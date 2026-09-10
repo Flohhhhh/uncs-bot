@@ -25,3 +25,7 @@ npm run create:listener -- <name> <event>
 ```
 
 The generator validates the Discord.js event, derives its typed context parameters, creates the `.listener.ts` file, and wires it into `listeners.module.ts`. Confirm the required gateway intent in `src/bot/bot.module.ts` and in the Discord application settings when the intent is privileged. Verify with `npm run lint`, `npm run build`, and `git diff --check` when dependencies are installed.
+
+## Centralized Discord logging
+
+Command and event execution is logged automatically through the global interceptors in `src/common/logging/`. Command handlers should not add duplicate logging for the command name or user, and event handlers should not add duplicate logging for the event or actor unless they need to record additional feature-specific details. Both entry points delegate output to `ActivityLogger`.

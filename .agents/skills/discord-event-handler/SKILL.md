@@ -16,6 +16,7 @@ Use this skill when an agent is asked to react to a Discord gateway event in thi
 - Use `Events` from `discord.js` for event identifiers and Necord’s `@On`/`@Once` decorators for registration.
 - Use `@Context()` with `ContextOf<Events.SomeEvent>` so the handler parameters match Discord.js’s `ClientEvents` tuple.
 - Use the existing dependencies and project style: double quotes, Prettier formatting, and strict null checks.
+- Event execution is logged centrally by `src/common/logging/event-logging.interceptor.ts`; do not add duplicate per-event logging unless the feature needs extra details.
 
 ## Implementation workflow
 

@@ -16,6 +16,7 @@ Use this skill when an agent is asked to add a new Discord slash command or slas
 - Use the existing `src` path alias for imports from `src/...`, or a relative import when that is the local convention.
 - The project uses double quotes, Prettier formatting, and strict null checks. Follow the existing code style.
 - Use the existing Necord and Discord.js dependencies; do not add packages unless explicitly requested.
+- Command execution is logged centrally by `src/common/logging/command-logging.interceptor.ts`; do not add duplicate per-command logging unless the feature needs extra details.
 
 ## Implementation workflow
 
