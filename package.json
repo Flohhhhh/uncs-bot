@@ -11,6 +11,7 @@
     "dev": "nest start --watch",
     "format": "prettier --write \"src/**/*.ts\"",
     "lint": "tsc --noEmit && eslint --max-warnings 0",
+    "validate:handlers": "tsx scripts/validate-handlers.ts",
     "create:command": "tsx scripts/create-command.ts",
     "create:listener": "tsx scripts/create-listener.ts"
   },
