@@ -9,8 +9,10 @@
     "build": "nest build",
     "start": "node dist/src/main",
     "dev": "nest start --watch",
-    "format": "prettier --write \"src/**/*.ts\"",
-    "lint": "tsc --noEmit && eslint --max-warnings 0",
+    "format": "tsx scripts/run-prettier.ts --write",
+    "format:check": "tsx scripts/run-prettier.ts --check",
+    "lint": "eslint --max-warnings 0",
+    "typecheck": "tsx scripts/typecheck.ts",
     "validate:handlers": "tsx scripts/validate-handlers.ts",
     "create:command": "tsx scripts/create-command.ts",
     "create:listener": "tsx scripts/create-listener.ts"

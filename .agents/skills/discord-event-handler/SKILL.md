@@ -68,8 +68,8 @@ When not using the generator, add the class import and class name to `HANDLERS` 
 ## Verification
 
 - Search `src` for the event name and listener class to confirm there is one intended registration and no stale TODO.
-- Run `npm run lint` and `npm run build` when dependencies are installed.
-- Run `git diff --check` and inspect the diff for unintended changes.
+- Use scoped checks for focused agent changes when practical: `npm run format:check -- <file ...>`, `npm run lint -- <file ...>`, and `npm run typecheck -- <file ...>`.
+- Run `npm run format:check`, `npm run build`, and `npm run validate:handlers` for whole-project verification when the change warrants it.
 - Report inability to run checks, such as missing `node_modules`, rather than claiming the listener was compiled or tested.
 
 For the project layout rationale, consult [`guides/PROJECT_STRUCTURE.md`](../../../docs/guides/PROJECT_STRUCTURE.md). For generator behavior, consult [`scripts/create-listener.ts`](../../../scripts/create-listener.ts).
