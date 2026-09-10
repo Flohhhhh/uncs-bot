@@ -58,7 +58,7 @@ export class WelcomeCommandHandler {
   async handleMessage(@Context() [interaction]: SlashCommandContext, @Options() { message }: WelcomeMessageOptions) {
     if (!interaction.guild) return;
 
-    if (message === undefined) {
+    if (!message) {
       const current = await this.welcomeService.getSettings(interaction.guild.id);
       return interaction.reply({
         content: [
