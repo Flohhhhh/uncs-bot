@@ -97,7 +97,50 @@ Now that your bot is online and production ready, you can setup your local devel
 
 Now that you have your bot up and running, you can start customizing it to your needs. Here are some suggestions on what to do next.
 
-### 6.1 Intents
+### 6.1 Welcome messages
+
+The bot sends a welcome embed when a member joins. It uses Discord's configured **System Messages Channel**, so configure that channel in the server's settings and make sure the bot can send messages and embeds there.
+
+#### Persisting welcome settings on Railway
+
+Welcome settings are stored as JSON instead of being hard-coded or kept only in memory. The file is:
+
+```text
+/data/welcome-config.json
+```
+
+To configure this on Railway:
+
+1. Add a Volume to the Discord Bot service in the same Railway project.
+2. Set the Volume mount path to `/data`.
+3. Keep the Volume in the same region as the Discord Bot service.
+4. Deploy the Railway changes.
+
+Railway exposes the mount path through `RAILWAY_VOLUME_MOUNT_PATH`, which the bot uses automatically. Without that environment variable, local development uses `./data/welcome-config.json`. The local `data` directory is ignored by Git.
+
+Railway Volumes provide persistent read/write storage for a service. See the [Railway Volumes documentation](https://docs.railway.com/volumes) for setup and backup information.
+
+#### Welcome commands
+
+These commands require the **Manage Server** permission:
+
+- `/welcome help` — show all template placeholders and channel-ID examples.
+- `/welcome message` — view the current welcome message.
+- `/welcome message message:<text>` — save a new welcome message template.
+- `/welcome enable enabled:true` or `/welcome enable enabled:false` — enable or disable welcome messages.
+
+Supported template placeholders include:
+
+- `{user}` — mentions the joining member.
+- `{user.id}` or `{user_id}` — inserts the joining member's ID.
+- `{general}` — mentions `#general` (`1546923296568778893`).
+- `{squad-up}` — mentions `#squad-up` (`327209891708141568`).
+- `{lobby}` — mentions The Lobby voice channel (`1546924372948815882`).
+- `{channels-and-roles}` — inserts the bold `Channels & Roles` label.
+
+Discord channel mentions can also be written directly using `<#CHANNEL_ID>`, for example `<#1546923296568778893>`.
+
+### 6.2 Intents
 
 Intents tell Discord what events your bot intends on handling, so that your bot isn't overwhelmed with events it doesn't care about. For example, having the `GUILD_MEMBERS` intent enabled will allow your bot to receive events related to guild members, such as when a member joins or leaves a guild.
 
@@ -105,6 +148,6 @@ Set the correct intents for your bot in the [`src/bot/bot.module.ts`](../src/bot
 
 You can find a list of all the available intents in the [Discord.js documentation](https://discord-api-types.dev/api/discord-api-types-v10/enum/GatewayIntentBits) and on [Discord's official documentation](https://discord.com/developers/docs/events/gateway#list-of-intents).
 
-### 6.2 Explore the examples
+### 6.3 Explore the examples
 
 Each handler for a feature (command, event, etc.) was created with the intention of being a quick example of how to use one specific feature. I recommend that you glance over each of them to get a general idea of what you can do! The examples are purposely kept simple, short and not meant to be kept as-is in your bot.
