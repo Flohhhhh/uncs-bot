@@ -7,9 +7,9 @@ import {
   type ExecutionContext,
 } from "@nestjs/common";
 import { Reflector } from "@nestjs/core";
-import { BaseInteraction, GuildChannel, PermissionFlagsBits, PermissionResolvable } from "discord.js";
+import { BaseInteraction, GuildChannel, PermissionResolvable } from "discord.js";
 import { NecordExecutionContext } from "necord";
-import { InteractionError } from "../errors/interaction-error";
+import { formatPermissions, replyPermissionError } from "../utils/permission.utils";
 
 const REQUIRED_MEMBER_PERMISSIONS_KEY = "required_member_permissions";
 
@@ -38,17 +38,12 @@ export class RequireMemberPermissionGuard implements CanActivate {
 
     const permissions = interaction.memberPermissions;
     if (!permissions || !permissions.has(requiredPermissions)) {
-      let message = "❌ You don't have the required permissions to do that.";
-      if (permissions?.has(PermissionFlagsBits.ManageGuild)) {
-        const missing = permissions
-          ?.missing(requiredPermissions)
-          .map((perm) => `\`${perm}\``)
-          .join(", ");
-        if (missing) {
-          message += `\nMissing permissions: ${missing}`;
-        }
-      }
-      throw new InteractionError(message);
+      const missing = permissions?.missing(requiredPermissions) ?? requiredPermissions;
+      await replyPermissionError(
+        interaction,
+        `❌ You need the following permission(s) to use this command: **${formatPermissions(missing)}**.`,
+      );
+      return false;
     }
 
     return true;

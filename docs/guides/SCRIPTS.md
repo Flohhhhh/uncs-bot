@@ -1,6 +1,6 @@
 # Scripts
 
-This template comes with NPM scripts that help you automate some tasks, like creating new commands.
+This project includes NPM scripts for local development, validation, database work, and command/listener generation.
 
 ## Development Mode
 
@@ -41,6 +41,26 @@ Formats the code in the `src/` folder using Prettier.
 ```bash
 npm run format
 ```
+
+## Database
+
+The database scripts manage the Drizzle schema and migrations. Set `DATABASE_URL` before running them.
+
+```bash
+# Create a migration from schema changes
+npm run db:generate
+
+# Apply committed migrations
+npm run db:migrate
+
+# Push the schema directly during local prototyping
+npm run db:push
+
+# Open Drizzle Studio
+npm run db:studio
+```
+
+Human contributors generate migrations after the combined schema changes are ready for integration and commit the resulting `drizzle/` files. Use `db:push` only with a personal development database branch while iterating. Railway should run `npm run db:migrate` as the service's Pre-deploy Command.
 
 ## Create a New Command
 

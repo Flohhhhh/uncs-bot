@@ -10,11 +10,13 @@ import { AppExceptionFilter } from "./common/filters/app-exception.filter";
 import { ComponentsModule } from "./components/components.module";
 import { ScheduleModule } from "@nestjs/schedule";
 import { LoggingModule } from "./common/logging/logging.module";
+import { DatabaseModule } from "./database/database.module";
 
 @Module({
   imports: [
     ScheduleModule.forRoot(),
     EnvModule,
+    DatabaseModule,
     BotModule,
     CommandsModule,
     ListenersModule,

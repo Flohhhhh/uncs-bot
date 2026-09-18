@@ -14,6 +14,9 @@ export const Env = z.object({
   /** Discord bot token */
   DISCORD_BOT_TOKEN: nonEmptyString,
 
+  /** Neon PostgreSQL connection string */
+  DATABASE_URL: nonEmptyString,
+
   /** A Discord server (guild) ID to use for development */
   DISCORD_DEVELOPMENT_GUILD_ID: nonEmptyString
     .trim()

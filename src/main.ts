@@ -5,6 +5,7 @@ import { EnvService } from "./env/env.service";
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+  app.enableShutdownHooks();
 
   const env = app.get(EnvService);
 
@@ -12,6 +13,7 @@ async function bootstrap() {
 }
 bootstrap().catch((err) => {
   console.error("💥 Failed to bootstrap the application:", err);
+  process.exitCode = 1;
 });
 
 // Prevent the bot from crashing when deep errors occur
