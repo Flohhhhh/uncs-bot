@@ -4,6 +4,7 @@ export const guildWelcomeSettings = pgTable("guild_welcome_settings", {
   guildId: text("guild_id").primaryKey(),
   enabled: boolean("enabled").notNull().default(true),
   message: text("message").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
