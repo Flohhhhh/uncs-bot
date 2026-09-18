@@ -9,6 +9,7 @@ export const LOBBY_CHANNEL_ID = "1546924372948815882";
 
 /** Defaults used when a guild has not configured its welcome settings yet. */
 export const WELCOME_ENABLED = true;
+export const MAX_WELCOME_DESCRIPTION_LENGTH = 4096;
 export const DEFAULT_WELCOME_MESSAGE =
   "{user}, good to have you. Say hey in {general}, check {squad-up}, or jump into **The Lobby**.\n\nPick your games and roles in **Channels & Roles**. Get on when you can.";
 
@@ -52,7 +53,7 @@ export class WelcomeService {
   }
 
   createEmbed(member: GuildMember, settings: WelcomeSettings): EmbedBuilder {
-    const description = this.renderMessage(settings.message, member);
+    const description = this.renderMessage(settings.message, member).slice(0, MAX_WELCOME_DESCRIPTION_LENGTH);
 
     return new EmbedBuilder()
       .setColor(0xff6b35)
