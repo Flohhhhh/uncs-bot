@@ -10,13 +10,8 @@ import {
   type SlashCommandContext,
 } from "necord";
 import { RequiredMemberPermission } from "src/common/guards/require-member-permission.guard";
-import {
-  GENERAL_CHANNEL_ID,
-  getWelcomeConfigPath,
-  LOBBY_CHANNEL_ID,
-  SQUAD_UP_CHANNEL_ID,
-  WelcomeService,
-} from "src/welcome/welcome.service";
+import { config } from "src/config";
+import { WelcomeService } from "src/welcome/welcome.service";
 
 class WelcomeMessageOptions {
   @StringOption({
@@ -58,24 +53,19 @@ export class WelcomeCommandHandler {
   async handleMessage(@Context() [interaction]: SlashCommandContext, @Options() { message }: WelcomeMessageOptions) {
     if (!interaction.guild) return;
 
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
     if (!message) {
       const current = await this.welcomeService.getSettings(interaction.guild.id);
-      return interaction.reply({
-        content: [
-          "**Current welcome message:**",
-          current.message,
-          "",
-          `Stored in \`${getWelcomeConfigPath()}\` on the Railway volume.`,
-        ].join("\n"),
-        flags: MessageFlags.Ephemeral,
+      return interaction.editReply({
+        content: ["**Current welcome message:**", current.message, "", "Stored in Neon PostgreSQL."].join("\n"),
         allowedMentions: { parse: [] },
       });
     }
 
     await this.welcomeService.setMessage(interaction.guild.id, message);
-    return interaction.reply({
+    return interaction.editReply({
       content: "✅ Welcome message updated and saved.",
-      flags: MessageFlags.Ephemeral,
     });
   }
 
@@ -86,10 +76,10 @@ export class WelcomeCommandHandler {
   async handleEnable(@Context() [interaction]: SlashCommandContext, @Options() { enabled }: WelcomeEnableOptions) {
     if (!interaction.guild) return;
 
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     await this.welcomeService.setEnabled(interaction.guild.id, enabled);
-    return interaction.reply({
+    return interaction.editReply({
       content: `✅ Welcome messages are now ${enabled ? "enabled" : "disabled"} and saved.`,
-      flags: MessageFlags.Ephemeral,
     });
   }
 
@@ -101,7 +91,7 @@ export class WelcomeCommandHandler {
     return interaction.reply({
       content: [
         "**Welcome message template help**",
-        `Welcome settings are stored in \`${getWelcomeConfigPath()}\` on the Railway volume.`,
+        "Welcome settings are stored in Neon PostgreSQL.",
         "Use `/welcome message` to view the current message or `/welcome message message:<text>` to update it.",
         "Use `/welcome enable enabled:true` or `enabled:false` to toggle welcome messages.",
         "Templates are replaced when a member joins:",
@@ -113,9 +103,9 @@ export class WelcomeCommandHandler {
         "`{channels-and-roles}` → inserts **Channels & Roles**",
         "",
         "To mention any Discord channel directly, use `<#CHANNEL_ID>`:",
-        `#general: \`<#${GENERAL_CHANNEL_ID}>\``,
-        `#squad-up: \`<#${SQUAD_UP_CHANNEL_ID}>\``,
-        `The Lobby: \`<#${LOBBY_CHANNEL_ID}>\``,
+        `#general: \`<#${config.channels.general}>\``,
+        `#squad-up: \`<#${config.channels.squadUp}>\``,
+        `The Lobby: \`<#${config.channels.lobby}>\``,
         "",
         "Example: `{user}, say hello in {general}! Your ID is {user.id}.`",
       ].join("\n"),

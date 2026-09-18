@@ -107,3 +107,30 @@ jobs:
 
       - name: Validate command and event handlers
         run: npm run validate:handlers
+
+  migration-drift:
+    name: Check migration drift for development to main
+    if: github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.ref == 'development'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.20.0
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check generated migrations are committed
+        run: |
+          DATABASE_URL="postgresql://placeholder" npm run db:generate
+          if [ -n "$(git status --porcelain -- drizzle)" ]; then
+            echo "Migration drift detected. Generate and commit the migration on development before merging to main."
+            git status --short -- drizzle
+            exit 1
+          fi

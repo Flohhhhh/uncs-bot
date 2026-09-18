@@ -101,24 +101,38 @@ Now that you have your bot up and running, you can start customizing it to your 
 
 The bot sends a welcome embed when a member joins. It uses Discord's configured **System Messages Channel**, so configure that channel in the server's settings and make sure the bot can send messages and embeds there.
 
-#### Persisting welcome settings on Railway
+#### Persisting welcome settings with Neon PostgreSQL
 
-Welcome settings are stored as JSON instead of being hard-coded or kept only in memory. The file is:
+Welcome settings are stored in the Neon PostgreSQL database through Drizzle ORM. No Railway volume is required.
 
-```text
-/data/welcome-config.json
-```
+For local development:
 
-To configure this on Railway:
+1. Create a Neon project and copy its pooled PostgreSQL connection string.
+2. Add the connection string as `DATABASE_URL` in your local `.env` file.
+3. Generate migrations after schema changes:
 
-1. Add a Volume to the Discord Bot service in the same Railway project.
-2. Set the Volume mount path to `/data`.
-3. Keep the Volume in the same region as the Discord Bot service.
-4. Deploy the Railway changes.
+   ```bash
+   npm run db:generate
+   ```
 
-Railway exposes the mount path through `RAILWAY_VOLUME_MOUNT_PATH`, which the bot uses automatically. Without that environment variable, local development uses `./data/welcome-config.json`. The local `data` directory is ignored by Git.
+4. Apply migrations locally:
 
-Railway Volumes provide persistent read/write storage for a service. See the [Railway Volumes documentation](https://docs.railway.com/volumes) for setup and backup information.
+   ```bash
+   npm run db:migrate
+   ```
+
+For Railway:
+
+1. Add `DATABASE_URL` to the bot service variables using the pooled Neon connection string.
+2. In the service's **Settings → Deploy** section, set the **Pre-deploy Command** to:
+
+   ```text
+   npm run db:migrate
+   ```
+
+3. Leave the start command as `npm start`.
+
+Migrations are generated and committed locally, then applied by Railway before the new bot deployment starts. Railway's [pre-deploy command](https://docs.railway.com/deployments/pre-deploy-command) runs with service variables available and stops the deployment if the migration fails.
 
 #### Welcome commands
 

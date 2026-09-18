@@ -6,6 +6,14 @@
 - Handler registration/validation: `npm run validate:handlers` passes for command or event-handler changes.
 - Whitespace Issues: `git diff --check` ran and passes
 
+# Database migration ownership
+
+- Agents must never run `npm run db:generate` or `drizzle-kit generate`.
+- Agents must never create, edit, rename, or delete committed migration files under `drizzle/`, including SQL files and migration metadata.
+- Agents may update `src/database/schema.ts` when implementing a requested feature, but must tell the human contributor that a migration still needs to be generated and reviewed.
+- Agents must not run `npm run db:push` or `npm run db:migrate` unless the user explicitly requests it and has identified the target development database.
+- Human contributors own migration generation and commits. Generate one reviewed migration after the combined schema changes are ready for integration.
+
 # Adding Discord slash commands
 
 For requests to add a Discord slash command, follow the task-specific workflow in [`.agents/skills/discord-slash-command/SKILL.md`](.agents/skills/discord-slash-command/SKILL.md).
