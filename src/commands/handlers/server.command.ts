@@ -1,6 +1,22 @@
 import { Injectable } from "@nestjs/common";
-import { Colors, EmbedBuilder } from "discord.js";
-import { Context, createCommandGroupDecorator, Subcommand, type SlashCommandContext } from "necord";
+import { Colors, EmbedBuilder, type User } from "discord.js";
+import {
+  Context,
+  createCommandGroupDecorator,
+  Options,
+  Subcommand,
+  type SlashCommandContext,
+  UserOption,
+} from "necord";
+
+class ServerInfoOptions {
+  @UserOption({
+    name: "user",
+    description: "User to notify with the server information",
+    required: false,
+  })
+  user?: User;
+}
 
 const ServerCommand = createCommandGroupDecorator({
   name: "server",
@@ -14,7 +30,7 @@ export class ServerCommandHandler {
     name: "info",
     description: "Show instructions for joining the server",
   })
-  async handleInfo(@Context() [interaction]: SlashCommandContext) {
+  async handleInfo(@Context() [interaction]: SlashCommandContext, @Options() { user }: ServerInfoOptions) {
     const embed = new EmbedBuilder()
       .setTitle("UNCs Community Wardogs Server")
       .setColor(Colors.Orange)
@@ -28,6 +44,10 @@ export class ServerCommandHandler {
 
     return interaction.reply({
       embeds: [embed],
+      ...(user && {
+        content: user.toString(),
+        allowedMentions: { parse: [], users: [user.id] },
+      }),
     });
   }
 }
