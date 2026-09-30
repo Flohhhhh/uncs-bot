@@ -7,6 +7,7 @@ import { AdminSettings } from "./admin.settings";
 import { AdminStore } from "./admin.store";
 import { WardogsClient } from "./wardogs.client";
 import { hash } from "./admin.auth";
+import { AppController } from "../app.controller";
 
 describe("admin HTTP boundaries", () => {
   let app: INestApplication;
@@ -47,7 +48,7 @@ describe("admin HTTP boundaries", () => {
     game.overview.mockResolvedValue({ status: { serverName: "The UNCs" }, players: [] });
     game.execute.mockResolvedValue({ state: "accepted", message: "Accepted" });
     jest.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ roles: ["staff"] })));
-    const module = await Test.createTestingModule({ imports: [AdminModule] })
+    const module = await Test.createTestingModule({ imports: [AdminModule], controllers: [AppController] })
       .overrideProvider(AdminSettings)
       .useValue({ get: () => config })
       .overrideProvider(AdminStore)
@@ -62,9 +63,20 @@ describe("admin HTTP boundaries", () => {
     await app.close();
     jest.restoreAllMocks();
   });
+  it("opens staff tools at the admin host root while health checks stay independent of the game", async () => {
+    await request(app.getHttpServer())
+      .get("/")
+      .expect(302)
+      .expect("Location", "/admin")
+      .expect("Cache-Control", "no-store");
+    await request(app.getHttpServer()).get("/health").expect(200, { status: "ok" });
+    expect(game.overview).not.toHaveBeenCalled();
+    expect(game.execute).not.toHaveBeenCalled();
+  });
   it("serves the same static interface with security headers and blocks anonymous data", async () => {
     const page = await request(app.getHttpServer()).get("/admin").expect(200);
     expect(page.text).toContain("Continue with Discord");
+    expect(page.text).toContain('href="https://theuncsgaming.com/"');
     expect(page.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
     expect(page.headers["cache-control"]).toBe("no-store");
     expect(page.headers["cdn-cache-control"]).toBe("no-store");
