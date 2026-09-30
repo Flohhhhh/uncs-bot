@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#171a1b" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>The UNCs · Server Admin</title>
+    <link rel="icon" type="image/png" href="/admin/assets/uncs-mascot.png" />
+    <link rel="stylesheet" href="/admin/style.css" />
+    <script src="/admin/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to dashboard</a>
+    <div id="login" class="login-screen" hidden>
+      <a class="wordmark login-brand" href="/" aria-label="The UNCs home"
+        ><span class="wordmark-the">THE</span
+        ><span>UNCs<span class="wordmark-star" aria-hidden="true">✳</span></span></a
+      >
+      <div class="login-card">
+        <div class="login-copy">
+          <p class="eyebrow"><span aria-hidden="true">✳</span> THE UNCs / STAFF ACCESS</p>
+          <h1>GOOD COMMS.<br /><span>GOOD HANDS.</span></h1>
+          <p>
+            Look after the match. Look after the crew. Your community’s players, whitelist, and server controls, all in
+            one place.
+          </p>
+          <a class="button primary" href="/admin/auth/login">Continue with Discord <span aria-hidden="true">↗</span></a>
+          <p id="login-note" class="muted">Use a Discord account with an assigned staff role.</p>
+        </div>
+        <div class="login-art" aria-hidden="true">
+          <img src="/admin/assets/uncs-mascot.png" width="1254" height="1254" alt="" />
+          <span>THE SERVER’S OURS.<br />LET’S LOOK AFTER IT.</span>
+        </div>
+      </div>
+      <div class="login-footer"><a href="/">← Back to the community</a><span>THE UNCs · POWERED BY GRAMPS</span></div>
+    </div>
+    <div id="shell" class="shell" hidden>
+      <aside class="sidebar">
+        <div class="brand">
+          <a class="wordmark" href="/" aria-label="The UNCs home"
+            ><span class="wordmark-the">THE</span
+            ><span>UNCs<span class="wordmark-star" aria-hidden="true">✳</span></span></a
+          >
+          <span class="admin-label">SERVER ADMIN</span>
+        </div>
+        <p class="nav-label">SERVER OPERATIONS</p>
+        <nav aria-label="Dashboard sections">
+          <button data-page="overview" class="active"><span>◫</span>Overview</button>
+          <button data-page="players"><span>♟</span>Live players</button>
+          <button data-page="combat"><span>⌁</span>Combat history</button>
+          <button data-page="whitelist"><span>☷</span>Whitelist</button>
+          <button data-page="applications" data-admin-only hidden><span>✉</span>Applications</button>
+          <button data-page="supporters" data-admin-only hidden><span>✳</span>Supporters</button>
+          <button data-page="bans"><span>⊘</span>Bans</button>
+          <button data-page="announcements"><span>↗</span>Announcements</button>
+          <button data-page="match"><span>◇</span>Match & maps</button>
+          <button data-page="audit"><span>◷</span>Action history</button>
+        </nav>
+        <div class="sidebar-bottom">
+          <a class="community" href="/"
+            ><span aria-hidden="true">↖</span> Back to the community<small>Good games. Older knees.</small></a
+          >
+          <div class="staff">
+            <div id="avatar" class="avatar">S</div>
+            <div><strong id="staff-name">Staff</strong><small id="staff-role"></small></div>
+            <button data-logout class="icon-button" title="Sign out" aria-label="Sign out">↪</button>
+          </div>
+        </div>
+      </aside>
+      <main id="main-content">
+        <div id="demo-banner" class="demo-banner" hidden>
+          LOCAL PREVIEW <span>Sample players and simulated actions. This preview cannot control the live server.</span>
+        </div>
+        <header class="topbar">
+          <div>
+            <a class="breadcrumb" href="/">The UNCs</a><span class="divider">/</span
+            ><span class="breadcrumb">Admin</span><span class="divider">/</span><span id="breadcrumb">Overview</span>
+          </div>
+          <div class="topbar-right">
+            <span id="connection" class="pill neutral">Connecting</span><span class="private-label">STAFF ONLY</span>
+            <button data-logout class="icon-button mobile-only" title="Sign out" aria-label="Sign out">↪</button>
+          </div>
+        </header>
+        <div class="content">
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow"><span aria-hidden="true">✳</span> WARDOGS / COMMUNITY SERVER</p>
+              <h1 id="page-title">Server overview</h1>
+              <p id="page-description">Keep an eye on the match. Take care of the community.</p>
+            </div>
+            <button id="refresh" class="button secondary">↻ <span>Refresh</span></button>
+          </div>
+          <div class="server-strip">
+            <span class="server-symbol" aria-hidden="true">✳</span>
+            <div>
+              <strong id="server-name">Connecting to the server…</strong
+              ><small id="observed">Waiting for a response</small>
+            </div>
+            <span id="build" class="build"></span>
+          </div>
+          <div id="error" class="notice error" role="alert" hidden></div>
+          <div id="result" class="notice" role="status" hidden></div>
+          <section id="page" aria-live="polite"><div class="empty">Loading server data…</div></section>
+          <footer>
+            <span>THE UNCs <span aria-hidden="true">✳</span> POWERED BY GRAMPS</span
+            ><span>Updates every 20 seconds while this page is visible</span>
+          </footer>
+        </div>
+      </main>
+    </div>
+    <dialog id="action-dialog">
+      <form id="action-form">
+        <div class="dialog-top">
+          <p class="eyebrow">SERVER ACTION</p>
+          <button type="button" class="icon-button" id="close-dialog" aria-label="Close dialog">×</button>
+        </div>
+        <h2 id="action-title"></h2>
+        <p id="action-description" class="muted"></p>
+        <div id="action-fields"></div>
+        <label
+          >Reason
+          <textarea
+            name="reason"
+            required
+            minlength="3"
+            maxlength="200"
+            rows="2"
+            placeholder="A clear reason for the staff record"
+          ></textarea>
+        </label>
+        <div id="confirmation"></div>
+        <div id="action-error" class="notice error" role="alert" hidden></div>
+        <div class="dialog-footer">
+          <button class="button secondary" type="button" id="cancel-dialog">Cancel</button
+          ><button class="button primary" type="submit" id="submit-action">Confirm action</button>
+        </div>
+      </form>
+    </dialog>
+  </body>
+</html>
