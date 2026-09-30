@@ -1,4 +1,6 @@
-import { type MiddlewareConsumer, Module, type NestModule } from "@nestjs/common";
+import { type MiddlewareConsumer, Module, type NestModule, RequestMethod } from "@nestjs/common";
+import { ServeStaticModule } from "@nestjs/serve-static";
+import { join } from "node:path";
 import type { NextFunction, Request, Response } from "express";
 import { AdminAuth, AdminGuard } from "./admin.auth";
 import { AdminApiController, AdminExceptionFilter, AdminPageController } from "./admin.controller";
@@ -8,6 +10,14 @@ import { AdminStore } from "./admin.store";
 import { WardogsClient } from "./wardogs.client";
 
 @Module({
+  imports: [
+    ServeStaticModule.forRoot({
+      rootPath: join(process.cwd(), "dist", "src", "admin", "public", "assets"),
+      serveRoot: "/admin/assets",
+      // Only public build assets are served here. API/auth/unknown paths never fall back to HTML.
+      serveStaticOptions: { index: false, redirect: false, fallthrough: false, dotfiles: "deny", cacheControl: false },
+    }),
+  ],
   providers: [AdminSettings, AdminStore, AdminAuth, AdminGuard, AdminService, WardogsClient, AdminExceptionFilter],
   controllers: [AdminPageController, AdminApiController],
   exports: [AdminSettings, AdminStore, AdminAuth, AdminGuard, AdminService, WardogsClient],
@@ -56,6 +66,6 @@ export class AdminModule implements NestModule {
         }
         next();
       })
-      .forRoutes(AdminPageController, AdminApiController);
+      .forRoutes({ path: "admin", method: RequestMethod.ALL }, { path: "admin/{*path}", method: RequestMethod.ALL });
   }
 }

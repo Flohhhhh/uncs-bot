@@ -1,4 +1,6 @@
 import { Test } from "@nestjs/testing";
+import { HttpAdapterHost } from "@nestjs/core";
+import { ExpressAdapter } from "@nestjs/platform-express";
 import type { INestApplication } from "@nestjs/common";
 import request from "supertest";
 import { randomUUID } from "node:crypto";
@@ -48,7 +50,12 @@ describe("admin HTTP boundaries", () => {
     game.overview.mockResolvedValue({ status: { serverName: "The UNCs" }, players: [] });
     game.execute.mockResolvedValue({ state: "accepted", message: "Accepted" });
     jest.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ roles: ["staff"] })));
+    const adapter = new ExpressAdapter();
+    const adapterHost = new HttpAdapterHost();
+    adapterHost.httpAdapter = adapter;
     const module = await Test.createTestingModule({ imports: [AdminModule], controllers: [AppController] })
+      .overrideProvider(HttpAdapterHost)
+      .useValue(adapterHost)
       .overrideProvider(AdminSettings)
       .useValue({ get: () => config })
       .overrideProvider(AdminStore)
@@ -56,7 +63,8 @@ describe("admin HTTP boundaries", () => {
       .overrideProvider(WardogsClient)
       .useValue(game)
       .compile();
-    app = module.createNestApplication();
+    app = module.createNestApplication(adapter);
+    app.useLogger(false);
     await app.init();
   });
   afterEach(async () => {
@@ -75,7 +83,8 @@ describe("admin HTTP boundaries", () => {
   });
   it("serves the same static interface with security headers and blocks anonymous data", async () => {
     const page = await request(app.getHttpServer()).get("/admin").expect(200);
-    expect(page.text).toContain("Continue with Discord");
+    expect(page.text).toContain('<div id="root"></div>');
+    expect(page.text).toMatch(/type="module"[^>]+src="\/admin\/assets\/[^"]+\.js"/);
     expect(page.text).toContain('href="https://theuncsgaming.com/"');
     expect(page.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
     expect(page.headers["cache-control"]).toBe("no-store");
@@ -87,7 +96,7 @@ describe("admin HTTP boundaries", () => {
     await request(app.getHttpServer()).get("/admin/api/overview").expect(401);
     expect(game.overview).not.toHaveBeenCalled();
   });
-  it("serves only the allowed local brand assets with matching CSP and no CDN caching", async () => {
+  it("serves compiled assets with matching CSP while rejecting traversal and missing assets", async () => {
     for (const file of ["barlow-condensed-bold.ttf", "barlow-condensed-extrabold.ttf", "dm-sans.ttf"]) {
       const font = await request(app.getHttpServer()).get(`/admin/assets/${file}`).expect(200);
       expect(font.headers["content-type"]).toBe("font/ttf");
@@ -101,7 +110,27 @@ describe("admin HTTP boundaries", () => {
       .expect("Content-Type", "image/png");
     await request(app.getHttpServer()).get("/admin/assets/package.json").expect(404);
     await request(app.getHttpServer()).get("/admin/assets/constructor").expect(404);
-    await request(app.getHttpServer()).get("/admin/assets/..%2F..%2Fadmin.settings.ts").expect(404);
+    const traversal = await request(app.getHttpServer()).get("/admin/assets/..%2F..%2Fadmin.settings.ts").expect(403);
+    expect(traversal.text).not.toContain("clientSecret");
+  });
+  it("supports dashboard deep links without swallowing API, auth, or missing-file errors", async () => {
+    for (const path of ["players", "applications", "supporters", "combat", "match"]) {
+      const page = await request(app.getHttpServer()).get(`/admin/${path}`).expect(200);
+      expect(page.text).toContain('<div id="root"></div>');
+      expect(page.headers["content-security-policy"]).toContain("script-src 'self'");
+    }
+    const page = await request(app.getHttpServer()).get("/admin").expect(200);
+    const script = page.text.match(/src="(\/admin\/assets\/[^"]+\.js)"/)?.[1];
+    expect(script).toBeDefined();
+    const asset = await request(app.getHttpServer()).get(script!).expect(200);
+    expect(asset.headers["content-type"]).toContain("javascript");
+    expect(asset.headers["content-security-policy"]).toContain("script-src 'self'");
+    for (const path of ["api/missing", "auth/missing", "assets/missing.js", "app.js", "style.css", "missing"]) {
+      const response = await request(app.getHttpServer()).get(`/admin/${path}`).expect(404);
+      expect(response.text).not.toContain('<div id="root"></div>');
+    }
+    expect(game.overview).not.toHaveBeenCalled();
+    expect(game.execute).not.toHaveBeenCalled();
   });
   it("requires both the correct origin and session CSRF for mutations", async () => {
     const action = { id: randomUUID(), action: "broadcast", message: "Hello", reason: "Community welcome" };

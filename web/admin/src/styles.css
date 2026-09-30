@@ -1,20 +1,20 @@
 @font-face {
   font-family: "Barlow Condensed";
-  src: url("/admin/assets/barlow-condensed-bold.ttf") format("truetype");
+  src: url("/assets/barlow-condensed-bold.ttf") format("truetype");
   font-style: normal;
   font-weight: 700;
   font-display: swap;
 }
 @font-face {
   font-family: "Barlow Condensed";
-  src: url("/admin/assets/barlow-condensed-extrabold.ttf") format("truetype");
+  src: url("/assets/barlow-condensed-extrabold.ttf") format("truetype");
   font-style: normal;
   font-weight: 800 900;
   font-display: swap;
 }
 @font-face {
   font-family: "DM Sans";
-  src: url("/admin/assets/dm-sans.ttf") format("truetype");
+  src: url("/assets/dm-sans.ttf") format("truetype");
   font-style: normal;
   font-weight: 100 1000;
   font-display: swap;
@@ -203,7 +203,7 @@ h3 {
   display: grid;
   gap: 7px;
 }
-.sidebar nav button {
+.sidebar nav a {
   border: 1px solid transparent;
   background: none;
   color: #b4b8b1;
@@ -218,23 +218,23 @@ h3 {
     background 0.15s,
     color 0.15s;
 }
-.sidebar nav button span {
+.sidebar nav a span {
   font-size: 18px;
   width: 20px;
   text-align: center;
   line-height: 20px;
   color: #858d83;
 }
-.sidebar nav button:hover {
+.sidebar nav a:hover {
   background: #222728;
   color: var(--cream);
 }
-.sidebar nav button.active {
+.sidebar nav a.active {
   background: var(--orange);
   color: var(--ink-deep);
   font-weight: 750;
 }
-.sidebar nav button.active span {
+.sidebar nav a.active span {
   color: var(--ink-deep);
 }
 .sidebar-bottom {
@@ -1579,7 +1579,8 @@ dialog select[multiple] {
 dialog textarea {
   resize: vertical;
 }
-.dialog-footer {
+.dialog-footer,
+.dialog-actions {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
@@ -1784,13 +1785,13 @@ dialog textarea {
     padding-bottom: 6px;
     scrollbar-width: thin;
   }
-  .sidebar nav button {
+  .sidebar nav a {
     white-space: nowrap;
     padding: 10px 13px;
     font-size: 11px;
     min-height: 39px;
   }
-  .sidebar nav button span {
+  .sidebar nav a span {
     display: none;
   }
   .topbar {
@@ -1970,4 +1971,14 @@ dialog textarea {
     transition: none !important;
     scroll-behavior: auto !important;
   }
+}
+
+.sidebar nav a {
+  text-decoration: none;
+}
+dialog fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
 }

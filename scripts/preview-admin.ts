@@ -1,6 +1,8 @@
 /** Local-only visual preview. Never imported by AppModule or enabled by a production flag. */
 import "reflect-metadata";
 import { Test } from "@nestjs/testing";
+import { HttpAdapterHost } from "@nestjs/core";
+import { ExpressAdapter } from "@nestjs/platform-express";
 import { ConflictException, ForbiddenException, Global, Module, UnauthorizedException } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import type { Request, Response } from "express";
@@ -23,6 +25,8 @@ import type { CombatStats } from "../src/telemetry/telemetry.types";
 import { SupportersModule } from "../src/supporters/supporters.module";
 import { SupportersStore } from "../src/supporters/supporters.store";
 import type { FounderPolicy, PaymentView, SupporterMutation, SupporterView } from "../src/supporters/supporters.types";
+
+const previewPort = Number(process.env.PREVIEW_PORT || 4317);
 
 const players = [
   { name: "UncDap", steamId: "76561198066952872", faction: "RED", kills: 18, deaths: 7, cash: 14300, pingMs: 32 },
@@ -242,7 +246,12 @@ const auth = {
   async authenticate(req: Request) {
     if (
       !["GET", "HEAD"].includes(req.method) &&
-      (!["http://127.0.0.1:4317", "http://127.0.0.1:4318"].includes(req.headers.origin ?? "") ||
+      (![
+        "http://127.0.0.1:4317",
+        "http://127.0.0.1:4318",
+        "http://127.0.0.1:4319",
+        `http://127.0.0.1:${previewPort}`,
+      ].includes(req.headers.origin ?? "") ||
         req.headers["x-csrf-token"] !== "local-preview")
     )
       throw new Error("Preview origin rejected");
@@ -580,9 +589,16 @@ const previewEnvironment: Record<string, unknown> = {
 class PreviewApplicationEnvironment {}
 
 async function main() {
+  // ServeStaticModule selects its loader during dependency creation, so the test
+  // application must provide its adapter before compiling the isolated preview.
+  const adapter = new ExpressAdapter();
+  const adapterHost = new HttpAdapterHost();
+  adapterHost.httpAdapter = adapter;
   const module = await Test.createTestingModule({
     imports: [PreviewApplicationEnvironment, AdminModule, ApplicationsModule, TelemModule, SupportersModule],
   })
+    .overrideProvider(HttpAdapterHost)
+    .useValue(adapterHost)
     .overrideProvider(AdminSettings)
     .useValue(settings)
     .overrideProvider(AdminStore)
@@ -600,8 +616,10 @@ async function main() {
     .overrideProvider(SupportersStore)
     .useValue(supporterStore)
     .compile();
-  const app = module.createNestApplication({ rawBody: true });
-  await app.listen(4317, "127.0.0.1");
-  console.info("Gramps local preview: http://127.0.0.1:4317/admin (simulated game, no credentials, no database)");
+  const app = module.createNestApplication(adapter, { rawBody: true });
+  await app.listen(previewPort, "127.0.0.1");
+  console.info(
+    `Gramps local preview: http://127.0.0.1:${previewPort}/admin (simulated game, no credentials, no database)`,
+  );
 }
 void main();

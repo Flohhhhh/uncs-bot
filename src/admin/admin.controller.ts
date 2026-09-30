@@ -7,8 +7,6 @@ import {
   Get,
   HttpException,
   Injectable,
-  Param,
-  NotFoundException,
   Post,
   Req,
   Res,
@@ -40,28 +38,21 @@ export class AdminExceptionFilter implements ExceptionFilter {
 @UseFilters(AdminExceptionFilter)
 export class AdminPageController {
   constructor(private readonly auth: AdminAuth) {}
-  @Get()
+  @Get([
+    "",
+    "overview",
+    "players",
+    "combat",
+    "whitelist",
+    "applications",
+    "supporters",
+    "bans",
+    "announcements",
+    "match",
+    "audit",
+  ])
   page(@Res() res: Response) {
-    res.sendFile(join(__dirname, "public", "index.html"));
-  }
-  @Get("app.js")
-  script(@Res() res: Response) {
-    res.sendFile(join(__dirname, "public", "app.js"));
-  }
-  @Get("style.css")
-  style(@Res() res: Response) {
-    res.sendFile(join(__dirname, "public", "style.css"));
-  }
-  @Get("assets/:file")
-  asset(@Param("file") file: string, @Res() res: Response) {
-    const assets: Record<string, string> = {
-      "uncs-mascot.png": "image/png",
-      "barlow-condensed-bold.ttf": "font/ttf",
-      "barlow-condensed-extrabold.ttf": "font/ttf",
-      "dm-sans.ttf": "font/ttf",
-    };
-    if (!Object.hasOwn(assets, file)) throw new NotFoundException("Asset not found.");
-    res.type(assets[file]).sendFile(join(__dirname, "public", "assets", file));
+    res.sendFile(join(process.cwd(), "dist", "src", "admin", "public", "index.html"));
   }
   @Get("auth/login")
   login(@Res() res: Response) {
