@@ -8,8 +8,8 @@ if (mode !== "--write" && mode !== "--check") {
 }
 
 const files = requestedFiles.length > 0 ? requestedFiles : ["src/**/*.ts", "scripts/**/*.ts"];
-const prettierCommand = process.platform === "win32" ? "prettier.cmd" : "prettier";
-const result = spawnSync(prettierCommand, [mode, ...files], { stdio: "inherit" });
+const prettierCli = require.resolve("prettier/bin/prettier.cjs");
+const result = spawnSync(process.execPath, [prettierCli, mode, ...files], { stdio: "inherit" });
 
 if (result.error) {
   console.error(`Unable to run Prettier: ${result.error.message}`);

@@ -11,6 +11,11 @@ import { ComponentsModule } from "./components/components.module";
 import { ScheduleModule } from "@nestjs/schedule";
 import { LoggingModule } from "./common/logging/logging.module";
 import { DatabaseModule } from "./database/database.module";
+import { AdminModule } from "./admin/admin.module";
+import { ApplicationsModule } from "./applications/applications.module";
+import { TelemModule } from "./telemetry/telemetry.module";
+import { SupportersModule } from "./supporters/supporters.module";
+import { ServerCommunityModule } from "./server-community/server-community.module";
 
 @Module({
   imports: [
@@ -22,6 +27,11 @@ import { DatabaseModule } from "./database/database.module";
     ListenersModule,
     ComponentsModule,
     LoggingModule,
+    AdminModule,
+    ApplicationsModule,
+    TelemModule,
+    SupportersModule,
+    ServerCommunityModule,
   ],
   providers: [AppService, { provide: APP_FILTER, useClass: AppExceptionFilter }],
   controllers: [AppController],

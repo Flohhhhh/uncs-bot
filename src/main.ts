@@ -4,7 +4,7 @@ import { Logger } from "@nestjs/common";
 import { EnvService } from "./env/env.service";
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, { rawBody: true });
   app.enableShutdownHooks();
 
   const env = app.get(EnvService);
