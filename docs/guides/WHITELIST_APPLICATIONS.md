@@ -2,7 +2,7 @@
 
 The main website's `/whitelist` page lets a Discord member request access and check their own request. Gramps stores the application and provides an admin-only review queue. This is the existing free whitelist application process; it does not activate donations, queue tiers, seeding rewards, or paid benefits.
 
-The feature is deployed and **disabled by default**. The production database migration was applied and checked on September 30, 2026. Discord OAuth and live application handling remain unconfigured; no whitelist access was changed by this deployment.
+The feature is **disabled by default in code**. The production database migration was applied and checked on September 30, 2026. A later Railway inspection found `WHITELIST_APPLICATIONS_ENABLED=true` and OAuth credential variable names, but no separate `APPLICATION_ORIGIN`. Cloudflare's routing variables are saved for its next deployment; the application worker and complete applicant sign-in/submission flow are not yet verified live. Enabling the flag alone does not complete that connection. No whitelist access was changed by the release checks.
 
 ## Information collected
 
@@ -44,7 +44,7 @@ A crash or database completion failure can leave `processing`. This state delibe
 
 ## Deployment prerequisites
 
-1. Keep `WHITELIST_APPLICATIONS_ENABLED=false` until the remaining connection and end-to-end checks are complete. The application tables, `whitelist_applications` and `whitelist_application_reviews`, were applied and checked in the identified production database on September 30 under the owner's explicit launch authorization; see [Database prerequisite](ADMIN_DASHBOARD.md#database-prerequisite--launch-migration-applied). Other deployments still require the reviewed schema before activation.
+1. For a new deployment, keep `WHITELIST_APPLICATIONS_ENABLED=false` until the remaining connection and end-to-end checks are complete. On the existing production service the owner has already enabled it; coordinate any change with the owner rather than assuming it is off. The application tables, `whitelist_applications` and `whitelist_application_reviews`, were applied and checked in the identified production database on September 30 under the owner's explicit launch authorization; see [Database prerequisite](ADMIN_DASHBOARD.md#database-prerequisite--launch-migration-applied). Other deployments still require the reviewed schema before activation.
 2. Configure `APPLICATION_ORIGIN=https://theuncsgaming.com` and the shared Discord identity credentials: `ADMIN_DISCORD_CLIENT_ID`, `ADMIN_DISCORD_CLIENT_SECRET`, `ADMIN_SESSION_SECRET`, `ADMIN_GUILD_ID`, and `DISCORD_BOT_TOKEN`. These values remain server-side. Applicant login and submission do not require `ADMIN_ENABLED`, `ADMIN_ORIGIN`, or RCON credentials. Staff review still requires staff access, and granting game access requires the game connection.
 3. Add the exact Discord OAuth redirect `https://theuncsgaming.com/apply/auth/callback`, alongside staff's `https://admin.theuncsgaming.com/admin/auth/callback`. `APPLICATION_ORIGIN` must match the public website origin exactly. Proxy `/apply/*` through that public origin, preserve host-only cookies/Origin, and prevent caching. The website's `/whitelist` route is the return page. Never share staff cookies with the public site.
 4. Leave `WHITELIST_APPLICATION_EMAIL_REQUIRED=true` for the agreed required-email policy. The implementation supports `false` for a deliberate future policy change; any supplied email still requires contact consent.

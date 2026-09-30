@@ -199,6 +199,23 @@ describe("CombatPage", () => {
     expect(await screen.findByRole("table", { name: "Server leaderboard" })).toBeTruthy();
   });
 
+  it("opens combat history for a valid SteamID beyond the old prefix", async () => {
+    const steamId = "76561200000000000";
+    const response = server({ leaderboard: [{ ...server().leaderboard[0], steamId }] });
+    const { leaderboard, ...base } = response;
+    request.mockImplementation(async (path) =>
+      path.startsWith("combat/players/") ? { ...base, steamId, player: leaderboard[0] } : response,
+    );
+    render(page());
+    const table = await screen.findByRole("table", { name: "Server leaderboard" });
+    fireEvent.click(within(table).getByRole("button", { name: "Alice" }));
+    expect(await screen.findByRole("heading", { name: "Alice" })).toBeTruthy();
+    expect(request).toHaveBeenCalledWith(
+      `combat/players/${steamId}?period=week`,
+      expect.objectContaining({ signal: expect.anything() }),
+    );
+  });
+
   it("keeps failed-refresh history explicitly stale and stops claiming a receiving feed", async () => {
     request.mockResolvedValueOnce(server()).mockRejectedValueOnce(new Error("Unavailable"));
     const view = render(page());

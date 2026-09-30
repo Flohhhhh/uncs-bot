@@ -1,4 +1,5 @@
 import type { Overview, Staff } from "./types";
+import { isPublicIndividualSteamId } from "../../../../src/common/steam-id";
 
 const record = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
@@ -56,8 +57,7 @@ export function validateOverview(value: unknown): Overview {
       (player) =>
         record(player) &&
         text(player.name) &&
-        text(player.steamId) &&
-        /^7656119\d{10}$/.test(player.steamId) &&
+        isPublicIndividualSteamId(player.steamId) &&
         (player.faction === null || optionalText(player.faction)) &&
         [player.kills, player.deaths, player.cash, player.pingMs].every(optionalNumber),
     )

@@ -1,4 +1,5 @@
 import type { FounderPolicy, PaymentEvidence, Supporter, SupporterDecision, SupporterReviewInput } from "./types";
+import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 
 export function paymentDescription(payment: PaymentEvidence | null) {
   if (!payment) return "No payment evidence recorded";
@@ -20,7 +21,7 @@ export function founderReady(record: Supporter, policy: FounderPolicy) {
     policy.configured &&
     record.identityState === "staff_linked" &&
     record.discordId &&
-    record.steamId &&
+    isPublicIndividualSteamId(record.steamId) &&
     payment?.source === "manual_receipt" &&
     payment.verificationState === "verified" &&
     payment.firstSuccessfulPaymentVerified === true &&
@@ -51,7 +52,7 @@ export function reviewInput(
   if (decision === "link") {
     const discordId = String(values.get("discordId") ?? "").trim();
     const steamId = String(values.get("steamId") ?? "").trim();
-    if (!/^\d{17,20}$/.test(discordId) || !/^7656119\d{10}$/.test(steamId))
+    if (!/^\d{17,20}$/.test(discordId) || !isPublicIndividualSteamId(steamId))
       throw new Error("Enter the Discord user ID and the player’s 17-digit SteamID64.");
     return { ...base, discordId, steamId };
   }

@@ -3,7 +3,7 @@ import type { Staff } from "../admin/admin.types";
 import type { EnvService } from "../env/env.service";
 import { SupportersService } from "./supporters.service";
 import type { SupportersStore } from "./supporters.store";
-import { parsePatreon } from "./supporters.types";
+import { linkSchema, parsePatreon } from "./supporters.types";
 
 const secret = "dedicated-patreon-webhook-secret";
 const campaign = "123456";
@@ -48,6 +48,7 @@ function fixture(overrides: Record<string, unknown> = {}) {
     list: jest.fn().mockResolvedValue([]),
     ingest: jest.fn().mockResolvedValue({ duplicate: false }),
     mutate: jest.fn().mockResolvedValue({ ok: true }),
+    register: jest.fn().mockResolvedValue({ ok: true }),
   };
   return {
     store,
@@ -58,6 +59,17 @@ function fixture(overrides: Record<string, unknown> = {}) {
   };
 }
 describe("Patreon signed observations", () => {
+  it.each(["", "   ", null, undefined])(
+    "accepts hidden member names without inventing an identity: %p",
+    (full_name) => {
+      const { raw, signature } = signed(payload({ full_name }));
+      expect(parsePatreon(raw, signature, "members:update", secret, campaign).displayName).toBeNull();
+    },
+  );
+  it.each(["a".repeat(121), "Hidden\u0000name", {}])("still rejects invalid member names: %p", (full_name) => {
+    const { raw, signature } = signed(payload({ full_name }));
+    expect(() => parsePatreon(raw, signature, "members:update", secret, campaign)).toThrow("Invalid Patreon member");
+  });
   it("verifies original bytes and persists only the selected private ledger fields", () => {
     const { raw, signature } = signed();
     const observation = parsePatreon(raw, signature, "members:update", secret, campaign);
@@ -107,6 +119,64 @@ describe("Patreon signed observations", () => {
   });
 });
 describe("supporter reviews", () => {
+  it("accepts the full public player SteamID range and rejects structurally invalid account IDs", () => {
+    const input = {
+      id: randomUUID(),
+      version: 1,
+      confirm: "member-123",
+      discordId: "123456789012345678",
+      reason: "Checked account identity",
+    };
+    for (const steamId of ["76561197960265729", "76561202255233023"])
+      expect(linkSchema.safeParse({ ...input, steamId }).success).toBe(true);
+    for (const steamId of ["76561190000000001", "76561197960265728", "76561202255233024"])
+      expect(linkSchema.safeParse({ ...input, steamId }).success).toBe(false);
+  });
+  it("bounds all-record searches and never treats invalid query shapes as an unfiltered list", async () => {
+    const { service, store } = fixture();
+    await expect(service.list(admin, "  earlier%_member  ")).resolves.toMatchObject({
+      search: "earlier%_member",
+      limit: 100,
+    });
+    expect(store.list).toHaveBeenCalledWith(campaign, expect.any(Object), undefined, "earlier%_member");
+    store.list.mockClear();
+    for (const query of ["x".repeat(101), ["one", "two"], {}, null])
+      await expect(service.list(admin, query)).rejects.toMatchObject({ status: 400 });
+    expect(store.list).not.toHaveBeenCalled();
+  });
+  it("allows audited manual tracking before webhook setup without enabling webhook ingestion", async () => {
+    const { service, store } = fixture({ PATREON_WEBHOOK_SECRET: undefined });
+    const input = {
+      id: randomUUID(),
+      patreonMemberId: "membership-123",
+      campaignMembershipVerified: true,
+      reason: "Checked this campaign in Patreon",
+    };
+    await expect(service.register(admin, input)).resolves.toEqual({ ok: true });
+    expect(store.register).toHaveBeenCalledWith({ ...input, displayName: null }, admin, campaign, expect.any(Object));
+    await expect(service.list(admin)).resolves.toMatchObject({ configured: true, webhookConfigured: false });
+    await expect(service.webhook(undefined, undefined, undefined)).rejects.toMatchObject({ status: 503 });
+    expect(store.ingest).not.toHaveBeenCalled();
+  });
+  it("rejects unconfirmed membership entry, imported benefit claims and disabled ledger writes", async () => {
+    const { service, store } = fixture();
+    const input = { id: randomUUID(), patreonMemberId: "membership-123", reason: "Checked Patreon membership" };
+    await expect(service.register(admin, input)).rejects.toMatchObject({ status: 400 });
+    await expect(
+      service.register(admin, { ...input, campaignMembershipVerified: true, paid: true }),
+    ).rejects.toMatchObject({ status: 400 });
+    await expect(
+      service.register(admin, {
+        ...input,
+        campaignMembershipVerified: true,
+        patreonMemberId: "https://patreon.com/member",
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+    await expect(
+      fixture({ PATREON_ENABLED: false }).service.register(admin, { ...input, campaignMembershipVerified: true }),
+    ).rejects.toMatchObject({ status: 503 });
+    expect(store.register).not.toHaveBeenCalled();
+  });
   it("fails closed when disabled or reusing another server secret", async () => {
     for (const overrides of [
       { PATREON_ENABLED: false },
@@ -124,8 +194,10 @@ describe("supporter reviews", () => {
     const { service, store } = fixture();
     await expect(service.list({ ...admin, role })).rejects.toMatchObject({ status: 403 });
     await expect(service.mutate({ ...admin, role }, randomUUID(), "link", {})).rejects.toMatchObject({ status: 403 });
+    await expect(service.register({ ...admin, role }, {})).rejects.toMatchObject({ status: 403 });
     expect(store.list).not.toHaveBeenCalled();
     expect(store.mutate).not.toHaveBeenCalled();
+    expect(store.register).not.toHaveBeenCalled();
   });
   it("leaves the founder launch window unset and rejects assumed or non-15-day windows", async () => {
     const { service, store } = fixture();

@@ -24,7 +24,13 @@ import { TelemetryStore } from "../src/telemetry/telemetry.store";
 import type { CombatStats } from "../src/telemetry/telemetry.types";
 import { SupportersModule } from "../src/supporters/supporters.module";
 import { SupportersStore } from "../src/supporters/supporters.store";
-import type { FounderPolicy, PaymentView, SupporterMutation, SupporterView } from "../src/supporters/supporters.types";
+import type {
+  FounderPolicy,
+  ManualMemberInput,
+  PaymentView,
+  SupporterMutation,
+  SupporterView,
+} from "../src/supporters/supporters.types";
 
 const previewPort = Number(process.env.PREVIEW_PORT || 4317);
 
@@ -487,7 +493,7 @@ for (const [index, displayName] of ["Demo · Steady Supporter", "Demo · Foundin
     observedAt: new Date().toISOString(),
     reviewState: index === 1 ? "verified" : "pending",
     discordId: index === 2 ? null : `88888888888888888${index + 1}`,
-    steamId: index === 2 ? null : `7656119000000000${index + 1}`,
+    steamId: index === 2 ? null : `7656119800000000${index + 1}`,
     identityState: index === 2 ? "unlinked" : "staff_linked",
     version: 1,
     latestPayment: payment,
@@ -499,10 +505,51 @@ const supporterStore = {
   async ingest() {
     throw new Error("Patreon webhook intake is unavailable in the simulated preview.");
   },
-  async list(_campaignId: string, _policy: FounderPolicy, memberId?: string) {
+  async register(input: ManualMemberInput, staff: Staff, campaignId: string, policy: FounderPolicy) {
+    const fingerprint = JSON.stringify({ kind: "manual-member", campaignId, input, staff: staff.id });
+    const previous = demoSupporterActions.get(input.id);
+    const existing = [...demoSupporters.values()].find((entry) => entry.patreonMemberId === input.patreonMemberId);
+    if (previous) {
+      if (previous !== fingerprint || !existing) throw new ConflictException("Preview review ID was already used.");
+      return { ok: true, replayed: true, supporter: structuredClone(existing) };
+    }
+    if (existing) throw new ConflictException("This preview membership is already recorded. Search its membership ID.");
+    const record: SupporterView = {
+      id: randomUUID(),
+      patreonMemberId: input.patreonMemberId,
+      displayName: input.displayName,
+      patronStatus: null,
+      lastChargeStatus: null,
+      lastChargeAt: null,
+      observedAt: new Date().toISOString(),
+      reviewState: "unverified",
+      discordId: null,
+      steamId: null,
+      identityState: "unlinked",
+      version: 1,
+      latestPayment: null,
+      founderEligiblePayment: null,
+      founder: null,
+    };
+    demoSupporters.set(record.id, record);
+    demoSupporterActions.set(input.id, fingerprint);
+    const [supporter] = await this.list(campaignId, policy, record.id);
+    return { ok: true, replayed: false, supporter };
+  },
+  async list(_campaignId: string, _policy: FounderPolicy, memberId?: string, search = "") {
+    const needle = search.toLocaleLowerCase();
     return structuredClone(
       [...demoSupporters.values()]
         .filter((entry) => !memberId || entry.id === memberId)
+        .filter(
+          (entry) =>
+            !needle ||
+            [entry.displayName, entry.patreonMemberId, entry.discordId, entry.steamId].some((value) =>
+              value?.toLocaleLowerCase().includes(needle),
+            ),
+        )
+        .sort((a, b) => Date.parse(b.observedAt) - Date.parse(a.observedAt) || a.id.localeCompare(b.id))
+        .slice(0, 100)
         .map((entry) => {
           const payment = entry.latestPayment;
           const eligible =

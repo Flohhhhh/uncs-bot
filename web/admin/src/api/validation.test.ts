@@ -14,6 +14,22 @@ const overview = (): Overview => ({
   observedAt: "2026-09-30T18:00:00.000Z",
 });
 describe("browser response contracts", () => {
+  it.each(["76561197960265729", "76561200000000000", "76561202255233023"])(
+    "accepts structural SteamID64 boundaries in the roster: %s",
+    (steamId) => {
+      const data = overview();
+      data.players[0].steamId = steamId;
+      expect(validateOverview(data)).toBe(data);
+    },
+  );
+  it.each(["76561197960265728", "76561202255233024", 76561200000000000])(
+    "rejects out-of-range or numeric roster IDs: %s",
+    (steamId) => {
+      expect(() => validateOverview({ ...overview(), players: [{ name: "Player", steamId }] })).toThrow(
+        "could not be verified",
+      );
+    },
+  );
   it("accepts normal and simulated staff without weakening role or CSRF types", () => {
     expect(validateStaff({ id: "12345678901234567", name: "Staff", role: "moderator", csrf: "csrf" }).role).toBe(
       "moderator",

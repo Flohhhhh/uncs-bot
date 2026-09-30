@@ -1,6 +1,7 @@
 import { BadRequestException, UnauthorizedException } from "@nestjs/common";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
+import { isPublicIndividualSteamId } from "../common/steam-id";
 
 export const MAX_PATREON_BYTES = 65_536;
 const line = (maximum: number) =>
@@ -16,6 +17,8 @@ export const providerId = z.string().regex(/^[A-Za-z0-9_-]{1,100}$/);
 const optionalText = line(120)
   .nullish()
   .transform((value) => value ?? null);
+// Patreon permits empty names when a member hides their identity.
+const displayName = z.preprocess((value) => (typeof value === "string" && !value.trim() ? null : value), optionalText);
 const timestamp = z.iso.datetime({ offset: true }).transform((value) => new Date(value));
 export const supportedTriggers = z.enum([
   "members:create",
@@ -30,7 +33,7 @@ const payloadSchema = z.object({
     id: providerId,
     type: z.literal("member"),
     attributes: z.object({
-      full_name: optionalText,
+      full_name: displayName,
       patron_status: optionalText,
       last_charge_status: optionalText,
       last_charge_date: timestamp.nullish().transform((value) => value ?? null),
@@ -94,9 +97,23 @@ export function parsePatreon(
   };
 }
 const base = { id: z.uuid(), version: z.number().int().positive(), confirm: providerId, reason: line(200).min(3) };
+export const manualMemberSchema = z
+  .object({
+    id: z.uuid(),
+    patreonMemberId: providerId,
+    displayName,
+    campaignMembershipVerified: z.literal(true),
+    reason: line(200).min(3),
+  })
+  .strict();
+export type ManualMemberInput = z.infer<typeof manualMemberSchema>;
 export const reviewSchema = z.object(base).strict();
 export const linkSchema = z
-  .object({ ...base, discordId: z.string().regex(/^\d{17,20}$/), steamId: z.string().regex(/^7656119\d{10}$/) })
+  .object({
+    ...base,
+    discordId: z.string().regex(/^\d{17,20}$/),
+    steamId: z.string().refine(isPublicIndividualSteamId, "Enter a valid player SteamID64."),
+  })
   .strict();
 export const paymentSchema = z
   .object({

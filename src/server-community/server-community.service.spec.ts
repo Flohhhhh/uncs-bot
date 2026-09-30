@@ -167,7 +167,7 @@ describe("optional community worker", () => {
   it("bounds delivery to one send per observation and expires its finite queue", async () => {
     const { service, look, game } = fixture();
     await service.tick();
-    const ids = Array.from({ length: 300 }, (_, index) => `7656119${String(index).padStart(10, "0")}`);
+    const ids = Array.from({ length: 300 }, (_, index) => `765611980${String(index).padStart(8, "0")}`);
     await look(ids);
     expect(game.execute).toHaveBeenCalledTimes(1);
     for (let index = 0; index < 20; index++) await look(ids);
@@ -180,7 +180,7 @@ describe("optional community worker", () => {
   it("drops queued welcomes for disconnected players", async () => {
     const { service, look, game } = fixture();
     await service.tick();
-    await look(Array.from({ length: 10 }, (_, index) => `7656119${String(index).padStart(10, "0")}`));
+    await look(Array.from({ length: 10 }, (_, index) => `765611980${String(index).padStart(8, "0")}`));
     expect(game.execute).toHaveBeenCalledTimes(1);
     await look([]);
     expect(game.execute).toHaveBeenCalledTimes(1);

@@ -1,9 +1,12 @@
 import { z } from "zod";
+import { isPublicIndividualSteamId } from "../common/steam-id";
 
 export type StaffRole = "viewer" | "moderator" | "admin";
 export type Staff = { id: string; name: string; role: StaffRole; csrf: string };
 export type ActionResult = { state: "applied" | "accepted" | "pending" | "failed" | "unknown"; message: string };
-export const steamId = z.string().regex(/^7656119\d{10}$/, "Enter a SteamID64 (17 digits starting with 7656119).");
+export const steamId = z
+  .string()
+  .refine(isPublicIndividualSteamId, "Enter a 17-digit SteamID64 for a personal Steam account.");
 const reason = z
   .string()
   .trim()

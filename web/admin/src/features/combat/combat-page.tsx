@@ -1,11 +1,12 @@
 import { useState } from "react";
+import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 import { useResource } from "../../api/use-resource";
 import { useAdmin } from "../../app/context";
 import { Badge, Card, Empty, Metric, Search, date } from "../../components/ui";
 import type { CombatEvent, CombatEventKind, CombatPeriod, CombatPlayer, CombatResponse } from "./combat.types";
 
 const periods: Record<CombatPeriod, string> = { day: "Last 24 hours", week: "Last 7 days", month: "Last 30 days" };
-const validSteamId = (id: string | null) => /^7656119\d{10}$/.test(id ?? "");
+const validSteamId = isPublicIndividualSteamId;
 const count = (value: number | undefined) =>
   typeof value === "number" && Number.isFinite(value) ? value.toLocaleString() : "—";
 const ratio = (player: CombatPlayer | null | undefined) =>

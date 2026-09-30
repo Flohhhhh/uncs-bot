@@ -12,6 +12,22 @@ beforeEach(() => {
 });
 
 describe("server action review", () => {
+  it("accepts a structural SteamID64 beyond the old prefix while preserving its exact string", async () => {
+    const steamId = "76561200000000000";
+    request.mockResolvedValue({ state: "applied", message: "Whitelist saved" });
+    render(
+      <AdminContext.Provider value={context()}>
+        <ActionsDialog action="whitelist-add" onClose={vi.fn()} />
+      </AdminContext.Provider>,
+    );
+    const field = screen.getByLabelText("SteamID64");
+    expect(field).toHaveAttribute("pattern", "[0-9]{17}");
+    fireEvent.change(field, { target: { value: steamId } });
+    fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "Requested access" } });
+    fireEvent.click(screen.getByRole("button", { name: "Confirm action" }));
+    await waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+    expect(JSON.parse(String(request.mock.calls[0][1]?.body))).toMatchObject({ steamId });
+  });
   it("requires the exact target confirmation and sends only once", async () => {
     request.mockResolvedValue({ state: "applied", message: "Ban saved" });
     render(

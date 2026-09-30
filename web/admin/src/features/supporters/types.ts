@@ -36,6 +36,7 @@ export interface SupportersResponse {
   enabled: boolean;
   configured: boolean;
   founderPolicy: FounderPolicy;
+  webhookConfigured: boolean;
   supporters: Supporter[];
   note: string;
 }

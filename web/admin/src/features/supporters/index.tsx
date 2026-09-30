@@ -2,8 +2,9 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api } from "../../api/client";
 import { useResource } from "../../api/use-resource";
 import { useAdmin } from "../../app/context";
-import { Badge, Card, Empty, Modal, ReasonField, Search, date } from "../../components/ui";
+import { Badge, Card, Empty, Modal, ReasonField, date } from "../../components/ui";
 import { founderReady, paymentDescription, reviewInput } from "./policy";
+import { ManualMember } from "./manual-member";
 import type { FounderPolicy, Supporter, SupporterDecision, SupporterReviewResponse, SupportersResponse } from "./types";
 
 const decisions = {
@@ -56,13 +57,15 @@ function SupporterDetails({ record }: { record: Supporter }) {
       </div>
       <dl className="application-details">
         <div>
-          <dt>Latest membership observation</dt>
+          <dt>Record timestamp</dt>
           <dd>
             {date(record.observedAt)}
             <small>
               {record.reviewState === "verified"
                 ? "Reviewed by staff; this is not payment or account ownership verification."
-                : "Awaiting staff review."}
+                : record.reviewState === "unverified"
+                  ? "Entered by staff; membership status and payment need separate review."
+                  : "Awaiting staff review."}
             </small>
           </dd>
         </div>
@@ -316,11 +319,11 @@ function SupporterReview({
                     <input
                       name="steamId"
                       required
-                      pattern="7656119[0-9]{10}"
+                      pattern="[0-9]{17}"
                       maxLength={17}
                       inputMode="numeric"
                       defaultValue={record.steamId ?? ""}
-                      placeholder="7656119…"
+                      placeholder="17-digit SteamID64"
                     />
                   </label>
                 </>
@@ -408,9 +411,13 @@ function SupporterReview({
 
 function AdminSupporters() {
   const { busy } = useAdmin();
-  const resource = useResource<SupportersResponse>("supporters");
   const [query, setQuery] = useState("");
+  const [search, setSearch] = useState("");
+  const resource = useResource<SupportersResponse>(
+    search ? `supporters?search=${encodeURIComponent(search)}` : "supporters",
+  );
   const [selected, setSelected] = useState<Supporter | null>(null);
+  const [adding, setAdding] = useState(false);
   const data = resource.data;
   if (!data)
     return (
@@ -420,12 +427,6 @@ function AdminSupporters() {
       />
     );
   const records = data.supporters;
-  const needle = query.toLocaleLowerCase();
-  const rows = records.filter((record) =>
-    [record.displayName, record.patreonMemberId, record.discordId, record.steamId].some((value) =>
-      value?.toLocaleLowerCase().includes(needle),
-    ),
-  );
   const policy = data.founderPolicy;
   const windowDate = (value: string | null) =>
     value
@@ -458,8 +459,13 @@ function AdminSupporters() {
               : "The launch dates must be set before any founder promise can be recorded."}
           </small>
           <Badge kind={data.enabled && data.configured ? "neutral" : "warn"}>
-            {data.enabled && data.configured ? "INTEGRATION CONFIGURED" : "NOT CONNECTED"}
+            {data.enabled && data.configured ? "SUPPORTER RECORDS READY" : "NOT CONFIGURED"}
           </Badge>
+          <small>
+            {data.webhookConfigured
+              ? "Patreon webhook configured; check delivery in Patreon."
+              : "Automatic Patreon updates are not connected. Verified member details can be entered manually when records are ready."}
+          </small>
         </div>
       </div>
       <div className="notice info">
@@ -486,13 +492,61 @@ function AdminSupporters() {
         </span>
         <span>Counts are for the records shown</span>
       </div>
-      <Search value={query} onChange={setQuery} placeholder="Search Patreon name, member ID, Discord ID, or SteamID" />
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (busy || resource.loading || query.trim().length > 100) return;
+          if (query.trim() === search) resource.refresh();
+          else setSearch(query.trim());
+        }}
+      >
+        <div className="toolbar">
+          <label className="search">
+            <input
+              type="search"
+              maxLength={100}
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              aria-label="Search all supporter records"
+              placeholder="Patreon name, membership ID, Discord ID, or SteamID"
+            />
+          </label>
+          <button className="button secondary" disabled={busy || resource.loading}>
+            Search all records
+          </button>
+          {search && (
+            <button
+              type="button"
+              className="button secondary"
+              disabled={busy || resource.loading}
+              onClick={() => {
+                setQuery("");
+                setSearch("");
+              }}
+            >
+              Clear search
+            </button>
+          )}
+        </div>
+      </form>
+      <p className="muted">
+        {search
+          ? `Searching all records for “${search}”. Up to 100 matching records are shown.`
+          : "Showing up to 100 recent records. Search all records to find earlier supporters."}
+      </p>
+      <button
+        className="button secondary"
+        disabled={busy || resource.loading || Boolean(resource.error) || !data.enabled || !data.configured}
+        onClick={() => setAdding(true)}
+      >
+        Record existing Patreon member
+      </button>
       <Card
         title="Patreon supporters"
         subtitle="Membership status is not proof of a completed payment. Open a record to check evidence."
         badge={<Badge>ADMIN ONLY</Badge>}
       >
-        {rows.length ? (
+        {records.length ? (
           <div className="table-wrap">
             <table>
               <thead>
@@ -503,7 +557,7 @@ function AdminSupporters() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((record) => (
+                {records.map((record) => (
                   <tr key={record.id}>
                     <td>
                       <strong>{record.displayName || "Patreon member"}</strong>
@@ -542,11 +596,11 @@ function AdminSupporters() {
           </div>
         ) : (
           <Empty
-            title={records.length ? "No matching supporters" : "No supporter records yet"}
+            title={search ? "No matching supporters" : "No supporter records yet"}
             detail={
-              records.length
+              search
                 ? "Try another name or account ID."
-                : "Records will appear after Patreon is connected and sends membership updates. A payment has not been assumed."
+                : "Records can be entered after checking the member in Patreon, or arrive through connected webhooks. A payment has not been assumed."
             }
           />
         )}
@@ -560,6 +614,13 @@ function AdminSupporters() {
           onReviewed={() => {
             void resource.refresh();
           }}
+        />
+      )}
+      {adding && (
+        <ManualMember
+          unavailable={!data.enabled || !data.configured || Boolean(resource.error) || resource.loading}
+          onClose={() => setAdding(false)}
+          onRecorded={resource.refresh}
         />
       )}
     </>

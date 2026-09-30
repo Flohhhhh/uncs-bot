@@ -24,6 +24,22 @@ const unrelatedLines = (text: string) =>
   text.split(/\r?\n/).filter((line) => !/^\s*[+.!-]?DefaultReservedPlayerIds\s*=/i.test(line));
 
 describe("targeted whitelist edits", () => {
+  it("preserves valid IDs beyond the old prefix through add and remove", () => {
+    const nextId = "76561200000000000";
+    const updated = editWhitelist(document, nextId, true);
+    expect(configuredWhitelist(updated)).toEqual([existing, nextId]);
+    expect(unrelatedLines(updated)).toEqual(unrelatedLines(document.text));
+    expect(configuredWhitelist(editWhitelist({ ...document, text: updated }, existing, false))).toEqual([nextId]);
+  });
+  it.each(["76561197960265728", "76561202255233024", "76561190000000001"])(
+    "refuses out-of-range existing values before rewriting: %s",
+    (value) => {
+      const text = document.text.replace(existing, value);
+      expect(() => configuredWhitelist(text)).toThrow("unsupported");
+      expect(() => editWhitelist({ ...document, text }, added, true)).toThrow("unsupported");
+      expect(() => editWhitelist(document, value, true)).toThrow("Invalid SteamID64");
+    },
+  );
   it("adds one ID and preserves every existing setting and entry", () => {
     const updated = editWhitelist(document, added, true);
     expect(configuredWhitelist(updated)).toEqual([existing, added]);

@@ -76,6 +76,28 @@ describe("shared dashboard and community observations", () => {
 
 describe("Wardogs action outcomes", () => {
   afterEach(() => jest.restoreAllMocks());
+  it("reads and confirms a whitelist addition beyond the old SteamID prefix", async () => {
+    const steamId = "76561200000000000";
+    const client = new WardogsClient(settings);
+    const request = jest.spyOn(client, "request").mockImplementation(async (method, path) => {
+      if (path === "/v1/capabilities") return { routes: ["POST /v1/reserved-slots"] };
+      if (path === "/v1/reserved-slots")
+        return method === "POST" ? { ok: true } : { reservedSlots: [existing, steamId] };
+      if (path === "/v1/config") return document;
+      throw new Error("Unexpected route");
+    });
+    await expect(client.whitelist()).resolves.toMatchObject({
+      entries: [
+        { steamId: existing, active: true },
+        { steamId, active: true },
+      ],
+      invalidEntryCount: 0,
+    });
+    await expect(
+      client.execute({ id: randomUUID(), action: "whitelist-add", steamId, reason: "Requested access" }),
+    ).resolves.toMatchObject({ state: "applied" });
+    expect(request).toHaveBeenCalledWith("POST", "/v1/reserved-slots", { steamId });
+  });
   it("keeps valid whitelist entries visible when one or more reserved slots are malformed", async () => {
     const client = new WardogsClient(settings);
     const request = jest.spyOn(client, "request").mockImplementation(async (_method, path) => {

@@ -1,4 +1,5 @@
 import { useRef, useState, type FormEvent } from "react";
+import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 import { api } from "../../api/client";
 import type { ActionName, ActionResult, Catalog } from "../../api/types";
 import { useResource } from "../../api/use-resource";
@@ -69,8 +70,8 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
       setError("Enter a single-line reason between 3 and 200 characters.");
       return;
     }
-    if (requiresPlayer && !/^7656119\d{10}$/.test(target)) {
-      setError("Enter a SteamID64: 17 digits starting with 7656119.");
+    if (requiresPlayer && !isPublicIndividualSteamId(target)) {
+      setError("Enter a 17-digit SteamID64 for a personal Steam account.");
       return;
     }
     if (requiresConfirmation && confirm !== (phrase ?? target)) {
@@ -185,9 +186,9 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
                     <input
                       name="steamId"
                       required
-                      pattern="7656119[0-9]{10}"
+                      pattern="[0-9]{17}"
                       maxLength={17}
-                      placeholder="7656119…"
+                      placeholder="17-digit SteamID64"
                       inputMode="numeric"
                     />
                   </label>
