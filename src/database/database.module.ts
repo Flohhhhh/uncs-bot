@@ -1,14 +1,13 @@
 import { Global, Inject, Injectable, Module, type OnApplicationShutdown, type OnModuleInit } from "@nestjs/common";
-import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
+import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import { EnvModule } from "src/env/env.module";
 import { EnvService } from "src/env/env.service";
 import * as schema from "./schema";
+import { DATABASE } from "./database.types";
+export { DATABASE, type Database } from "./database.types";
 
-export const DATABASE = Symbol("DATABASE");
 const DATABASE_POOL = Symbol("DATABASE_POOL");
-
-export type Database = NodePgDatabase<typeof schema>;
 
 @Injectable()
 class DatabaseLifecycle implements OnApplicationShutdown, OnModuleInit {

@@ -90,3 +90,5 @@ npm run typecheck       # Run TypeScript checks
 - [Project structure](docs/guides/PROJECT_STRUCTURE.md) — repository organization.
 - [Scripts guide](docs/guides/SCRIPTS.md) — available development scripts.
 - [REST API guide](docs/guides/REST_API.md) — enabling the optional HTTP API.
+- [Staff dashboard](docs/guides/ADMIN_DASHBOARD.md) — Wardogs administration, local preview, staff permissions, and deployment prerequisites.
+- [Website whitelist applications](docs/guides/WHITELIST_APPLICATIONS.md) — applicant sign-in, private contact information, staff review, and activation requirements.

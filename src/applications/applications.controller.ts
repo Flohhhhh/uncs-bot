@@ -1,0 +1,115 @@
+import {
+  ArgumentsHost,
+  Body,
+  CanActivate,
+  Catch,
+  Controller,
+  ExceptionFilter,
+  ExecutionContext,
+  Get,
+  HttpException,
+  Injectable,
+  Param,
+  Post,
+  Req,
+  Res,
+  UseFilters,
+  UseGuards,
+} from "@nestjs/common";
+import type { Request, Response } from "express";
+import { AdminGuard, type StaffRequest } from "../admin/admin.auth";
+import { ApplicantAuth, type ApplicantRequest } from "./applicant.auth";
+import { ApplicationsService } from "./applications.service";
+
+@Catch()
+@Injectable()
+export class ApplicationsExceptionFilter implements ExceptionFilter {
+  catch(error: unknown, host: ArgumentsHost) {
+    const response = host.switchToHttp().getResponse<Response>();
+    const status = error instanceof HttpException ? error.getStatus() : 503;
+    response.status(status).json({
+      message:
+        error instanceof HttpException
+          ? error.message
+          : "Applications are temporarily unavailable. Contact staff at discord.gg/t5NSzurtRS.",
+    });
+  }
+}
+
+@Injectable()
+export class ApplicationsEnabledGuard implements CanActivate {
+  constructor(private readonly service: ApplicationsService) {}
+  canActivate() {
+    this.service.enabled();
+    return true;
+  }
+}
+
+@Injectable()
+export class ApplicantGuard implements CanActivate {
+  constructor(private readonly auth: ApplicantAuth) {}
+  async canActivate(context: ExecutionContext) {
+    const request = context.switchToHttp().getRequest<ApplicantRequest>();
+    request.applicant = await this.auth.authenticate(request);
+    return true;
+  }
+}
+
+@Controller("apply/auth")
+@UseFilters(ApplicationsExceptionFilter)
+@UseGuards(ApplicationsEnabledGuard)
+export class ApplicantAuthController {
+  constructor(private readonly auth: ApplicantAuth) {}
+  @Get("login")
+  login(@Req() req: Request, @Res() res: Response) {
+    return this.auth.login(req, res);
+  }
+  @Get("callback")
+  callback(@Req() req: Request, @Res() res: Response) {
+    return this.auth.callback(req, res);
+  }
+  @Post("logout")
+  logout(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
+    // ApplicantAuth validates the session, origin and CSRF itself. A former
+    // member must still be able to clear their cookie and sign out.
+    return this.auth.logout(req, res);
+  }
+}
+
+@Controller("apply/api")
+@UseFilters(ApplicationsExceptionFilter)
+@UseGuards(ApplicationsEnabledGuard, ApplicantGuard)
+export class ApplicantApiController {
+  constructor(private readonly service: ApplicationsService) {}
+  @Get("me")
+  me(@Req() req: ApplicantRequest) {
+    return this.service.me(req.applicant);
+  }
+  @Post("request")
+  submit(@Req() req: ApplicantRequest, @Body() body: unknown) {
+    return this.service.submit(req.applicant, body);
+  }
+}
+
+@Controller("admin/api/applications")
+@UseFilters(ApplicationsExceptionFilter)
+@UseGuards(ApplicationsEnabledGuard, AdminGuard)
+export class StaffApplicationsController {
+  constructor(private readonly service: ApplicationsService) {}
+  @Get()
+  list(@Req() req: StaffRequest) {
+    return this.service.list(req.staff);
+  }
+  @Post(":id/approve")
+  approve(@Req() req: StaffRequest, @Param("id") id: string, @Body() body: unknown) {
+    return this.service.review(req.staff, id, "approve", body);
+  }
+  @Post(":id/decline")
+  decline(@Req() req: StaffRequest, @Param("id") id: string, @Body() body: unknown) {
+    return this.service.review(req.staff, id, "decline", body);
+  }
+  @Post(":id/recheck")
+  recheck(@Req() req: StaffRequest, @Param("id") id: string, @Body() body: unknown) {
+    return this.service.review(req.staff, id, "recheck", body);
+  }
+}
