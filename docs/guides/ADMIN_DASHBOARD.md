@@ -62,6 +62,8 @@ Assign a trusted person the mapped role in the configured Discord server, then s
 
 The UNCs owner reports adding whitelist entries through the current RCON console takes effect live. The dashboard therefore determines success from the **running list**, not an assumed restart requirement.
 
+The whitelist view validates entries individually. A malformed entry no longer hides valid SteamIDs; the page shows the count requiring review in the server configuration. It never coerces numeric IDs (which can lose precision) or edits malformed entries automatically. A malformed response envelope still fails the read, and mutation input and post-write confirmation remain strict.
+
 - Use live reserved-slot writes if the server advertises them in `/v1/capabilities`.
 - Otherwise read the current config revision and modify only the requested `DefaultReservedPlayerIds` entry. Preserve the other entries, `MaxReservedSlots`, ban list, server feed and all unrelated configuration.
 - Write with `If-Match`, never force overwrite or blindly retry a conflict.

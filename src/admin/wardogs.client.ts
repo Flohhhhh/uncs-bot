@@ -7,6 +7,7 @@ import {
   configDocumentSchema,
   playersSchema,
   reservedSchema,
+  steamId,
   statusSchema,
   type ActionResult,
   type AdminAction,
@@ -200,7 +201,15 @@ export class WardogsClient {
   }
 
   async whitelist() {
-    const live = reservedSchema.parse(await this.request("GET", "/v1/reserved-slots")).reservedSlots;
+    // Tolerate individual bad rows for display, without weakening action input
+    // validation or the strict readback used to confirm a whitelist mutation.
+    const slots = z
+      .object({ reservedSlots: z.array(z.unknown()) })
+      .parse(await this.request("GET", "/v1/reserved-slots")).reservedSlots;
+    const live = slots.flatMap((value) => {
+      const parsed = steamId.safeParse(value);
+      return parsed.success ? [parsed.data] : [];
+    });
     let configured: string[] | null = null;
     try {
       configured = configuredWhitelist((await this.document()).text);
@@ -213,7 +222,7 @@ export class WardogsClient {
       active: live.includes(id),
       configured: configured === null ? null : configured.includes(id),
     }));
-    return { entries, configurationAvailable: configured !== null };
+    return { entries, configurationAvailable: configured !== null, invalidEntryCount: slots.length - live.length };
   }
 
   async catalog() {

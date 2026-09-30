@@ -76,6 +76,39 @@ describe("shared dashboard and community observations", () => {
 
 describe("Wardogs action outcomes", () => {
   afterEach(() => jest.restoreAllMocks());
+  it("keeps valid whitelist entries visible when one or more reserved slots are malformed", async () => {
+    const client = new WardogsClient(settings);
+    const request = jest.spyOn(client, "request").mockImplementation(async (_method, path) => {
+      if (path === "/v1/reserved-slots") return { reservedSlots: [existing, "not-a-steam-id", id, null, Number(id)] };
+      if (path === "/v1/config") return document;
+      throw new Error("Unexpected route");
+    });
+    await expect(client.whitelist()).resolves.toMatchObject({
+      entries: [
+        { steamId: existing, active: true, configured: true },
+        { steamId: id, active: true, configured: false },
+      ],
+      invalidEntryCount: 3,
+      configurationAvailable: true,
+    });
+    expect(request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+  });
+  it("rejects an invalid reserved-list envelope instead of claiming the server whitelist is empty", async () => {
+    const client = new WardogsClient(settings);
+    jest.spyOn(client, "request").mockResolvedValue({ reservedSlots: null });
+    await expect(client.whitelist()).rejects.toThrow();
+  });
+  it("does not use a partially malformed list to confirm a whitelist mutation", async () => {
+    const client = new WardogsClient(settings);
+    jest.spyOn(client, "request").mockImplementation(async (method, path) => {
+      if (path === "/v1/capabilities") return { routes: ["POST /v1/reserved-slots"] };
+      if (path === "/v1/reserved-slots") return method === "POST" ? { ok: true } : { reservedSlots: [id, "bad-id"] };
+      throw new Error("Unexpected route");
+    });
+    await expect(
+      client.execute({ id: randomUUID(), action: "whitelist-add", steamId: id, reason: "Test approval" }),
+    ).resolves.toMatchObject({ state: "unknown" });
+  });
   it("reports an unconfigured game as unsent instead of an uncertain mutation", async () => {
     const transport = jest.spyOn(globalThis, "fetch");
     const client = new WardogsClient({

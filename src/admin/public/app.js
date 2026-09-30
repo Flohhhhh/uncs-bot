@@ -837,6 +837,8 @@ function render() {
     else {
       const rows = filter(data.entries, ["steamId"]);
       html = `<div class="notice info"><strong>Current community access stays in place.</strong> Existing whitelist entries have no new expiry. Membership billing, seeding rewards, and future queue tiers are not changing this list.</div>`;
+      if (data.invalidEntryCount > 0)
+        html += `<div class="notice warning"><strong>${esc(data.invalidEntryCount)} malformed reserved-slot entries.</strong> Valid SteamIDs are shown below. Review the malformed entries in the server configuration; this view does not change the server list.</div>`;
       if (!data.configurationAvailable)
         html += `<div class="notice warning">The running whitelist is available, but the saved configuration could not be checked.</div>`;
       html +=

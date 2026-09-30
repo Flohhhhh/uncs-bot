@@ -25,6 +25,7 @@ describe("staff action safeguards", () => {
     const { service, game, store } = fixture();
     await expect(service.act({ ...staff, role: "viewer" }, input())).rejects.toThrow("staff role");
     await expect(service.act(staff, { ...input(), confirm: "76561198066952872" })).rejects.toThrow("does not match");
+    await expect(service.act(staff, { ...input(), steamId: "bad-id", confirm: "bad-id" })).rejects.toThrow("SteamID64");
     await expect(
       service.act(
         { ...staff, role: "moderator" },
