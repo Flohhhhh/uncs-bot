@@ -34,7 +34,7 @@ export class ApplicationsService {
   enabled() {
     if (!this.env.get("WHITELIST_APPLICATIONS_ENABLED"))
       throw new ServiceUnavailableException(
-        "Website applications are not open yet. Use the whitelisting channel at discord.gg/t5NSzurtRS.",
+        "Website applications are not open yet. Please check back on this website.",
       );
   }
 

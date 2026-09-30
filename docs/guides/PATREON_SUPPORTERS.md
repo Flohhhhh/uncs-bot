@@ -14,7 +14,7 @@ Founder awards are separate permanent records with their own audit and payment r
 
 ## Connecting the integration
 
-1. The combined launch migration is generated and reviewed under the owner's explicit September 30 authorization; see [Database prerequisite](ADMIN_DASHBOARD.md#database-prerequisite--launch-migration-prepared). It has not been applied. Verify it on the explicitly chosen development database before arranging production application.
+1. The combined launch migration was applied to the identified production database on September 30 under the owner's explicit authorization, and post-deployment schema checks passed; see [Database prerequisite](ADMIN_DASHBOARD.md#database-prerequisite--launch-migration-applied). `PATREON_ENABLED` remains false. Other deployments still require the reviewed schema before activation.
 2. Create the Patreon page and a v2 webhook for the correct campaign. Configure its HTTPS destination as `/supporters/webhooks/patreon` on the backend. Subscribe to the supported `members:*` and `members:pledge:*` create, update and delete events.
 3. Configure `PATREON_CAMPAIGN_ID` and the webhook's `PATREON_WEBHOOK_SECRET`. Use a dedicated secret, separate from RCON, combat feed and session secrets.
 4. Set `PATREON_FOUNDER_START_AT=2026-09-30T00:00:00-04:00` and `PATREON_FOUNDER_END_AT=2026-10-15T00:00:00-04:00`. Enable `PATREON_ENABLED` only after the database, HTTPS route and webhook are ready.
@@ -30,4 +30,4 @@ Webhooks do not establish a trustworthy delivery order. New observations always 
 
 Only administrators can read or edit this ledger. Mutations require the existing fresh role check, exact website origin and session CSRF token. The integration stores selected member/status fields and private payment references, not raw payloads, email addresses, postal addresses, card details or creator notes. Dashboard and proxy responses use no-store headers. The payment and audit ledger currently has no automatic purge; include it in the deployment's access, backup and retention decisions.
 
-Local tests cover signatures, tampering, campaign checks, privacy, role/CSRF enforcement, replay, ordering and founder eligibility. Persistence tests inspect generated PostgreSQL queries and transaction behavior; actual migration execution and real Patreon delivery still need deployment verification.
+Local tests cover signatures, tampering, campaign checks, privacy, role/CSRF enforcement, replay, ordering and founder eligibility. Persistence tests inspect generated PostgreSQL queries and transaction behavior. Production migration execution and schema checks are complete; real Patreon delivery and authenticated staff use still need deployment verification.

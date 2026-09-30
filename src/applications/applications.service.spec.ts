@@ -182,7 +182,7 @@ describe("private website whitelist requests", () => {
     const { service, store, admin } = fixture({ enabled: false });
     await expect(service.me(applicant)).rejects.toMatchObject({
       status: 503,
-      message: expect.stringContaining("discord.gg/t5NSzurtRS"),
+      message: expect.stringContaining("check back on this website"),
     });
     await expect(service.submit(applicant, input)).rejects.toMatchObject({ status: 503 });
     await expect(service.list(staff)).rejects.toMatchObject({ status: 503 });

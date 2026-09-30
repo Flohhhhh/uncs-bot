@@ -4,7 +4,7 @@ This optional, single-instance worker provides in-game welcome whispers, generic
 
 ## Configuration
 
-The worker uses the existing `WardogsClient`, so the current `ADMIN_ENABLED`, Discord OAuth/admin settings, `ADMIN_GUILD_ID`, and RCON connection configuration must already be valid. The `admin_actions` table must be deployed through the reviewed combined launch migration before enabling game messages. The migration is prepared but has not been applied; see [Database prerequisite](ADMIN_DASHBOARD.md#database-prerequisite--launch-migration-prepared). This module adds no database tables or migrations.
+The worker uses the existing `WardogsClient` and requires RCON connection settings. Its own flags control activation; it does not require staff OAuth or `ADMIN_ENABLED`. The Discord card additionally requires `ADMIN_GUILD_ID` and the configured bot-owned message. The `admin_actions` table was deployed and checked through the combined production launch migration on September 30; see [Database prerequisite](ADMIN_DASHBOARD.md#database-prerequisite--launch-migration-applied). The worker remains off, pending connection checks and announcement cutover. Other deployments still need the reviewed schema. This module adds no database tables or migrations.
 
 | Variable                                  | Default / purpose                                         |
 | ----------------------------------------- | --------------------------------------------------------- |
@@ -23,7 +23,7 @@ Import `ServerCommunityModule` in `AppModule`; export `AdminStore` from `AdminMo
 
 ## Observations and delivery
 
-One non-overlapping loop reads current status and players through the existing client. The next observation is scheduled five seconds after an occupied pass, fifteen seconds after an empty pass, or thirty seconds after a failed read. Network work adds to these intervals. The client's RCON pause/`Retry-After` handling remains in force. Polling is necessary because no supported join or match-ended push event is documented.
+One non-overlapping loop reads current status and players through the existing client. The dashboard and worker share in-flight reads and observations for up to five seconds; failed reads are not cached, and mutations discard cached observations. The next observation is scheduled five seconds after an occupied pass, fifteen seconds after an empty pass, or thirty seconds after a failed read. Network work adds to these intervals. The client's RCON pause/`Retry-After` handling remains in force. Polling is necessary because no supported join or match-ended push event is documented.
 
 Startup, a failed observation, or an observation gap greater than thirty seconds establishes a new baseline without messages. This deliberately misses activity during downtime instead of replaying welcomes or old rounds. Names and clan tags are not identities; welcome detection uses SteamID64.
 

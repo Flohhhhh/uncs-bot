@@ -69,6 +69,8 @@ npm run db:migrate
 
 The production bot starts only after pending migrations succeed.
 
+The September 30, 2026 launch migration was applied to the identified production Neon database through that existing Railway pre-deploy command, following the owner's explicit launch exception. Read-only schema and migration-journal checks passed, and the existing welcome-settings row and content were preserved. The active production rebuild runs verified Node 22.23.3 and passed all 13 loopback response checks. The new feature flags remain off; OAuth, RCON and the public backend hostname are not configured. See [launch status and database checks](docs/guides/ADMIN_DASHBOARD.md#database-prerequisite--launch-migration-applied). The general migration workflow above remains unchanged for future work.
+
 ## Useful commands
 
 ```bash

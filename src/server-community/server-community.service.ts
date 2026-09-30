@@ -1,7 +1,6 @@
 import { Injectable, Logger, type OnApplicationBootstrap, type OnModuleDestroy } from "@nestjs/common";
 import { Client } from "discord.js";
 import { createHash, randomUUID } from "node:crypto";
-import { AdminSettings } from "../admin/admin.settings";
 import { AdminStore } from "../admin/admin.store";
 import { actionSchema, type ActionResult, type AdminAction, type Staff } from "../admin/admin.types";
 import { RconError, WardogsClient } from "../admin/wardogs.client";
@@ -35,7 +34,6 @@ export class ServerCommunityService implements OnApplicationBootstrap, OnModuleD
   constructor(
     private readonly game: WardogsClient,
     private readonly store: AdminStore,
-    private readonly settings: AdminSettings,
     private readonly env: EnvService,
     private readonly discord: Client,
   ) {}
@@ -182,7 +180,8 @@ export class ServerCommunityService implements OnApplicationBootstrap, OnModuleD
     if (key === this.cardKey && now - this.cardSavedAt < 300_000) return;
     this.cardAttemptAt = now;
     try {
-      const guildId = this.settings.get().guildId;
+      const guildId = this.env.get("ADMIN_GUILD_ID");
+      if (!guildId) return;
       const channel = await this.discord.channels.fetch(options.channelId!);
       if (!channel || !("guildId" in channel) || channel.guildId !== guildId || !("messages" in channel)) return;
       const message = await channel.messages.fetch(options.messageId!);

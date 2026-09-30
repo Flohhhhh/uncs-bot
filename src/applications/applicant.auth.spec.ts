@@ -19,7 +19,7 @@ function response() {
   return { cookie: jest.fn(), clearCookie: jest.fn(), redirect: jest.fn() };
 }
 function fixture() {
-  const settings = { get: () => ({ ...config }) } as unknown as AdminSettings;
+  const settings = { applicant: () => ({ ...config }) } as unknown as AdminSettings;
   const auth = new ApplicantAuth(settings);
   const res = response();
   auth.login({} as Request, res as unknown as Response);
@@ -181,6 +181,7 @@ describe("public applicant Discord authentication", () => {
       {},
       { origin: config.origin },
       { origin: "https://evil.example", "x-csrf-token": session.csrf, "x-forwarded-host": "theuncs.example" },
+      { origin: "https://admin.theuncs.example", "x-csrf-token": session.csrf },
       { origin: config.origin, "x-csrf-token": "incorrect" },
     ]) {
       await expect(
@@ -245,7 +246,7 @@ describe("public applicant Discord authentication", () => {
 
   it("uses an application-only cookie path for the local development exception", () => {
     const auth = new ApplicantAuth({
-      get: () => ({ ...config, origin: "http://127.0.0.1:4317", secure: false }),
+      applicant: () => ({ ...config, origin: "http://127.0.0.1:4317", secure: false }),
     } as unknown as AdminSettings);
     const res = response();
     auth.login({} as Request, res as unknown as Response);

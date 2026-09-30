@@ -1,4 +1,4 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, ServiceUnavailableException } from "@nestjs/common";
 import { z } from "zod";
 import { AdminSettings } from "./admin.settings";
 import {
@@ -50,6 +50,12 @@ const factionCodesByColor: Record<string, string> = {
   "#7bc462": "GRN",
 };
 type CurrentFaction = z.infer<typeof statusSchema>["factionScores"][number];
+type Overview = {
+  status: z.infer<typeof statusSchema>;
+  players: z.infer<typeof playersSchema>["players"];
+  capabilities: Capabilities;
+  observedAt: string;
+};
 const teamPlayersSchema = z.object({
   players: z.array(z.object({ steamId: z.string().nullable().optional(), faction: z.string().nullable().optional() })),
 });
@@ -65,13 +71,21 @@ function assignedTo(faction: string | null | undefined, target: CurrentFaction, 
 @Injectable()
 export class WardogsClient {
   private capabilitiesCache?: { until: number; value: Capabilities };
+  private overviewCache?: { until: number; promise: Promise<Overview> };
   private holdUntil = 0;
   constructor(private readonly settings: AdminSettings) {}
 
   async request(method: string, path: string, body?: unknown, revision?: string): Promise<any> {
     if (Date.now() < this.holdUntil) throw new RconError("The game requested a short pause. Wait before trying again.");
-    const config = this.settings.get();
+    let config: ReturnType<AdminSettings["rcon"]>;
+    try {
+      config = this.settings.rcon();
+    } catch (error) {
+      if (error instanceof ServiceUnavailableException) throw new RconError(error.message);
+      throw error;
+    }
     const mutates = method !== "GET" && !(method === "POST" && path === "/v1/config/validate");
+    if (mutates) this.overviewCache = undefined;
     let response: Response;
     try {
       response = await fetch(`${config.rconUrl.replace(/\/$/, "")}${path}`, {
@@ -93,6 +107,9 @@ export class WardogsClient {
           : "The connection ended before confirmation. Check the server before repeating this action.",
         mutates,
       );
+    } finally {
+      // Discard observations started during an action, including uncertain ones.
+      if (mutates) this.overviewCache = undefined;
     }
     if (!response.ok) {
       // Translate only known codes. Never forward upstream text, which can
@@ -147,7 +164,21 @@ export class WardogsClient {
     return value;
   }
 
-  async overview() {
+  async overview(): Promise<Overview> {
+    if (this.overviewCache && this.overviewCache.until > Date.now()) return this.overviewCache.promise;
+    const entry = { until: Infinity, promise: this.readOverview() };
+    this.overviewCache = entry;
+    try {
+      const value = await entry.promise;
+      entry.until = Date.now() + 5_000;
+      return value;
+    } catch (error) {
+      if (this.overviewCache === entry) this.overviewCache = undefined;
+      throw error;
+    }
+  }
+
+  private async readOverview(): Promise<Overview> {
     const capabilities = await this.capabilities();
     const [status, players] = await Promise.all([
       this.request("GET", "/v1/status").then((data) => statusSchema.parse(data)),

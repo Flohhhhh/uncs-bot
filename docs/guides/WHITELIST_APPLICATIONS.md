@@ -2,7 +2,7 @@
 
 The main website's `/whitelist` page lets a Discord member request access and check their own request. Gramps stores the application and provides an admin-only review queue. This is the existing free whitelist application process; it does not activate donations, queue tiers, seeding rewards, or paid benefits.
 
-The feature is implemented for local testing and **disabled by default**. No production database migration, OAuth connection, or live whitelist application has been performed as part of this implementation.
+The feature is deployed and **disabled by default**. The production database migration was applied and checked on September 30, 2026. Discord OAuth and live application handling remain unconfigured; no whitelist access was changed by this deployment.
 
 ## Information collected
 
@@ -44,12 +44,12 @@ A crash or database completion failure can leave `processing`. This state delibe
 
 ## Deployment prerequisites
 
-1. Keep `WHITELIST_APPLICATIONS_ENABLED=false` until the combined schema migration is verified and applied to the intended deployment. The new application tables are `whitelist_applications` and `whitelist_application_reviews`; they complement the dashboard tables. The launch migration is generated under the owner's explicit September 30 override of the usual human-only preparation rule, but has not been applied; see [Database prerequisite](ADMIN_DASHBOARD.md#database-prerequisite--launch-migration-prepared). Test it on an explicitly selected development database before enabling the feature.
-2. Configure the existing [staff dashboard settings](ADMIN_DASHBOARD.md#connection-setup). Applicant authentication currently shares `AdminSettings`, so it also requires `ADMIN_ENABLED=true`, `ADMIN_ORIGIN`, `ADMIN_DISCORD_CLIENT_ID`, `ADMIN_DISCORD_CLIENT_SECRET`, `ADMIN_SESSION_SECRET`, `ADMIN_GUILD_ID`, `DISCORD_BOT_TOKEN`, and the configured `WARDOGS_RCON_URL`/`WARDOGS_RCON_PASSWORD`. These values remain server-side.
-3. Add the exact Discord OAuth redirect `https://<your-domain>/apply/auth/callback`, alongside the existing staff callback. `ADMIN_ORIGIN` must match the public website origin exactly. Proxy `/apply/*` to Gramps through that origin, preserve cookies/Origin, and prevent caching. The website's `/whitelist` route is the return page.
+1. Keep `WHITELIST_APPLICATIONS_ENABLED=false` until the remaining connection and end-to-end checks are complete. The application tables, `whitelist_applications` and `whitelist_application_reviews`, were applied and checked in the identified production database on September 30 under the owner's explicit launch authorization; see [Database prerequisite](ADMIN_DASHBOARD.md#database-prerequisite--launch-migration-applied). Other deployments still require the reviewed schema before activation.
+2. Configure `APPLICATION_ORIGIN=https://theuncsgaming.com` and the shared Discord identity credentials: `ADMIN_DISCORD_CLIENT_ID`, `ADMIN_DISCORD_CLIENT_SECRET`, `ADMIN_SESSION_SECRET`, `ADMIN_GUILD_ID`, and `DISCORD_BOT_TOKEN`. These values remain server-side. Applicant login and submission do not require `ADMIN_ENABLED`, `ADMIN_ORIGIN`, or RCON credentials. Staff review still requires staff access, and granting game access requires the game connection.
+3. Add the exact Discord OAuth redirect `https://theuncsgaming.com/apply/auth/callback`, alongside staff's `https://admin.theuncsgaming.com/admin/auth/callback`. `APPLICATION_ORIGIN` must match the public website origin exactly. Proxy `/apply/*` through that public origin, preserve host-only cookies/Origin, and prevent caching. The website's `/whitelist` route is the return page. Never share staff cookies with the public site.
 4. Leave `WHITELIST_APPLICATION_EMAIL_REQUIRED=true` for the agreed required-email policy. The implementation supports `false` for a deliberate future policy change; any supplied email still requires contact consent.
 5. Configure client rate limits at the trusted website edge. Gramps also bounds requests by socket peer (30 auth or 180 API requests per minute) and submissions by authenticated account (5 per hour); these limits are per process and do not trust arbitrary forwarding headers.
-6. Enable `WHITELIST_APPLICATIONS_ENABLED=true` in a development deployment and verify sign-in, own-record isolation, admin-only review, duplicate handling, and controlled game readback before production activation. When disabled, application routes return 503 with the existing [Discord whitelisting fallback](https://discord.gg/t5NSzurtRS).
+6. Enable `WHITELIST_APPLICATIONS_ENABLED=true` in a development deployment and verify sign-in, own-record isolation, admin-only review, duplicate handling, and controlled game readback before production activation. When disabled, application routes return 503 and ask visitors to check back on the website. There is no Discord application fallback.
 
 ## Applicant session privacy
 

@@ -1,12 +1,15 @@
 import { AdminSettings } from "./admin.settings";
+import { AdminService } from "./admin.service";
+import type { AdminStore } from "./admin.store";
 import { RconError, serves, WardogsClient } from "./wardogs.client";
 import { actionSchema, type AdminAction } from "./admin.types";
 import { configuredWhitelist } from "./whitelist-document";
 import { randomUUID } from "node:crypto";
+import { ServiceUnavailableException } from "@nestjs/common";
 const id = "76561198123456789",
   existing = "76561198066952872";
 const settings = {
-  get: () => ({ rconUrl: "https://rcon.example.test", password: "never-send-to-browser" }),
+  rcon: () => ({ rconUrl: "https://rcon.example.test", password: "never-send-to-browser" }),
 } as AdminSettings;
 const document = {
   revision: "r1",
@@ -14,8 +17,78 @@ const document = {
   text: `[/Script/WDGame.WDGameSession]\nMaxReservedSlots=0\n+DefaultReservedPlayerIds=${existing}\n[WDServerFeed]\nToken=secret\n`,
 };
 
+describe("shared dashboard and community observations", () => {
+  let now = 1_800_000_000_000;
+  beforeEach(() => jest.spyOn(Date, "now").mockImplementation(() => now));
+  afterEach(() => jest.restoreAllMocks());
+
+  function fixture() {
+    const transport = jest.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const path = new URL(String(input)).pathname;
+      const body =
+        path === "/v1/capabilities"
+          ? { routes: [] }
+          : path === "/v1/status"
+            ? { serverName: "UNCs", map: "Test", players: { current: 0, max: 100 } }
+            : path === "/v1/players"
+              ? { players: [] }
+              : { ok: true };
+      return new Response(JSON.stringify(body));
+    });
+    const client = new WardogsClient(settings);
+    const dashboard = new AdminService(client, {} as AdminStore);
+    const playerReads = () => transport.mock.calls.filter(([url]) => String(url).endsWith("/v1/players")).length;
+    return { transport, client, dashboard, playerReads };
+  }
+
+  it("shares concurrent and recent roster reads, then refreshes at five seconds", async () => {
+    const { client, dashboard, playerReads } = fixture();
+    const [staff, community] = await Promise.all([dashboard.read("overview"), client.overview()]);
+    expect(staff).toEqual(community);
+    expect(playerReads()).toBe(1);
+    now += 4_999;
+    await dashboard.read("overview");
+    expect(playerReads()).toBe(1);
+    now += 1;
+    await client.overview();
+    expect(playerReads()).toBe(2);
+  });
+
+  it.each([false, true])("reads fresh state after a mutation, including a lost response (lost=%s)", async (lost) => {
+    const { transport, client, dashboard, playerReads } = fixture();
+    await dashboard.read("overview");
+    if (lost) transport.mockRejectedValueOnce(new Error("Lost response"));
+    const action = client.request("POST", "/v1/broadcast", { message: "Test" });
+    if (lost) await expect(action).rejects.toMatchObject({ unknownResult: true });
+    else await action;
+    await dashboard.read("overview");
+    expect(playerReads()).toBe(2);
+  });
+
+  it("does not cache a failed observation", async () => {
+    const { transport, client, dashboard, playerReads } = fixture();
+    transport.mockRejectedValueOnce(new Error("Unavailable"));
+    await expect(client.overview()).rejects.toThrow("could not be reached");
+    await dashboard.read("overview");
+    expect(playerReads()).toBe(1);
+  });
+});
+
 describe("Wardogs action outcomes", () => {
   afterEach(() => jest.restoreAllMocks());
+  it("reports an unconfigured game as unsent instead of an uncertain mutation", async () => {
+    const transport = jest.spyOn(globalThis, "fetch");
+    const client = new WardogsClient({
+      rcon: () => {
+        throw new ServiceUnavailableException("The game server has not been connected yet.");
+      },
+    } as unknown as AdminSettings);
+    await expect(client.request("POST", "/v1/bans", { steamId: id })).rejects.toMatchObject({
+      unknownResult: false,
+      message: "The game server has not been connected yet.",
+    });
+    expect(transport).not.toHaveBeenCalled();
+  });
   it.each([true, false])("reads the actual whitelist after a config change (live = %s)", async (live) => {
     const client = new WardogsClient(settings);
     const request = jest.spyOn(client, "request").mockImplementation(async (method, path) => {

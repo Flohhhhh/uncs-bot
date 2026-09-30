@@ -31,7 +31,7 @@ export class ApplicationsExceptionFilter implements ExceptionFilter {
       message:
         error instanceof HttpException
           ? error.message
-          : "Applications are temporarily unavailable. Contact staff at discord.gg/t5NSzurtRS.",
+          : "Applications are temporarily unavailable. Please try again on this website shortly.",
     });
   }
 }

@@ -33,7 +33,8 @@ export class AdminService {
     const cached = this.reads.get(resource);
     if (cached && cached.until > Date.now()) return cached.promise;
     const entry = { until: Date.now() + 10_000, promise: readers[resource]() };
-    this.reads.set(resource, entry);
+    // The roster is shared with the community worker in WardogsClient.
+    if (resource !== "overview") this.reads.set(resource, entry);
     try {
       return await entry.promise;
     } catch (error) {

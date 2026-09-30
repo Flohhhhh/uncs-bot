@@ -124,7 +124,8 @@ describe("application HTTP routing and privacy", () => {
   it("returns the Discord fallback while applications are disabled", async () => {
     enabled = false;
     const response = await request(app.getHttpServer()).get("/apply/api/me").expect(503);
-    expect(response.body.message).toContain("discord.gg/t5NSzurtRS");
+    expect(response.body.message).toContain("this website");
+    expect(response.body.message).not.toContain("discord.gg");
     await request(app.getHttpServer()).get("/admin/api/applications").expect(503);
     expect(store.own).not.toHaveBeenCalled();
     expect(store.list).not.toHaveBeenCalled();

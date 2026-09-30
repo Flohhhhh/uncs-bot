@@ -98,6 +98,7 @@ export const Env = z.object({
     .enum(["true", "false"])
     .default("false")
     .transform((value) => value === "true"),
+  APPLICATION_ORIGIN: z.url().optional(),
   WHITELIST_APPLICATION_EMAIL_REQUIRED: z
     .enum(["true", "false"])
     .default("true")

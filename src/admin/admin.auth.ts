@@ -46,7 +46,7 @@ export class AdminAuth {
 
   private cookieName(kind: "oauth" | "session") {
     // __Host- rejects Domain cookies injected by a sibling subdomain. Its
-    // required root path is intentional; the public site shares this origin.
+    // required root path is intentional; staff sessions stay on ADMIN_ORIGIN.
     return `${this.settings.get().secure ? "__Host-" : ""}uncs_admin_${kind}`;
   }
 

@@ -1,6 +1,5 @@
 import { Logger } from "@nestjs/common";
 import type { Client } from "discord.js";
-import type { AdminSettings } from "../admin/admin.settings";
 import type { AdminStore } from "../admin/admin.store";
 import { RconError, type WardogsClient } from "../admin/wardogs.client";
 import type { EnvService } from "../env/env.service";
@@ -20,6 +19,7 @@ function snapshot(ids = [firstId], map = "Kavkazi"): CommunitySnapshot {
 }
 function fixture(overrides: Record<string, unknown> = {}) {
   const values: Record<string, unknown> = {
+    ADMIN_GUILD_ID: "guild",
     SERVER_COMMUNITY_ENABLED: true,
     SERVER_COMMUNITY_WELCOME_ENABLED: true,
     SERVER_COMMUNITY_ROUND_ENABLED: true,
@@ -48,7 +48,6 @@ function fixture(overrides: Record<string, unknown> = {}) {
   const service = new ServerCommunityService(
     game as unknown as WardogsClient,
     store as unknown as AdminStore,
-    { get: () => ({ guildId: "guild" }) } as AdminSettings,
     { get: (key: string) => values[key] } as EnvService,
     discord as unknown as Client,
   );

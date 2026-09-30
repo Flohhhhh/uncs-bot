@@ -5,6 +5,8 @@ function settings(overrides: Record<string, unknown> = {}) {
   const values: Record<string, unknown> = {
     ADMIN_ENABLED: true,
     ADMIN_ORIGIN: "https://theuncs.example",
+    APPLICATION_ORIGIN: "https://public.theuncs.example",
+    WHITELIST_APPLICATIONS_ENABLED: true,
     ADMIN_DISCORD_CLIENT_ID: "123456789012345678",
     ADMIN_DISCORD_CLIENT_SECRET: "client-secret",
     ADMIN_SESSION_SECRET: "a".repeat(40),
@@ -23,9 +25,32 @@ function settings(overrides: Record<string, unknown> = {}) {
 }
 
 describe("dashboard settings boundary", () => {
-  it("keeps access disabled until all required server settings exist", () => {
+  it("keeps staff access disabled without its flag or Discord credentials", () => {
     expect(() => settings({ ADMIN_ENABLED: false }).get()).toThrow("not been connected");
-    expect(() => settings({ WARDOGS_RCON_PASSWORD: undefined }).get()).toThrow("not been connected");
+    expect(() => settings({ ADMIN_DISCORD_CLIENT_SECRET: undefined }).get()).toThrow("not been connected");
+  });
+  it("allows staff records and public applications without a game connection", () => {
+    const config = settings({ WARDOGS_RCON_URL: undefined, WARDOGS_RCON_PASSWORD: undefined });
+    expect(config.get().origin).toBe("https://theuncs.example");
+    expect(config.applicant().origin).toBe("https://public.theuncs.example");
+    expect(() => config.rcon()).toThrow("not been connected");
+  });
+  it("keeps public sign-in independent of staff access and requires its own origin", () => {
+    expect(settings({ ADMIN_ENABLED: false, ADMIN_ORIGIN: undefined }).applicant().origin).toBe(
+      "https://public.theuncs.example",
+    );
+    expect(() => settings({ WHITELIST_APPLICATIONS_ENABLED: false }).applicant()).toThrow("not open yet");
+    expect(() => settings({ APPLICATION_ORIGIN: undefined }).applicant()).toThrow("not been connected");
+    expect(() => settings({ APPLICATION_ORIGIN: "https://public.theuncs.example/path" }).applicant()).toThrow(
+      "need attention",
+    );
+    expect(() => settings({ APPLICATION_ORIGIN: "http://public.theuncs.example" }).applicant()).toThrow(
+      "need attention",
+    );
+  });
+  it("does not require website login settings for the separately enabled community worker's game client", () => {
+    const config = settings({ ADMIN_ENABLED: false, ADMIN_ORIGIN: undefined, ADMIN_DISCORD_CLIENT_SECRET: undefined });
+    expect(config.rcon()).toEqual({ rconUrl: "https://rcon.example", password: "rcon-secret" });
   });
   it.each([
     "http://theuncs.example",
@@ -51,7 +76,7 @@ describe("dashboard settings boundary", () => {
     "https://rcon.example?target=evil",
     "https://rcon.example#secret",
   ])("rejects credential-bearing or non-HTTP RCON endpoints: %s", (url) =>
-    expect(() => settings({ WARDOGS_RCON_URL: url }).get()).toThrow("need attention"),
+    expect(() => settings({ WARDOGS_RCON_URL: url }).rcon()).toThrow("need attention"),
   );
   it("uses only explicit IDs without implicitly granting Discord administrators access", () => {
     expect(settings().get()).toMatchObject({ ownerIds: [], adminRoleIds: [], moderatorRoleIds: [], viewerRoleIds: [] });
