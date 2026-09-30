@@ -97,9 +97,9 @@ describe("admin HTTP boundaries", () => {
     expect(game.overview).not.toHaveBeenCalled();
   });
   it("serves compiled assets with matching CSP while rejecting traversal and missing assets", async () => {
-    for (const file of ["barlow-condensed-bold.ttf", "barlow-condensed-extrabold.ttf", "dm-sans.ttf"]) {
+    for (const file of ["barlow-condensed-bold.woff2", "barlow-condensed-extrabold.woff2", "dm-sans.woff2"]) {
       const font = await request(app.getHttpServer()).get(`/admin/assets/${file}`).expect(200);
-      expect(font.headers["content-type"]).toBe("font/ttf");
+      expect(font.headers["content-type"]).toBe("font/woff2");
       expect(font.headers["content-security-policy"]).toContain("font-src 'self'");
       expect(font.headers["cdn-cache-control"]).toBe("no-store");
       expect(font.headers["vercel-cdn-cache-control"]).toBe("no-store");

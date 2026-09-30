@@ -4,6 +4,17 @@ import { DATABASE, type Database } from "../database/database.types";
 import { adminActions, adminSessions } from "../database/schema";
 import type { ActionResult, AdminAction, Staff } from "./admin.types";
 
+const auditFields = {
+  id: adminActions.id,
+  actorName: adminActions.actorName,
+  action: adminActions.action,
+  target: adminActions.target,
+  details: adminActions.details,
+  state: adminActions.state,
+  message: adminActions.message,
+  createdAt: adminActions.createdAt,
+};
+
 @Injectable()
 export class AdminStore {
   constructor(@Inject(DATABASE) private readonly db: Database) {}
@@ -53,19 +64,11 @@ export class AdminStore {
   }
 
   async history() {
-    return this.db
-      .select({
-        id: adminActions.id,
-        actorName: adminActions.actorName,
-        action: adminActions.action,
-        target: adminActions.target,
-        details: adminActions.details,
-        state: adminActions.state,
-        message: adminActions.message,
-        createdAt: adminActions.createdAt,
-      })
-      .from(adminActions)
-      .orderBy(desc(adminActions.createdAt))
-      .limit(100);
+    return this.db.select(auditFields).from(adminActions).orderBy(desc(adminActions.createdAt)).limit(100);
+  }
+
+  async receipt(id: string) {
+    const [record] = await this.db.select(auditFields).from(adminActions).where(eq(adminActions.id, id)).limit(1);
+    return record ?? null;
   }
 }

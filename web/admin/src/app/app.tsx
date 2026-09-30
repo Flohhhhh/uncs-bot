@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
-import { api, configureSession } from "../api/client";
+import { api, configureSession, isReadPending } from "../api/client";
+import { validateOverview, validateStaff } from "../api/validation";
 import type { ActionName, Overview, Staff } from "../api/types";
 import { AdminContext } from "./context";
 import { Badge, Empty } from "../components/ui";
@@ -59,6 +60,9 @@ function Brand({ className = "" }: { className?: string }) {
   );
 }
 function Login({ message }: { message: string }) {
+  useEffect(() => {
+    document.title = "Staff sign-in · The UNCs";
+  }, []);
   return (
     <div className="login-screen">
       <Brand className="login-brand" />
@@ -110,15 +114,9 @@ export function App() {
     const controller = new AbortController();
     configureSession("", expire);
     void api<Staff>("me", { signal: controller.signal })
-      .then((staff) => {
+      .then((value) => {
         if (controller.signal.aborted) return;
-        if (
-          !staff ||
-          !["admin", "moderator", "viewer"].includes(staff.role) ||
-          typeof staff.csrf !== "string" ||
-          typeof staff.name !== "string"
-        )
-          throw new Error("The staff session could not be verified.");
+        const staff = validateStaff(value);
         configureSession(staff.csrf, expire);
         setMe(staff);
         setLoading(false);
@@ -149,7 +147,7 @@ function Dashboard({ me, signOut }: { me: Staff; signOut: () => void }) {
   const location = useLocation();
   const key = location.pathname.split("/").filter(Boolean)[0] || "overview";
   const page = Object.hasOwn(pages, key) ? (key as keyof typeof pages) : "overview";
-  const gamePage = !["applications", "supporters", "combat"].includes(page);
+  const gamePage = ["overview", "players", "whitelist", "bans", "announcements", "match"].includes(key);
   const [overview, setOverview] = useState<Overview | null>(null);
   const [stale, setStale] = useState(true);
   const [error, setError] = useState("");
@@ -159,33 +157,51 @@ function Dashboard({ me, signOut }: { me: Staff; signOut: () => void }) {
   const [notice, setNotice] = useState({ message: "", kind: "" });
   const [action, setAction] = useState<{ action: ActionName; steamId?: string; key: string } | null>(null);
   const pause = useRef(false);
+  const freshness = useRef(0);
+  const heading = useRef<HTMLHeadingElement>(null);
   pause.current = busy || dialogOpen;
   const refresh = useCallback(() => setRefreshVersion((value) => value + 1), []);
-  const invalidateOverview = useCallback(() => setStale(true), []);
+  const invalidateOverview = useCallback(() => {
+    freshness.current++;
+    setStale(true);
+  }, []);
   const notify = useCallback((message: string, kind = "") => setNotice({ message, kind }), []);
   const openAction = useCallback(
     (action: ActionName, steamId?: string) => setAction({ action, steamId, key: crypto.randomUUID() }),
     [],
   );
   useEffect(() => {
+    document.title = `${pages[page][1]} · The UNCs Admin`;
+    heading.current?.focus();
+  }, [location.pathname, page]);
+  useEffect(() => {
     const tick = () => {
-      if (!document.hidden && !pause.current) refresh();
+      if (!document.hidden && !pause.current && !isReadPending()) refresh();
+    };
+    const visibilityChanged = () => {
+      // A sleeping tab must not advertise its old player list as current.
+      invalidateOverview();
+      tick();
     };
     const timer = window.setInterval(tick, 20_000);
-    document.addEventListener("visibilitychange", tick);
+    document.addEventListener("visibilitychange", visibilityChanged);
     return () => {
       window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", tick);
+      document.removeEventListener("visibilitychange", visibilityChanged);
     };
-  }, [refresh]);
+  }, [refresh, invalidateOverview]);
   useEffect(() => {
-    if (!gamePage) return;
+    if (!gamePage) {
+      setStale(true);
+      return;
+    }
     const controller = new AbortController();
+    const requestedFreshness = freshness.current;
     void api<Overview>("overview", { signal: controller.signal })
       .then((value) => {
         if (!controller.signal.aborted) {
-          setOverview(value);
-          setStale(false);
+          setOverview(validateOverview(value));
+          setStale(document.hidden || requestedFreshness !== freshness.current);
           setError("");
         }
       })
@@ -197,6 +213,12 @@ function Dashboard({ me, signOut }: { me: Staff; signOut: () => void }) {
       });
     return () => controller.abort();
   }, [gamePage, refreshVersion]);
+  useEffect(() => {
+    if (!overview) return;
+    // Expire an unattended confirmation without adding another polling loop.
+    const timer = window.setTimeout(() => setStale(true), 60_000);
+    return () => window.clearTimeout(timer);
+  }, [overview]);
   useEffect(() => {
     const guard = (event: BeforeUnloadEvent) => {
       if (busy) {
@@ -286,7 +308,7 @@ function Dashboard({ me, signOut }: { me: Staff; signOut: () => void }) {
             </div>
           </div>
         </aside>
-        <main id="main-content">
+        <main id="main-content" tabIndex={-1}>
           {me.demo && (
             <div className="demo-banner">
               LOCAL PREVIEW{" "}
@@ -325,10 +347,17 @@ function Dashboard({ me, signOut }: { me: Staff; signOut: () => void }) {
             <div className="page-heading">
               <div>
                 <p className="eyebrow">✳ WARDOGS / COMMUNITY SERVER</p>
-                <h1>{pages[page][2]}</h1>
+                <h1 ref={heading} tabIndex={-1}>
+                  {pages[page][2]}
+                </h1>
                 <p>{pages[page][3]}</p>
               </div>
-              <button className="button secondary" disabled={busy || dialogOpen} onClick={refresh}>
+              <button
+                className="button secondary"
+                aria-label="Refresh dashboard"
+                disabled={busy || dialogOpen}
+                onClick={refresh}
+              >
                 ↻ <span>Refresh</span>
               </button>
             </div>
@@ -351,6 +380,11 @@ function Dashboard({ me, signOut }: { me: Staff; signOut: () => void }) {
             {gamePage && error && (
               <div className="notice error" role="alert">
                 {error}
+              </div>
+            )}
+            {gamePage && overview && stale && !error && (
+              <div className="notice" role="status">
+                Server details need a fresh check. Close any open dialog and refresh before making changes.
               </div>
             )}
             {notice.message && (

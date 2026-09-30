@@ -241,6 +241,20 @@ const store = {
   async history() {
     return [...records.values()].reverse().slice(0, 100);
   },
+  async receipt(id: string) {
+    const record = records.get(id);
+    if (!record) return null;
+    return {
+      id: record.id,
+      actorName: record.actorName,
+      action: record.action,
+      target: record.target,
+      details: record.details,
+      state: record.state,
+      message: record.message,
+      createdAt: record.createdAt,
+    };
+  },
 };
 const auth = {
   async authenticate(req: Request) {

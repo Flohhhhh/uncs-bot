@@ -7,6 +7,7 @@ import {
   Get,
   HttpException,
   Injectable,
+  Param,
   Post,
   Req,
   Res,
@@ -88,5 +89,9 @@ export class AdminApiController {
   read(@Req() req: Request) {
     const resource = req.path.replace(/\/$/, "").split("/").at(-1) ?? "";
     return this.service.read(resource);
+  }
+  @Get("audit/:id")
+  receipt(@Param("id") id: string) {
+    return this.service.receipt(id);
   }
 }

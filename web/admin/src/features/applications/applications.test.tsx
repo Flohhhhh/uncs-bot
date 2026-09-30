@@ -3,7 +3,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { api } from "../../api/client";
 import { AdminContext, type AdminContextValue } from "../../app/context";
 import { ApplicationsPage } from "./index";
-import type { ApplicationReviewResponse, WhitelistApplication } from "./types";
+import type { ApplicationReviewResponse, ApplicationsResponse, WhitelistApplication } from "./types";
 
 vi.mock("../../api/client", () => ({ api: vi.fn() }));
 const request = vi.mocked(api);
@@ -66,6 +66,47 @@ function postCalls() {
 beforeEach(() => {
   vi.clearAllMocks();
   request.mockReset();
+});
+
+it("waits for a refreshed list before freezing an application for review", async () => {
+  const refreshed = deferred<ApplicationsResponse>();
+  request.mockResolvedValueOnce({ applications: [record] }).mockReturnValueOnce(refreshed.promise);
+  const view = render(page());
+  await screen.findByRole("button", { name: "View request" });
+  view.rerender(page({ ...context, refreshVersion: 1 }));
+  const open = screen.getByRole("button", { name: "View request" });
+  expect(open).toBeDisabled();
+  fireEvent.click(open);
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  await act(async () => refreshed.resolve({ applications: [{ ...record, status: "processing" }] }));
+  fireEvent.click(screen.getByRole("button", { name: "View request" }));
+  expect(within(screen.getByRole("dialog")).getByText("Processing")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Review approval" })).not.toBeInTheDocument();
+  expect(postCalls()).toHaveLength(0);
+});
+
+it("keeps the latest read-only review receipt distinct from its original game action", async () => {
+  const actionId = "01234567-89ab-4cde-8fab-0123456789ac";
+  const reviewId = "01234567-89ab-4cde-8fab-0123456789ad";
+  request.mockResolvedValue({
+    applications: [
+      {
+        ...record,
+        status: "needs_review",
+        reviewKind: "recheck",
+        actionId,
+        reviewId,
+        lastActionState: "pending",
+        lastActionMessage: "No game change was sent.",
+      },
+    ],
+  });
+  render(page());
+  fireEvent.click(await screen.findByRole("button", { name: "View request" }));
+  const dialog = within(screen.getByRole("dialog"));
+  expect(dialog.getByText(`Review ID: ${reviewId}`)).toBeInTheDocument();
+  expect(dialog.getByText(`Original whitelist action ID: ${actionId}`)).toBeInTheDocument();
+  expect(dialog.getByText("Last review: pending")).toBeInTheDocument();
 });
 
 it("does not fetch private records for a non-admin; contact details appear only inside the request", async () => {

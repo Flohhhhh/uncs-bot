@@ -110,4 +110,31 @@ describe("server action review", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("single-line message");
     expect(request).not.toHaveBeenCalled();
   });
+  it("blocks map submissions while retained catalog options are refreshing or failed", async () => {
+    request.mockResolvedValueOnce({ maps: [{ id: "Harbor" }], experiences: [], lightings: [] });
+    const admin = context();
+    const tree = (version: number) => (
+      <AdminContext.Provider value={{ ...admin, refreshVersion: version }}>
+        <ActionsDialog action="map" onClose={vi.fn()} />
+      </AdminContext.Provider>
+    );
+    const { rerender } = render(tree(0));
+    await screen.findByRole("option", { name: "Harbor" });
+    fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "Community map change" } });
+    fireEvent.change(screen.getByPlaceholderText("CHANGE MAP"), { target: { value: "CHANGE MAP" } });
+    expect(screen.getByRole("button", { name: "Confirm action" })).toBeEnabled();
+    let reject!: (error: Error) => void;
+    request.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, fail) => {
+          reject = fail;
+        }),
+    );
+    rerender(tree(1));
+    expect(screen.getByRole("button", { name: "Confirm action" })).toBeDisabled();
+    reject(new Error("Server options unavailable"));
+    await screen.findByText("The server options could not be loaded. Close this review and try again.");
+    fireEvent.submit(screen.getByRole("button", { name: "Confirm action" }).closest("form")!);
+    expect(request.mock.calls.every(([path]) => path === "catalog")).toBe(true);
+  });
 });

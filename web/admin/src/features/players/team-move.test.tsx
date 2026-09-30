@@ -144,4 +144,60 @@ describe("reviewed team moves", () => {
     });
     expect(request).toHaveBeenCalledTimes(1);
   });
+  it.each(["left", "changed team"])("stops when the latest roster shows a queued player %s", async (change) => {
+    vi.useFakeTimers();
+    request.mockResolvedValue({ state: "applied", message: "Confirmed" });
+    const admin = context();
+    const finished = vi.fn<(result: TeamMoveResult) => void>();
+    const tree = (changed: boolean) => (
+      <AdminContext.Provider
+        value={{
+          ...admin,
+          overview: {
+            ...admin.overview!,
+            players: changed
+              ? change === "left"
+                ? [alice, cara]
+                : [alice, { ...bob, faction: "BLU" }, cara]
+              : admin.overview!.players,
+          },
+        }}
+      >
+        <TeamMoveDialog players={[alice, bob]} initialFaction="Lonestar" onClose={vi.fn()} onComplete={finished} />
+      </AdminContext.Provider>
+    );
+    const { rerender } = render(tree(false));
+    submit();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    rerender(tree(true));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2200);
+    });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(finished.mock.calls[0][0].stopped).toBe(true);
+    expect(finished.mock.calls[0][0].items[1].state).toBe("queued");
+  });
+  it("does not add a request-spacing delay for players already on the destination", async () => {
+    vi.useFakeTimers();
+    request.mockResolvedValue({ state: "accepted", message: "Accepted, not verified" });
+    const finished = vi.fn<(result: TeamMoveResult) => void>();
+    render(
+      <AdminContext.Provider value={context()}>
+        <TeamMoveDialog
+          players={[alice, cara, bob]}
+          initialFaction="Lonestar"
+          onClose={vi.fn()}
+          onComplete={finished}
+        />
+      </AdminContext.Provider>,
+    );
+    submit();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2200);
+    });
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(finished.mock.calls[0][0].items.map((item) => item.state)).toEqual(["accepted", "skipped", "accepted"]);
+  });
 });

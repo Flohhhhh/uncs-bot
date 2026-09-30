@@ -119,16 +119,6 @@ export function TeamMoveDialog({
       mounted.current = false;
     };
   }, []);
-  useEffect(() => {
-    if (!running) return;
-    const warn = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      event.returnValue = "";
-    };
-    window.addEventListener("beforeunload", warn);
-    return () => window.removeEventListener("beforeunload", warn);
-  }, [running]);
-
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (submitted.current || !ready || !destination) return;
@@ -161,12 +151,16 @@ export function TeamMoveDialog({
     };
     try {
       for (const item of batch) {
-        if (didSend) await new Promise((resolve) => setTimeout(resolve, 2200));
+        if (didSend && item.from !== faction) await new Promise((resolve) => setTimeout(resolve, 2200));
         const latest = current.current;
+        const latestTeams = liveFactions(latest.overview);
+        const latestPlayer = latest.overview?.players.find((player) => player.steamId === item.steamId);
         if (
           !mounted.current ||
           !allowed("team", latest.me, latest.overview, latest.stale, false) ||
-          !liveFactions(latest.overview).some((team) => team.name === faction)
+          !latestTeams.some((team) => team.name === faction) ||
+          !latestPlayer ||
+          (playerFaction(latestPlayer, latestTeams)?.name ?? "") !== item.from
         ) {
           didStop = true;
           break;

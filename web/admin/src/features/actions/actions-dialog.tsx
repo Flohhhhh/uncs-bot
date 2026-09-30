@@ -41,7 +41,7 @@ export function ActionsDialog({
 
 function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?: string; onClose: () => void }) {
   const admin = useAdmin();
-  const id = useRef(crypto.randomUUID());
+  const [id] = useState(() => crypto.randomUUID());
   const submitted = useRef(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
@@ -51,6 +51,7 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
   const catalog = useResource<Catalog>(
     needsCatalog && allowed(action, admin.me, admin.overview, admin.stale, false) ? "catalog" : null,
   );
+  const catalogReady = !needsCatalog || Boolean(catalog.data && !catalog.loading && !catalog.error);
   const player = admin.overview?.players.find((entry) => entry.steamId === steamId);
   const [title, description] = actionDefinitions[action];
   const requiresPlayer = playerActions.includes(action);
@@ -59,7 +60,7 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (submitted.current || !permitted || (needsCatalog && !catalog.data)) return;
+    if (submitted.current || !permitted || !catalogReady) return;
     const values = new FormData(event.currentTarget);
     const reason = String(values.get("reason") ?? "").trim();
     const target = steamId || String(values.get("steamId") ?? "");
@@ -76,7 +77,7 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
       setError("The confirmation must match exactly. Nothing was sent.");
       return;
     }
-    const input: Record<string, string | string[]> = { id: id.current, action, reason };
+    const input: Record<string, string | string[]> = { id, action, reason };
     if (requiresPlayer) input.steamId = target;
     if (requiresConfirmation) input.confirm = confirm;
     if (action === "message" || action === "broadcast") {
@@ -118,14 +119,14 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
       const response = await api<ActionResult>("actions", { method: "POST", body: JSON.stringify(input) });
       const outcome: ActionResult = {
         ...response,
-        id: id.current,
+        id,
         state: ["applied", "accepted", "pending", "failed", "unknown"].includes(response.state)
           ? response.state
           : "unknown",
       };
       setResult(outcome);
       admin.notify(
-        `${outcome.message} Action ID: ${id.current}`,
+        `${outcome.message} Action ID: ${id}`,
         outcome.state === "failed"
           ? "error"
           : ["unknown", "pending", "accepted"].includes(outcome.state)
@@ -134,7 +135,7 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
       );
     } catch (failure) {
       setResult({
-        id: id.current,
+        id,
         state: rejectionState(failure),
         message: `${errorMessage(failure)} Check Action history before repeating this action; the connection can fail after the game acts.`,
       });
@@ -166,7 +167,7 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
                       : "Unconfirmed"}
             </strong>
             <p>{result.message}</p>
-            <small>Action ID: {id.current}</small>
+            <small>Action ID: {id}</small>
             <p>No repeat request will be sent from this review. Check Action history before starting another action.</p>
           </div>
         ) : (
@@ -197,7 +198,7 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
                   <textarea name="message" maxLength={200} required rows={4} placeholder="Write your message…" />
                 </label>
               )}
-              {needsCatalog && !catalog.data && (
+              {needsCatalog && !catalogReady && (
                 <p role="status">
                   {catalog.error
                     ? "The server options could not be loaded. Close this review and try again."
@@ -269,7 +270,7 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
             <button
               type="submit"
               className="button primary"
-              disabled={!permitted || sending || submitted.current || (needsCatalog && !catalog.data)}
+              disabled={!permitted || sending || submitted.current || !catalogReady}
             >
               {sending ? "Sending…" : "Confirm action"}
             </button>

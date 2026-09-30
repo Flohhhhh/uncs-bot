@@ -122,13 +122,14 @@ function ApplicationDetails({ record }: { record: WhitelistApplication }) {
       </dl>
       {record.lastActionState && (
         <div className={`notice ${record.status === "approved" ? "" : "warning"}`}>
-          <strong>Last action: {record.lastActionState}</strong>
+          <strong>Last review: {record.lastActionState}</strong>
           <br />
           {record.lastActionMessage || "No additional details were recorded."}
-          {record.actionId && (
-            <small className="application-action-id">
-              {record.status === "declined" ? "Decision" : "Whitelist action"} {record.actionId}
-            </small>
+          {(record.reviewId || record.actionId) && (
+            <small className="application-action-id">Review ID: {record.reviewId || record.actionId}</small>
+          )}
+          {record.actionId && record.reviewKind !== "decline" && record.status !== "declined" && (
+            <small className="application-action-id">Original whitelist action ID: {record.actionId}</small>
           )}
         </div>
       )}
@@ -405,7 +406,11 @@ function AdminApplications() {
                       <ApplicationBadge record={record} />
                     </td>
                     <td>
-                      <button className="button secondary small" disabled={busy} onClick={() => setSelected(record)}>
+                      <button
+                        className="button secondary small"
+                        disabled={busy || resource.loading}
+                        onClick={() => setSelected(record)}
+                      >
                         View request
                       </button>
                     </td>

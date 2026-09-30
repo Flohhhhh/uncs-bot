@@ -527,7 +527,11 @@ function AdminSupporters() {
                       <small>{record.founder ? "Waiting for game update" : "Requires payment review"}</small>
                     </td>
                     <td>
-                      <button className="button secondary small" disabled={busy} onClick={() => setSelected(record)}>
+                      <button
+                        className="button secondary small"
+                        disabled={busy || resource.loading}
+                        onClick={() => setSelected(record)}
+                      >
                         Review supporter
                       </button>
                     </td>

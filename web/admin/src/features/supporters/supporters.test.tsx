@@ -87,6 +87,34 @@ beforeEach(() => {
   request.mockReset();
 });
 
+it("waits for a refreshed supporter revision before opening a new review", async () => {
+  const refreshed = deferred<SupportersResponse>();
+  request
+    .mockResolvedValueOnce(data())
+    .mockReturnValueOnce(refreshed.promise)
+    .mockImplementation(async (_path, options) =>
+      options?.method === "POST"
+        ? { ok: true, replayed: false, supporter: { ...supporter, version: 10, reviewState: "verified" } }
+        : data({ ...supporter, version: 10 }),
+    );
+  const view = render(page());
+  await screen.findByRole("button", { name: "Review supporter" });
+  view.rerender(page({ ...context, refreshVersion: 1 }));
+  const open = screen.getByRole("button", { name: "Review supporter" });
+  expect(open).toBeDisabled();
+  fireEvent.click(open);
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  await act(async () => refreshed.resolve(data({ ...supporter, version: 9 })));
+  fireEvent.click(screen.getByRole("button", { name: "Review supporter" }));
+  fireEvent.click(screen.getByRole("button", { name: "Mark observation reviewed" }));
+  fireEvent.change(screen.getByLabelText("Reason"), {
+    target: { value: "Checked the latest membership observation." },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save reviewed record" }));
+  await screen.findByRole("heading", { name: "Supporter record saved" });
+  expect(JSON.parse(String(postCalls()[0][1]?.body))).toMatchObject({ version: 9 });
+});
+
 it("requires admin access and renders provider data as text, with no access-grant claims", async () => {
   const view = render(page({ ...context, me: { ...context.me, role: "viewer" } }));
   expect(request).not.toHaveBeenCalled();

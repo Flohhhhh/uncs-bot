@@ -22,7 +22,7 @@ function mount(path = "/overview", role = "admin") {
             ? { id: "staff", name: "Test staff", role, csrf: "csrf" }
             : url.endsWith("/overview")
               ? overview
-              : {},
+              : [],
         ),
       ),
   );
@@ -87,8 +87,150 @@ describe("React staff shell", () => {
     const fetcher = mount();
     await screen.findByText("Simulated UNCs");
     fetcher.mockImplementation(async () => new Response("Denied", { status: 403 }));
-    fireEvent.click(screen.getByRole("button", { name: "↻ Refresh" }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh dashboard" }));
     await waitFor(() => expect(screen.getByRole("link", { name: /Continue with Discord/ })).toBeInTheDocument());
     expect(screen.queryByText("Simulated UNCs")).not.toBeInTheDocument();
+  });
+  it("loads and refreshes action history without querying the live game", async () => {
+    vi.useFakeTimers();
+    const fetcher = mount("/audit");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText("No matching staff actions")).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+    });
+    expect(fetcher.mock.calls.filter(([url]) => url.endsWith("/audit"))).toHaveLength(3);
+    expect(fetcher.mock.calls.some(([url]) => url.endsWith("/overview"))).toBe(false);
+    expect(document.title).toBe("Action history · The UNCs Admin");
+    expect(screen.getByRole("heading", { level: 1 })).toHaveFocus();
+  });
+  it("requires a fresh server check after returning from a records page", async () => {
+    const fetcher = mount();
+    await screen.findByText("Simulated UNCs");
+    fireEvent.click(screen.getByRole("link", { name: /Action history/ }));
+    await screen.findByText("No matching staff actions");
+    let finish!: (value: Response) => void;
+    fetcher.mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    fireEvent.click(screen.getByRole("link", { name: /Overview/ }));
+    expect(screen.getByRole("button", { name: /Send an announcement/ })).toBeDisabled();
+    expect(screen.getByText(/Server details need a fresh check/)).toBeInTheDocument();
+    await act(async () => {
+      finish(new Response(JSON.stringify(overview)));
+    });
+  });
+  it("expires an old confirmation snapshot while refresh is paused", async () => {
+    vi.useFakeTimers();
+    const fetcher = mount();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Send an announcement/ }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(fetcher.mock.calls.filter(([url]) => url.endsWith("/overview"))).toHaveLength(1);
+    expect(screen.getByText(/Server details need a fresh check/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close dialog" }));
+    expect(screen.getByRole("button", { name: /Send an announcement/ })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh dashboard" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByRole("button", { name: /Send an announcement/ })).toBeEnabled();
+  });
+  it("invalidates the old snapshot while a tab is hidden", async () => {
+    mount();
+    await screen.findByText("Simulated UNCs");
+    vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+    fireEvent(document, new Event("visibilitychange"));
+    expect(screen.getByRole("button", { name: /Send an announcement/ })).toBeDisabled();
+  });
+  it("does not let a late read restore controls after the tab was hidden", async () => {
+    const fetcher = mount();
+    await screen.findByText("Simulated UNCs");
+    let finish!: (value: Response) => void;
+    fetcher.mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Refresh dashboard" }));
+    vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+    fireEvent(document, new Event("visibilitychange"));
+    await act(async () => {
+      finish(new Response(JSON.stringify(overview)));
+    });
+    expect(screen.getByRole("button", { name: /Send an announcement/ })).toBeDisabled();
+  });
+  it("keeps a slow read alive instead of restarting it on every automatic refresh", async () => {
+    vi.useFakeTimers();
+    const fetcher = mount();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    let finish!: (value: Response) => void;
+    fetcher.mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Refresh dashboard" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(40_000);
+    });
+    expect(fetcher.mock.calls.filter(([url]) => url.endsWith("/overview"))).toHaveLength(2);
+    await act(async () => {
+      finish(new Response(JSON.stringify(overview)));
+    });
+  });
+  it("keeps controls locked and reports malformed server data without crashing the page", async () => {
+    const fetcher = mount();
+    await screen.findByText("Simulated UNCs");
+    fetcher.mockImplementation(async () => new Response(JSON.stringify({ unexpected: true })));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh dashboard" }));
+    await screen.findByRole("alert");
+    expect(screen.getByRole("button", { name: /Send an announcement/ })).toBeDisabled();
+    expect(screen.getByRole("navigation")).toBeInTheDocument();
+  });
+  it("finds an uncertain action by its receipt ID or staff reason", async () => {
+    const fetcher = mount("/audit");
+    const entry = {
+      id: "receipt-unique",
+      actorName: "UNC Staff",
+      action: "broadcast",
+      target: "server",
+      state: "unknown",
+      message: "Readback unavailable",
+      createdAt: "2026-09-30T12:00:00Z",
+      details: { reason: "Round briefing" },
+    };
+    fetcher.mockImplementation(
+      async (url: string) =>
+        new Response(
+          JSON.stringify(
+            url.endsWith("/me") ? { id: "staff", name: "Test staff", role: "admin", csrf: "csrf" } : [entry],
+          ),
+        ),
+    );
+    await screen.findByText("receipt-unique");
+    const search = screen.getByRole("searchbox");
+    fireEvent.change(search, { target: { value: "receipt-unique" } });
+    expect(screen.getByText("Readback unavailable")).toBeInTheDocument();
+    fireEvent.change(search, { target: { value: "Round briefing" } });
+    expect(screen.getByText("receipt-unique")).toBeInTheDocument();
+    fireEvent.change(search, { target: { value: "not-this-receipt" } });
+    expect(screen.getByText("No matching staff actions")).toBeInTheDocument();
   });
 });

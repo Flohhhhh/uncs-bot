@@ -1,20 +1,20 @@
 @font-face {
   font-family: "Barlow Condensed";
-  src: url("/assets/barlow-condensed-bold.ttf") format("truetype");
+  src: url("/assets/barlow-condensed-bold.woff2") format("woff2");
   font-style: normal;
   font-weight: 700;
   font-display: swap;
 }
 @font-face {
   font-family: "Barlow Condensed";
-  src: url("/assets/barlow-condensed-extrabold.ttf") format("truetype");
+  src: url("/assets/barlow-condensed-extrabold.woff2") format("woff2");
   font-style: normal;
   font-weight: 800 900;
   font-display: swap;
 }
 @font-face {
   font-family: "DM Sans";
-  src: url("/assets/dm-sans.ttf") format("truetype");
+  src: url("/assets/dm-sans.woff2") format("woff2");
   font-style: normal;
   font-weight: 100 1000;
   font-display: swap;
@@ -97,6 +97,9 @@ h1 {
   font-size: 48px;
   margin-bottom: 12px;
   text-transform: uppercase;
+}
+.page-heading h1:focus {
+  outline: none;
 }
 h2 {
   font-size: 32px;

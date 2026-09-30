@@ -7,6 +7,7 @@ import {
   ServiceUnavailableException,
 } from "@nestjs/common";
 import { createHash } from "node:crypto";
+import { z } from "zod";
 import { AdminStore } from "./admin.store";
 import { actionSchema, canAct, type ActionResult, type Staff } from "./admin.types";
 import { RconError, WardogsClient } from "./wardogs.client";
@@ -102,5 +103,15 @@ export class AdminService {
       };
     }
     return { id: action.id, ...result };
+  }
+
+  async receipt(id: string) {
+    const parsed = z.uuid().safeParse(id);
+    if (!parsed.success) throw new BadRequestException("Enter a valid action ID.");
+    try {
+      return { record: await this.store.receipt(parsed.data.toLowerCase()) };
+    } catch {
+      throw new ServiceUnavailableException("The action receipt could not be loaded. Try again shortly.");
+    }
   }
 }

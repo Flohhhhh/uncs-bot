@@ -407,25 +407,56 @@ export function MatchPage() {
   );
 }
 export function AuditPage() {
-  const { data, error } = useResource<Audit[]>("audit");
   const [query, setQuery] = useState("");
-  if (!data)
-    return <Empty title={error ? "Action history could not be loaded" : "Loading action history…"} detail={error} />;
-  const rows = data.filter((entry) =>
-    [entry.actorName, entry.action, entry.target, entry.message].some((value) =>
-      value.toLowerCase().includes(query.toLowerCase()),
-    ),
-  );
+  const lookupId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(query.trim())
+    ? query.trim().toLowerCase()
+    : "";
+  const recent = useResource<Audit[]>(lookupId ? null : "audit");
+  const receipt = useResource<{ record: Audit | null }>(lookupId ? `audit/${lookupId}` : null);
+  const error = lookupId ? receipt.error : recent.error;
+  const loading = lookupId ? receipt.loading && !receipt.data : recent.loading && !recent.data;
+  const rows = lookupId
+    ? receipt.data?.record
+      ? [receipt.data.record]
+      : []
+    : (recent.data ?? []).filter((entry) =>
+        [
+          entry.id,
+          entry.actorName,
+          entry.action,
+          actionDefinitions[entry.action]?.[0] || "",
+          entry.target,
+          entry.message,
+          entry.details.reason,
+        ].some((value) => value.toLowerCase().includes(query.toLowerCase())),
+      );
   return (
     <>
       {error && (
         <div className="notice error" role="alert">
-          {error} Showing the last successful history.
+          {error}
+          {rows.length > 0 && " Showing the last successful result."}
         </div>
       )}
-      <Search value={query} onChange={setQuery} placeholder="Search staff, action, or SteamID" />
-      <Card title="Recent staff actions" badge={<Badge>LAST 100</Badge>}>
-        {rows.length ? (
+      <Search value={query} onChange={setQuery} placeholder="Search staff, SteamID, reason, or action ID">
+        {lookupId && (
+          <button type="button" className="button secondary" onClick={() => setQuery("")}>
+            Back to recent actions
+          </button>
+        )}
+      </Search>
+      <p className="filter-note">
+        {lookupId
+          ? "Exact action ID lookup across stored history. This only reads the receipt; it does not resend the action or recheck the game."
+          : "Search the latest 100 actions, or paste a complete action ID to retrieve an older receipt."}
+      </p>
+      <Card
+        title={lookupId ? "Action receipt" : "Recent staff actions"}
+        badge={<Badge>{lookupId ? "EXACT ID" : "LAST 100"}</Badge>}
+      >
+        {loading ? (
+          <Empty title={lookupId ? "Looking up action receipt…" : "Loading action history…"} />
+        ) : rows.length ? (
           <Table headers={["WHEN / STAFF", "ACTION / TARGET", "OUTCOME", "DETAILS"]}>
             {rows.map((entry) => (
               <tr key={entry.id}>
@@ -451,6 +482,16 @@ export function AuditPage() {
               </tr>
             ))}
           </Table>
+        ) : error ? (
+          <Empty
+            title={lookupId ? "Action receipt could not be loaded" : "Action history could not be loaded"}
+            detail="Refresh to try this read again. No game action was sent."
+          />
+        ) : lookupId ? (
+          <Empty
+            title="No stored receipt for this action ID"
+            detail="This does not establish whether the game acted. Check the game before repeating an uncertain request."
+          />
         ) : (
           <Empty
             title="No matching staff actions"

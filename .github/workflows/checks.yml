@@ -30,6 +30,10 @@ jobs:
         run: npm run test:admin
       - name: Test browser workflows with simulated responses
         run: npm run test:frontend
+      - name: Check source formatting
+        run: npm run format:check
+      - name: Lint the browser dashboard
+        run: npm run lint -- web/admin
 
   format:
     name: Format check
