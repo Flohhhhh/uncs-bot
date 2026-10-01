@@ -10,6 +10,7 @@ import { FactionChip, liveFactions, playerFaction } from "../players/factions";
 import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 import { PlayerActions } from "../players/player-actions";
 import { GameLogView } from "./game-log";
+import { CommunityMessages } from "./community-messages";
 function ActionButton({
   action,
   steamId,
@@ -386,26 +387,7 @@ export function AnnouncementsPage() {
           </ActionButton>
         </div>
       </Card>
-      <Card title="Automatic community messages" badge={<Badge>SEPARATE CONFIGURATION</Badge>}>
-        <div className="card-body">
-          <p className="intro">
-            Welcome sequences, round notices and the Discord status card use Gramps deployment settings. Their live
-            activation is not shown here.
-          </p>
-          <div className="info-row">
-            <span>Join welcome</span>
-            <strong>Up to 4 spaced messages</strong>
-          </div>
-          <div className="info-row">
-            <span>Round notice</span>
-            <strong>Observed transition</strong>
-          </div>
-          <div className="info-row">
-            <span>Discord status card</span>
-            <strong>Gramps automation</strong>
-          </div>
-        </div>
-      </Card>
+      <CommunityMessages />
     </div>
   );
 }
