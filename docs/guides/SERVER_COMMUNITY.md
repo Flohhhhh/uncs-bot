@@ -6,18 +6,33 @@ This optional, single-instance worker provides in-game welcome whispers, generic
 
 The worker uses the existing `WardogsClient` and requires RCON connection settings. Its own flags control activation; it does not require staff OAuth or `ADMIN_ENABLED`. The Discord card additionally requires `ADMIN_GUILD_ID` and the configured bot-owned message. The `admin_actions` table was deployed and checked through the combined production launch migration on September 30; see [Database prerequisite](ADMIN_DASHBOARD.md#database-prerequisite--launch-migration-applied). The worker remains off, pending connection checks and announcement cutover. Other deployments still need the reviewed schema. This module adds no database tables or migrations.
 
-| Variable                                  | Default / purpose                                         |
-| ----------------------------------------- | --------------------------------------------------------- |
-| `SERVER_COMMUNITY_ENABLED`                | `false`; master switch                                    |
-| `SERVER_COMMUNITY_WELCOME_ENABLED`        | `false`; whisper to observed new connections              |
-| `SERVER_COMMUNITY_ROUND_ENABLED`          | `false`; generic message at an inferred round transition  |
-| `SERVER_COMMUNITY_DISCORD_STATUS_ENABLED` | `false`; edit the configured existing Discord message     |
-| `SERVER_COMMUNITY_WELCOME_MESSAGE`        | `Welcome to The UNCs! Squad up and enjoy the server.`     |
-| `SERVER_COMMUNITY_ROUND_MESSAGE`          | `GG! Thanks for playing on The UNCs. See you next round.` |
-| `SERVER_COMMUNITY_DISCORD_CHANNEL_ID`     | Existing Discord channel in `ADMIN_GUILD_ID`              |
-| `SERVER_COMMUNITY_DISCORD_MESSAGE_ID`     | Existing message authored by this Gramps bot              |
+| Variable                                   | Default / purpose                                                |
+| ------------------------------------------ | ---------------------------------------------------------------- |
+| `SERVER_COMMUNITY_ENABLED`                 | `false`; master switch                                           |
+| `SERVER_COMMUNITY_WELCOME_ENABLED`         | `false`; whisper to observed new connections                     |
+| `SERVER_COMMUNITY_ROUND_ENABLED`           | `false`; generic message at an inferred round transition         |
+| `SERVER_COMMUNITY_DISCORD_STATUS_ENABLED`  | `false`; edit the configured existing Discord message            |
+| `SERVER_COMMUNITY_WELCOME_MESSAGE`         | `Welcome to The UNCs! Squad up and enjoy the server.`            |
+| `SERVER_COMMUNITY_WELCOME_MESSAGES`        | Optional JSON array of 1–4 messages; replaces the single message |
+| `SERVER_COMMUNITY_WELCOME_DELAY_SECONDS`   | `10`; first-message loading delay, 0–60 seconds                  |
+| `SERVER_COMMUNITY_WELCOME_SPACING_SECONDS` | `20`; minimum time after a confirmed send, 10–120 seconds        |
+| `SERVER_COMMUNITY_ROUND_MESSAGE`           | `GG! Thanks for playing on The UNCs. See you next round.`        |
+| `SERVER_COMMUNITY_DISCORD_CHANNEL_ID`      | Existing Discord channel in `ADMIN_GUILD_ID`                     |
+| `SERVER_COMMUNITY_DISCORD_MESSAGE_ID`      | Existing message authored by this Gramps bot                     |
 
-Messages are literal, single-line text, 1–200 characters. There is no placeholder expansion or silent truncation. Invalid text is skipped. Each feature is independent; status requires both message/channel IDs. Settings are deployment configuration, not editable dashboard controls.
+Messages are literal, single-line text, 1–200 characters. There is no placeholder expansion or silent truncation. Invalid deployment values fail startup validation; the send boundary also refuses invalid text. When the optional array is absent, the existing single-message setting still works with the configured initial delay. Each feature is independent; status requires both message/channel IDs. Settings are deployment configuration, not editable dashboard controls.
+
+### Newcomer wording and launch state
+
+The disabled example in `.env.example` works before website intake opens: welcome, free whitelist information/Discord at the website, then seeding. It does not claim that the application flow is already available. After website publication, both OAuth callbacks and a controlled application rehearsal are verified, the second message can become:
+
+`Free whitelist: apply at theuncsgaming.com/whitelist. Sign in with Discord, then finish on the website. Staff review is required; donating is optional.`
+
+The seeding message is:
+
+`Quiet server? Help seed: join, play a round and invite a friend. Thanks for getting the match going!`
+
+Seeding means helping an initially quiet server gain enough real players for a match. This wording does not promise points, automatic whitelist rewards, a queue tier or a current XP/cash bonus. The legacy whitelist stays intact. Discord is the identity/community step; new applications are completed on the website, not handed back to a Discord request channel. Check the live flow before changing the welcome text.
 
 Import `ServerCommunityModule` in `AppModule`; export `AdminStore` from `AdminModule`. The existing global Necord module supplies its Discord `Client`. No new gateway listener, intent, or slash command is registered.
 
@@ -29,7 +44,9 @@ Startup, a failed observation, or an observation gap greater than thirty seconds
 
 A missing player remains remembered for sixty seconds. During a detected round transition, known players remain remembered for up to three minutes to tolerate map loading. The first populated return and observations that themselves reveal a transition suppress join messages, including when the game exposes the new map only after loading. A status response reporting zero players suppresses welcomes even if the parallel roster is still populated. New arrivals during these suppressed samples can miss their welcome. Loading longer than the bounded grace can still look like a new session.
 
-At most one RCON message is attempted per successful pass. The queue holds at most sixty-four messages, expires them after sixty seconds, and drops welcomes when their recipient is no longer in the observed connected roster. Large bursts may therefore skip welcomes. Pending round broadcasts take priority. These are courtesy messages, not a guaranteed delivery service.
+At most one RCON message is attempted per successful pass. The queue holds at most sixty-four items (each either a round notice or one recipient's remaining welcome sequence). A welcome waits for the loading delay; each later message waits at least the configured spacing after the previous request completes successfully and its result is saved. Due times are minimums, not exact delivery guarantees. Waiting items do not block ready recipients. Every message expires sixty seconds after it becomes due; large bursts may therefore skip welcomes. Pending round broadcasts take priority.
+
+Disconnect, failed observation, baseline reset or shutdown discards the recipient's remaining sequence. A failed, pending or unknown send, or failure saving its audit outcome, ends that sequence without retrying it. Queues are never replayed on restart. These are courtesy messages, not guaranteed delivery or proof a client displayed the popup.
 
 Each attempted game message receives a UUID and durable `AdminStore.begin` record before its request. The actor is explicitly `system:server-community` / `Gramps community messages`. A failed journal insert prevents sending. An existing action ID is not sent again. A definite refusal is recorded as failed; an uncertain request is unknown. There is no automatic mutation retry, including after a failure saving its final audit result. An unresolved `started` record must not be interpreted as successful delivery.
 
@@ -59,6 +76,6 @@ Run one Gramps replica with these switches enabled. There is no cross-process le
 
 Before activation, verify the current production capabilities, the configured existing Discord message, and the intended literal messages. Disable the overlapping third-party **game** welcome, round-announcement, and status-card features before enabling their Gramps replacements. Leave the separate Discord guild-join welcome enabled if desired. Do not change the existing `WDServerFeed` URL/token for this worker.
 
-Tests use mocked game, database, and Discord boundaries. They verify startup/outage suppression, map-load grace, conservative round detection, bounded delivery, durable-before-send ordering, uncertain outcomes, and edit-only Discord behavior. They do not verify the production server's capabilities, private-message popup appearance, or whether clients actually display a delivered message.
+Tests use mocked game, database, and Discord boundaries. They verify startup/outage suppression, map-load grace, conservative round detection, loading delay, spacing from slow actual sends, other-recipient progress, cancellation, configuration validation, bounded delivery, durable-before-send ordering, uncertain outcomes, and edit-only Discord behavior. They do not verify the production server's capabilities, private-message popup appearance, or whether clients actually display a delivered message.
 
 Protocol evidence checked 30 September 2026: [official RCON client](http://rcon.wardogs.com/js/api.js), [official polling configuration](http://rcon.wardogs.com/js/config.js), [Warcon live-build observations](https://github.com/warcon-app/warcon/blob/main/docs/wardogs-api.md), and [Warcon observation/rule implementation](https://github.com/warcon-app/warcon/blob/main/src/lib/server/trigger-rules.ts). Warcon is implementation evidence from another host, not verification of The UNCs production build.

@@ -3,6 +3,7 @@ import type { Client } from "discord.js";
 import type { AdminStore } from "../admin/admin.store";
 import { RconError, type WardogsClient } from "../admin/wardogs.client";
 import type { EnvService } from "../env/env.service";
+import { Env } from "../env/env";
 import type { CommunitySnapshot } from "./community-state";
 import { ServerCommunityService } from "./server-community.service";
 
@@ -25,6 +26,8 @@ function fixture(overrides: Record<string, unknown> = {}) {
     SERVER_COMMUNITY_ROUND_ENABLED: true,
     SERVER_COMMUNITY_DISCORD_STATUS_ENABLED: false,
     SERVER_COMMUNITY_WELCOME_MESSAGE: "Welcome to The UNCs!",
+    SERVER_COMMUNITY_WELCOME_DELAY_SECONDS: 0,
+    SERVER_COMMUNITY_WELCOME_SPACING_SECONDS: 20,
     SERVER_COMMUNITY_ROUND_MESSAGE: "GG! Thanks for playing.",
     SERVER_COMMUNITY_DISCORD_CHANNEL_ID: "123456789012345678",
     SERVER_COMMUNITY_DISCORD_MESSAGE_ID: "223456789012345678",
@@ -94,6 +97,80 @@ describe("optional community worker", () => {
       expect.stringMatching(/^[a-f0-9]{64}$/),
     );
     expect(store.begin.mock.invocationCallOrder[0]).toBeLessThan(game.execute.mock.invocationCallOrder[0]);
+  });
+
+  it("waits for loading and spaces a sequence from actual delivery, including slow sends", async () => {
+    const { service, look, game, store } = fixture({
+      SERVER_COMMUNITY_WELCOME_MESSAGES: [
+        "Welcome!",
+        "Free whitelist at theuncsgaming.com",
+        "Help seed by playing when quiet.",
+      ],
+      SERVER_COMMUNITY_WELCOME_DELAY_SECONDS: 10,
+    });
+    await service.tick();
+    await look([firstId, secondId]);
+    await look([firstId, secondId]);
+    expect(game.execute).not.toHaveBeenCalled();
+    game.execute.mockImplementationOnce(async () => {
+      jest.setSystemTime(Date.now() + 8_000);
+      return { state: "accepted", message: "Accepted." };
+    });
+    await look([firstId, secondId]);
+    expect(game.execute).toHaveBeenCalledTimes(1);
+    for (let i = 0; i < 3; i++) await look([firstId, secondId]);
+    expect(game.execute).toHaveBeenCalledTimes(1);
+    await look([firstId, secondId]);
+    expect(game.execute).toHaveBeenCalledTimes(2);
+    for (let i = 0; i < 4; i++) await look([firstId, secondId]);
+    expect(game.execute.mock.calls.map(([action]) => action.message)).toEqual([
+      "Welcome!",
+      "Free whitelist at theuncsgaming.com",
+      "Help seed by playing when quiet.",
+    ]);
+    expect(new Set(store.begin.mock.calls.map(([, action]) => action.id)).size).toBe(3);
+    await look([firstId, secondId]);
+    expect(game.execute).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps other welcomes and round messages moving while a follow-up is waiting", async () => {
+    const { service, look, game } = fixture({ SERVER_COMMUNITY_WELCOME_MESSAGES: ["Welcome!", "More info"] });
+    await service.tick();
+    await look([firstId, secondId]);
+    const ids = [firstId, secondId, "76561198000000003"];
+    await look(ids);
+    expect(game.execute.mock.calls.map(([action]) => action.steamId)).toEqual([secondId, ids[2]]);
+    await look(ids, "Europe");
+    expect(game.execute).toHaveBeenLastCalledWith(expect.objectContaining({ action: "broadcast" }));
+    await look(ids, "Europe");
+    expect(game.execute).toHaveBeenCalledTimes(3);
+    await look(ids, "Europe");
+    expect(game.execute).toHaveBeenLastCalledWith(expect.objectContaining({ steamId: secondId, message: "More info" }));
+  });
+
+  it.each(["disconnect", "outage", "gap", "shutdown"])("discards remaining messages after %s", async (event) => {
+    const { service, look, game } = fixture({ SERVER_COMMUNITY_WELCOME_MESSAGES: ["Welcome!", "More info"] });
+    await service.tick();
+    await look([firstId, secondId]);
+    if (event === "disconnect") await look([firstId]);
+    if (event === "outage") {
+      game.overview.mockRejectedValueOnce(new Error("offline"));
+      await service.tick();
+    }
+    if (event === "gap") await look([firstId, secondId], "Kavkazi", 31_000);
+    if (event === "shutdown") service.onModuleDestroy();
+    for (let i = 0; i < 5; i++) await look([firstId, secondId]);
+    expect(game.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["unknown", "failed", "audit failure"])("does not continue a welcome sequence after %s", async (result) => {
+    const { service, look, game, store } = fixture({ SERVER_COMMUNITY_WELCOME_MESSAGES: ["Welcome!", "More info"] });
+    await service.tick();
+    if (result === "audit failure") store.finish.mockRejectedValueOnce(new Error("journal unavailable"));
+    else game.execute.mockResolvedValueOnce({ state: result, message: "Not confirmed." });
+    await look([firstId, secondId]);
+    for (let i = 0; i < 5; i++) await look([firstId, secondId]);
+    expect(game.execute).toHaveBeenCalledTimes(1);
   });
 
   it("baselines after failed observations instead of welcoming returning players or announcing stale rounds", async () => {
@@ -222,6 +299,39 @@ describe("optional community worker", () => {
     const { service, look } = fixture();
     expect(await service.tick()).toBe(5_000);
     expect(await look([])).toBe(15_000);
+  });
+});
+
+describe("welcome deployment settings", () => {
+  it("validates a short literal sequence while preserving single-message installations", () => {
+    expect(Env.shape.SERVER_COMMUNITY_WELCOME_MESSAGES.parse(undefined)).toBeUndefined();
+    expect(Env.shape.SERVER_COMMUNITY_WELCOME_MESSAGES.parse('["Welcome!", "  Free whitelist  "]')).toEqual([
+      "Welcome!",
+      "Free whitelist",
+    ]);
+    expect(Env.shape.SERVER_COMMUNITY_WELCOME_DELAY_SECONDS.parse(undefined)).toBe(10);
+    expect(Env.shape.SERVER_COMMUNITY_WELCOME_SPACING_SECONDS.parse(undefined)).toBe(20);
+  });
+
+  it.each([
+    "not JSON",
+    "{}",
+    "[]",
+    '[" "]',
+    "[123]",
+    '["line\\nbreak"]',
+    JSON.stringify(["x".repeat(201)]),
+    JSON.stringify(Array(5).fill("Hi")),
+  ])("rejects invalid welcome configuration: %s", (value) => {
+    expect(Env.shape.SERVER_COMMUNITY_WELCOME_MESSAGES.safeParse(value).success).toBe(false);
+  });
+
+  it.each([-1, 61, 1.5])("rejects invalid loading delay: %s", (value) => {
+    expect(Env.shape.SERVER_COMMUNITY_WELCOME_DELAY_SECONDS.safeParse(value).success).toBe(false);
+  });
+
+  it.each([0, 9, 121, 10.5])("rejects message spacing that is unsafe or unbounded: %s", (value) => {
+    expect(Env.shape.SERVER_COMMUNITY_WELCOME_SPACING_SECONDS.safeParse(value).success).toBe(false);
   });
 });
 

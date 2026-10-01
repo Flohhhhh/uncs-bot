@@ -16,7 +16,7 @@ const SYSTEM_ACTOR: Staff = {
 const MAX_QUEUE = 64;
 const MAX_SENDS_PER_TICK = 1;
 const MESSAGE_TTL_MS = 60_000;
-type QueuedMessage = { action: AdminAction; expiresAt: number };
+type QueuedMessage = { action: AdminAction; readyAt: number; expiresAt: number; followUps: string[] };
 
 @Injectable()
 export class ServerCommunityService implements OnApplicationBootstrap, OnModuleDestroy {
@@ -96,24 +96,43 @@ export class ServerCommunityService implements OnApplicationBootstrap, OnModuleD
       this.snapshot = current;
       const options = this.options();
       if (observation.baseline) this.queue = [];
-      if (options.round && observation.round)
-        this.enqueue({ action: "broadcast", message: this.env.get("SERVER_COMMUNITY_ROUND_MESSAGE") }, now, true);
-      if (options.welcome) {
-        const available = MAX_QUEUE - this.queue.length;
-        if (observation.joined.length > available)
-          this.logger.warn("Community message queue is full; excess welcomes were skipped.");
-        for (const steamId of observation.joined.slice(0, available))
-          this.enqueue({ action: "message", steamId, message: this.env.get("SERVER_COMMUNITY_WELCOME_MESSAGE") }, now);
-      }
       const connected = new Set(
         current.status.players.current > 0 ? current.players.map((player) => player.steamId) : [],
       );
       this.queue = this.queue.filter(
-        ({ action, expiresAt }) => expiresAt > now && (!("steamId" in action) || connected.has(action.steamId)),
+        ({ action, expiresAt }) =>
+          expiresAt > now &&
+          (action.action === "message" ? options.welcome && connected.has(action.steamId) : options.round),
       );
+      if (options.round && observation.round)
+        this.enqueue({ action: "broadcast", message: this.env.get("SERVER_COMMUNITY_ROUND_MESSAGE") }, now, true);
+      if (options.welcome) {
+        const messages = this.env.get("SERVER_COMMUNITY_WELCOME_MESSAGES") ?? [
+          this.env.get("SERVER_COMMUNITY_WELCOME_MESSAGE"),
+        ];
+        const readyAt = now + this.env.get("SERVER_COMMUNITY_WELCOME_DELAY_SECONDS") * 1000;
+        const available = MAX_QUEUE - this.queue.length;
+        if (observation.joined.length > available)
+          this.logger.warn("Community message queue is full; excess welcomes were skipped.");
+        for (const steamId of observation.joined.slice(0, available))
+          this.enqueue({ action: "message", steamId, message: messages[0] }, readyAt, false, messages.slice(1));
+      }
       for (let sent = 0; sent < MAX_SENDS_PER_TICK && this.queue.length && !this.stopped; sent++) {
-        const next = this.queue.shift()!;
-        if (next.expiresAt > Date.now()) await this.deliver(next.action);
+        // A future welcome must not hold up another recipient or a ready round message.
+        const index = this.queue.findIndex((item) => item.readyAt <= Date.now() && item.expiresAt > Date.now());
+        if (index < 0) break;
+        const [next] = this.queue.splice(index, 1);
+        const confirmed = await this.deliver(next.action);
+        if (confirmed && !this.stopped && next.action.action === "message" && next.followUps.length) {
+          // Space from the actual send, so a delayed queue never dumps several messages at once.
+          const readyAt = Date.now() + this.env.get("SERVER_COMMUNITY_WELCOME_SPACING_SECONDS") * 1000;
+          this.enqueue(
+            { action: "message", steamId: next.action.steamId, message: next.followUps[0] },
+            readyAt,
+            false,
+            next.followUps.slice(1),
+          );
+        }
       }
       if (!this.stopped) await this.updateCard(true);
       return current.status.players.current > 0 ? 5_000 : 15_000;
@@ -122,7 +141,7 @@ export class ServerCommunityService implements OnApplicationBootstrap, OnModuleD
     }
   }
 
-  private enqueue(input: Record<string, unknown>, now: number, first = false) {
+  private enqueue(input: Record<string, unknown>, readyAt: number, first = false, followUps: string[] = []) {
     const parsed = actionSchema.safeParse({
       ...input,
       id: randomUUID(),
@@ -135,7 +154,7 @@ export class ServerCommunityService implements OnApplicationBootstrap, OnModuleD
       this.logger.warn("Community message was skipped because its configured text is invalid.");
       return;
     }
-    const item = { action: parsed.data, expiresAt: now + MESSAGE_TTL_MS };
+    const item = { action: parsed.data, readyAt, expiresAt: readyAt + MESSAGE_TTL_MS, followUps };
     if (first) this.queue.unshift(item);
     else this.queue.push(item);
     if (this.queue.length > MAX_QUEUE) {
@@ -147,10 +166,10 @@ export class ServerCommunityService implements OnApplicationBootstrap, OnModuleD
     const requestHash = createHash("sha256").update(JSON.stringify(action)).digest("hex");
     try {
       const started = await this.store.begin(SYSTEM_ACTOR, action, requestHash);
-      if (!started.created || this.stopped) return;
+      if (!started.created || this.stopped) return false;
     } catch {
       this.logger.warn("Community message was not sent because its audit record could not be saved.");
-      return;
+      return false;
     }
     let result: ActionResult;
     try {
@@ -167,7 +186,9 @@ export class ServerCommunityService implements OnApplicationBootstrap, OnModuleD
       this.logger.warn(
         "Community message result could not be saved; inspect its started audit record. No retry is scheduled.",
       );
+      return false;
     }
+    return result.state === "accepted" || result.state === "applied";
   }
 
   private async updateCard(online: boolean) {

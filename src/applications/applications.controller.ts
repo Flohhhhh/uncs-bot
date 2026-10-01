@@ -26,7 +26,17 @@ import { ApplicationsService } from "./applications.service";
 export class ApplicationsExceptionFilter implements ExceptionFilter {
   catch(error: unknown, host: ArgumentsHost) {
     const response = host.switchToHttp().getResponse<Response>();
+    const request = host.switchToHttp().getRequest<Request>();
     const status = error instanceof HttpException ? error.getStatus() : 503;
+    if (request.method === "GET" && /^\/apply\/auth\/(login|callback)\/?$/.test(request.path)) {
+      // Return to the application with a fixed public code, never an OAuth code,
+      // state value, upstream error body or caller-supplied redirect.
+      const code = status === 401 ? "sign_in" : status === 403 ? "discord_access" : "unavailable";
+      response.setHeader("Cache-Control", "no-store");
+      response.setHeader("Referrer-Policy", "no-referrer");
+      response.redirect(303, `/whitelist?auth=${code}`);
+      return;
+    }
     response.status(status).json({
       message:
         error instanceof HttpException

@@ -1,4 +1,4 @@
-import { type INestApplication } from "@nestjs/common";
+import { ForbiddenException, UnauthorizedException, type INestApplication } from "@nestjs/common";
 import { Test } from "@nestjs/testing";
 import request from "supertest";
 import { AdminApiController, AdminExceptionFilter } from "../admin/admin.controller";
@@ -41,6 +41,7 @@ describe("application HTTP routing and privacy", () => {
     finishApproval: jest.fn(),
   };
   const admin = { read: jest.fn(async (resource: string) => ({ resource })), act: jest.fn() };
+  const applicantAuth = { authenticate: async () => identity, login: jest.fn(), callback: jest.fn() };
 
   beforeAll(async () => {
     const module = await Test.createTestingModule({
@@ -62,7 +63,7 @@ describe("application HTTP routing and privacy", () => {
         },
         { provide: WardogsClient, useValue: {} },
         { provide: AdminAuth, useValue: { authenticate: async () => staff } },
-        { provide: ApplicantAuth, useValue: { authenticate: async () => identity } },
+        { provide: ApplicantAuth, useValue: applicantAuth },
       ],
     }).compile();
     app = module.createNestApplication({ logger: false });
@@ -74,6 +75,30 @@ describe("application HTTP routing and privacy", () => {
     staff = { id: "234567890123456789", name: "Reviewer", role: "admin", csrf: "csrf" };
   });
   afterAll(async () => app.close());
+
+  it.each([
+    [new UnauthorizedException("Expired OAuth state"), "sign_in"],
+    [new ForbiddenException("Membership screening pending"), "discord_access"],
+    [new Error("private upstream details"), "unavailable"],
+  ])("returns failed browser sign-in to the application without private details: %p", async (error, code) => {
+    applicantAuth.callback.mockRejectedValueOnce(error);
+    const response = await request(app.getHttpServer())
+      .get("/apply/auth/callback?code=private-oauth-code&state=private-state&redirect=https://example.org")
+      .expect(303);
+    expect(response.headers.location).toBe(`/whitelist?auth=${code}`);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.headers["referrer-policy"]).toBe("no-referrer");
+    expect(response.text).not.toMatch(/private-|screening/);
+  });
+
+  it("returns disabled login to the website while keeping disabled API requests as JSON errors", async () => {
+    enabled = false;
+    const response = await request(app.getHttpServer()).get("/apply/auth/login").expect(303);
+    expect(response.headers.location).toBe("/whitelist?auth=unavailable");
+    const api = await request(app.getHttpServer()).get("/apply/api/me").expect(503);
+    expect(api.headers.location).toBeUndefined();
+    expect(api.body.message).toBeDefined();
+  });
 
   it("routes the administrator applications list separately from existing resources", async () => {
     const response = await request(app.getHttpServer()).get("/admin/api/applications").expect(200);
@@ -121,7 +146,7 @@ describe("application HTTP routing and privacy", () => {
       .expect(400);
     expect(store.create).not.toHaveBeenCalled();
   });
-  it("returns the Discord fallback while applications are disabled", async () => {
+  it("keeps application data unavailable while applications are disabled", async () => {
     enabled = false;
     const response = await request(app.getHttpServer()).get("/apply/api/me").expect(503);
     expect(response.body.message).toContain("this website");

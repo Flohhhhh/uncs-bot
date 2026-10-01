@@ -35,6 +35,20 @@ Player, application, supporter, combat, whitelist, ban and action-history tables
 
 Local validation passed **134 dashboard tests**, the full production build, global formatting, scoped lint, typechecks and whitespace checks. Backend code is unchanged from PR #8's 388 passing tests. Browser rehearsal verified numeric kill sorting, retained sorting after refresh, a selected player remaining selected after sorting and hidden by a team filter, exact SteamID copying, keyboard focus and a phone viewport without document overflow. All providers were simulated. Sorting is local to the loaded results and is not retained after leaving a page or unmounting an empty table.
 
+Delivered as draft [PR #9](https://github.com/Flohhhhh/uncs-bot/pull/9), stacked on #8. Its dashboard, PostgreSQL concurrency and build CI checks passed for `4b459ed`.
+
+### Newcomer experience follow-up
+
+The optional community worker now accepts one to four short welcome messages, with a default ten-second loading delay and twenty-second spacing measured after each successful send. It uses the existing observation loop and audit path. It does not dump overdue messages together, block another ready recipient, replay after restart or continue a sequence after a failed/unknown send. Disconnects and lost observation continuity discard the remainder. All activation flags remain off by default; no live announcer was changed. The [community guide](SERVER_COMMUNITY.md) supplies accurate pre-launch and post-verification whitelist wording plus a seeding message that promises no automatic rewards.
+
+Browser sign-in failures now return applicants to `/whitelist` with one fixed recovery code instead of stranding them on a JSON error page. OAuth codes/state, exception text and arbitrary redirect input are never reflected. API and sign-out failures retain their JSON behavior. The companion website adds recovery guidance, a clearer free-whitelist entry, Discord-to-website instructions, status-check/return-to-game links and seeding explanation. Its homepage refers to checking availability instead of permanently claiming that applications are either open or coming soon. The actual form remains gated by the service response.
+
+Validation: **417 backend, 134 dashboard and 56 website tests pass**. The full production build, global formatting, scoped lint, typechecks and whitespace checks pass. Browser rehearsal used only local simulated providers and fictional contact details; it covered recovery guidance, sign-in returning to the website form, saved-request instructions and phone layout without horizontal page overflow. The production Discord callback, welcome popup timing and live delivery are not verified by these checks.
+
+The website/QR banner is prepared locally as `outputs/uncs-server-assets/the-uncs-server-banner-website-qr-1024x256.png` in the task workspace. It is 1024×256, 506713 bytes, and an independent QR decoder returned `https://theuncsgaming.com` at full, three-quarter and half size. It is not hosted or applied to the live server.
+
+Research on [East/Central traffic, BattleMetrics and Discord group assignment](WARDOGS_2026-09-30.md#october-1-research-east-versus-central) is recorded with dated evidence and limitations. East is the current conditional recommendation. Discord voice-channel sorting remains **research only**, including Blue-team preferences and opposing friend groups. No voice listener or automatic move was implemented. Multi-server operation, verified process-restart controls, event automation and voting remain outstanding; this follow-up does not claim they are ready.
+
 ## Reviewed delivery boundaries
 
 - Cleanup PR [#5](https://github.com/Flohhhhh/uncs-bot/pull/5) separates public applicant and staff origins, removes website hosting from Gramps, and tolerates individual malformed reserved-list rows. It does not repair xREALM's own interface.

@@ -356,16 +356,16 @@ export function AnnouncementsPage() {
       <Card title="Automatic community messages" badge={<Badge>SEPARATE CONFIGURATION</Badge>}>
         <div className="card-body">
           <p className="intro">
-            Join welcomes, automatic end-of-match messages, and the Discord live-status card are configured separately
-            in Gramps. This page does not report or change their activation state.
+            Welcome sequences, round notices and the Discord status card use Gramps deployment settings. Their live
+            activation is not shown here.
           </p>
           <div className="info-row">
             <span>Join welcome</span>
-            <strong>Gramps automation</strong>
+            <strong>Up to 4 spaced messages</strong>
           </div>
           <div className="info-row">
-            <span>End-of-match automation</span>
-            <strong>Gramps automation</strong>
+            <span>Round notice</span>
+            <strong>Observed transition</strong>
           </div>
           <div className="info-row">
             <span>Discord status card</span>
