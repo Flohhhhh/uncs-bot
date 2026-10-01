@@ -1,9 +1,10 @@
 import { useState } from "react";
-import type { ActionName, Player } from "../../api/types";
+import type { Player } from "../../api/types";
 import { useGameAdmin as useAdmin } from "../../app/context";
-import { Badge, Card, Empty, Modal, Search } from "../../components/ui";
+import { Badge, Card, Empty, Search } from "../../components/ui";
 import { DataTable, CopyValue } from "../../components/data-table";
-import { actionDefinitions, allowed } from "../actions/policy";
+import { allowed } from "../actions/policy";
+import { PlayerActions } from "./player-actions";
 import { FactionChip, FactionOptions, liveFactions, playerFaction } from "./factions";
 import { TeamMoveDialog, TeamResults, type TeamMoveResult } from "./team-move";
 
@@ -29,12 +30,11 @@ export function PlayersPage() {
       (nameOnly
         ? [player.name]
         : [player.name, player.steamId, player.faction, playerFaction(player, teams)?.label]
-      ).some((value) => (value ?? "").toLowerCase().includes(query.toLowerCase())),
+      ).some((value) => (value ?? "").toLowerCase().includes(query.trim().toLowerCase())),
   );
   const selection = players.filter((player) => selected.has(player.steamId));
   const allShownSelected = found.length > 0 && found.every((player) => selected.has(player.steamId));
   const unassigned = players.filter((player) => !playerFaction(player, teams)).length;
-  const managedPlayer = players.find((player) => player.steamId === managedId);
   const manageAllowed = !admin.busy && !admin.stale && Boolean(admin.me && admin.me.role !== "viewer");
 
   function toggle(id: string, checked: boolean) {
@@ -66,8 +66,8 @@ export function PlayersPage() {
       {!!admin.overview?.unlinkedPlayerCount && (
         <p className="notice warning" role="status" aria-label="Incomplete player roster">
           {admin.overview.unlinkedPlayerCount} roster{" "}
-          {admin.overview.unlinkedPlayerCount === 1 ? "entry has" : "entries have"} no SteamID. Player controls and team
-          counts below exclude {admin.overview.unlinkedPlayerCount === 1 ? "it" : "them"}.
+          {admin.overview.unlinkedPlayerCount === 1 ? "entry has" : "entries have"} no usable SteamID. Player controls
+          and team counts below exclude {admin.overview.unlinkedPlayerCount === 1 ? "it" : "them"}.
         </p>
       )}
       <div className="team-counts">
@@ -302,36 +302,7 @@ export function PlayersPage() {
           <Empty title="No matching players" detail="Try a different search or refresh the roster." />
         )}
       </Card>
-      {managedPlayer && (
-        <Modal
-          serverScoped
-          title={managedPlayer.name}
-          description={managedPlayer.steamId}
-          onClose={() => setManagedId(null)}
-        >
-          <div className="action-list">
-            {(["message", "kick", "ban", "whitelist-add", "team", "kill"] as ActionName[]).map((action) => (
-              <button
-                type="button"
-                key={action}
-                className="button secondary small"
-                disabled={!allowed(action, admin.me, admin.overview, admin.stale, admin.busy)}
-                onClick={() => {
-                  setManagedId(null);
-                  admin.openAction(action, managedPlayer.steamId);
-                }}
-              >
-                {actionDefinitions[action][0]}
-              </button>
-            ))}
-          </div>
-          <div className="dialog-actions">
-            <button type="button" className="button secondary" onClick={() => setManagedId(null)}>
-              Close
-            </button>
-          </div>
-        </Modal>
-      )}
+      {managedId && <PlayerActions steamId={managedId} onClose={() => setManagedId(null)} />}
       {move && (
         <TeamMoveDialog
           key={move.key}

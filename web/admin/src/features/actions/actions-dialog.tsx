@@ -62,14 +62,15 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
   const requiresPlayer = playerActions.includes(action);
   const phrase = confirmationPhrases[action];
   const requiresConfirmation = confirmedActions.includes(action);
+  const requiresReason = ["kick", "ban", "unban", "whitelist-remove"].includes(action);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (submitted.current || !permitted || !catalogReady) return;
     const values = new FormData(event.currentTarget);
-    const reason = String(values.get("reason") ?? "").trim();
+    const reason = requiresReason ? String(values.get("reason") ?? "").trim() : `Staff action: ${title}.`;
     const target = steamId || String(values.get("steamId") ?? "");
-    const confirm = String(values.get("confirm") ?? "");
+    const confirm = phrase ? String(values.get("confirm") ?? "") : target;
     if (!singleLine(reason, 3)) {
       setError("Enter a single-line reason between 3 and 200 characters.");
       return;
@@ -230,11 +231,11 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
                   </select>
                 </label>
               )}
-              <ReasonField />
-              {requiresConfirmation && (
+              {requiresReason && <ReasonField />}
+              {phrase && (
                 <label>
-                  Type {phrase ? <strong>{phrase}</strong> : "the player's SteamID64"} to confirm
-                  <input name="confirm" required autoComplete="off" placeholder={phrase || steamId || "SteamID64"} />
+                  Type <strong>{phrase}</strong> to confirm
+                  <input name="confirm" required autoComplete="off" placeholder={phrase} />
                 </label>
               )}
             </fieldset>
@@ -262,7 +263,7 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
                 !permitted || sending || submitted.current || !catalogReady || (action === "map" && !selection.map)
               }
             >
-              {sending ? "Sending…" : "Confirm action"}
+              {sending ? "Sending…" : title}
             </button>
           )}
         </div>

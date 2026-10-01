@@ -5,10 +5,10 @@ import { useGameApi } from "../../api/server-client";
 import { useResource } from "../../api/use-resource";
 import type { Catalog } from "../../api/types";
 import { useGameAdmin as useAdmin } from "../../app/context";
-import { Badge, Card, Empty, Modal, ReasonField, date } from "../../components/ui";
+import { Badge, Card, Empty, Modal, date } from "../../components/ui";
 import { CopyValue, DataTable } from "../../components/data-table";
 import { MapPicker } from "../actions/map-picker";
-import { errorMessage, singleLine } from "../actions/policy";
+import { errorMessage } from "../actions/policy";
 
 type Vote = ReturnType<typeof mapVoteView>;
 type VoteList = { enabled: boolean; serverId: string; votes: Vote[] };
@@ -41,15 +41,10 @@ function VoteReview({
   const [id] = useState(() => crypto.randomUUID());
   const submitted = useRef(false);
   const [result, setResult] = useState<string | null>(null);
-  const [validation, setValidation] = useState("");
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (busy || submitted.current) return;
-    const reason = String(new FormData(event.currentTarget).get("reason") ?? "").trim();
-    if (!singleLine(reason, 3)) {
-      setValidation("Enter a single-line reason of 3–200 characters.");
-      return;
-    }
+    const reason = vote ? "Staff closed map vote." : "Staff started map vote.";
     submitted.current = true;
     setBusy(true);
     try {
@@ -106,8 +101,6 @@ function VoteReview({
         </>
       ) : (
         <form onSubmit={(event) => void submit(event)}>
-          <ReasonField />
-          {validation && <p role="alert">{validation}</p>}
           <div className="dialog-actions">
             <button type="button" className="button secondary" disabled={busy} onClick={close}>
               Back
@@ -131,7 +124,7 @@ export function MapVotesPage() {
     return (
       <Empty
         title="Map voting is not enabled"
-        detail="The owner needs to finish database setup and choose a Discord voting channel."
+        detail="Choose a Discord voting channel and enable map voting in the bot configuration."
       />
     );
   return (

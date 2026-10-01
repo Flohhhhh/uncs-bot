@@ -2,8 +2,8 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useGameApi } from "../../api/server-client";
 import type { ActionResult, Player } from "../../api/types";
 import { useGameAdmin as useAdmin } from "../../app/context";
-import { Badge, Modal, ReasonField } from "../../components/ui";
-import { allowed, errorMessage, rejectionState, singleLine } from "../actions/policy";
+import { Badge, Modal } from "../../components/ui";
+import { allowed, errorMessage, rejectionState } from "../actions/policy";
 import { FactionOptions, liveFactions, playerFaction } from "./factions";
 
 type ItemState = ActionResult["state"] | "queued" | "sending" | "skipped";
@@ -123,11 +123,6 @@ export function TeamMoveDialog({
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (submitted.current || !ready || !destination) return;
-    const reason = String(new FormData(event.currentTarget).get("reason") ?? "").trim();
-    if (!singleLine(reason, 3)) {
-      setError("Enter a single-line reason between 3 and 200 characters.");
-      return;
-    }
     if (
       items.some(
         (item) =>
@@ -185,7 +180,7 @@ export function TeamMoveDialog({
               steamId: item.steamId,
               confirm: item.steamId,
               faction,
-              reason,
+              reason: "Staff requested team move.",
             }),
           });
           item.state = ["applied", "accepted", "pending", "failed", "unknown"].includes(result.state)
@@ -271,7 +266,6 @@ export function TeamMoveDialog({
                 </li>
               ))}
             </ul>
-            <ReasonField defaultValue="Staff-assisted team move to group players together." />
           </>
         )}
         {error && (

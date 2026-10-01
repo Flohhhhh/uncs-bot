@@ -7,6 +7,18 @@ import { alice, context } from "./test-fixtures";
 vi.mock("../../api/client", () => ({ api: vi.fn() }));
 
 describe("live player controls", () => {
+  it("finds pasted IDs and names with surrounding spaces", () => {
+    render(
+      <AdminContext.Provider value={context()}>
+        <PlayersPage />
+      </AdminContext.Provider>,
+    );
+    for (const query of [` ${alice.steamId} `, "  unc alice  "]) {
+      fireEvent.change(screen.getByRole("searchbox"), { target: { value: query } });
+      expect(screen.getByText(alice.name)).toBeInTheDocument();
+      expect(screen.queryByText("Bob")).not.toBeInTheDocument();
+    }
+  });
   it("discloses excluded unlinked entries without inventing selectable identities", () => {
     const admin = context();
     admin.overview!.unlinkedPlayerCount = 2;
@@ -16,7 +28,7 @@ describe("live player controls", () => {
       </AdminContext.Provider>,
     );
     expect(screen.getByRole("status", { name: "Incomplete player roster" })).toHaveTextContent(
-      "2 roster entries have no SteamID.",
+      "2 roster entries have no usable SteamID.",
     );
     expect(screen.getByRole("status", { name: "Incomplete player roster" })).toHaveTextContent(
       "team counts below exclude them",
@@ -108,5 +120,19 @@ describe("live player controls", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "More" })[0]);
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Message player" }));
     expect(admin.openAction).toHaveBeenCalledWith("message", alice.steamId);
+  });
+  it("removes player actions if the selected player leaves while the menu is open", () => {
+    const admin = context();
+    const tree = (present: boolean) => (
+      <AdminContext.Provider value={{ ...admin, overview: { ...admin.overview!, players: present ? [alice] : [] } }}>
+        <PlayersPage />
+      </AdminContext.Provider>
+    );
+    const { rerender } = render(tree(true));
+    fireEvent.click(screen.getByRole("button", { name: "More" }));
+    rerender(tree(false));
+    expect(screen.getByRole("dialog")).toHaveTextContent("no longer in the current roster");
+    expect(screen.queryByRole("button", { name: "Ban player" })).not.toBeInTheDocument();
+    expect(admin.openAction).not.toHaveBeenCalled();
   });
 });

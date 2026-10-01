@@ -25,6 +25,7 @@ describe("reviewed team moves", () => {
         <TeamMoveDialog players={[alice, bob]} initialFaction="Lonestar" onClose={vi.fn()} onComplete={finished} />
       </AdminContext.Provider>,
     );
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
     submit();
     await act(async () => {
       await Promise.resolve();
@@ -45,6 +46,7 @@ describe("reviewed team moves", () => {
       faction: "Lonestar",
       steamId: alice.steamId,
       confirm: alice.steamId,
+      reason: "Staff requested team move.",
     });
     expect(second).toMatchObject({ action: "team", faction: "Lonestar", steamId: bob.steamId, confirm: bob.steamId });
     expect(first.id).not.toBe(second.id);

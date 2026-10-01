@@ -49,7 +49,9 @@ export class AdminService {
       throw new ServiceUnavailableException(
         error instanceof RconError
           ? error.message
-          : "This page could not be loaded. Check the dashboard connection and database setup.",
+          : error instanceof z.ZodError
+            ? "The game returned data this dashboard could not read. Refresh or report this page to staff."
+            : "This page could not be loaded. Check the dashboard connection and database setup.",
       );
     }
   }
