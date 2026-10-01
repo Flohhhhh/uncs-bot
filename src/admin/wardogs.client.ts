@@ -34,6 +34,7 @@ type CurrentFaction = z.infer<typeof statusSchema>["factionScores"][number];
 type Overview = {
   status: z.infer<typeof statusSchema>;
   players: z.infer<typeof playersSchema>["players"];
+  unlinkedPlayerCount?: number;
   capabilities: Capabilities;
   observedAt: string;
 };
@@ -161,11 +162,11 @@ export class WardogsClient {
 
   private async readOverview(): Promise<Overview> {
     const capabilities = await this.capabilities();
-    const [status, players] = await Promise.all([
+    const [status, roster] = await Promise.all([
       this.request("GET", "/v1/status").then((data) => statusSchema.parse(data)),
-      this.request("GET", "/v1/players").then((data) => playersSchema.parse(data).players),
+      this.request("GET", "/v1/players").then((data) => playersSchema.parse(data)),
     ]);
-    return { status, players, capabilities, observedAt: new Date().toISOString() };
+    return { status, ...roster, capabilities, observedAt: new Date().toISOString() };
   }
 
   async bans() {

@@ -2,7 +2,7 @@ import { AdminSettings } from "./admin.settings";
 import { AdminService } from "./admin.service";
 import type { AdminStore } from "./admin.store";
 import { RconError, serves, WardogsClient } from "./wardogs.client";
-import { actionSchema, type AdminAction } from "./admin.types";
+import { actionSchema, playersSchema, type AdminAction } from "./admin.types";
 import { configuredWhitelist } from "./whitelist-document";
 import { randomUUID } from "node:crypto";
 import { ServiceUnavailableException } from "@nestjs/common";
@@ -71,6 +71,50 @@ describe("shared dashboard and community observations", () => {
     await expect(client.overview()).rejects.toThrow("could not be reached");
     await dashboard.read("overview");
     expect(playerReads()).toBe(1);
+  });
+});
+
+describe("roster identity compatibility", () => {
+  it("keeps known player controls available beside the official null-SteamID shape", async () => {
+    const client = new WardogsClient(settings);
+    const request = jest.spyOn(client, "request").mockImplementation(async (_method, path) => {
+      if (path === "/v1/capabilities") return { routes: [] };
+      if (path === "/v1/status") return { serverName: "Local test", map: "Test", players: { current: 3, max: 100 } };
+      if (path === "/v1/players")
+        return {
+          players: [
+            { name: "Tea", steamId: id, faction: "RED" },
+            { name: "Tea", steamId: null, faction: "BLU" },
+            { name: "Tea", steamId: existing, faction: "GRN" },
+          ],
+        };
+      throw new Error("Unexpected route");
+    });
+    const result = await client.overview();
+    expect(result.players.map((player) => player.steamId)).toEqual([id, existing]);
+    expect(result.unlinkedPlayerCount).toBe(1);
+    expect(result.status.players.current).toBe(3);
+    expect(request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+  });
+  it("reports an entirely unlinked roster without manufacturing player IDs", () => {
+    expect(playersSchema.parse({ players: [{ name: "Unlinked", steamId: null }] })).toEqual({
+      players: [],
+      unlinkedPlayerCount: 1,
+    });
+  });
+  it.each([undefined, "invalid", "", Number(id)])(
+    "still rejects an undocumented or malformed identity: %s",
+    (steamId) => {
+      expect(playersSchema.safeParse({ players: [{ name: "Player", steamId }] }).success).toBe(false);
+      expect(
+        actionSchema.safeParse({ id: randomUUID(), action: "kick", reason: "Identity check", steamId }).success,
+      ).toBe(false);
+    },
+  );
+  it("never accepts an unlinked identity as an action target", () => {
+    expect(
+      actionSchema.safeParse({ id: randomUUID(), action: "kick", reason: "Identity check", steamId: null }).success,
+    ).toBe(false);
   });
 });
 

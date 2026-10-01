@@ -63,6 +63,13 @@ export function PlayersPage() {
 
   return (
     <>
+      {!!admin.overview?.unlinkedPlayerCount && (
+        <p className="notice warning" role="status" aria-label="Incomplete player roster">
+          {admin.overview.unlinkedPlayerCount} roster{" "}
+          {admin.overview.unlinkedPlayerCount === 1 ? "entry has" : "entries have"} no SteamID. Player controls and team
+          counts below exclude {admin.overview.unlinkedPlayerCount === 1 ? "it" : "them"}.
+        </p>
+      )}
       <div className="team-counts">
         {teams.map((team) => {
           const count = players.filter((player) => playerFaction(player, teams)?.name === team.name).length;

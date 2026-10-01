@@ -7,6 +7,23 @@ import { alice, context } from "./test-fixtures";
 vi.mock("../../api/client", () => ({ api: vi.fn() }));
 
 describe("live player controls", () => {
+  it("discloses excluded unlinked entries without inventing selectable identities", () => {
+    const admin = context();
+    admin.overview!.unlinkedPlayerCount = 2;
+    render(
+      <AdminContext.Provider value={admin}>
+        <PlayersPage />
+      </AdminContext.Provider>,
+    );
+    expect(screen.getByRole("status", { name: "Incomplete player roster" })).toHaveTextContent(
+      "2 roster entries have no SteamID.",
+    );
+    expect(screen.getByRole("status", { name: "Incomplete player roster" })).toHaveTextContent(
+      "team counts below exclude them",
+    );
+    fireEvent.click(screen.getByLabelText("Select all shown players"));
+    expect(screen.getByText("3 selected")).toBeInTheDocument();
+  });
   it("sorts without changing selected identities and combines team filters with search", () => {
     render(
       <AdminContext.Provider value={context()}>

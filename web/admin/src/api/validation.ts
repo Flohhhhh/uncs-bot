@@ -37,6 +37,10 @@ export function validateOverview(value: unknown): Overview {
   if (
     !text(value.observedAt) ||
     !Number.isFinite(Date.parse(value.observedAt)) ||
+    (value.unlinkedPlayerCount !== undefined &&
+      (!finite(value.unlinkedPlayerCount) ||
+        !Number.isInteger(value.unlinkedPlayerCount) ||
+        value.unlinkedPlayerCount < 0)) ||
     !text(status.serverName) ||
     !text(status.map) ||
     !optionalText(status.lighting) ||

@@ -14,6 +14,13 @@ const overview = (): Overview => ({
   observedAt: "2026-09-30T18:00:00.000Z",
 });
 describe("browser response contracts", () => {
+  it("accepts the unlinked count without accepting null actionable IDs", () => {
+    expect(validateOverview({ ...overview(), unlinkedPlayerCount: 2 }).unlinkedPlayerCount).toBe(2);
+    expect(() => validateOverview({ ...overview(), players: [{ name: "Player", steamId: null }] })).toThrow();
+  });
+  it.each([-1, 1.5, "2", null])("rejects a malformed unlinked count: %s", (unlinkedPlayerCount) => {
+    expect(() => validateOverview({ ...overview(), unlinkedPlayerCount })).toThrow();
+  });
   it.each(["76561197960265729", "76561200000000000", "76561202255233023"])(
     "accepts structural SteamID64 boundaries in the roster: %s",
     (steamId) => {

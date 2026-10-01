@@ -29,6 +29,7 @@ export type Overview = {
     matchSeconds?: number;
   };
   players: Player[];
+  unlinkedPlayerCount?: number;
   capabilities: {
     build?: string;
     routes: string[];

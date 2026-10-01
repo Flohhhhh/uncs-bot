@@ -71,6 +71,16 @@ This uses the existing React Router dependency's data router and `useBlocker`, w
 
 Browser rehearsal used the isolated preview only: cancelling retained a typed name, confirming left without sending a game action, Back detected a hidden rotation draft, and mobile sign-out required the same discard choice. The phone dialog fit without horizontal document overflow; captured console errors were empty. The separate multi-server prototype was excluded from this build.
 
+Delivered as draft [PR #11](https://github.com/Flohhhhh/uncs-bot/pull/11), stacked on #10. Its dashboard, PostgreSQL concurrency and build CI checks passed for `e26d6f9`.
+
+### Unlinked roster compatibility and event research
+
+The official demonstration roster contains a player whose SteamID is null. A matching isolated reproduction previously rejected the entire overview. The adapter now keeps valid players available, excludes null identities from actionable rows and returns an explicit count. Live players explains that its controls and team counts exclude those rows; the game's reported total is preserved. Action input still rejects null, numeric, missing or malformed SteamIDs, and repeated display names never replace SteamID targeting. This is compatibility with the official sample, not a claim that production currently returns null IDs.
+
+Validation passes **424 backend and 147 dashboard tests**, full production build, backend/frontend typechecks, global formatting, scoped lint and whitespace checks. Seven backend regressions cover mixed/all-unlinked rosters and strict action identities; six frontend regressions cover count validation and disclosure. No dependency, schema, migration, game mutation or new automated action is included.
+
+The [updated event research](WARDOGS_2026-09-30.md#october-1-research-optional-events-ballots-and-scheduling) records Reddit's mixed 50v50 feedback and an existing bot author's first-party implementation reports. It distinguishes documented infantry/hardcore/lighting selections from custom two-team enforcement, Discord ballots from native voting, and scheduled match restarts from host process restarts. Optional-event automation and voting remain unfinished. Discord friend-group/Blue-channel assignment remains research-only.
+
 ## Reviewed delivery boundaries
 
 - Cleanup PR [#5](https://github.com/Flohhhhh/uncs-bot/pull/5) separates public applicant and staff origins, removes website hosting from Gramps, and tolerates individual malformed reserved-list rows. It does not repair xREALM's own interface.

@@ -117,19 +117,26 @@ export const statusSchema = z.object({
   matchSeconds: z.number().optional(),
   scoreCap: z.number().optional(),
 });
-export const playersSchema = z.object({
-  players: z.array(
-    z.object({
-      name: z.string(),
-      steamId,
-      faction: z.string().nullable().optional(),
-      kills: z.number().optional(),
-      deaths: z.number().optional(),
-      cash: z.number().optional(),
-      pingMs: z.number().optional(),
-    }),
-  ),
-});
+export const playersSchema = z
+  .object({
+    players: z.array(
+      z.object({
+        name: z.string(),
+        steamId: steamId.nullable(),
+        faction: z.string().nullable().optional(),
+        kills: z.number().optional(),
+        deaths: z.number().optional(),
+        cash: z.number().optional(),
+        pingMs: z.number().optional(),
+      }),
+    ),
+  })
+  .transform(({ players }) => ({
+    // The official demo includes an unlinked player. Never invent an actionable
+    // identity for that row, or hide that player controls show only part of a roster.
+    players: players.flatMap((player) => (player.steamId === null ? [] : [{ ...player, steamId: player.steamId }])),
+    unlinkedPlayerCount: players.filter((player) => player.steamId === null).length,
+  }));
 export const bansSchema = z.object({
   bans: z.array(
     z.object({
