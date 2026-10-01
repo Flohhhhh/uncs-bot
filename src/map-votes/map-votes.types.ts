@@ -80,6 +80,9 @@ export function ballotWinner(counts: number[]) {
   const maximum = Math.max(0, ...counts);
   return maximum > 0 ? counts.indexOf(maximum) : null;
 }
+export function hasVoteCounts(vote: MapVoteRecord) {
+  return vote.winner !== null || ["closing", "queued", "no_votes"].includes(vote.state);
+}
 
 export function mapVoteView(vote: MapVoteRecord) {
   return {
@@ -92,6 +95,7 @@ export function mapVoteView(vote: MapVoteRecord) {
     state: vote.state,
     winner: vote.winner,
     counts: vote.counts,
+    counted: hasVoteCounts(vote),
     createdAt: vote.createdAt.toISOString(),
     closesAt: vote.closesAt.toISOString(),
     message: vote.message,

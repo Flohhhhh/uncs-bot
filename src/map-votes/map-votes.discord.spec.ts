@@ -1,6 +1,7 @@
 import { ChannelType, Client } from "discord.js";
 import { ballotMessage, MapVotesDiscord } from "./map-votes.discord";
 import type { MapVoteRecord } from "./map-votes.types";
+import { mapVoteView } from "./map-votes.types";
 const record: MapVoteRecord = {
   id: "d0a3cdd7-a1c7-4904-a99e-cf058b432c34",
   serverId: "primary",
@@ -66,6 +67,12 @@ it("disables closed buttons and reports the winner and counts", () => {
   expect(payload.content).toContain("Winner: Islands");
   expect(payload.content).toContain("3 votes");
   expect(payload.components[0].toJSON().components.every((button) => button.disabled)).toBe(true);
+});
+it.each(["cancelled", "needs_review"] as const)("does not present an uncounted %s ballot as zero votes", (state) => {
+  const vote = { ...record, state };
+  expect(ballotMessage(vote).content).not.toContain("0 votes");
+  expect(mapVoteView(vote).counted).toBe(false);
+  expect(mapVoteView({ ...record, state: "no_votes" }).counted).toBe(true);
 });
 it("uses a stable nonce for Discord's duplicate-send protection", async () => {
   const { service, channel } = fixture();

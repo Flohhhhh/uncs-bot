@@ -2,13 +2,14 @@ import { Injectable, ServiceUnavailableException } from "@nestjs/common";
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, Client, PermissionFlagsBits } from "discord.js";
 import { plainLabel } from "../server-community/community-state";
 import { createHash } from "node:crypto";
-import type { MapVoteRecord } from "./map-votes.types";
+import { hasVoteCounts, type MapVoteRecord } from "./map-votes.types";
 
 export function ballotMessage(vote: MapVoteRecord) {
   const open = vote.state === "open";
+  const counted = hasVoteCounts(vote);
   const choices = vote.choices.map(
     (choice, index) =>
-      `${index + 1}. ${plainLabel(choice.map, 80)}${open ? "" : ` — ${vote.counts[index] ?? 0} votes`}\n   ${plainLabel([...choice.experiences, choice.lighting, choice.zoneAlternator].filter(Boolean).join(", ") || "Map defaults", 150)}`,
+      `${index + 1}. ${plainLabel(choice.map, 80)}${counted ? ` — ${vote.counts[index] ?? 0} votes` : ""}\n   ${plainLabel([...choice.experiences, choice.lighting, choice.zoneAlternator].filter(Boolean).join(", ") || "Map defaults", 150)}`,
   );
   const winner =
     vote.winner === null ? "" : `\nWinner: ${plainLabel(vote.choices[vote.winner]?.map ?? "Unknown", 80)}.`;

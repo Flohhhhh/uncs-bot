@@ -323,7 +323,7 @@ function EnabledMapVotes({
                       {vote.choices.map((choice, index) => (
                         <li key={choice.map}>
                           {selectionLabel(choice)}
-                          {!["publishing", "open"].includes(vote.state) && ` — ${vote.counts[index]} votes`}
+                          {vote.counted && ` — ${vote.counts[index]} votes`}
                         </li>
                       ))}
                     </ol>

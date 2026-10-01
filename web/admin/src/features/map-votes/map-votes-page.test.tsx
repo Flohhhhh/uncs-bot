@@ -21,6 +21,7 @@ const ballot = {
     { map: "Islands", experiences: [] },
   ],
   counts: [0, 0],
+  counted: false,
   winner: null,
   createdAt: "2026-10-01T10:00:00Z",
   closesAt: "2026-10-01T10:05:00Z",
@@ -151,6 +152,7 @@ it("shows saved results and closes an active ballot with a separate reasoned req
   votes = [ballot];
   show();
   await screen.findByText(/An active ballot/);
+  expect(request.mock.calls.map(([path]) => path)).toEqual(["map-votes"]);
   expect(screen.queryByRole("button", { name: "Review ballot" })).not.toBeInTheDocument();
   expect(screen.getByRole("link", { name: /View in Discord/ })).toHaveAttribute("href", ballot.messageUrl);
   fireEvent.click(screen.getByRole("button", { name: "Close ballot" }));
@@ -161,4 +163,11 @@ it("shows saved results and closes an active ballot with a separate reasoned req
   const sent = request.mock.calls.find(([, init]) => init?.method === "POST")!;
   expect(sent[0]).toBe(`map-votes/${ballot.id}/cancel`);
   expect(JSON.parse(String(sent[1]?.body))).toMatchObject({ reason: "Event cancelled", id: expect.any(String) });
+});
+it("does not invent a zero-vote total when staff close an uncounted ballot", async () => {
+  votes = [{ ...ballot, state: "cancelled", message: "Closed before counting." }];
+  show();
+  const table = await screen.findByRole("table", { name: "Map votes" });
+  expect(within(table).queryByText(/0 votes/)).not.toBeInTheDocument();
+  expect(within(table).getByText("Closed before counting.")).toBeInTheDocument();
 });
