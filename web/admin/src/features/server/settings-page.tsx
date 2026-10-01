@@ -13,6 +13,7 @@ import { useResource } from "../../api/use-resource";
 import { useGameApi } from "../../api/server-client";
 import type { ActionResult, Catalog } from "../../api/types";
 import { Badge, Card, Empty, Modal, Table } from "../../components/ui";
+import { CopyValue } from "../../components/data-table";
 import { errorMessage, rejectionState } from "../actions/policy";
 import { MapPicker } from "../actions/map-picker";
 import { ServerIdentityReadout } from "./server-identity";
@@ -41,7 +42,7 @@ function ReviewChanges({
   action: DraftAction;
   summary: string[];
   close: () => void;
-  finished: () => void;
+  finished: (state: ActionResult["state"]) => void;
 }) {
   const admin = useAdmin();
   const api = useGameApi();
@@ -53,27 +54,29 @@ function ReviewChanges({
     if (admin.busy || submitted.current) return;
     submitted.current = true;
     admin.setBusy(true);
+    let outcome: ActionResult;
     try {
       const response = await api<ActionResult>("actions", {
         method: "POST",
         body: JSON.stringify({ ...action, id, reason: "Staff reviewed server changes." }),
       });
-      setResult({
+      outcome = {
         ...response,
         state: ["applied", "accepted", "pending", "failed", "unknown"].includes(response.state)
           ? response.state
           : "unknown",
-      });
+      };
     } catch (error) {
-      setResult({
+      outcome = {
         state: rejectionState(error),
-        message: `${errorMessage(error)} Check action ${id} in Action history before trying again.`,
-      });
+        message: errorMessage(error),
+      };
     } finally {
       admin.setBusy(false);
       admin.invalidateOverview();
-      finished();
     }
+    setResult(outcome);
+    finished(outcome.state);
   }
   return (
     <Modal serverScoped title={saveLabels[action.action]} onClose={close} busy={admin.busy}>
@@ -90,9 +93,13 @@ function ReviewChanges({
           >
             {result.message}
           </p>
-          <p className="muted">Receipt: {id}</p>
+          {result.state === "unknown" && <p>Check this receipt in Action history before trying again.</p>}
+          <details>
+            <summary>Action details</summary>
+            <CopyValue value={id} label="action ID" />
+          </details>
           <button type="button" onClick={close} className="button secondary">
-            Close
+            {result.state === "failed" ? "Back to edits" : "Close"}
           </button>
         </>
       ) : (
@@ -312,8 +319,8 @@ function RotationEditor({
         <ReviewChanges
           {...review}
           close={() => setReview(null)}
-          finished={() => {
-            setDraft(null);
+          finished={(state) => {
+            if (state !== "failed") setDraft(null);
             reload();
           }}
         />
@@ -645,8 +652,8 @@ export function SettingsPage() {
         <ReviewChanges
           {...review}
           close={() => setReview(null)}
-          finished={() => {
-            setDraft(null);
+          finished={(state) => {
+            if (state !== "failed") setDraft(null);
             resource.refresh();
           }}
         />
