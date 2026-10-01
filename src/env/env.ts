@@ -1,5 +1,7 @@
 import { nonEmptyString } from "../common/schemas/non-empty-string.schema";
 import { z } from "zod";
+import { jsonSetting } from "./json-setting";
+import { gameServerConnections } from "../common/game-server";
 
 const discordId = z.string().regex(/^\d{17,20}$/, "Use a Discord numeric ID.");
 const communityMessage = z
@@ -51,6 +53,8 @@ export const Env = z.object({
   ADMIN_VIEWER_ROLE_IDS: discordIds,
   WARDOGS_RCON_URL: z.url().optional(),
   WARDOGS_RCON_PASSWORD: nonEmptyString.optional(),
+  /** Explicit server registry. Never expose connection fields through public APIs. */
+  WARDOGS_SERVERS: jsonSetting(gameServerConnections, 65_536).optional(),
   /** Requires a human-reviewed map-vote migration and a configured guild channel. */
   MAP_VOTES_ENABLED: z
     .enum(["true", "false"])
@@ -88,19 +92,7 @@ export const Env = z.object({
     .transform((value) => value === "true"),
   SERVER_COMMUNITY_WELCOME_MESSAGE: communityMessage.default("Welcome to The UNCs! Squad up and enjoy the server."),
   /** Optional JSON array replaces the legacy single message. No placeholder expansion. */
-  SERVER_COMMUNITY_WELCOME_MESSAGES: z
-    .string()
-    .max(2048)
-    .transform((value, context) => {
-      try {
-        return JSON.parse(value) as unknown;
-      } catch {
-        context.addIssue({ code: "custom", message: "Use a JSON array of one to four welcome messages." });
-        return z.NEVER;
-      }
-    })
-    .pipe(z.array(communityMessage).min(1).max(4))
-    .optional(),
+  SERVER_COMMUNITY_WELCOME_MESSAGES: jsonSetting(z.array(communityMessage).min(1).max(4), 2048).optional(),
   SERVER_COMMUNITY_WELCOME_DELAY_SECONDS: z.coerce.number().int().min(0).max(60).default(10),
   SERVER_COMMUNITY_WELCOME_SPACING_SECONDS: z.coerce.number().int().min(10).max(120).default(20),
   SERVER_COMMUNITY_ROUND_MESSAGE: communityMessage.default("GG! Thanks for playing on The UNCs. See you next round."),

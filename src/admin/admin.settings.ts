@@ -1,5 +1,6 @@
 import { Injectable, ServiceUnavailableException } from "@nestjs/common";
 import { EnvService } from "../env/env.service";
+import { LEGACY_SERVER_ID, validRconUrl, type GameServerSummary, type RconConnection } from "../common/game-server";
 
 @Injectable()
 export class AdminSettings {
@@ -57,20 +58,32 @@ export class AdminSettings {
     };
   }
 
-  rcon() {
+  /** Labels only: a browser must never receive the endpoint or password. */
+  servers(): GameServerSummary[] {
+    const configured = this.env.get("WARDOGS_SERVERS");
+    return configured ? configured.map(({ id, name }) => ({ id, name })) : [{ id: LEGACY_SERVER_ID, name: "The UNCs" }];
+  }
+
+  connection(serverId: string): RconConnection {
+    const configured = this.env.get("WARDOGS_SERVERS");
+    if (configured) {
+      const server = configured.find(({ id }) => id === serverId);
+      if (!server) throw new ServiceUnavailableException("That game server is not configured.");
+      return { rconUrl: server.rconUrl, password: server.password };
+    }
+    if (serverId !== LEGACY_SERVER_ID) throw new ServiceUnavailableException("That game server is not configured.");
     const rconUrl = this.env.get("WARDOGS_RCON_URL");
     const password = this.env.get("WARDOGS_RCON_PASSWORD");
     if (!rconUrl || !password) throw new ServiceUnavailableException("The game server has not been connected yet.");
-    const endpoint = this.url(rconUrl);
-    if (
-      !["http:", "https:"].includes(endpoint.protocol) ||
-      endpoint.username ||
-      endpoint.password ||
-      endpoint.search ||
-      endpoint.hash
-    )
-      throw new ServiceUnavailableException("The game connection settings need attention.");
+    if (!validRconUrl(rconUrl)) throw new ServiceUnavailableException("The game connection settings need attention.");
     return { rconUrl, password };
+  }
+
+  /** Legacy callers must never choose an arbitrary target once the registry is in use. */
+  rcon(): RconConnection {
+    if (this.env.get("WARDOGS_SERVERS"))
+      throw new ServiceUnavailableException("An explicit server selection is required for this operation.");
+    return this.connection(LEGACY_SERVER_ID);
   }
 
   private url(value: string) {

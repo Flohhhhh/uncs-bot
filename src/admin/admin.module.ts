@@ -8,6 +8,7 @@ import { AdminService } from "./admin.service";
 import { AdminSettings } from "./admin.settings";
 import { AdminStore } from "./admin.store";
 import { WardogsClient } from "./wardogs.client";
+import { GameServers } from "./game-servers";
 
 @Module({
   imports: [
@@ -18,9 +19,18 @@ import { WardogsClient } from "./wardogs.client";
       serveStaticOptions: { index: false, redirect: false, fallthrough: false, dotfiles: "deny", cacheControl: false },
     }),
   ],
-  providers: [AdminSettings, AdminStore, AdminAuth, AdminGuard, AdminService, WardogsClient, AdminExceptionFilter],
+  providers: [
+    AdminSettings,
+    AdminStore,
+    AdminAuth,
+    AdminGuard,
+    AdminService,
+    WardogsClient,
+    GameServers,
+    AdminExceptionFilter,
+  ],
   controllers: [AdminPageController, AdminApiController],
-  exports: [AdminSettings, AdminStore, AdminAuth, AdminGuard, AdminService, WardogsClient],
+  exports: [AdminSettings, AdminStore, AdminAuth, AdminGuard, AdminService, WardogsClient, GameServers],
 })
 export class AdminModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {
