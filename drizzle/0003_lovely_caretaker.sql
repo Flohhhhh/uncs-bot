@@ -78,9 +78,10 @@ DROP INDEX "combat_events_received_idx";--> statement-breakpoint
 DROP INDEX "combat_events_killer_received_idx";--> statement-breakpoint
 DROP INDEX "combat_events_victim_received_idx";--> statement-breakpoint
 ALTER TABLE "combat_events" DROP CONSTRAINT "combat_events_server_instance_id_event_id_pk";--> statement-breakpoint
-ALTER TABLE "combat_events" ADD CONSTRAINT "combat_events_server_id_server_instance_id_event_id_pk" PRIMARY KEY("server_id","server_instance_id","event_id");--> statement-breakpoint
 ALTER TABLE "whitelist_applications" ADD COLUMN "server_id" text DEFAULT 'primary' NOT NULL;--> statement-breakpoint
 ALTER TABLE "combat_events" ADD COLUMN "server_id" text DEFAULT 'primary' NOT NULL;--> statement-breakpoint
+ALTER TABLE "combat_events" ADD CONSTRAINT "combat_events_server_id_server_instance_id_event_id_pk" PRIMARY KEY("server_id","server_instance_id","event_id");--> statement-breakpoint
+UPDATE "combat_tracking" SET "id" = 'primary' WHERE "id" = 'uncs';--> statement-breakpoint
 ALTER TABLE "map_vote_ballots" ADD CONSTRAINT "map_vote_ballots_vote_id_map_votes_id_fk" FOREIGN KEY ("vote_id") REFERENCES "public"."map_votes"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "server_event_operations" ADD CONSTRAINT "server_event_operations_event_id_server_events_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."server_events"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 CREATE UNIQUE INDEX "map_votes_active_server_idx" ON "map_votes" USING btree ("server_id") WHERE "map_votes"."state" in ('publishing', 'open', 'closing', 'needs_review');--> statement-breakpoint

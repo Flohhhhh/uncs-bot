@@ -33,6 +33,12 @@ describe("launch storage on isolated PostgreSQL", () => {
   let admin: AdminStore;
   let votes: MapVotesStore;
   let events: ServerEventsStore;
+  let migratedLegacyData: Record<string, unknown[]>;
+  const legacyApplicationId = randomUUID();
+  const legacyServerInstanceId = randomUUID();
+  const legacyEventId = randomUUID();
+  const legacyFirstReceivedAt = new Date("2026-09-30T12:00:00.000Z");
+  const legacyLastReceivedAt = new Date("2026-09-30T13:00:00.000Z");
   function worker(pool: Pool) {
     const db = drizzle({ client: pool, schema });
     return {
@@ -150,59 +156,38 @@ describe("launch storage on isolated PostgreSQL", () => {
     if (existing.rowCount !== 0) throw new Error("Storage rehearsal requires a fresh empty test database.");
     const directory = join(__dirname, "../drizzle");
     for (const file of (await readdir(directory)).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort()) {
+      if (file === "0003_lovely_caretaker.sql") {
+        // Exercise the upgrade with records written by the previous single-server release.
+        await client.query(
+          `INSERT INTO whitelist_applications
+            (id, discord_user_id, discord_display_name, steam_id, relationship, email,
+             contact_consent, consent_version, rules_accepted_at, status)
+           VALUES ($1, $2, 'Legacy applicant', '76561198000000001', 'new_player',
+             'legacy@example.test', true, 'test-consent', $3, 'approved')`,
+          [legacyApplicationId, staff.id, legacyFirstReceivedAt],
+        );
+        await client.query(
+          `INSERT INTO combat_events
+            (server_instance_id, event_id, server_name, received_at, event_time,
+             context_tags, headshot, suicide)
+           VALUES ($1, $2, 'Legacy server', $3, 120, '[]', false, false)`,
+          [legacyServerInstanceId, legacyEventId, legacyLastReceivedAt],
+        );
+        await client.query(
+          "INSERT INTO combat_tracking (id, first_received_at, last_received_at, last_cleanup_at) VALUES ('uncs', $1, $2, $2)",
+          [legacyFirstReceivedAt, legacyLastReceivedAt],
+        );
+      }
       await client.query(await readFile(join(directory, file), "utf8"));
     }
-    // Test-only fixture for the proposed source schema, NOT a deployment migration.
-    await client.query(`ALTER TABLE whitelist_applications ADD COLUMN server_id text NOT NULL DEFAULT 'primary';
-      ALTER TABLE whitelist_applications DROP CONSTRAINT whitelist_applications_discord_user_id_unique;
-      ALTER TABLE whitelist_applications DROP CONSTRAINT whitelist_applications_steam_id_unique;
-      CREATE UNIQUE INDEX whitelist_applications_server_discord_idx ON whitelist_applications(server_id, discord_user_id);
-      CREATE UNIQUE INDEX whitelist_applications_server_steam_idx ON whitelist_applications(server_id, steam_id);
-      DROP INDEX whitelist_applications_submitted_idx;
-      CREATE INDEX whitelist_applications_submitted_idx ON whitelist_applications(server_id, submitted_at);
-      ALTER TABLE combat_events ADD COLUMN server_id text NOT NULL DEFAULT 'primary';
-      ALTER TABLE combat_events DROP CONSTRAINT combat_events_server_instance_id_event_id_pk;
-      ALTER TABLE combat_events ADD PRIMARY KEY(server_id, server_instance_id, event_id);
-      DROP INDEX combat_events_received_idx;
-      DROP INDEX combat_events_killer_received_idx;
-      DROP INDEX combat_events_victim_received_idx;
-      CREATE INDEX combat_events_received_idx ON combat_events(server_id, received_at);
-      CREATE INDEX combat_events_killer_received_idx ON combat_events(server_id, killer_steam_id, received_at);
-      CREATE INDEX combat_events_victim_received_idx ON combat_events(server_id, victim_steam_id, received_at);
-      UPDATE combat_tracking SET id = 'primary' WHERE id = 'uncs';`);
-    // A human must generate and review the real migration before enabling map votes.
-    await client.query(`CREATE TABLE map_votes (
-      id uuid PRIMARY KEY, server_id text NOT NULL, server_name text NOT NULL, connection_hash text NOT NULL,
-      guild_id text NOT NULL, channel_id text NOT NULL, message_id text,
-      actor_id text NOT NULL, actor_name text NOT NULL, reason text NOT NULL, request_hash text NOT NULL,
-      choices jsonb NOT NULL, revision text NOT NULL, current_map text NOT NULL, current_index integer NOT NULL,
-      round_started_at timestamptz, state text NOT NULL DEFAULT 'publishing', winner integer,
-      counts jsonb NOT NULL, message text NOT NULL DEFAULT 'Creating the Discord ballot.', cancellation jsonb,
-      created_at timestamptz NOT NULL DEFAULT now(), closes_at timestamptz NOT NULL, updated_at timestamptz NOT NULL DEFAULT now()
-    );
-    CREATE UNIQUE INDEX map_votes_active_server_idx ON map_votes(server_id) WHERE state IN ('publishing', 'open', 'closing', 'needs_review');
-    CREATE INDEX map_votes_created_idx ON map_votes(created_at);
-    CREATE TABLE map_vote_ballots (
-      vote_id uuid NOT NULL REFERENCES map_votes(id), discord_user_id text NOT NULL, choice integer NOT NULL,
-      updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (vote_id, discord_user_id)
-    )`);
-    // Proposed-schema fixtures only; these do not validate or replace the human-owned migration.
-    await client.query(`CREATE TABLE server_events (
-      id uuid PRIMARY KEY, server_id text NOT NULL, server_name text NOT NULL, connection_hash text NOT NULL,
-      guild_id text NOT NULL, actor_id text NOT NULL, actor_name text NOT NULL, reason text NOT NULL, request_hash text NOT NULL,
-      options jsonb NOT NULL, original_lock boolean NOT NULL, initial_revision text NOT NULL, restore_revision text,
-      state text NOT NULL DEFAULT 'preparing', progress jsonb NOT NULL, operation_id uuid, version integer NOT NULL DEFAULT 1,
-      message text NOT NULL DEFAULT 'Preparing the optional event.', last_action_id uuid, stop jsonb,
-      created_at timestamptz NOT NULL DEFAULT now(), ends_at timestamptz NOT NULL, updated_at timestamptz NOT NULL DEFAULT now()
-    );
-    CREATE UNIQUE INDEX server_events_active_server_idx ON server_events(server_id) WHERE state <> 'complete';
-    CREATE INDEX server_events_created_idx ON server_events(created_at);
-    CREATE TABLE server_event_operations (
-      id uuid PRIMARY KEY, event_id uuid NOT NULL REFERENCES server_events(id), actor_id text NOT NULL, actor_name text NOT NULL,
-      operation jsonb NOT NULL, state text NOT NULL DEFAULT 'started', message text NOT NULL DEFAULT 'Recorded before contacting the game.',
-      created_at timestamptz NOT NULL DEFAULT now(), completed_at timestamptz
-    );
-    CREATE INDEX server_event_operations_event_idx ON server_event_operations(event_id, created_at)`);
+    migratedLegacyData = {
+      applications: (
+        await client.query("SELECT id, server_id, discord_user_id, steam_id, email, status FROM whitelist_applications")
+      ).rows,
+      events: (await client.query("SELECT server_id, server_instance_id, event_id, server_name FROM combat_events"))
+        .rows,
+      tracking: (await client.query("SELECT * FROM combat_tracking")).rows,
+    };
     const db = drizzle({ client, schema });
     supporters = new SupportersStore(db);
     applications = new ApplicationsStore(db);
@@ -222,6 +207,37 @@ describe("launch storage on isolated PostgreSQL", () => {
   });
   afterAll(async () => {
     await Promise.all([...workers.map(({ pool }) => pool.end()), client?.end()]);
+  });
+
+  it("preserves existing applications, combat events and tracking when migrating to the primary server", () => {
+    expect(migratedLegacyData).toEqual({
+      applications: [
+        {
+          id: legacyApplicationId,
+          server_id: "primary",
+          discord_user_id: staff.id,
+          steam_id: "76561198000000001",
+          email: "legacy@example.test",
+          status: "approved",
+        },
+      ],
+      events: [
+        {
+          server_id: "primary",
+          server_instance_id: legacyServerInstanceId,
+          event_id: legacyEventId,
+          server_name: "Legacy server",
+        },
+      ],
+      tracking: [
+        {
+          id: "primary",
+          first_received_at: legacyFirstReceivedAt,
+          last_received_at: legacyLastReceivedAt,
+          last_cleanup_at: legacyLastReceivedAt,
+        },
+      ],
+    });
   });
 
   const ballotInput = () => ({
