@@ -10,11 +10,12 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 
-// One configured community feed. serverInstanceId is a per-boot deduplication
+// serverId is the configured connection. serverInstanceId is a per-boot deduplication
 // namespace supplied by the game, never an authorization or tenant selector.
 export const combatEvents = pgTable(
   "combat_events",
   {
+    serverId: text("server_id").notNull().default("primary"),
     serverInstanceId: uuid("server_instance_id").notNull(),
     eventId: uuid("event_id").notNull(),
     serverName: text("server_name").notNull(),
@@ -33,10 +34,10 @@ export const combatEvents = pgTable(
     suicide: boolean("suicide").notNull(),
   },
   (table) => [
-    primaryKey({ columns: [table.serverInstanceId, table.eventId] }),
-    index("combat_events_received_idx").on(table.receivedAt),
-    index("combat_events_killer_received_idx").on(table.killerSteamId, table.receivedAt),
-    index("combat_events_victim_received_idx").on(table.victimSteamId, table.receivedAt),
+    primaryKey({ columns: [table.serverId, table.serverInstanceId, table.eventId] }),
+    index("combat_events_received_idx").on(table.serverId, table.receivedAt),
+    index("combat_events_killer_received_idx").on(table.serverId, table.killerSteamId, table.receivedAt),
+    index("combat_events_victim_received_idx").on(table.serverId, table.victimSteamId, table.receivedAt),
   ],
 );
 

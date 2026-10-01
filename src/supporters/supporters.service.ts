@@ -38,6 +38,7 @@ export class SupportersService {
       secret.length >= 16 &&
       secret !== this.env.get("WARDOGS_RCON_PASSWORD") &&
       secret !== this.env.get("WARDOGS_FEED_TOKEN") &&
+      !this.env.get("WARDOGS_SERVERS")?.some((server) => secret === server.password || secret === server.feedToken) &&
       secret !== this.env.get("ADMIN_SESSION_SECRET"),
     );
   }

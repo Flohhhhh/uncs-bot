@@ -11,13 +11,14 @@ import {
   Injectable,
   Param,
   Post,
+  Query,
   Req,
   Res,
   UseFilters,
   UseGuards,
 } from "@nestjs/common";
 import type { Request, Response } from "express";
-import { AdminGuard, type StaffRequest } from "../admin/admin.auth";
+import { AdminGuard, AdminServerGuard, type StaffRequest } from "../admin/admin.auth";
 import { ApplicantAuth, type ApplicantRequest } from "./applicant.auth";
 import { ApplicationsService } from "./applications.service";
 
@@ -92,8 +93,8 @@ export class ApplicantAuthController {
 export class ApplicantApiController {
   constructor(private readonly service: ApplicationsService) {}
   @Get("me")
-  me(@Req() req: ApplicantRequest) {
-    return this.service.me(req.applicant);
+  me(@Req() req: ApplicantRequest, @Query("server") serverId?: string) {
+    return this.service.me(req.applicant, serverId);
   }
   @Post("request")
   submit(@Req() req: ApplicantRequest, @Body() body: unknown) {
@@ -101,9 +102,9 @@ export class ApplicantApiController {
   }
 }
 
-@Controller("admin/api/applications")
+@Controller(["admin/api/applications", "admin/api/servers/:serverId/applications"])
 @UseFilters(ApplicationsExceptionFilter)
-@UseGuards(ApplicationsEnabledGuard, AdminGuard)
+@UseGuards(ApplicationsEnabledGuard, AdminGuard, AdminServerGuard)
 export class StaffApplicationsController {
   constructor(private readonly service: ApplicationsService) {}
   @Get()

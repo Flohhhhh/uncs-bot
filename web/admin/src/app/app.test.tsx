@@ -20,9 +20,11 @@ function mount(path = "/overview", role = "admin") {
         JSON.stringify(
           url.endsWith("/me")
             ? { id: "staff", name: "Test staff", role, csrf: "csrf" }
-            : url.endsWith("/overview")
-              ? overview
-              : [],
+            : url.endsWith("/servers")
+              ? { legacy: true, servers: [{ id: "primary", name: "Test server", version: "0".repeat(64), role }] }
+              : url.endsWith("/overview")
+                ? overview
+                : [],
         ),
       ),
   );
@@ -214,7 +216,14 @@ describe("React staff shell", () => {
       async (url: string) =>
         new Response(
           JSON.stringify(
-            url.endsWith("/me") ? { id: "staff", name: "Test staff", role: "admin", csrf: "csrf" } : [entry],
+            url.endsWith("/me")
+              ? { id: "staff", name: "Test staff", role: "admin", csrf: "csrf" }
+              : url.endsWith("/servers")
+                ? {
+                    legacy: true,
+                    servers: [{ id: "primary", name: "Test server", version: "0".repeat(64), role: "admin" }],
+                  }
+                : [entry],
           ),
         ),
     );

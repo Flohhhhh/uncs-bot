@@ -16,7 +16,7 @@ import {
 } from "@nestjs/common";
 import type { Request, Response } from "express";
 import { join } from "node:path";
-import { AdminAuth, AdminGuard, type StaffRequest } from "./admin.auth";
+import { AdminAuth, AdminGuard, AdminServerGuard, type StaffRequest } from "./admin.auth";
 import { AdminService } from "./admin.service";
 
 @Catch()
@@ -77,30 +77,41 @@ export class AdminPageController {
 @UseFilters(AdminExceptionFilter)
 @UseGuards(AdminGuard)
 export class AdminApiController {
-  constructor(private readonly service: AdminService) {}
+  constructor(private readonly auth: AdminAuth) {}
   @Get("me")
   me(@Req() req: StaffRequest) {
     return req.staff;
   }
+  @Get("servers")
+  servers(@Req() req: StaffRequest) {
+    return this.auth.serverList(req.staff);
+  }
+}
+
+@Controller(["admin/api", "admin/api/servers/:serverId"])
+@UseFilters(AdminExceptionFilter)
+@UseGuards(AdminGuard, AdminServerGuard)
+export class AdminGameController {
+  constructor(private readonly service: AdminService) {}
   @Get("settings")
   settings(@Req() req: StaffRequest) {
     return this.service.configuration(req.staff);
   }
   @Get("catalog/maps/:map")
-  mapOptions(@Param("map") map: string) {
-    return this.service.mapOptions(map);
+  mapOptions(@Req() req: StaffRequest, @Param("map") map: string) {
+    return this.service.mapOptions(map, req.staff.serverId);
   }
   @Post("actions")
   act(@Req() req: StaffRequest, @Body() body: unknown) {
     return this.service.act(req.staff, body);
   }
   @Get(["overview", "bans", "whitelist", "catalog", "rotation", "audit"])
-  read(@Req() req: Request) {
+  read(@Req() req: StaffRequest) {
     const resource = req.path.replace(/\/$/, "").split("/").at(-1) ?? "";
-    return this.service.read(resource);
+    return this.service.read(resource, req.staff.serverId);
   }
   @Get("audit/:id")
-  receipt(@Param("id") id: string) {
-    return this.service.receipt(id);
+  receipt(@Req() req: StaffRequest, @Param("id") id: string) {
+    return this.service.receipt(id, req.staff.serverId);
   }
 }

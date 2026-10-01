@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { AdminService } from "./admin.service";
 import { AdminStore } from "./admin.store";
-import { RconError, WardogsClient } from "./wardogs.client";
+import { RconError } from "./wardogs.client";
+import { fixtureServers } from "./game-server-fixture";
 import type { Staff } from "./admin.types";
 const staff: Staff = { id: "123456789012345678", name: "Admin", role: "admin", csrf: "csrf" };
 const input = () => ({
@@ -17,7 +18,7 @@ function fixture() {
     begin: jest.fn().mockResolvedValue({ created: true }),
     finish: jest.fn().mockResolvedValue(undefined),
   };
-  const service = new AdminService(game as unknown as WardogsClient, store as unknown as AdminStore);
+  const service = new AdminService(fixtureServers(game), store as unknown as AdminStore);
   return { game, store, service };
 }
 describe("staff action safeguards", () => {

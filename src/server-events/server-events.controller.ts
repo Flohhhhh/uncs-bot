@@ -1,11 +1,11 @@
 import { Body, Controller, Get, Param, Post, Req, UseFilters, UseGuards } from "@nestjs/common";
-import { AdminGuard, type StaffRequest } from "../admin/admin.auth";
+import { AdminGuard, AdminServerGuard, type StaffRequest } from "../admin/admin.auth";
 import { AdminExceptionFilter } from "../admin/admin.controller";
 import { ServerEventsService } from "./server-events.service";
 
-@Controller("admin/api/events")
+@Controller(["admin/api/events", "admin/api/servers/:serverId/events"])
 @UseFilters(AdminExceptionFilter)
-@UseGuards(AdminGuard)
+@UseGuards(AdminGuard, AdminServerGuard)
 export class ServerEventsController {
   constructor(private readonly service: ServerEventsService) {}
   @Get() list(@Req() request: StaffRequest) {

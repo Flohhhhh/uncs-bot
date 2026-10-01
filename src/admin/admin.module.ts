@@ -2,12 +2,11 @@ import { type MiddlewareConsumer, Module, type NestModule, RequestMethod } from 
 import { ServeStaticModule } from "@nestjs/serve-static";
 import { join } from "node:path";
 import type { NextFunction, Request, Response } from "express";
-import { AdminAuth, AdminGuard } from "./admin.auth";
-import { AdminApiController, AdminExceptionFilter, AdminPageController } from "./admin.controller";
+import { AdminAuth, AdminGuard, AdminServerGuard } from "./admin.auth";
+import { AdminApiController, AdminGameController, AdminExceptionFilter, AdminPageController } from "./admin.controller";
 import { AdminService } from "./admin.service";
 import { AdminSettings } from "./admin.settings";
 import { AdminStore } from "./admin.store";
-import { WardogsClient } from "./wardogs.client";
 import { GameServers } from "./game-servers";
 
 @Module({
@@ -24,13 +23,13 @@ import { GameServers } from "./game-servers";
     AdminStore,
     AdminAuth,
     AdminGuard,
+    AdminServerGuard,
     AdminService,
-    WardogsClient,
     GameServers,
     AdminExceptionFilter,
   ],
-  controllers: [AdminPageController, AdminApiController],
-  exports: [AdminSettings, AdminStore, AdminAuth, AdminGuard, AdminService, WardogsClient, GameServers],
+  controllers: [AdminPageController, AdminApiController, AdminGameController],
+  exports: [AdminSettings, AdminStore, AdminAuth, AdminGuard, AdminServerGuard, AdminService, GameServers],
 })
 export class AdminModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {

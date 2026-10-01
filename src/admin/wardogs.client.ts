@@ -1,4 +1,4 @@
-import { Inject, Injectable, ServiceUnavailableException } from "@nestjs/common";
+import { Injectable, ServiceUnavailableException } from "@nestjs/common";
 import { z } from "zod";
 import { AdminSettings } from "./admin.settings";
 import {
@@ -41,7 +41,7 @@ export class WardogsClient {
   private capabilitiesCache?: { until: number; value: Capabilities };
   private overviewCache?: { until: number; promise: Promise<Overview> };
   private holdUntil = 0;
-  constructor(@Inject(AdminSettings) private readonly settings: RconConnectionSource) {}
+  constructor(private readonly settings: RconConnectionSource) {}
 
   async request(method: string, path: string, body?: unknown, revision?: string): Promise<any> {
     if (Date.now() < this.holdUntil) throw new RconError("The game requested a short pause. Wait before trying again.");

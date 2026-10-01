@@ -48,7 +48,12 @@ export function operation(
   extra: Partial<EventOperation> = {},
 ): EventOperation {
   const id = randomUUID();
-  return { id, kind, action: { ...input, id, reason: `50v50 event ${event.id}: ${kind}` } as AdminAction, ...extra };
+  return {
+    id,
+    kind,
+    action: { ...input, id, serverId: event.serverId, reason: `50v50 event ${event.id}: ${kind}` } as AdminAction,
+    ...extra,
+  };
 }
 
 /** Pure roster planning: no network, mutation, Discord membership or cash-based purchase inference. */

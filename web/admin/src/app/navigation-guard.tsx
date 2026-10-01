@@ -18,7 +18,8 @@ export function NavigationGuard({
   // Capture why navigation was blocked before opening our own confirmation.
   const reason = useRef<"draft" | "review" | null>(null);
   const blocker = useBlocker(({ currentLocation, nextLocation }) => {
-    if (currentLocation.pathname === nextLocation.pathname) return false;
+    if (currentLocation.pathname === nextLocation.pathname && currentLocation.search === nextLocation.search)
+      return false;
     if (reason.current === "draft") return true;
     reason.current = busy || dialogOpen ? "review" : unsaved ? "draft" : null;
     return reason.current !== null;

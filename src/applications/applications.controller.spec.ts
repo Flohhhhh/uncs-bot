@@ -1,10 +1,11 @@
 import { ForbiddenException, UnauthorizedException, type INestApplication } from "@nestjs/common";
 import { Test } from "@nestjs/testing";
 import request from "supertest";
-import { AdminApiController, AdminExceptionFilter } from "../admin/admin.controller";
-import { AdminAuth, AdminGuard } from "../admin/admin.auth";
+import { AdminApiController, AdminGameController, AdminExceptionFilter } from "../admin/admin.controller";
+import { AdminAuth, AdminGuard, AdminServerGuard } from "../admin/admin.auth";
 import { AdminService } from "../admin/admin.service";
-import { WardogsClient } from "../admin/wardogs.client";
+import { GameServers } from "../admin/game-servers";
+import { fixtureServers } from "../admin/game-server-fixture";
 import type { Staff } from "../admin/admin.types";
 import { EnvService } from "../env/env.service";
 import { ApplicantAuth } from "./applicant.auth";
@@ -47,10 +48,17 @@ describe("application HTTP routing and privacy", () => {
     const module = await Test.createTestingModule({
       // Deliberately register the existing controller first. Its old generic
       // resource route would steal the applications endpoint in this order.
-      controllers: [AdminApiController, StaffApplicationsController, ApplicantApiController, ApplicantAuthController],
+      controllers: [
+        AdminApiController,
+        AdminGameController,
+        StaffApplicationsController,
+        ApplicantApiController,
+        ApplicantAuthController,
+      ],
       providers: [
         ApplicationsService,
         AdminGuard,
+        AdminServerGuard,
         ApplicantGuard,
         ApplicationsEnabledGuard,
         ApplicationsExceptionFilter,
@@ -61,8 +69,14 @@ describe("application HTTP routing and privacy", () => {
           provide: EnvService,
           useValue: { get: (key: string) => (key === "WHITELIST_APPLICATIONS_ENABLED" ? enabled : true) },
         },
-        { provide: WardogsClient, useValue: {} },
-        { provide: AdminAuth, useValue: { authenticate: async () => staff } },
+        { provide: GameServers, useValue: fixtureServers({}) },
+        {
+          provide: AdminAuth,
+          useValue: {
+            authenticate: async () => staff,
+            serverStaff: async (actor: Staff, serverId: string) => ({ ...actor, serverId }),
+          },
+        },
         { provide: ApplicantAuth, useValue: applicantAuth },
       ],
     }).compile();
@@ -102,7 +116,7 @@ describe("application HTTP routing and privacy", () => {
 
   it("routes the administrator applications list separately from existing resources", async () => {
     const response = await request(app.getHttpServer()).get("/admin/api/applications").expect(200);
-    expect(response.body).toEqual({ applications: [privateRow] });
+    expect(response.body).toEqual({ serverId: "primary", applications: [privateRow] });
     expect(admin.read).not.toHaveBeenCalled();
     expect(store.list).toHaveBeenCalledTimes(1);
   });
@@ -111,7 +125,7 @@ describe("application HTTP routing and privacy", () => {
     async (resource) => {
       const response = await request(app.getHttpServer()).get(`/admin/api/${resource}`).expect(200);
       expect(response.body).toEqual({ resource });
-      expect(admin.read).toHaveBeenCalledWith(resource);
+      expect(admin.read).toHaveBeenCalledWith(resource, "primary");
     },
   );
   it.each(["moderator", "viewer"] as const)("does not send private contact data to %s", async (role) => {
@@ -122,7 +136,7 @@ describe("application HTTP routing and privacy", () => {
   });
   it("ignores an attempted identity selector and returns only the signed-in applicant's public projection", async () => {
     const response = await request(app.getHttpServer()).get("/apply/api/me?userId=999999999999999999").expect(200);
-    expect(store.own).toHaveBeenCalledWith(identity.userId);
+    expect(store.own).toHaveBeenCalledWith(identity.userId, "primary");
     expect(response.body.userId).toBe(identity.userId);
     expect(response.body.emailRequired).toBe(true);
     expect(response.body.application).not.toHaveProperty("reviewReason");

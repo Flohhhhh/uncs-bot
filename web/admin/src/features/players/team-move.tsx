@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { api } from "../../api/client";
+import { useGameApi } from "../../api/server-client";
 import type { ActionResult, Player } from "../../api/types";
-import { useAdmin } from "../../app/context";
+import { useGameAdmin as useAdmin } from "../../app/context";
 import { Badge, Modal, ReasonField } from "../../components/ui";
 import { allowed, errorMessage, rejectionState, singleLine } from "../actions/policy";
 import { FactionOptions, liveFactions, playerFaction } from "./factions";
@@ -85,6 +85,7 @@ export function TeamMoveDialog({
   onComplete?: (result: TeamMoveResult) => void;
 }) {
   const admin = useAdmin();
+  const api = useGameApi();
   const current = useRef(admin);
   current.current = admin;
   const mounted = useRef(true);
@@ -220,6 +221,7 @@ export function TeamMoveDialog({
 
   return (
     <Modal
+      serverScoped
       className="team-dialog"
       title={
         done

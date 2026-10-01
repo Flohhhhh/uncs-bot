@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { AdminAction } from "../admin/admin.types";
 import type { WardogsClient } from "../admin/wardogs.client";
 import { roundStamp, type RoundStamp } from "../common/game-round";
+import { gameServerId } from "../common/game-server";
 export { sameRound, type RoundStamp } from "../common/game-round";
 const reason = z
   .string()
@@ -22,7 +23,7 @@ const faction = z
 export const startEventSchema = z
   .object({
     id: z.uuid(),
-    serverId: z.literal("primary"),
+    serverId: gameServerId,
     reason,
     revision,
     teams: z.tuple([faction, faction]).refine(([a, b]) => a !== b),

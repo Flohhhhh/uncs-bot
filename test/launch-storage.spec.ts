@@ -19,6 +19,8 @@ import { MapVotesStore } from "../src/map-votes/map-votes.store";
 import { ServerEventsStore } from "../src/server-events/server-events.store";
 import { eventFixture, eventStaff } from "../src/server-events/event-fixtures";
 import { operation } from "../src/server-events/event-planner";
+import { TelemetryStore } from "../src/telemetry/telemetry.store";
+import { parseFeed } from "../src/telemetry/telemetry.types";
 
 // Only the port is configurable. Never load the application's configuration or
 // DATABASE_URL: this suite requires an empty, disposable loopback test database.
@@ -151,6 +153,23 @@ describe("launch storage on isolated PostgreSQL", () => {
       await client.query(await readFile(join(directory, file), "utf8"));
     }
     // Test-only fixture for the proposed source schema, NOT a deployment migration.
+    await client.query(`ALTER TABLE whitelist_applications ADD COLUMN server_id text NOT NULL DEFAULT 'primary';
+      ALTER TABLE whitelist_applications DROP CONSTRAINT whitelist_applications_discord_user_id_unique;
+      ALTER TABLE whitelist_applications DROP CONSTRAINT whitelist_applications_steam_id_unique;
+      CREATE UNIQUE INDEX whitelist_applications_server_discord_idx ON whitelist_applications(server_id, discord_user_id);
+      CREATE UNIQUE INDEX whitelist_applications_server_steam_idx ON whitelist_applications(server_id, steam_id);
+      DROP INDEX whitelist_applications_submitted_idx;
+      CREATE INDEX whitelist_applications_submitted_idx ON whitelist_applications(server_id, submitted_at);
+      ALTER TABLE combat_events ADD COLUMN server_id text NOT NULL DEFAULT 'primary';
+      ALTER TABLE combat_events DROP CONSTRAINT combat_events_server_instance_id_event_id_pk;
+      ALTER TABLE combat_events ADD PRIMARY KEY(server_id, server_instance_id, event_id);
+      DROP INDEX combat_events_received_idx;
+      DROP INDEX combat_events_killer_received_idx;
+      DROP INDEX combat_events_victim_received_idx;
+      CREATE INDEX combat_events_received_idx ON combat_events(server_id, received_at);
+      CREATE INDEX combat_events_killer_received_idx ON combat_events(server_id, killer_steam_id, received_at);
+      CREATE INDEX combat_events_victim_received_idx ON combat_events(server_id, victim_steam_id, received_at);
+      UPDATE combat_tracking SET id = 'primary' WHERE id = 'uncs';`);
     // A human must generate and review the real migration before enabling map votes.
     await client.query(`CREATE TABLE map_votes (
       id uuid PRIMARY KEY, server_id text NOT NULL, server_name text NOT NULL, connection_hash text NOT NULL,
@@ -198,7 +217,7 @@ describe("launch storage on isolated PostgreSQL", () => {
   beforeEach(async () => {
     if (!initialized) return;
     await client.query(
-      "TRUNCATE server_event_operations, server_events, map_vote_ballots, map_votes, supporter_actions, supporter_founders, supporter_payments, supporter_observations, supporter_members, whitelist_application_reviews, whitelist_applications, admin_actions, admin_sessions CASCADE",
+      "TRUNCATE combat_events, combat_tracking, server_event_operations, server_events, map_vote_ballots, map_votes, supporter_actions, supporter_founders, supporter_payments, supporter_observations, supporter_members, whitelist_application_reviews, whitelist_applications, admin_actions, admin_sessions CASCADE",
     );
   });
   afterAll(async () => {
@@ -225,6 +244,75 @@ describe("launch storage on isolated PostgreSQL", () => {
     currentIndex: 0,
     counts: [0, 0],
     closesAt: new Date(Date.now() + 60_000),
+  });
+
+  it("keeps applications and grants separate when the same member joins two servers", async () => {
+    const east = await applications.create({ ...applicationInput(), serverId: "east" });
+    const central = await applications.create({ ...applicationInput(), serverId: "central" });
+    expect(east?.id).not.toBe(central?.id);
+    expect(await applications.create({ ...applicationInput(), serverId: "east" })).toBeUndefined();
+    expect((await applications.own(staff.id, "east"))?.id).toBe(east!.id);
+    expect((await applications.list("central")).map((r) => r.id)).toEqual([central!.id]);
+    const wrong = await applications.claim(east!.id, { id: randomUUID(), reason: "Wrong target" }, "approve", {
+      ...staff,
+      serverId: "central",
+    });
+    expect(wrong).toEqual({ claimed: false, application: undefined });
+    expect((await applications.own(staff.id, "east"))?.status).toBe("pending");
+    const review = { id: randomUUID(), reason: "Reviewed exact target" };
+    expect((await applications.claim(east!.id, review, "approve", { ...staff, serverId: "east" })).claimed).toBe(true);
+    await applications.finishApproval(east!.id, review.id, { state: "applied", message: "Confirmed" });
+    expect((await applications.own(staff.id, "central"))?.status).toBe("pending");
+  });
+
+  it("filters history before its row limit and keeps legacy receipts on primary", async () => {
+    const oldId = randomUUID();
+    await admin.begin(staff, { id: oldId, action: "broadcast", message: "Legacy", reason: "Old receipt" }, "old");
+    await admin.finish(oldId, { state: "accepted", message: "Legacy accepted" });
+    const eastId = randomUUID();
+    await admin.begin(
+      staff,
+      { id: eastId, serverId: "east", action: "broadcast", message: "East", reason: "East receipt" },
+      "east",
+    );
+    for (let i = 0; i < 101; i++)
+      await admin.begin(
+        staff,
+        { id: randomUUID(), serverId: "central", action: "broadcast", message: "Central", reason: "Central receipt" },
+        `central-${i}`,
+      );
+    expect((await admin.history("east")).map((r) => r.id)).toEqual([eastId]);
+    expect((await admin.history("primary")).map((r) => r.id)).toEqual([oldId]);
+    expect(await admin.receipt(eastId, "central")).toBeNull();
+    expect(await admin.receipt(oldId, "east")).toBeNull();
+    expect((await admin.receipt(oldId, "primary"))?.state).toBe("accepted");
+  });
+
+  it("deduplicates and aggregates the same game event independently on two configured servers", async () => {
+    const telemetry = new TelemetryStore(drizzle({ client, schema }));
+    const now = new Date(),
+      since = new Date(now.getTime() - 60_000);
+    const feed = parseFeed({
+      serverId: randomUUID(),
+      serverName: "Untrusted game label",
+      events: [
+        {
+          eventId: randomUUID(),
+          type: "killed",
+          eventTime: 12,
+          killerSteamId: "76561198000000001",
+          victimSteamId: "76561198000000002",
+        },
+      ],
+    });
+    expect((await telemetry.ingest(feed, now, "east")).inserted).toBe(1);
+    expect((await telemetry.ingest(feed, now, "central")).inserted).toBe(1);
+    expect((await telemetry.ingest(feed, now, "east")).duplicates).toBe(1);
+    expect((await telemetry.snapshot(since, now, undefined, "east")).totals.events).toBe(1);
+    expect((await telemetry.snapshot(since, now, undefined, "central")).totals.events).toBe(1);
+    expect(await telemetry.events(since, now, undefined, "primary")).toEqual([]);
+    expect(await telemetry.tracking("primary")).toBeNull();
+    expect((await telemetry.tracking("east"))?.lastReceivedAt).toEqual(now);
   });
   function eventInput() {
     const { operation: _operation, ...record } = eventFixture();

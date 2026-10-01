@@ -11,6 +11,7 @@ import { AdminAuth } from "../src/admin/admin.auth";
 import { AdminSettings } from "../src/admin/admin.settings";
 import { AdminStore } from "../src/admin/admin.store";
 import { WardogsClient } from "../src/admin/wardogs.client";
+import { GameServers } from "../src/admin/game-servers";
 import { configuredWhitelist } from "../src/admin/whitelist-document";
 import { settingFields, SESSION, ROTATION } from "../src/common/server-settings";
 import { scalarValue } from "../src/admin/config-document";
@@ -43,216 +44,249 @@ import type {
 } from "../src/supporters/supporters.types";
 
 const previewPort = Number(process.env.PREVIEW_PORT || 4317);
-let previewRoundStart = Date.now() - 600_000;
+function createPreviewGame(name: string) {
+  let previewRoundStart = Date.now() - 600_000;
 
-const players = [
-  { name: "UncDap", steamId: "76561198066952872", faction: "RED", kills: 18, deaths: 7, cash: 14300, pingMs: 32 },
-  {
-    name: "MossyBoots",
-    steamId: "76561198123456789",
-    faction: "RED",
-    kills: 11,
-    deaths: 6,
-    cash: 8700,
-    pingMs: 47,
-  },
-  {
-    name: "[UNC] OldManRiver",
-    steamId: "76561198123456780",
-    faction: "BLU",
-    kills: 16,
-    deaths: 9,
-    cash: 12200,
-    pingMs: 61,
-  },
-  {
-    name: "TeaAndTanks",
-    steamId: "76561198123456781",
-    faction: "GRN",
-    kills: 8,
-    deaths: 4,
-    cash: 7800,
-    pingMs: 39,
-  },
-  {
-    name: "NightShift",
-    steamId: "76561198123456782",
-    faction: "BLU",
-    kills: 14,
-    deaths: 8,
-    cash: 10500,
-    pingMs: 52,
-  },
-  {
-    name: "RustyCompass",
-    steamId: "76561198123456783",
-    faction: "GRN",
-    kills: 6,
-    deaths: 5,
-    cash: 6200,
-    pingMs: 44,
-  },
-];
-const factions = [
-  { code: "RED", name: "Valkyra", colorHex: "#D86060", score: 18420 },
-  { code: "BLU", name: "Lonestar", colorHex: "#5B95D8", score: 14800 },
-  { code: "GRN", name: "Manticore", colorHex: "#7BC462", score: 12600 },
-];
-const bans: { steamId: string; reason: string; bannedBy: string; bannedAtUtc: string }[] = [
-  {
-    steamId: "76561198123456000",
-    reason: "Repeated team disruption (sample)",
-    bannedBy: "Demo staff",
-    bannedAtUtc: new Date().toISOString(),
-  },
-];
-const sampleSettings: Record<string, string | number | boolean> = {
-  serverName: "The UNCs | Local event preview",
-  imageUrl: "",
-  serverPassword: "",
-  maxPlayers: 100,
-  maxReservedSlots: 0,
-  minPlayerCash: 0,
-  maxPlayerCash: 0,
-  minPlayerLevel: 0,
-  maxPlayerLevel: 0,
-  minRequiredPlayers: 60,
-  scorePeriod: 24,
-  lockOverpopulated: true,
-  overpopThreshold: 2,
-  rotationEnabled: true,
-  rotationMode: "Ordered",
-};
-let text =
-  [...new Set(settingFields.map((field) => field.section))]
-    .map((section) => {
-      const values = settingFields
-        .filter((field) => field.section === section)
-        .map((field) => `${field.key}=${sampleSettings[field.id]}`);
-      if (section === SESSION)
-        values.push(...players.slice(0, 3).map((player) => `+DefaultReservedPlayerIds=${player.steamId}`));
-      if (section === ROTATION)
-        values.push(
-          ...["Lonestar", "Kavkazi", "Europe"].map(
-            (map) => `+RotationEntries=(Map="${map}",Experiences="",Lighting="DayClear")`,
-          ),
-        );
-      return `[${section}]\n${values.join("\n")}\n`;
-    })
-    .join("\n") + "[WDServerFeed]\nUrl=http://127.0.0.1:32190\n";
-let revision = 1,
-  currentMap = "Lonestar",
-  lighting = "DayClear";
-const routes = [
-  "GET /v1/status",
-  "GET /v1/players",
-  "GET /v1/bans",
-  "GET /v1/reserved-slots",
-  "GET /v1/config",
-  "PUT /v1/config",
-  "POST /v1/config/validate",
-  "POST /v1/bans",
-  "DELETE /v1/bans/{id}",
-  "POST /v1/players/{id}/kick",
-  "POST /v1/players/{id}/kill",
-  "POST /v1/players/{id}/message",
-  "PATCH /v1/players/{id}",
-  "POST /v1/broadcast",
-  "POST /v1/match/end",
-  "POST /v1/match/restart",
-  "POST /v1/match/map",
-  "PUT /v1/world/lighting",
-  "GET /v1/catalog/maps",
-  "GET /v1/catalog/lightings",
-  "GET /v1/catalog/experiences",
-  "GET /v1/rotation",
-];
-const settings = { get: () => ({}) } as AdminSettings;
-class PreviewGame extends WardogsClient {
-  override async request(method: string, path: string, body?: any, expectedRevision?: string) {
-    if (path === "/v1/capabilities")
-      return { routes, build: "LOCAL PREVIEW · SAMPLE DATA", config: { writable: true } };
-    if (path === "/v1/status")
-      return {
-        serverName: scalarValue(text, SESSION, "ServerName") || "Local preview",
-        map: currentMap,
-        matchSeconds: (Date.now() - previewRoundStart) / 1000,
-        lighting,
-        experiences: ["King of the Hill"],
-        scoreTick: { current: 24, min: 18, max: 30 },
-        rotation: { nowIndex: 0, nextIndex: 1 },
-        players: { current: players.length, max: 100 },
-        factionScores: factions.map(({ name, colorHex, score }) => ({ name, colorHex, score })),
-      };
-    if (path === "/v1/players") return { players };
-    if (path === "/v1/reserved-slots") return { reservedSlots: configuredWhitelist(text) };
-    if (path === "/v1/config/validate") return { ok: true };
-    if (path === "/v1/config") {
-      if (method === "GET")
+  const players = [
+    { name: "UncDap", steamId: "76561198066952872", faction: "RED", kills: 18, deaths: 7, cash: 14300, pingMs: 32 },
+    {
+      name: "MossyBoots",
+      steamId: "76561198123456789",
+      faction: "RED",
+      kills: 11,
+      deaths: 6,
+      cash: 8700,
+      pingMs: 47,
+    },
+    {
+      name: "[UNC] OldManRiver",
+      steamId: "76561198123456780",
+      faction: "BLU",
+      kills: 16,
+      deaths: 9,
+      cash: 12200,
+      pingMs: 61,
+    },
+    {
+      name: "TeaAndTanks",
+      steamId: "76561198123456781",
+      faction: "GRN",
+      kills: 8,
+      deaths: 4,
+      cash: 7800,
+      pingMs: 39,
+    },
+    {
+      name: "NightShift",
+      steamId: "76561198123456782",
+      faction: "BLU",
+      kills: 14,
+      deaths: 8,
+      cash: 10500,
+      pingMs: 52,
+    },
+    {
+      name: "RustyCompass",
+      steamId: "76561198123456783",
+      faction: "GRN",
+      kills: 6,
+      deaths: 5,
+      cash: 6200,
+      pingMs: 44,
+    },
+  ];
+  const factions = [
+    { code: "RED", name: "Valkyra", colorHex: "#D86060", score: 18420 },
+    { code: "BLU", name: "Lonestar", colorHex: "#5B95D8", score: 14800 },
+    { code: "GRN", name: "Manticore", colorHex: "#7BC462", score: 12600 },
+  ];
+  const bans: { steamId: string; reason: string; bannedBy: string; bannedAtUtc: string }[] = [
+    {
+      steamId: "76561198123456000",
+      reason: "Repeated team disruption (sample)",
+      bannedBy: "Demo staff",
+      bannedAtUtc: new Date().toISOString(),
+    },
+  ];
+  const sampleSettings: Record<string, string | number | boolean> = {
+    serverName: name,
+    imageUrl: "",
+    serverPassword: "",
+    maxPlayers: 100,
+    maxReservedSlots: 0,
+    minPlayerCash: 0,
+    maxPlayerCash: 0,
+    minPlayerLevel: 0,
+    maxPlayerLevel: 0,
+    minRequiredPlayers: 60,
+    scorePeriod: 24,
+    lockOverpopulated: true,
+    overpopThreshold: 2,
+    rotationEnabled: true,
+    rotationMode: "Ordered",
+  };
+  let text =
+    [...new Set(settingFields.map((field) => field.section))]
+      .map((section) => {
+        const values = settingFields
+          .filter((field) => field.section === section)
+          .map((field) => `${field.key}=${sampleSettings[field.id]}`);
+        if (section === SESSION)
+          values.push(...players.slice(0, 3).map((player) => `+DefaultReservedPlayerIds=${player.steamId}`));
+        if (section === ROTATION)
+          values.push(
+            ...["Lonestar", "Kavkazi", "Europe"].map(
+              (map) => `+RotationEntries=(Map="${map}",Experiences="",Lighting="DayClear")`,
+            ),
+          );
+        return `[${section}]\n${values.join("\n")}\n`;
+      })
+      .join("\n") + "[WDServerFeed]\nUrl=http://127.0.0.1:32190\n";
+  let revision = 1,
+    currentMap = "Lonestar",
+    lighting = "DayClear";
+  const routes = [
+    "GET /v1/status",
+    "GET /v1/players",
+    "GET /v1/bans",
+    "GET /v1/reserved-slots",
+    "GET /v1/config",
+    "PUT /v1/config",
+    "POST /v1/config/validate",
+    "POST /v1/bans",
+    "DELETE /v1/bans/{id}",
+    "POST /v1/players/{id}/kick",
+    "POST /v1/players/{id}/kill",
+    "POST /v1/players/{id}/message",
+    "PATCH /v1/players/{id}",
+    "POST /v1/broadcast",
+    "POST /v1/match/end",
+    "POST /v1/match/restart",
+    "POST /v1/match/map",
+    "PUT /v1/world/lighting",
+    "GET /v1/catalog/maps",
+    "GET /v1/catalog/lightings",
+    "GET /v1/catalog/experiences",
+    "GET /v1/rotation",
+  ];
+  class PreviewGame extends WardogsClient {
+    override async request(method: string, path: string, body?: any, expectedRevision?: string) {
+      if (path === "/v1/capabilities")
+        return { routes, build: "LOCAL PREVIEW · SAMPLE DATA", config: { writable: true } };
+      if (path === "/v1/status")
         return {
-          text,
-          revision: String(revision),
-          writable: true,
-          sections: [...new Set(settingFields.map((field) => field.section))].map((section) => ({
-            section,
-            appliesWhen: section === "MatchState.Playing.KOTH" ? "next-match" : "live",
+          serverName: scalarValue(text, SESSION, "ServerName") || "Local preview",
+          map: currentMap,
+          matchSeconds: (Date.now() - previewRoundStart) / 1000,
+          lighting,
+          experiences: ["King of the Hill"],
+          scoreTick: { current: 24, min: 18, max: 30 },
+          rotation: { nowIndex: 0, nextIndex: 1 },
+          players: { current: players.length, max: 100 },
+          factionScores: factions.map(({ name, colorHex, score }) => ({ name, colorHex, score })),
+        };
+      if (path === "/v1/players") return { players };
+      if (path === "/v1/reserved-slots") return { reservedSlots: configuredWhitelist(text) };
+      if (path === "/v1/config/validate") return { ok: true };
+      if (path === "/v1/config") {
+        if (method === "GET")
+          return {
+            text,
+            revision: String(revision),
+            writable: true,
+            sections: [...new Set(settingFields.map((field) => field.section))].map((section) => ({
+              section,
+              appliesWhen: section === "MatchState.Playing.KOTH" ? "next-match" : "live",
+            })),
+          };
+        if (expectedRevision !== String(revision)) throw new Error("Preview revision conflict");
+        text = body;
+        revision++;
+        return { ok: true };
+      }
+      if (path === "/v1/bans") {
+        if (method === "GET") return { bans };
+        bans.push({
+          steamId: body.steamId,
+          reason: body.reason,
+          bannedBy: "Preview staff",
+          bannedAtUtc: new Date().toISOString(),
+        });
+        const index = players.findIndex((p) => p.steamId === body.steamId);
+        if (index >= 0) players.splice(index, 1);
+        return { ok: true };
+      }
+      if (path.startsWith("/v1/bans/")) {
+        const index = bans.findIndex((b) => b.steamId === path.split("/").pop());
+        if (index >= 0) bans.splice(index, 1);
+        return { ok: true };
+      }
+      if (path === "/v1/catalog/maps")
+        return { maps: ["Lonestar", "Kavkazi", "Europe", "NorthAmerica"].map((id) => ({ id, displayName: id })) };
+      if (path === "/v1/catalog/lightings")
+        return { lightings: ["DayClear", "DayEarlyFog", "DayLateClear"].map((id) => ({ id })) };
+      if (path === "/v1/catalog/experiences")
+        return { experiences: ["KOTH_InfantryOnly", "KOTH_Hardcore"].map((id) => ({ id })) };
+      if (path === "/v1/rotation")
+        return {
+          enabled: true,
+          mode: "ordered",
+          entries: parseRotation(text).map((entry, index) => ({
+            ...entry,
+            index,
+            lighting: "DayClear",
+            status: index === 0 ? "now" : index === 1 ? "next" : null,
           })),
         };
-      if (expectedRevision !== String(revision)) throw new Error("Preview revision conflict");
-      text = body;
-      revision++;
-      return { ok: true };
-    }
-    if (path === "/v1/bans") {
-      if (method === "GET") return { bans };
-      bans.push({
-        steamId: body.steamId,
-        reason: body.reason,
-        bannedBy: "Preview staff",
-        bannedAtUtc: new Date().toISOString(),
-      });
-      const index = players.findIndex((p) => p.steamId === body.steamId);
-      if (index >= 0) players.splice(index, 1);
-      return { ok: true };
-    }
-    if (path.startsWith("/v1/bans/")) {
-      const index = bans.findIndex((b) => b.steamId === path.split("/").pop());
-      if (index >= 0) bans.splice(index, 1);
-      return { ok: true };
-    }
-    if (path === "/v1/catalog/maps")
-      return { maps: ["Lonestar", "Kavkazi", "Europe", "NorthAmerica"].map((id) => ({ id, displayName: id })) };
-    if (path === "/v1/catalog/lightings")
-      return { lightings: ["DayClear", "DayEarlyFog", "DayLateClear"].map((id) => ({ id })) };
-    if (path === "/v1/catalog/experiences")
-      return { experiences: ["KOTH_InfantryOnly", "KOTH_Hardcore"].map((id) => ({ id })) };
-    if (path === "/v1/rotation")
-      return {
-        enabled: true,
-        mode: "ordered",
-        entries: parseRotation(text).map((entry, index) => ({
-          ...entry,
-          index,
-          lighting: "DayClear",
-          status: index === 0 ? "now" : index === 1 ? "next" : null,
-        })),
-      };
-    if (path === "/v1/match/map") currentMap = body.map;
-    if (path === "/v1/match/map" || path === "/v1/match/restart") previewRoundStart = Date.now();
-    if (path === "/v1/world/lighting") lighting = body.lighting;
-    const playerMatch = path.match(/^\/v1\/players\/(\d+)(?:\/(\w+))?$/);
-    if (playerMatch) {
-      const index = players.findIndex((p) => p.steamId === playerMatch[1]);
-      if (index >= 0 && playerMatch[2] === "kick") players.splice(index, 1);
-      if (index >= 0 && method === "PATCH") {
-        const faction = factions.find((entry) => entry.name === body.faction);
-        if (!faction) throw new Error("Unknown preview faction");
-        players[index].faction = faction.code;
+      if (path === "/v1/match/map") currentMap = body.map;
+      if (path === "/v1/match/map" || path === "/v1/match/restart") previewRoundStart = Date.now();
+      if (path === "/v1/world/lighting") lighting = body.lighting;
+      const playerMatch = path.match(/^\/v1\/players\/(\d+)(?:\/(\w+))?$/);
+      if (playerMatch) {
+        const index = players.findIndex((p) => p.steamId === playerMatch[1]);
+        if (index >= 0 && playerMatch[2] === "kick") players.splice(index, 1);
+        if (index >= 0 && method === "PATCH") {
+          const faction = factions.find((entry) => entry.name === body.faction);
+          if (!faction) throw new Error("Unknown preview faction");
+          players[index].faction = faction.code;
+        }
       }
+      return { ok: true };
     }
-    return { ok: true };
   }
+  return {
+    game: new PreviewGame({
+      rcon: () => {
+        throw new Error("No network transport exists in this preview.");
+      },
+    }),
+    players,
+  };
 }
+const primaryPreview = createPreviewGame("The UNCs | Primary preview");
+const eventPreview = createPreviewGame("The UNCs | Event preview");
+const players = primaryPreview.players;
+const previewDefinitions = [
+  {
+    id: "primary",
+    name: "UNCs Primary",
+    rconUrl: "https://primary.example.test",
+    password: "preview-only",
+    feedToken: "preview-primary-feed-placeholder-credential",
+  },
+  {
+    id: "event",
+    name: "UNCs Events",
+    rconUrl: "https://event.example.test",
+    password: "preview-only",
+    feedToken: "preview-event-feed-placeholder-credential",
+  },
+];
+const settings = new AdminSettings({
+  get: (key: string) => (key === "WARDOGS_SERVERS" ? previewDefinitions : previewEnvironment[key]),
+} as EnvService);
+const gameServers = new GameServers(settings);
+gameServers.get = (id) => (gameServers.resolve(id) === "primary" ? primaryPreview.game : eventPreview.game);
 type PreviewRecord = {
   id: string;
   actorId: string;
@@ -300,12 +334,15 @@ const store = {
   async finish(id: string, result: ActionResult) {
     Object.assign(records.get(id)!, result);
   },
-  async history() {
-    return [...records.values()].reverse().slice(0, 100);
+  async history(serverId: string) {
+    return [...records.values()]
+      .filter((record) => (record.details.serverId ?? "primary") === serverId)
+      .reverse()
+      .slice(0, 100);
   },
-  async receipt(id: string) {
+  async receipt(id: string, serverId: string) {
     const record = records.get(id);
-    if (!record) return null;
+    if (!record || (record.details.serverId ?? "primary") !== serverId) return null;
     return {
       id: record.id,
       actorName: record.actorName,
@@ -319,6 +356,13 @@ const store = {
   },
 };
 const auth = {
+  async serverList() {
+    return { legacy: false, servers: gameServers.list().map((server) => ({ ...server, role: "admin" })) };
+  },
+  async serverStaff(staff: Staff, id: string) {
+    const server = gameServers.list().find((server) => server.id === gameServers.resolve(id))!;
+    return { ...staff, serverId: id, serverVersion: server.version };
+  },
   async role() {
     return "admin";
   },
@@ -353,7 +397,9 @@ const applicationStore = {
   async create(input: typeof whitelistApplications.$inferInsert) {
     if (
       [...applications.values()].some(
-        (entry) => entry.discordUserId === input.discordUserId || entry.steamId === input.steamId,
+        (entry) =>
+          entry.serverId === input.serverId &&
+          (entry.discordUserId === input.discordUserId || entry.steamId === input.steamId),
       )
     )
       return undefined;
@@ -379,14 +425,15 @@ const applicationStore = {
     applications.set(entry.id, entry);
     return entry;
   },
-  async own(userId: string) {
-    return [...applications.values()].find((entry) => entry.discordUserId === userId);
+  async own(userId: string, serverId: string) {
+    return [...applications.values()].find((entry) => entry.discordUserId === userId && entry.serverId === serverId);
   },
-  async list() {
-    return [...applications.values()].reverse();
+  async list(serverId: string) {
+    return [...applications.values()].filter((entry) => entry.serverId === serverId).reverse();
   },
   async claim(id: string, review: ApplicationReview, kind: "approve" | "decline" | "recheck", staff: Staff) {
     const entry = applications.get(id);
+    if (entry?.serverId !== staff.serverId) return { claimed: false, application: undefined };
     if (!entry || entry.status !== (kind === "recheck" ? "needs_review" : "pending"))
       return { claimed: false, application: entry };
     Object.assign(entry, {
@@ -452,6 +499,7 @@ const demoEvents = Array.from({ length: 48 }, (_, index) => {
   const ageDays = index < 24 ? 0 : index < 38 ? 3 : 12;
   const suicide = !!killer && killer.steamId === victim.steamId;
   return {
+    serverId: index % 3 === 0 ? "event" : "primary",
     eventId: randomUUID(),
     serverInstanceId: demoInstance,
     receivedAt: new Date(Date.now() - ageDays * 86_400_000 - index * 65_000 - 20_000),
@@ -468,9 +516,10 @@ const demoEvents = Array.from({ length: 48 }, (_, index) => {
     suicide,
   };
 });
-const filteredDemoEvents = (since: Date, until: Date, playerId?: string) =>
+const filteredDemoEvents = (since: Date, until: Date, playerId?: string, serverId = "primary") =>
   demoEvents.filter(
     (entry) =>
+      entry.serverId === serverId &&
       entry.receivedAt >= since &&
       entry.receivedAt <= until &&
       (!playerId || entry.killerSteamId === playerId || entry.victimSteamId === playerId),
@@ -479,14 +528,15 @@ const telemetryStore = {
   async ingest() {
     throw new Error("Live event intake is unavailable in the simulated preview.");
   },
-  async tracking() {
+  async tracking(serverId: string) {
+    const entries = demoEvents.filter((event) => event.serverId === serverId);
     return {
-      firstReceivedAt: new Date(Math.min(...demoEvents.map((event) => event.receivedAt.getTime()))),
-      lastReceivedAt: new Date(Math.max(...demoEvents.map((event) => event.receivedAt.getTime()))),
+      firstReceivedAt: new Date(Math.min(...entries.map((event) => event.receivedAt.getTime()))),
+      lastReceivedAt: new Date(Math.max(...entries.map((event) => event.receivedAt.getTime()))),
     };
   },
-  async snapshot(since: Date, until: Date, playerId?: string) {
-    const events = filteredDemoEvents(since, until, playerId);
+  async snapshot(since: Date, until: Date, playerId?: string, serverId = "primary") {
+    const events = filteredDemoEvents(since, until, playerId, serverId);
     const stats = new Map<string, CombatStats>();
     const player = (id: string, name: string | null) => {
       if (!stats.has(id))
@@ -518,8 +568,8 @@ const telemetryStore = {
       },
     };
   },
-  async events(since: Date, until: Date, playerId?: string) {
-    return filteredDemoEvents(since, until, playerId)
+  async events(since: Date, until: Date, playerId?: string, serverId = "primary") {
+    return filteredDemoEvents(since, until, playerId, serverId)
       .sort((a, b) => b.receivedAt.getTime() - a.receivedAt.getTime())
       .slice(0, 100);
   },
@@ -732,11 +782,18 @@ const eventStore = {
   async get(id: string) {
     return structuredClone(demoServerEvents.get(id) ?? null);
   },
-  async current() {
-    return structuredClone([...demoServerEvents.values()].find((event) => event.state !== "complete") ?? null);
+  async current(serverId: string) {
+    return structuredClone(
+      [...demoServerEvents.values()].find((event) => event.serverId === serverId && event.state !== "complete") ?? null,
+    );
   },
-  async history() {
-    return structuredClone([...demoServerEvents.values()].reverse().slice(0, 20));
+  async history(serverId: string) {
+    return structuredClone(
+      [...demoServerEvents.values()]
+        .filter((event) => event.serverId === serverId)
+        .reverse()
+        .slice(0, 20),
+    );
   },
   async operations(id: string) {
     return structuredClone(
@@ -747,7 +804,7 @@ const eventStore = {
     );
   },
   async create(input: EventRecord) {
-    if (await this.current()) throw new ConflictException("A preview event is already active.");
+    if (await this.current(input.serverId)) throw new ConflictException("A preview event is already active.");
     const event: EventRecord = {
       ...input,
       operation: null,
@@ -838,11 +895,21 @@ const voteStore = {
   async get(id: string) {
     return structuredClone(demoVotes.get(id) ?? null);
   },
-  async history() {
-    return structuredClone([...demoVotes.values()].reverse().slice(0, 20));
+  async history(serverId: string) {
+    return structuredClone(
+      [...demoVotes.values()]
+        .filter((vote) => vote.serverId === serverId)
+        .reverse()
+        .slice(0, 20),
+    );
   },
   async create(input: MapVoteRecord) {
-    if ([...demoVotes.values()].some((vote) => ["publishing", "open", "closing", "needs_review"].includes(vote.state)))
+    if (
+      [...demoVotes.values()].some(
+        (vote) =>
+          vote.serverId === input.serverId && ["publishing", "open", "closing", "needs_review"].includes(vote.state),
+      )
+    )
       throw new ConflictException("A preview ballot is already active.");
     const record: MapVoteRecord = {
       ...input,
@@ -922,8 +989,8 @@ async function main() {
     .useValue(store)
     .overrideProvider(AdminAuth)
     .useValue(auth)
-    .overrideProvider(WardogsClient)
-    .useValue(new PreviewGame(settings))
+    .overrideProvider(GameServers)
+    .useValue(gameServers)
     .overrideProvider(ApplicationsStore)
     .useValue(applicationStore)
     .overrideProvider(ApplicantAuth)

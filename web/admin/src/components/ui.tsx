@@ -124,6 +124,7 @@ export function Modal({
   onClose,
   busy = false,
   className = "",
+  serverScoped = false,
 }: {
   title: string;
   description?: string;
@@ -131,9 +132,10 @@ export function Modal({
   onClose: () => void;
   busy?: boolean;
   className?: string;
+  serverScoped?: boolean;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
-  const { setDialogOpen } = useAdmin();
+  const { setDialogOpen, server } = useAdmin();
   useEffect(() => {
     setDialogOpen(true);
     const element = dialog.current;
@@ -160,6 +162,11 @@ export function Modal({
         </button>
       </div>
       <h2 id="dialog-title">{title}</h2>
+      {serverScoped && server && (
+        <p className="server-review-target">
+          Game server: <strong>{server.name}</strong> <small>({server.id})</small>
+        </p>
+      )}
       {description && <p className="muted">{description}</p>}
       {children}
     </dialog>

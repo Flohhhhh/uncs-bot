@@ -34,9 +34,11 @@ describe("stored action receipt lookup", () => {
     const [history] = query.mock.calls[0];
     const [lookup, params] = query.mock.calls[1];
     expect(lookup.text.split(" from ")[0]).toBe(history.text.split(" from ")[0]);
-    expect(lookup.text).toContain('where "admin_actions"."id" = $1');
-    expect(params).toEqual([id, 1]);
-    expect(lookup.text).not.toMatch(/actor_id|request_hash|order by|created_at.*[<>]/);
+    expect(lookup.text).toContain('"admin_actions"."id" = $1');
+    expect(lookup.text).toContain("->>'serverId'");
+    expect(params).toEqual([id, "primary", "primary", 1]);
+    expect(lookup.text).not.toMatch(/actor_id|request_hash|order by/);
+    expect(lookup.text.split(" where ")[1]).not.toContain("created_at");
     expect(record).not.toHaveProperty("actorId");
     expect(record).not.toHaveProperty("requestHash");
     expect(query.mock.calls.every(([config]) => config.text.startsWith("select "))).toBe(true);

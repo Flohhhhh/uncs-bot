@@ -5,6 +5,8 @@ import { AdminStore } from "../admin/admin.store";
 import { actionSchema, type ActionResult, type AdminAction, type Staff } from "../admin/admin.types";
 import { RconError, WardogsClient } from "../admin/wardogs.client";
 import { EnvService } from "../env/env.service";
+import { GameServers } from "../admin/game-servers";
+import type { GameServerSummary } from "../common/game-server";
 import { initialCommunityState, observeCommunity, statusCard, type CommunitySnapshot } from "./community-state";
 
 const SYSTEM_ACTOR: Staff = {
@@ -21,6 +23,44 @@ type QueuedMessage = { action: AdminAction; readyAt: number; expiresAt: number; 
 @Injectable()
 export class ServerCommunityService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(ServerCommunityService.name);
+  private readonly workers: ServerCommunityWorker[] = [];
+  constructor(
+    private readonly servers: GameServers,
+    private readonly store: AdminStore,
+    private readonly env: EnvService,
+    private readonly discord: Client,
+  ) {}
+  onApplicationBootstrap() {
+    if (!this.env.get("SERVER_COMMUNITY_ENABLED")) return;
+    for (const server of this.servers.list()) {
+      const configured = this.env.get("WARDOGS_SERVERS");
+      const card = configured?.find((entry) => entry.id === server.id)?.communityStatus;
+      // A registry never reuses the legacy shared status message for every server.
+      try {
+        const worker = new ServerCommunityWorker(
+          this.servers.get(server.id),
+          this.store,
+          this.env,
+          this.discord,
+          server,
+          configured ? (card ?? null) : undefined,
+        );
+        this.workers.push(worker);
+        worker.onApplicationBootstrap();
+      } catch {
+        this.logger.warn(`Community messages for ${server.id} need connection setup. Other servers remain available.`);
+      }
+    }
+  }
+  onModuleDestroy() {
+    for (const worker of this.workers) worker.onModuleDestroy();
+    this.workers.length = 0;
+  }
+}
+
+/** Each server owns its observation baseline, message queue and backoff timer. */
+export class ServerCommunityWorker implements OnApplicationBootstrap, OnModuleDestroy {
+  private readonly logger = new Logger(ServerCommunityWorker.name);
   private state = initialCommunityState();
   private queue: QueuedMessage[] = [];
   private snapshot: CommunitySnapshot | null = null;
@@ -36,12 +76,16 @@ export class ServerCommunityService implements OnApplicationBootstrap, OnModuleD
     private readonly store: AdminStore,
     private readonly env: EnvService,
     private readonly discord: Client,
+    private readonly server: GameServerSummary = { id: "primary", name: "The UNCs", version: "0".repeat(64) },
+    private readonly card?: { channelId: string; messageId: string } | null,
   ) {}
 
   private options() {
     const enabled = this.env.get("SERVER_COMMUNITY_ENABLED") === true;
-    const channelId = this.env.get("SERVER_COMMUNITY_DISCORD_CHANNEL_ID");
-    const messageId = this.env.get("SERVER_COMMUNITY_DISCORD_MESSAGE_ID");
+    const channelId =
+      this.card === undefined ? this.env.get("SERVER_COMMUNITY_DISCORD_CHANNEL_ID") : this.card?.channelId;
+    const messageId =
+      this.card === undefined ? this.env.get("SERVER_COMMUNITY_DISCORD_MESSAGE_ID") : this.card?.messageId;
     const welcome = enabled && this.env.get("SERVER_COMMUNITY_WELCOME_ENABLED") === true;
     const round = enabled && this.env.get("SERVER_COMMUNITY_ROUND_ENABLED") === true;
     const status =
@@ -145,6 +189,8 @@ export class ServerCommunityService implements OnApplicationBootstrap, OnModuleD
     const parsed = actionSchema.safeParse({
       ...input,
       id: randomUUID(),
+      serverId: this.server.id,
+      serverVersion: this.server.version,
       reason:
         input.action === "message"
           ? "Automatic observed-join welcome."
@@ -165,7 +211,11 @@ export class ServerCommunityService implements OnApplicationBootstrap, OnModuleD
   private async deliver(action: AdminAction) {
     const requestHash = createHash("sha256").update(JSON.stringify(action)).digest("hex");
     try {
-      const started = await this.store.begin(SYSTEM_ACTOR, action, requestHash);
+      const started = await this.store.begin(
+        { ...SYSTEM_ACTOR, serverId: this.server.id, serverVersion: this.server.version },
+        action,
+        requestHash,
+      );
       if (!started.created || this.stopped) return false;
     } catch {
       this.logger.warn("Community message was not sent because its audit record could not be saved.");

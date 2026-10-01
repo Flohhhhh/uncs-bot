@@ -12,19 +12,13 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { AdminAuth } from "../admin/admin.auth";
 import { AdminService } from "../admin/admin.service";
-import { WardogsClient } from "../admin/wardogs.client";
+import { GameServers } from "../admin/game-servers";
 import { validateMapSelection } from "../admin/server-configuration";
 import type { Staff } from "../admin/admin.types";
 import { EnvService } from "../env/env.service";
 import { MapVotesStore } from "./map-votes.store";
 import { MapVotesDiscord } from "./map-votes.discord";
-import {
-  cancelMapVoteSchema,
-  MAP_VOTE_SERVER,
-  mapVoteView,
-  startMapVoteSchema,
-  type MapVoteRecord,
-} from "./map-votes.types";
+import { cancelMapVoteSchema, mapVoteView, startMapVoteSchema, type MapVoteRecord } from "./map-votes.types";
 
 @Injectable()
 export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy {
@@ -34,7 +28,7 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
   private running = false;
   constructor(
     private readonly store: MapVotesStore,
-    private readonly game: WardogsClient,
+    private readonly servers: GameServers,
     private readonly admin: AdminService,
     private readonly auth: AdminAuth,
     private readonly discord: MapVotesDiscord,
@@ -48,11 +42,6 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
   private requireStaff(staff: Staff) {
     if (staff.role !== "admin") throw new ForbiddenException("Only administrators can manage map votes.");
   }
-  private connectionHash() {
-    const endpoint = this.env.get("WARDOGS_RCON_URL");
-    if (!endpoint) throw new ServiceUnavailableException("The game connection is not configured.");
-    return createHash("sha256").update(new URL(endpoint).toString().replace(/\/$/, "")).digest("hex");
-  }
   private enabled() {
     const options = this.options();
     if (!options.enabled)
@@ -63,11 +52,12 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
   }
   async list(staff: Staff) {
     this.requireStaff(staff);
+    const serverId = this.servers.resolve(staff.serverId);
     const enabled = this.options().enabled;
     return {
       enabled,
-      serverId: MAP_VOTE_SERVER,
-      votes: enabled ? (await this.store.history(MAP_VOTE_SERVER)).map(mapVoteView) : [],
+      serverId,
+      votes: enabled ? (await this.store.history(serverId)).map(mapVoteView) : [],
     };
   }
   async start(staff: Staff, input: unknown) {
@@ -77,15 +67,18 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
     if (!parsed.success)
       throw new BadRequestException("Choose two to five different maps, a 2–30 minute duration and a reason.");
     const action = parsed.data;
+    const serverId = this.servers.resolve(staff.serverId);
+    if (action.serverId !== serverId) throw new BadRequestException("The ballot must target the selected server.");
     const requestHash = createHash("sha256").update(JSON.stringify(action)).digest("hex");
     const previous = await this.store.get(action.id);
     if (previous) {
-      if (previous.actorId !== staff.id || previous.requestHash !== requestHash)
+      if (previous.serverId !== serverId || previous.actorId !== staff.id || previous.requestHash !== requestHash)
         throw new ConflictException("This ballot ID was used for a different request.");
       return mapVoteView(previous);
     }
-    const connectionHash = this.connectionHash();
-    const settings = await this.game.configuration();
+    const connectionHash = this.servers.connectionHash(serverId);
+    const game = this.servers.get(serverId);
+    const settings = await game.configuration();
     if (
       settings.revision !== action.revision ||
       !settings.rotation.editable ||
@@ -96,10 +89,10 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
       throw new ConflictException("Refresh settings. Map votes need the current editable, ordered rotation.");
     if (action.choices.some((choice) => choice.map === settings.rotation.currentMap))
       throw new BadRequestException("Leave the current map out of this ballot.");
-    const capabilities = await this.game.capabilities(),
-      catalog = await this.game.catalog();
-    for (const choice of action.choices) await validateMapSelection(this.game, choice, capabilities, catalog);
-    const overview = await this.game.overview();
+    const capabilities = await game.capabilities(),
+      catalog = await game.catalog();
+    for (const choice of action.choices) await validateMapSelection(game, choice, capabilities, catalog);
+    const overview = await game.overview();
     const seconds = overview.status.matchSeconds;
     const observedAt = Date.parse(overview.observedAt);
     if (
@@ -117,7 +110,7 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
     const now = new Date();
     const started = await this.store.create({
       id: action.id,
-      serverId: MAP_VOTE_SERVER,
+      serverId,
       serverName: overview.status.serverName,
       connectionHash,
       ...configured,
@@ -175,6 +168,9 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
     const parsed = cancelMapVoteSchema.safeParse(input);
     if (!z.uuid().safeParse(id).success || !parsed.success)
       throw new BadRequestException("Choose a ballot and enter a reason.");
+    const selected = this.servers.resolve(staff.serverId);
+    if ((await this.store.get(id))?.serverId !== selected)
+      throw new BadRequestException("Choose a ballot on the selected server.");
     const vote = await this.store.cancel(id, parsed.data.id, staff, parsed.data.reason);
     await this.updateMessage(vote);
     return mapVoteView(vote);
@@ -223,14 +219,18 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
       } else {
         const configured = this.enabled();
         if (
-          vote.connectionHash !== this.connectionHash() ||
+          vote.connectionHash !== this.servers.connectionHash(vote.serverId) ||
           vote.guildId !== configured.guildId ||
           vote.channelId !== configured.channelId
         )
           throw new Error("Ballot connection changed.");
-        const role = await this.auth.role(vote.actorId, true);
-        if (role !== "admin") throw new Error("Creator no longer authorized.");
-        const current = await this.game.overview();
+        const actor = await this.auth.serverStaff(
+          { id: vote.actorId, name: vote.actorName, role: "admin", csrf: "" },
+          vote.serverId,
+          true,
+        );
+        if (actor.role !== "admin") throw new Error("Creator no longer authorized.");
+        const current = await this.servers.get(vote.serverId).overview();
         const seconds = current.status.matchSeconds;
         const roundStart =
           typeof seconds === "number" && Number.isFinite(seconds) && seconds >= 0
@@ -247,18 +247,15 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
           throw new Error("Round cannot be confirmed.");
         if ((await this.store.get(vote.id))?.state !== "closing" || this.stopped)
           throw new Error("Ballot no longer closing.");
-        const result = await this.admin.act(
-          { id: vote.actorId, name: vote.actorName, role, csrf: "" },
-          {
-            id: vote.id,
-            action: "map-next",
-            reason: `Discord map vote ${vote.id}`,
-            revision: vote.revision,
-            currentIndex: vote.currentIndex,
-            currentMap: vote.currentMap,
-            entry: vote.choices[vote.winner],
-          },
-        );
+        const result = await this.admin.act(actor, {
+          id: vote.id,
+          action: "map-next",
+          reason: `Discord map vote ${vote.id}`,
+          revision: vote.revision,
+          currentIndex: vote.currentIndex,
+          currentMap: vote.currentMap,
+          entry: vote.choices[vote.winner],
+        });
         if (result.state === "applied" || result.state === "pending") {
           state = "queued";
           message = "The winning map was saved in the next rotation position. The current match continues.";

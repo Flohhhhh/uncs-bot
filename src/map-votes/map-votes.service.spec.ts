@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { MapVotesService } from "./map-votes.service";
 import { MapVotesStore } from "./map-votes.store";
 import { MapVotesDiscord } from "./map-votes.discord";
-import { WardogsClient } from "../admin/wardogs.client";
+import { fixtureServers } from "../admin/game-server-fixture";
 import { AdminService } from "../admin/admin.service";
 import { AdminAuth } from "../admin/admin.auth";
 import { EnvService } from "../env/env.service";
@@ -14,10 +14,10 @@ const guild = "234567890123456789",
   channel = "345678901234567890",
   messageId = "456789012345678901";
 const now = new Date("2026-10-01T10:00:00Z");
-function fixture(enabled = true) {
+function fixture(enabled = true, serverId = "primary") {
   const input: StartMapVote = {
     id: randomUUID(),
-    serverId: "primary",
+    serverId,
     revision: "r1",
     choices: [
       { map: "Europe", experiences: [] },
@@ -78,7 +78,16 @@ function fixture(enabled = true) {
     }),
   };
   const admin = { act: jest.fn().mockResolvedValue({ state: "pending", message: "Saved" }) };
-  const auth = { role: jest.fn().mockResolvedValue("admin") };
+  const role = jest.fn().mockResolvedValue("admin");
+  const auth = {
+    role,
+    serverStaff: jest.fn(async (actor: Staff, serverId: string) => ({
+      ...actor,
+      serverId,
+      serverVersion: "0".repeat(64),
+      role: await role(),
+    })),
+  };
   const discord = { check: jest.fn(), publish: jest.fn().mockResolvedValue(messageId), update: jest.fn() };
   const environment: Record<string, unknown> = {
     MAP_VOTES_ENABLED: enabled,
@@ -88,7 +97,7 @@ function fixture(enabled = true) {
   };
   const service = new MapVotesService(
     store as unknown as MapVotesStore,
-    game as unknown as WardogsClient,
+    fixtureServers(game, () => environment.WARDOGS_RCON_URL as string, serverId),
     admin as unknown as AdminService,
     auth as unknown as AdminAuth,
     discord as unknown as MapVotesDiscord,
@@ -99,6 +108,26 @@ function fixture(enabled = true) {
 }
 
 describe("durable Discord map voting", () => {
+  it("closes a non-primary ballot using that server and fresh server-specific authority", async () => {
+    const { service, closing, admin, auth, store } = fixture(true, "event");
+    closing();
+    await service.tick();
+    expect(auth.serverStaff).toHaveBeenCalledWith(expect.objectContaining({ id: staff.id }), "event", true);
+    expect(admin.act).toHaveBeenCalledWith(
+      expect.objectContaining({ serverId: "event", serverVersion: "0".repeat(64) }),
+      expect.objectContaining({ action: "map-next" }),
+    );
+    expect(store.finish).toHaveBeenCalledWith(expect.any(String), "queued", expect.any(String));
+  });
+  it("rejects another server's ballot before cancellation or replay", async () => {
+    const { service, store, record, input } = fixture();
+    store.get.mockResolvedValue({ ...record, serverId: "event" });
+    await expect(service.cancel(staff, record.id, { id: randomUUID(), reason: "Close ballot" })).rejects.toThrow(
+      "selected server",
+    );
+    await expect(service.start(staff, input)).rejects.toThrow("different request");
+    expect(store.cancel).not.toHaveBeenCalled();
+  });
   beforeEach(() => {
     jest.useFakeTimers();
     jest.setSystemTime(now);
@@ -229,7 +258,7 @@ describe("durable Discord map voting", () => {
     await service.tick();
     store.claimClose.mockResolvedValue(null);
     await service.tick();
-    expect(auth.role).toHaveBeenCalledWith(staff.id, true);
+    expect(auth.serverStaff).toHaveBeenCalledWith(expect.objectContaining({ id: staff.id }), "primary", true);
     expect(admin.act).toHaveBeenCalledTimes(1);
     expect(admin.act).toHaveBeenCalledWith(
       expect.objectContaining({ id: staff.id, role: "admin" }),
@@ -331,7 +360,8 @@ describe("durable Discord map voting", () => {
     expect(closing.admin.act).not.toHaveBeenCalled();
   });
   it("records the cancelling administrator and request identity without a game action", async () => {
-    const { service, store, input, admin } = fixture();
+    const { service, store, input, admin, closing } = fixture();
+    closing();
     const id = randomUUID();
     await service.cancel(staff, input.id, { id, reason: "Event changed" });
     expect(store.cancel).toHaveBeenCalledWith(input.id, id, staff, "Event changed");

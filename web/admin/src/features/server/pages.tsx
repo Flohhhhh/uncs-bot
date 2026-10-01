@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
-import { Link } from "react-router-dom";
-import { useAdmin } from "../../app/context";
+import { ServerLink as Link } from "../../app/server-link";
+import { useGameAdmin as useAdmin } from "../../app/context";
 import { useResource } from "../../api/use-resource";
 import type { ActionName, Audit, Ban, Rotation, Whitelist } from "../../api/types";
 import { Badge, Card, Empty, Metric, Search, Table, date } from "../../components/ui";
@@ -346,7 +346,7 @@ export function AnnouncementsPage() {
             thank-you.
           </p>
           <div className="copy-example">
-            GG! Thanks for playing on The UNCs. Squad up with our adult gaming community at discord.gg/t5NSzurtRS.
+            GG! Thanks for playing on The UNCs. Find the crew, whitelist details and seeding info at theuncsgaming.com.
           </div>
           <ActionButton action="broadcast" kind="primary">
             Write announcement ↗

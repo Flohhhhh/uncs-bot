@@ -12,6 +12,8 @@ import type { Request, Response } from "express";
 import { AdminSettings } from "./admin.settings";
 import { AdminStore } from "./admin.store";
 import type { Staff, StaffRole } from "./admin.types";
+import { restrictedServerRole, type GameServerSummary } from "../common/game-server";
+import { GameServers } from "./game-servers";
 
 export type StaffRequest = Request & { staff: Staff };
 export const hash = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -32,7 +34,7 @@ function cookie(req: Request, name: string) {
 
 @Injectable()
 export class AdminAuth {
-  private readonly memberCache = new Map<string, { expires: number; role: StaffRole }>();
+  private readonly memberCache = new Map<string, { expires: number; role: StaffRole; roles: string[] }>();
   private readonly requestCounts = new Map<string, { until: number; reads: number; writes: number }>();
   constructor(
     private readonly settings: AdminSettings,
@@ -124,8 +126,36 @@ export class AdminAuth {
       throw new ForbiddenException("Your Discord account does not have dashboard access.");
     }
     if (this.memberCache.size > 500) this.memberCache.clear();
-    this.memberCache.set(userId, { expires: Date.now() + 30_000, role });
+    this.memberCache.set(userId, { expires: Date.now() + 30_000, role, roles });
     return role;
+  }
+
+  async serverStaff(staff: Staff, serverId: string, fresh = false): Promise<Staff> {
+    const server = this.settings.servers().find((server) => server.id === serverId);
+    if (!server) throw new ForbiddenException("This game server is not configured.");
+    const globalRole = await this.role(staff.id, fresh);
+    const role = this.settings.get().ownerIds.includes(staff.id)
+      ? "admin"
+      : restrictedServerRole(
+          globalRole,
+          this.memberCache.get(staff.id)?.roles ?? [],
+          this.settings.serverRoles(serverId),
+        );
+    if (!role) throw new ForbiddenException("Your staff account does not have access to this game server.");
+    return { ...staff, role, serverId, serverVersion: server.version };
+  }
+
+  async serverList(staff: Staff) {
+    await this.role(staff.id);
+    const servers: Array<GameServerSummary & { role: StaffRole }> = [];
+    for (const server of this.settings.servers()) {
+      try {
+        servers.push({ ...server, role: (await this.serverStaff(staff, server.id)).role });
+      } catch (error) {
+        if (!(error instanceof ForbiddenException)) throw error;
+      }
+    }
+    return { legacy: !this.settings.explicitServers(), servers };
   }
 
   async callback(req: Request, res: Response) {
@@ -233,6 +263,25 @@ export class AdminGuard implements CanActivate {
   async canActivate(context: ExecutionContext) {
     const req = context.switchToHttp().getRequest<StaffRequest>();
     req.staff = await this.auth.authenticate(req);
+    return true;
+  }
+}
+
+/** Applies the configured server restriction after the normal session/origin/CSRF guard. */
+@Injectable()
+export class AdminServerGuard implements CanActivate {
+  constructor(
+    private readonly auth: AdminAuth,
+    private readonly servers: GameServers,
+  ) {}
+  async canActivate(context: ExecutionContext) {
+    const req = context.switchToHttp().getRequest<StaffRequest>();
+    const id = this.servers.resolve(req.params.serverId as string | undefined);
+    if (!["GET", "HEAD"].includes(req.method)) {
+      const version = req.headers["x-uncs-server-version"];
+      this.servers.checkVersion(id, typeof version === "string" ? version : undefined);
+    }
+    req.staff = await this.auth.serverStaff(req.staff, id);
     return true;
   }
 }

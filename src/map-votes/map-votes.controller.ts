@@ -1,11 +1,11 @@
 import { Body, Controller, Get, Param, Post, Req, UseFilters, UseGuards } from "@nestjs/common";
-import { AdminGuard, type StaffRequest } from "../admin/admin.auth";
+import { AdminGuard, AdminServerGuard, type StaffRequest } from "../admin/admin.auth";
 import { AdminExceptionFilter } from "../admin/admin.controller";
 import { MapVotesService } from "./map-votes.service";
 
-@Controller("admin/api/map-votes")
+@Controller(["admin/api/map-votes", "admin/api/servers/:serverId/map-votes"])
 @UseFilters(AdminExceptionFilter)
-@UseGuards(AdminGuard)
+@UseGuards(AdminGuard, AdminServerGuard)
 export class MapVotesController {
   constructor(private readonly service: MapVotesService) {}
   @Get() list(@Req() request: StaffRequest) {

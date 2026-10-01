@@ -7,6 +7,7 @@ import { AdminSettings } from "../admin/admin.settings";
 import { AdminStore } from "../admin/admin.store";
 import { WardogsClient } from "../admin/wardogs.client";
 import { hash } from "../admin/admin.auth";
+import { legacyServerSettings } from "../admin/game-server-fixture";
 import { TelemModule } from "./telemetry.module";
 import { TelemetryStore } from "./telemetry.store";
 import { emptyTotals } from "./telemetry.types";
@@ -74,7 +75,7 @@ describe("telemetry HTTP boundaries", () => {
       .overrideProvider(TelemetryStore)
       .useValue(store)
       .overrideProvider(AdminSettings)
-      .useValue({ get: () => config })
+      .useValue({ ...legacyServerSettings, feedToken: () => feedToken, get: () => config })
       .overrideProvider(AdminStore)
       .useValue(adminStore)
       .overrideProvider(WardogsClient)
@@ -109,7 +110,7 @@ describe("telemetry HTTP boundaries", () => {
       .get("/admin/api/combat/players/76561198000000001?period=day")
       .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
       .expect(200);
-    expect(store.events).toHaveBeenLastCalledWith(expect.any(Date), expect.any(Date), "76561198000000001");
+    expect(store.events).toHaveBeenLastCalledWith(expect.any(Date), expect.any(Date), "76561198000000001", "primary");
   });
   it("requires the dedicated feed credential and validates before persisting", async () => {
     await request(app.getHttpServer()).post("/api/ingest/events").send(batch()).expect(401);

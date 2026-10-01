@@ -9,6 +9,8 @@ import { AdminSettings } from "./admin.settings";
 import { AdminStore } from "./admin.store";
 import { WardogsClient } from "./wardogs.client";
 import { hash } from "./admin.auth";
+import { GameServers } from "./game-servers";
+import { fixtureServers, legacyServerSettings } from "./game-server-fixture";
 
 describe("action receipt HTTP access", () => {
   let app: INestApplication;
@@ -51,6 +53,7 @@ describe("action receipt HTTP access", () => {
       .useValue(adapterHost)
       .overrideProvider(AdminSettings)
       .useValue({
+        ...legacyServerSettings,
         get: () => ({
           origin: "https://admin.example.test",
           clientId: "123",
@@ -69,6 +72,8 @@ describe("action receipt HTTP access", () => {
       .useValue(store)
       .overrideProvider(WardogsClient)
       .useValue(game)
+      .overrideProvider(GameServers)
+      .useValue(fixtureServers(game))
       .compile();
     app = module.createNestApplication(adapter);
     app.useLogger(false);
@@ -92,7 +97,7 @@ describe("action receipt HTTP access", () => {
       .expect(200);
     expect(response.body).toEqual({ record });
     expect(response.headers["cache-control"]).toBe("no-store");
-    expect(store.receipt).toHaveBeenCalledWith(id);
+    expect(store.receipt).toHaveBeenCalledWith(id, "primary");
     expect(game.overview).not.toHaveBeenCalled();
     expect(game.execute).not.toHaveBeenCalled();
   });
@@ -104,7 +109,7 @@ describe("action receipt HTTP access", () => {
         .get(`/admin/api/audit/${id.toUpperCase()}`)
         .set("Cookie", `__Host-uncs_admin_session=${token}`)
         .expect(200, { record });
-      expect(store.receipt).toHaveBeenCalledWith(id);
+      expect(store.receipt).toHaveBeenCalledWith(id, "primary");
     },
   );
   it("rejects anonymous and unauthorized accounts before reading any receipt", async () => {

@@ -11,11 +11,12 @@ import {
   Param,
   Post,
   Query,
+  Req,
   UseFilters,
   UseGuards,
 } from "@nestjs/common";
 import type { Response } from "express";
-import { AdminGuard } from "../admin/admin.auth";
+import { AdminGuard, AdminServerGuard, type StaffRequest } from "../admin/admin.auth";
 import { TelemetryService } from "./telemetry.service";
 
 @Catch()
@@ -32,13 +33,17 @@ export class TelemetryExceptionFilter implements ExceptionFilter {
   }
 }
 
-@Controller("api/ingest")
+@Controller(["api/ingest", "api/ingest/servers/:serverId"])
 @UseFilters(TelemetryExceptionFilter)
 export class TelemetryIngestController {
   constructor(private readonly service: TelemetryService) {}
   @Post("events")
-  ingest(@Headers("authorization") authorization: string | undefined, @Body() body: unknown) {
-    return this.service.ingest(authorization, body);
+  ingest(
+    @Headers("authorization") authorization: string | undefined,
+    @Body() body: unknown,
+    @Param("serverId") serverId?: string,
+  ) {
+    return this.service.ingest(authorization, body, serverId);
   }
 }
 
@@ -46,23 +51,27 @@ export class TelemetryIngestController {
 @UseFilters(TelemetryExceptionFilter)
 export class TelemetryPublicController {
   constructor(private readonly service: TelemetryService) {}
-  @Get("leaderboard")
-  leaderboard(@Query("period") period: unknown) {
-    return this.service.leaderboard(period);
+  @Get("servers")
+  servers() {
+    return { servers: this.service.serversList() };
+  }
+  @Get(["leaderboard", "servers/:serverId/leaderboard"])
+  leaderboard(@Query("period") period: unknown, @Param("serverId") serverId?: string) {
+    return this.service.leaderboard(period, serverId);
   }
 }
 
-@Controller("admin/api/combat")
+@Controller(["admin/api/combat", "admin/api/servers/:serverId/combat"])
 @UseFilters(TelemetryExceptionFilter)
-@UseGuards(AdminGuard)
+@UseGuards(AdminGuard, AdminServerGuard)
 export class TelemetryAdminController {
   constructor(private readonly service: TelemetryService) {}
   @Get()
-  combat(@Query("period") period: unknown) {
-    return this.service.combat(period);
+  combat(@Query("period") period: unknown, @Req() req: StaffRequest) {
+    return this.service.combat(period, req.staff.serverId);
   }
   @Get("players/:steamId")
-  player(@Param("steamId") steamId: string, @Query("period") period: unknown) {
-    return this.service.player(steamId, period);
+  player(@Param("steamId") steamId: string, @Query("period") period: unknown, @Req() req: StaffRequest) {
+    return this.service.player(steamId, period, req.staff.serverId);
   }
 }

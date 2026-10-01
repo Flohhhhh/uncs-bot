@@ -13,7 +13,7 @@ import { z } from "zod";
 import { AdminAuth } from "../admin/admin.auth";
 import { AdminService } from "../admin/admin.service";
 import { actionSchema, type ActionResult, type Staff } from "../admin/admin.types";
-import { WardogsClient } from "../admin/wardogs.client";
+import { GameServers } from "../admin/game-servers";
 import { serves } from "../common/admin-policy";
 import { EnvService } from "../env/env.service";
 import { completeEventOperation, eventRoster, operation, planEvent } from "./event-planner";
@@ -35,12 +35,12 @@ import {
 @Injectable()
 export class ServerEventsService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(ServerEventsService.name);
-  private timer?: ReturnType<typeof setTimeout>;
+  private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   private stopped = false;
-  private running = false;
+  private readonly running = new Set<string>();
   constructor(
     private readonly store: ServerEventsStore,
-    private readonly game: WardogsClient,
+    private readonly servers: GameServers,
     private readonly admin: AdminService,
     private readonly auth: AdminAuth,
     private readonly env: EnvService,
@@ -55,27 +55,33 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
     if (!this.enabled())
       throw new ServiceUnavailableException("Optional events need owner setup and a reviewed database migration.");
   }
-  private connectionHash() {
-    const endpoint = this.env.get("WARDOGS_RCON_URL");
-    if (!endpoint) throw new ServiceUnavailableException("The game connection is not configured.");
-    return createHash("sha256").update(new URL(endpoint).toString().replace(/\/$/, "")).digest("hex");
-  }
   private connected(event: EventRecord) {
-    return event.connectionHash === this.connectionHash() && event.guildId === this.env.get("ADMIN_GUILD_ID");
+    return (
+      event.connectionHash === this.servers.connectionHash(event.serverId) &&
+      event.guildId === this.env.get("ADMIN_GUILD_ID")
+    );
+  }
+  private async selectedEvent(staff: Staff, id: string) {
+    const serverId = this.servers.resolve(staff.serverId);
+    const event = await this.store.get(id);
+    if (!event || event.serverId !== serverId) throw new BadRequestException("Choose an event on the selected server.");
+    return event;
   }
   async list(staff: Staff) {
     this.staff(staff);
+    const serverId = this.servers.resolve(staff.serverId);
     const enabled = this.enabled();
     return {
       enabled,
-      serverId: "primary" as const,
-      events: enabled ? (await this.store.history("primary")).map(eventView) : [],
+      serverId,
+      events: enabled ? (await this.store.history(serverId)).map(eventView) : [],
     };
   }
   async history(staff: Staff, id: string) {
     this.staff(staff);
     this.available();
     if (!z.uuid().safeParse(id).success) throw new BadRequestException("Choose a valid event.");
+    await this.selectedEvent(staff, id);
     // Reasons/actions are staff-only. No config documents, credentials or live-game request is involved.
     return { operations: await this.store.operations(id) };
   }
@@ -98,23 +104,26 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
       balanceWindowSeconds,
       forceRespawn,
     } = parsed.data;
+    if (serverId !== this.servers.resolve(staff.serverId))
+      throw new BadRequestException("The event must target the selected server.");
     const options = { teams, durationMinutes, warningSeconds, balanceWindowSeconds, forceRespawn };
     const requestHash = createHash("sha256").update(JSON.stringify(parsed.data)).digest("hex");
     const previous = await this.store.get(id);
     if (previous) {
-      if (previous.actorId !== staff.id || previous.requestHash !== requestHash)
+      if (previous.serverId !== serverId || previous.actorId !== staff.id || previous.requestHash !== requestHash)
         throw new ConflictException("This event ID was already used for a different request.");
       return eventView(previous);
     }
     const guildId = this.env.get("ADMIN_GUILD_ID");
     if (!guildId) throw new ServiceUnavailableException("The staff community is not configured.");
-    const settings = await this.game.configuration();
+    const game = this.servers.get(serverId);
+    const settings = await game.configuration();
     const lock = settings.fields.find((field) => field.id === "lockOverpopulated");
     if (settings.revision !== revision || typeof lock?.value !== "boolean" || (lock.value && !lock.editable))
       throw new ConflictException(
         "Refresh settings. The team lock must be readable, and editable if it is currently on.",
       );
-    const snapshot = await this.game.overview(),
+    const snapshot = await game.overview(),
       round = observedRound(snapshot);
     if (!round) throw new ConflictException("The game must report a current round clock before an event can be armed.");
     try {
@@ -145,7 +154,7 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
       id,
       serverId,
       serverName: snapshot.status.serverName,
-      connectionHash: this.connectionHash(),
+      connectionHash: this.servers.connectionHash(serverId),
       guildId,
       actorId: staff.id,
       actorName: staff.name,
@@ -167,6 +176,7 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
     const parsed = stopEventSchema.safeParse(input);
     if (!z.uuid().safeParse(id).success || !parsed.success)
       throw new BadRequestException("Choose an event and enter a reason.");
+    await this.selectedEvent(staff, id);
     return eventView(
       await this.store.stop(id, {
         ...parsed.data,
@@ -182,7 +192,7 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
     const parsed = restoreEventSchema.safeParse(input);
     if (!z.uuid().safeParse(id).success || !parsed.success)
       throw new BadRequestException("Review the current team lock and confirm its restoration.");
-    const event = await this.store.get(id);
+    const event = await this.selectedEvent(staff, id);
     if (!event || !event.stop || !["needs_review", "stopping", "complete"].includes(event.state))
       throw new ConflictException("Stop this event and inspect its receipts before restoring settings.");
     if (!this.connected(event))
@@ -195,6 +205,7 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
       kind: "restore_lock",
       action: {
         id: parsed.data.id,
+        serverId: event.serverId,
         action: "settings-save",
         revision: parsed.data.revision,
         changes: { lockOverpopulated: event.originalLock },
@@ -206,18 +217,20 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
     return eventView((await this.store.get(id))!);
   }
   onApplicationBootstrap() {
-    if (this.enabled()) this.schedule(0);
+    if (this.enabled()) for (const server of this.servers.list()) this.schedule(server.id, 0);
   }
   onModuleDestroy() {
     this.stopped = true;
-    if (this.timer) clearTimeout(this.timer);
+    for (const timer of this.timers.values()) clearTimeout(timer);
+    this.timers.clear();
   }
-  private schedule(delay: number) {
+  private schedule(serverId: string, delay: number) {
     if (this.stopped) return;
-    this.timer = setTimeout(() => {
-      void this.tick().then((next) => this.schedule(next));
+    const timer = setTimeout(() => {
+      void this.tick(serverId).then((next) => this.schedule(serverId, next));
     }, delay);
-    this.timer.unref();
+    timer.unref();
+    this.timers.set(serverId, timer);
   }
   private actor(event: EventRecord): Staff {
     return {
@@ -225,17 +238,20 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
       name: event.stop && !event.stop.actorId.startsWith("system:") ? event.stop.actorName : event.actorName,
       role: "admin",
       csrf: "",
+      serverId: event.serverId,
     };
   }
   private async problem(event: EventRecord, message: string) {
     await this.store.observe(event.id, event.version, { state: "needs_review", progress: event.progress, message });
   }
   /** At most one recorded effect per pass, with storage claims coordinating multiple instances. */
-  async tick(): Promise<number> {
-    if (this.running || this.stopped || !this.enabled()) return 30_000;
-    this.running = true;
+  async tick(id?: string): Promise<number> {
+    if (this.stopped || !this.enabled()) return 30_000;
+    const serverId = this.servers.resolve(id);
+    if (this.running.has(serverId)) return 30_000;
+    this.running.add(serverId);
     try {
-      let event = await this.store.current("primary");
+      let event = await this.store.current(serverId);
       if (!event) return 15_000;
       if (!event.stop && event.endsAt.getTime() <= Date.now())
         event = await this.store.stop(event.id, {
@@ -261,15 +277,16 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
         await this.store.completeUnchanged(event.id, event.version);
         return 15_000;
       }
-      const actor = this.actor(event);
-      if ((await this.auth.role(actor.id, true)) !== "admin") {
+      const actor = await this.auth.serverStaff(this.actor(event), serverId, true).catch(() => null);
+      if (actor?.role !== "admin") {
         await this.problem(
           event,
           "The responsible staff account no longer has administrator access. New moves have stopped; another administrator must review restoration.",
         );
         return 30_000;
       }
-      const settings = await this.game.configuration();
+      const game = this.servers.get(serverId);
+      const settings = await game.configuration();
       const lock = settings.fields.find((field) => field.id === "lockOverpopulated");
       let op: EventOperation | null = null;
       let progress = event.progress;
@@ -319,7 +336,7 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
           );
           return 30_000;
         }
-        const snapshot = await this.game.overview();
+        const snapshot = await game.overview();
         const plan = planEvent(event, snapshot, Date.now());
         progress = plan.progress;
         op = plan.operation;
@@ -329,7 +346,7 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
         const claimed = await this.store.claim(event.id, event.version, op, actor, progress);
         if (claimed) await this.execute(claimed, op, actor);
       }
-      const allowance = (await this.game.capabilities()).limits?.maxRequestsPerMinutePerIp;
+      const allowance = (await game.capabilities()).limits?.maxRequestsPerMinutePerIp;
       return Math.max(5_000, allowance ? Math.ceil((60_000 * 10) / allowance) : 10_000);
     } catch {
       this.logger.warn(
@@ -337,7 +354,7 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
       );
       return 30_000;
     } finally {
-      this.running = false;
+      this.running.delete(serverId);
     }
   }
   private async execute(event: EventRecord, op: EventOperation, actor: Staff) {
@@ -367,9 +384,10 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
       } else {
         actionSchema.parse(op.action);
         // Event ownership is checked separately; the system actor keeps event effects distinct from manual clicks.
-        if ((await this.auth.role(actor.id, true)) !== "admin") throw new Error("Administrator access changed.");
+        const authorized = await this.auth.serverStaff(actor, event.serverId, true);
+        if (authorized.role !== "admin") throw new Error("Administrator access changed.");
         if (op.round) {
-          const snapshot = await this.game.overview(),
+          const snapshot = await this.servers.get(event.serverId).overview(),
             current = observedRound(snapshot);
           if (!current || !sameRound(current, op.round) || Date.now() - Date.parse(snapshot.observedAt) > 15_000) {
             await this.store.settle(
@@ -405,7 +423,7 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
           return;
         }
         result = await this.admin.act(
-          { id: `system:50v50:${event.id}`, name: `Gramps 50v50 (${actor.name})`, role: "admin", csrf: "" },
+          { ...authorized, id: `system:50v50:${event.id}`, name: `Gramps 50v50 (${actor.name})` },
           op.action,
         );
         if (["move", "respawn"].includes(op.kind) && result.changed === false) {

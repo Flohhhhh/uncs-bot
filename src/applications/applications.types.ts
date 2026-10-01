@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { steamId } from "../admin/admin.types";
+import { gameServerId, LEGACY_SERVER_ID } from "../common/game-server";
 import type { whitelistApplications } from "../database/schema";
 
 export type ApplicantIdentity = { userId: string; displayName: string; csrf: string };
@@ -9,6 +10,7 @@ export const consentVersion = "whitelist-application-contact-v1-2026-09-30";
 export const applicationSchema = z
   .object({
     steamId,
+    serverId: gameServerId.default(LEGACY_SERVER_ID),
     email: z.string().trim().email().max(254).optional(),
     contactConsent: z.boolean(),
     rulesAccepted: z.literal(true),
@@ -40,6 +42,7 @@ export function ownApplication(application: WhitelistApplication | undefined | n
   if (!application) return null;
   return {
     id: application.id,
+    serverId: application.serverId,
     steamId: application.steamId,
     steamOwnershipVerified: application.steamOwnershipVerified,
     relationship: application.relationship,

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { ActionName, Player } from "../../api/types";
-import { useAdmin } from "../../app/context";
+import { useGameAdmin as useAdmin } from "../../app/context";
 import { Badge, Card, Empty, Modal, Search } from "../../components/ui";
 import { DataTable, CopyValue } from "../../components/data-table";
 import { actionDefinitions, allowed } from "../actions/policy";
@@ -303,7 +303,12 @@ export function PlayersPage() {
         )}
       </Card>
       {managedPlayer && (
-        <Modal title={managedPlayer.name} description={managedPlayer.steamId} onClose={() => setManagedId(null)}>
+        <Modal
+          serverScoped
+          title={managedPlayer.name}
+          description={managedPlayer.steamId}
+          onClose={() => setManagedId(null)}
+        >
           <div className="action-list">
             {(["message", "kick", "ban", "whitelist-add", "team", "kill"] as ActionName[]).map((action) => (
               <button

@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { ServerEventsService } from "./server-events.service";
 import { ServerEventsStore } from "./server-events.store";
-import { WardogsClient } from "../admin/wardogs.client";
+import { fixtureServers } from "../admin/game-server-fixture";
+import type { Staff } from "../admin/admin.types";
 import { AdminService } from "../admin/admin.service";
 import { AdminAuth } from "../admin/admin.auth";
 import { EnvService } from "../env/env.service";
@@ -9,8 +10,9 @@ import { eventFixture, eventNow, eventStaff, snapshotAt } from "./event-fixtures
 import { operation } from "./event-planner";
 import type { EventRecord } from "./server-events.types";
 
-function fixture() {
+function fixture(serverId = "primary") {
   const record = eventFixture();
+  record.serverId = serverId;
   let current: EventRecord | null = record;
   const store = {
     get: jest.fn(async () => current),
@@ -64,7 +66,16 @@ function fixture() {
       revision: "r2",
     })),
   };
-  const auth = { role: jest.fn(async () => "admin") };
+  const role = jest.fn(async () => "admin");
+  const auth = {
+    role,
+    serverStaff: jest.fn(async (actor: Staff, serverId: string) => ({
+      ...actor,
+      serverId,
+      serverVersion: "0".repeat(64),
+      role: await role(),
+    })),
+  };
   const environment: Record<string, unknown> = {
     SERVER_EVENTS_ENABLED: true,
     WARDOGS_RCON_URL: "https://game.example.test",
@@ -72,14 +83,14 @@ function fixture() {
   };
   const service = new ServerEventsService(
     store as unknown as ServerEventsStore,
-    game as unknown as WardogsClient,
+    fixtureServers(game, () => environment.WARDOGS_RCON_URL as string, serverId),
     admin as unknown as AdminService,
     auth as unknown as AdminAuth,
     { get: (key: string) => environment[key] } as EnvService,
   );
   const input = {
     id: record.id,
-    serverId: "primary",
+    serverId,
     revision: "r2",
     reason: record.reason,
     ...record.options,
@@ -102,6 +113,26 @@ function fixture() {
 }
 
 describe("durable optional event service", () => {
+  it("binds a non-primary event worker and its system action to the original server", async () => {
+    const f = fixture("event");
+    await f.service.tick("event");
+    expect(f.store.current).toHaveBeenCalledWith("event");
+    expect(f.auth.serverStaff).toHaveBeenCalledWith(expect.objectContaining({ serverId: "event" }), "event", true);
+    expect(f.admin.act).toHaveBeenCalledWith(
+      expect.objectContaining({ serverId: "event", serverVersion: "0".repeat(64) }),
+      expect.objectContaining({ serverId: "event" }),
+    );
+  });
+  it("does not expose or stop an event through another server's routes", async () => {
+    const f = fixture();
+    f.set({ ...f.record, serverId: "event" });
+    await expect(f.service.history(eventStaff, f.record.id)).rejects.toThrow("selected server");
+    await expect(f.service.stop(eventStaff, f.record.id, { id: randomUUID(), reason: "Stop event" })).rejects.toThrow(
+      "selected server",
+    );
+    expect(f.store.operations).not.toHaveBeenCalled();
+    expect(f.store.stop).not.toHaveBeenCalled();
+  });
   beforeEach(() => {
     jest.useFakeTimers();
     jest.setSystemTime(eventNow);

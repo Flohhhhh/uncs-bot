@@ -5,7 +5,7 @@ import { RconError, type WardogsClient } from "../admin/wardogs.client";
 import type { EnvService } from "../env/env.service";
 import { Env } from "../env/env";
 import type { CommunitySnapshot } from "./community-state";
-import { ServerCommunityService } from "./server-community.service";
+import { ServerCommunityWorker as ServerCommunityService } from "./server-community.service";
 
 const firstId = "76561198000000001";
 const secondId = "76561198000000002";
@@ -18,7 +18,7 @@ function snapshot(ids = [firstId], map = "Kavkazi"): CommunitySnapshot {
     players: ids.map((steamId) => ({ name: "Example player", steamId })),
   };
 }
-function fixture(overrides: Record<string, unknown> = {}) {
+function fixture(overrides: Record<string, unknown> = {}, serverId = "primary") {
   const values: Record<string, unknown> = {
     ADMIN_GUILD_ID: "guild",
     SERVER_COMMUNITY_ENABLED: true,
@@ -53,6 +53,7 @@ function fixture(overrides: Record<string, unknown> = {}) {
     store as unknown as AdminStore,
     { get: (key: string) => values[key] } as EnvService,
     discord as unknown as Client,
+    { id: serverId, name: `Test ${serverId}`, version: "0".repeat(64) },
   );
   const look = async (ids = [firstId], map = "Kavkazi", elapsed = 5_000) => {
     jest.setSystemTime(Date.now() + elapsed);
@@ -63,6 +64,24 @@ function fixture(overrides: Record<string, unknown> = {}) {
 }
 
 describe("optional community worker", () => {
+  it("keeps same-player welcomes and outage cancellation independent between servers", async () => {
+    const first = fixture({ SERVER_COMMUNITY_WELCOME_MESSAGES: ["Welcome", "Follow-up"] }, "primary");
+    const second = fixture({ SERVER_COMMUNITY_WELCOME_MESSAGES: ["Welcome", "Follow-up"] }, "event");
+    await first.service.tick();
+    await second.service.tick();
+    await first.look([firstId, secondId]);
+    await second.look([firstId, secondId]);
+    expect(first.game.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ steamId: secondId, serverId: "primary" }),
+    );
+    expect(second.game.execute).toHaveBeenCalledWith(expect.objectContaining({ steamId: secondId, serverId: "event" }));
+    first.game.overview.mockRejectedValueOnce(new Error("First server offline"));
+    await first.service.tick();
+    for (let index = 0; index < 4; index++) await second.look([firstId, secondId]);
+    expect(first.game.execute).toHaveBeenCalledTimes(1);
+    expect(second.game.execute).toHaveBeenCalledTimes(2);
+    expect(second.store.begin.mock.calls.map(([, action]) => action.serverId)).toEqual(["event", "event"]);
+  });
   beforeEach(() => {
     jest.useFakeTimers().setSystemTime(time);
     jest.spyOn(Logger.prototype, "warn").mockImplementation(() => undefined);

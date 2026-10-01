@@ -1,17 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import type { eventView, EventOptions } from "../../../../../src/server-events/server-events.types";
 import type { SettingsSnapshot } from "../../../../../src/common/server-settings";
-import { api } from "../../api/client";
+import { useGameApi } from "../../api/server-client";
 import { useResource } from "../../api/use-resource";
 import type { Overview } from "../../api/types";
-import { useAdmin } from "../../app/context";
+import { useGameAdmin as useAdmin } from "../../app/context";
 import { Badge, Card, Empty, Modal, ReasonField, date } from "../../components/ui";
 import { CopyValue, DataTable } from "../../components/data-table";
 import { errorMessage, singleLine } from "../actions/policy";
 
 type Event = ReturnType<typeof eventView>;
-type Events = { enabled: boolean; serverId: "primary"; events: Event[] };
-type Draft = EventOptions & { serverId: "primary"; revision: string; originalLock: boolean; serverName: string };
+type Events = { enabled: boolean; serverId: string; events: Event[] };
+type Draft = EventOptions & { serverId: string; revision: string; originalLock: boolean; serverName: string };
 type Review = { kind: "start"; draft: Draft } | { kind: "stop" | "restore"; event: Event };
 const labels = {
   preparing: "Preparing",
@@ -27,6 +27,7 @@ const stateLabel = (event: Event) =>
 
 function EventReview({ review, close, finished }: { review: Review; close: () => void; finished: () => void }) {
   const { busy, setBusy } = useAdmin();
+  const api = useGameApi();
   const [id] = useState(() => crypto.randomUUID());
   const submitted = useRef(false);
   const [result, setResult] = useState<string | null>(null);
@@ -69,6 +70,7 @@ function EventReview({ review, close, finished }: { review: Review; close: () =>
   }
   return (
     <Modal
+      serverScoped
       title={
         review.kind === "start"
           ? "Review optional 50v50"
@@ -315,7 +317,7 @@ function EventDraft({ review }: { review: (draft: Draft) => void }) {
             onClick={() =>
               review({
                 ...structuredClone(options),
-                serverId: "primary",
+                serverId: admin.server?.id ?? "primary",
                 revision: revision ?? settings.data!.revision,
                 originalLock: lock!.value as boolean,
                 serverName: roster.data!.status.serverName,
@@ -342,7 +344,7 @@ function EventOperations({ event, close }: { event: Event; close: () => void }) 
     }[];
   }>(`events/${event.id}/operations`);
   return (
-    <Modal title="Event actions" onClose={close}>
+    <Modal serverScoped title="Event actions" onClose={close}>
       <p>
         {event.options.teams.join(" vs ")} · {event.serverName}. Latest 100 actions.
       </p>

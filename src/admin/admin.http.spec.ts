@@ -14,6 +14,8 @@ import { MapVotesController } from "../map-votes/map-votes.controller";
 import { MapVotesService } from "../map-votes/map-votes.service";
 import { ServerEventsController } from "../server-events/server-events.controller";
 import { ServerEventsService } from "../server-events/server-events.service";
+import { GameServers } from "./game-servers";
+import { fixtureServers, legacyServerSettings } from "./game-server-fixture";
 
 describe("admin HTTP boundaries", () => {
   let app: INestApplication;
@@ -80,11 +82,13 @@ describe("admin HTTP boundaries", () => {
       .overrideProvider(HttpAdapterHost)
       .useValue(adapterHost)
       .overrideProvider(AdminSettings)
-      .useValue({ get: () => config })
+      .useValue({ ...legacyServerSettings, get: () => config })
       .overrideProvider(AdminStore)
       .useValue(store)
       .overrideProvider(WardogsClient)
       .useValue(game)
+      .overrideProvider(GameServers)
+      .useValue(fixtureServers(game))
       .compile();
     app = module.createNestApplication(adapter);
     app.useLogger(false);
@@ -386,12 +390,12 @@ describe("admin HTTP boundaries", () => {
       expect(result.body).toEqual({ id: action.id, state: "accepted", message: "Accepted" });
       expect(store.begin).toHaveBeenCalledWith(
         expect.objectContaining({ id: session.userId, role: "moderator" }),
-        action,
+        { ...action, serverId: "primary", serverVersion: "0".repeat(64) },
         expect.stringMatching(/^[a-f0-9]{64}$/),
       );
       expect(store.begin.mock.invocationCallOrder[0]).toBeLessThan(game.execute.mock.invocationCallOrder[0]);
       expect(game.execute).toHaveBeenCalledTimes(1);
-      expect(game.execute).toHaveBeenCalledWith(action);
+      expect(game.execute).toHaveBeenCalledWith({ ...action, serverId: "primary", serverVersion: "0".repeat(64) });
       expect(store.finish).toHaveBeenCalledWith(action.id, { state: "accepted", message: "Accepted" });
     },
   );

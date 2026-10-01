@@ -1,10 +1,10 @@
 import { useRef, useState, type FormEvent } from "react";
 import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 import type { MapSelection } from "../../../../../src/common/server-settings";
-import { api } from "../../api/client";
+import { useGameApi } from "../../api/server-client";
 import type { ActionName, ActionResult, Catalog } from "../../api/types";
 import { useResource } from "../../api/use-resource";
-import { useAdmin } from "../../app/context";
+import { useGameAdmin as useAdmin } from "../../app/context";
 import { Modal, ReasonField } from "../../components/ui";
 import { TeamMoveDialog } from "../players/team-move";
 import { MapPicker } from "./map-picker";
@@ -34,7 +34,7 @@ export function ActionsDialog({
     return player ? (
       <TeamMoveDialog players={[player]} onClose={onClose} />
     ) : (
-      <Modal title="Player unavailable" onClose={onClose}>
+      <Modal serverScoped title="Player unavailable" onClose={onClose}>
         <p>Refresh the live roster and select a connected player.</p>
       </Modal>
     );
@@ -43,6 +43,7 @@ export function ActionsDialog({
 }
 
 function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?: string; onClose: () => void }) {
+  const api = useGameApi();
   const admin = useAdmin();
   const [id] = useState(() => crypto.randomUUID());
   const submitted = useRef(false);
@@ -152,7 +153,7 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
   }
 
   return (
-    <Modal title={title} description={description} onClose={onClose} busy={sending}>
+    <Modal serverScoped title={title} description={description} onClose={onClose} busy={sending}>
       <form onSubmit={(event) => void submit(event)}>
         {result ? (
           <div

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { api } from "../../api/client";
+import { useGameApi } from "../../api/server-client";
 import { useResource } from "../../api/use-resource";
-import { useAdmin } from "../../app/context";
+import { useGameAdmin as useAdmin } from "../../app/context";
 import { Badge, Card, Empty, Modal, ReasonField, Search, date } from "../../components/ui";
 import { CopyValue, DataTable } from "../../components/data-table";
 import type {
@@ -152,6 +152,7 @@ function ApplicationReview({
   onReviewed: () => void;
 }) {
   const { busy, setBusy } = useAdmin();
+  const api = useGameApi();
   const [record, setRecord] = useState(initialRecord);
   const [review, setReview] = useState<{ decision: ApplicationDecision; id: string } | null>(null);
   const [result, setResult] = useState<ReviewResult | null>(null);
@@ -255,6 +256,7 @@ function ApplicationReview({
   const selected = review ? decisions[review.decision] : null;
   return (
     <Modal
+      serverScoped
       className="application-dialog"
       title={result?.title ?? selected?.title ?? "Whitelist application"}
       description={

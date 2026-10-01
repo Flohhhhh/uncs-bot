@@ -1,5 +1,6 @@
 import type { Overview, Staff } from "./types";
 import { isPublicIndividualSteamId } from "../../../../src/common/steam-id";
+import type { SelectedServer } from "../app/context";
 
 const record = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
@@ -8,6 +9,27 @@ const finite = (value: unknown): value is number => typeof value === "number" &&
 const optionalText = (value: unknown) => value === undefined || text(value);
 const optionalNumber = (value: unknown) => value === undefined || finite(value);
 const strings = (value: unknown) => Array.isArray(value) && value.every(text);
+export function validateServers(value: unknown): { legacy: boolean; servers: SelectedServer[] } {
+  if (
+    !record(value) ||
+    typeof value.legacy !== "boolean" ||
+    !Array.isArray(value.servers) ||
+    value.servers.length > 20 ||
+    !value.servers.every(
+      (server) =>
+        record(server) &&
+        text(server.id) &&
+        /^[a-z][a-z0-9-]{0,39}$/.test(server.id) &&
+        text(server.name) &&
+        text(server.version) &&
+        /^[a-f0-9]{64}$/.test(server.version) &&
+        ["admin", "moderator", "viewer"].includes(String(server.role)),
+    ) ||
+    new Set(value.servers.map((server) => server.id)).size !== value.servers.length
+  )
+    throw new Error("The game server list could not be verified. Refresh before continuing.");
+  return value as { legacy: boolean; servers: SelectedServer[] };
+}
 
 // These guards validate the browser contract, not staff authority. The server
 // independently authenticates every request and authorizes every action.

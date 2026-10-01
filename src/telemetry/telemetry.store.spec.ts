@@ -17,7 +17,11 @@ function fixture() {
 describe("telemetry persistence contract", () => {
   it("has durable instance+event identity and receipt/player lookup indexes", () => {
     const schema = getTableConfig(combatEvents);
-    expect(schema.primaryKeys[0].columns.map((column) => column.name)).toEqual(["server_instance_id", "event_id"]);
+    expect(schema.primaryKeys[0].columns.map((column) => column.name)).toEqual([
+      "server_id",
+      "server_instance_id",
+      "event_id",
+    ]);
     expect(schema.indexes.map((index) => index.config.name)).toEqual(
       expect.arrayContaining([
         "combat_events_received_idx",
@@ -46,7 +50,7 @@ describe("telemetry persistence contract", () => {
     const [config, values] = query.mock.calls.find(([config]) =>
       config.text.startsWith('insert into "combat_events"'),
     )!;
-    expect(config.text).toContain('on conflict ("server_instance_id","event_id") do nothing');
+    expect(config.text).toContain('on conflict ("server_id","server_instance_id","event_id") do nothing');
     expect(values).toContain(batch.serverId);
     expect(values).toContain(eventId);
     expect(query.mock.calls[0][0].text).toBe("begin");
@@ -87,15 +91,15 @@ describe("telemetry persistence contract", () => {
     const playerId = "76561198000000001";
     await store.snapshot(since, until, playerId);
     const [config, params] = query.mock.calls[0];
-    expect(config.text).toContain("received_at >= $1 AND received_at <= $2");
-    expect(params.slice(0, 2)).toEqual([since, until]);
+    expect(config.text).toContain("server_id = $1 AND received_at >= $2 AND received_at <= $3");
+    expect(params.slice(0, 3)).toEqual(["primary", since, until]);
     expect(config.text).toContain("CASE WHEN NOT suicide THEN 1 ELSE 0 END");
     expect(config.text).toContain("CASE WHEN NOT suicide AND headshot THEN 1 ELSE 0 END");
     expect(config.text).toContain("FROM scoped WHERE victim_steam_id IS NOT NULL");
-    expect(config.text).toContain("WHERE steam_id = $5");
+    expect(config.text).toContain("WHERE steam_id = $6");
     expect(config.text).toContain("LIMIT 100");
     expect(config.text).not.toContain(playerId);
-    expect(params.slice(2)).toEqual([playerId, playerId, playerId]);
+    expect(params.slice(3)).toEqual([playerId, playerId, playerId]);
   });
   it("bounds individual history and converts centimetres without altering game timestamps", async () => {
     const { store, query } = fixture();

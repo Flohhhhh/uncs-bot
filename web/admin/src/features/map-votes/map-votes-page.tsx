@@ -1,18 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import type { MapSelection, SettingsSnapshot } from "../../../../../src/common/server-settings";
 import type { mapVoteView } from "../../../../../src/map-votes/map-votes.types";
-import { api } from "../../api/client";
+import { useGameApi } from "../../api/server-client";
 import { useResource } from "../../api/use-resource";
 import type { Catalog } from "../../api/types";
-import { useAdmin } from "../../app/context";
+import { useGameAdmin as useAdmin } from "../../app/context";
 import { Badge, Card, Empty, Modal, ReasonField, date } from "../../components/ui";
 import { CopyValue, DataTable } from "../../components/data-table";
 import { MapPicker } from "../actions/map-picker";
 import { errorMessage, singleLine } from "../actions/policy";
 
 type Vote = ReturnType<typeof mapVoteView>;
-type VoteList = { enabled: boolean; serverId: "primary"; votes: Vote[] };
-type Draft = { serverId: "primary"; revision: string; choices: MapSelection[]; minutes: number };
+type VoteList = { enabled: boolean; serverId: string; votes: Vote[] };
+type Draft = { serverId: string; revision: string; choices: MapSelection[]; minutes: number };
 const stateLabels = {
   publishing: "Creating ballot",
   open: "Voting open",
@@ -37,6 +37,7 @@ function VoteReview({
   finished: () => void;
 }) {
   const { busy, setBusy } = useAdmin();
+  const api = useGameApi();
   const [id] = useState(() => crypto.randomUUID());
   const submitted = useRef(false);
   const [result, setResult] = useState<string | null>(null);
@@ -67,7 +68,7 @@ function VoteReview({
     }
   }
   return (
-    <Modal title={vote ? "Close this ballot" : "Review Discord ballot"} onClose={close} busy={busy}>
+    <Modal serverScoped title={vote ? "Close this ballot" : "Review Discord ballot"} onClose={close} busy={busy}>
       {draft && (
         <>
           <ol className="change-summary">

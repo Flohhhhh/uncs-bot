@@ -7,9 +7,9 @@ import {
   type SettingValue,
 } from "../../../../../src/common/server-settings";
 import { canAct } from "../../../../../src/common/admin-policy";
-import { useAdmin } from "../../app/context";
+import { useGameAdmin as useAdmin } from "../../app/context";
 import { useResource } from "../../api/use-resource";
-import { api } from "../../api/client";
+import { useGameApi } from "../../api/server-client";
 import type { ActionResult, Catalog } from "../../api/types";
 import { Badge, Card, Empty, Modal, ReasonField, Table } from "../../components/ui";
 import { errorMessage, rejectionState, singleLine } from "../actions/policy";
@@ -40,6 +40,7 @@ function ReviewChanges({
   finished: () => void;
 }) {
   const admin = useAdmin();
+  const api = useGameApi();
   const [id] = useState(() => crypto.randomUUID());
   const submitted = useRef(false);
   const [result, setResult] = useState<ActionResult | null>(null);
@@ -73,7 +74,7 @@ function ReviewChanges({
     }
   }
   return (
-    <Modal title="Review server changes" onClose={close} busy={admin.busy}>
+    <Modal serverScoped title="Review server changes" onClose={close} busy={admin.busy}>
       <ul className="change-summary">
         {summary.map((item, index) => (
           <li key={index}>{item}</li>
@@ -545,14 +546,17 @@ export function SettingsPage() {
   );
 }
 export function PermissionsPage() {
-  const { me } = useAdmin();
+  const { me, server } = useAdmin();
   const rows = [
     ["Player moderation & announcements", "kick"],
     ["Whitelist & map controls", "map"],
     ["Server settings & rotation", "settings-save"],
   ] as const;
   return (
-    <Card title="Staff permissions" subtitle={`Your access: ${me.role}. Assigned through configured Discord roles.`}>
+    <Card
+      title="Staff permissions"
+      subtitle={`Your access${server ? ` on ${server.name}` : ""}: ${me.role}. Assigned through configured Discord roles.`}
+    >
       <div className="card-body">
         <Table headers={["ACCESS", "VIEWER", "MODERATOR", "ADMIN / OWNER"]}>
           <tr>
@@ -570,7 +574,7 @@ export function PermissionsPage() {
             </tr>
           ))}
           <tr>
-            <td>Private applications & supporter records</td>
+            <td>Private applications for this server</td>
             <td>—</td>
             <td>—</td>
             <td>Manage</td>
@@ -593,6 +597,10 @@ export function PermissionsPage() {
           permission level. Discord role assignment remains with the community’s owners.
         </p>
         <p className="muted">Screened Discord members can vote in a published ballot. Voting grants no staff access.</p>
+        <p className="muted">
+          Server restrictions can narrow a staff role. Supporter records use community-wide administrator access and do
+          not grant game access.
+        </p>
       </div>
     </Card>
   );

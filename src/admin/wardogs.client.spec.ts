@@ -6,6 +6,7 @@ import { actionSchema, playersSchema, type AdminAction } from "./admin.types";
 import { configuredWhitelist } from "./whitelist-document";
 import { randomUUID } from "node:crypto";
 import { ServiceUnavailableException } from "@nestjs/common";
+import { fixtureServers } from "./game-server-fixture";
 const id = "76561198123456789",
   existing = "76561198066952872";
 const settings = {
@@ -36,7 +37,7 @@ describe("shared dashboard and community observations", () => {
       return new Response(JSON.stringify(body));
     });
     const client = new WardogsClient(settings);
-    const dashboard = new AdminService(client, {} as AdminStore);
+    const dashboard = new AdminService(fixtureServers(client), {} as AdminStore);
     const playerReads = () => transport.mock.calls.filter(([url]) => String(url).endsWith("/v1/players")).length;
     return { transport, client, dashboard, playerReads };
   }

@@ -22,7 +22,7 @@ describe("explicit game-server registry", () => {
   it("exposes only labels, requires an explicit exact ID and makes no discovery requests", () => {
     const transport = jest.spyOn(globalThis, "fetch");
     const registry = new GameServers(settings());
-    expect(registry.list()).toEqual([
+    expect(registry.list()).toMatchObject([
       { id: "east", name: "UNCs East" },
       { id: "central", name: "UNCs Central" },
     ]);
@@ -85,6 +85,7 @@ describe("explicit game-server registry", () => {
     const east = registry.get("east");
     config[0].rconUrl = "https://wrong.example.test";
     config[0].password = "wrong-secret";
+    expect(() => registry.get("east")).toThrow("Restart this instance");
     const transport = jest.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}"));
     await east.request("GET", "/v1/status");
     expect(transport).toHaveBeenCalledWith(
@@ -104,7 +105,7 @@ describe("explicit game-server registry", () => {
             ? "https://legacy.example.test"
             : "legacy-test-secret",
     } as EnvService);
-    expect(absent.servers()).toEqual([{ id: "primary", name: "The UNCs" }]);
+    expect(absent.servers()).toMatchObject([{ id: "primary", name: "The UNCs" }]);
     expect(absent.rcon()).toEqual({ rconUrl: "https://legacy.example.test", password: "legacy-test-secret" });
     expect(() => absent.connection("east")).toThrow("not configured");
     expect(() => settings().rcon()).toThrow("explicit server selection");
@@ -149,5 +150,18 @@ describe("server deployment configuration", () => {
     const parsed = Env.shape.WARDOGS_SERVERS.safeParse('{"password":"private-test-secret"');
     expect(parsed.success).toBe(false);
     if (!parsed.success) expect(JSON.stringify(parsed.error.issues)).not.toContain("private-test-secret");
+  });
+  it("rejects shared feed credentials, reused game passwords and shared status-card destinations", () => {
+    const token = "a-separate-feed-token-long-enough-123";
+    const card = { channelId: "123456789012345678", messageId: "234567890123456789" };
+    for (const input of [
+      servers.map((server) => ({ ...server, feedToken: token })),
+      [
+        { ...servers[0], password: token },
+        { ...servers[1], feedToken: token },
+      ],
+      servers.map((server) => ({ ...server, communityStatus: card })),
+    ])
+      expect(Env.shape.WARDOGS_SERVERS.safeParse(JSON.stringify(input)).success).toBe(false);
   });
 });

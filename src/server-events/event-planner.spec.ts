@@ -156,7 +156,7 @@ describe("optional game-roster 50v50 planning", () => {
       { durationMinutes: 0 },
       { warningSeconds: 1 },
       { forceRespawn: "false" },
-      { serverId: "other" },
+      { serverId: "../other" },
     ])
       expect(startEventSchema.safeParse({ ...input, ...change }).success).toBe(false);
   });

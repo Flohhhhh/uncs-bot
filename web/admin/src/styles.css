@@ -37,6 +37,32 @@
   font-synthesis: none;
   -webkit-font-smoothing: antialiased;
 }
+.server-selection {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 20px;
+}
+.server-selection label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  min-width: 0;
+  width: min(100%, 360px);
+}
+.server-selection select {
+  width: 100%;
+  min-width: 0;
+}
+.server-review-target {
+  border-left: 3px solid var(--orange);
+  padding: 10px 14px;
+  background: var(--ink-deep);
+  overflow-wrap: anywhere;
+}
+.server-review-target small {
+  color: var(--muted);
+}
 * {
   box-sizing: border-box;
 }

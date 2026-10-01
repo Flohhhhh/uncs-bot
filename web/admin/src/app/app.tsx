@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { api, configureSession, isReadPending } from "../api/client";
-import { validateOverview, validateStaff } from "../api/validation";
+import { validateOverview, validateStaff, validateServers } from "../api/validation";
 import type { ActionName, Overview, Staff } from "../api/types";
-import { AdminContext } from "./context";
+import { AdminContext, type SelectedServer } from "./context";
 import { Badge, Empty } from "../components/ui";
 import {
   OverviewPage,
@@ -95,11 +95,15 @@ function Login({ message }: { message: string }) {
   );
 }
 export function App() {
+  const location = useLocation(),
+    navigate = useNavigate();
   const [me, setMe] = useState<Staff | null>(null);
+  const [available, setAvailable] = useState<{ legacy: boolean; servers: SelectedServer[] } | null>(null);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState("");
   const expire = useCallback((reason: string) => {
     setMe(null);
+    setAvailable(null);
     setMessage(reason);
     setLoading(false);
   }, []);
@@ -107,10 +111,13 @@ export function App() {
     const controller = new AbortController();
     configureSession("", expire);
     void api<Staff>("me", { signal: controller.signal })
-      .then((value) => {
+      .then(async (value) => {
         if (controller.signal.aborted) return;
         const staff = validateStaff(value);
         configureSession(staff.csrf, expire);
+        const servers = validateServers(await api("servers", { signal: controller.signal }));
+        if (controller.signal.aborted) return;
+        setAvailable(servers);
         setMe(staff);
         setLoading(false);
       })
@@ -123,10 +130,25 @@ export function App() {
     };
   }, [expire]);
   if (loading) return <Empty title="Checking staff access…" />;
-  return me ? (
+  const selectedId = new URLSearchParams(location.search).get("server") ?? (available?.legacy ? "primary" : "");
+  const server = available?.servers.find((server) => server.id === selectedId);
+  if (me && available && !server)
+    return (
+      <div className="login-screen">
+        <Brand />
+        <CardServerChoice
+          servers={available.servers}
+          invalid={!!selectedId}
+          choose={(id) => navigate({ pathname: location.pathname, search: `?server=${id}` })}
+        />
+      </div>
+    );
+  return me && server && available ? (
     <Dashboard
-      key={me.id}
+      key={`${me.id}:${server.id}:${server.version}`}
       me={me}
+      server={server}
+      servers={available.servers}
       signOut={() => {
         configureSession("");
         expire("Signed out.");
@@ -136,8 +158,56 @@ export function App() {
     <Login message={message} />
   );
 }
-function Dashboard({ me, signOut }: { me: Staff; signOut: () => void }) {
+function CardServerChoice({
+  servers,
+  choose,
+  invalid,
+}: {
+  servers: SelectedServer[];
+  choose: (id: string) => void;
+  invalid: boolean;
+}) {
+  return (
+    <div className="login-card">
+      <div className="login-copy">
+        <h1>Choose a server</h1>
+        <p>
+          {invalid
+            ? "That server is unavailable or outside your staff access."
+            : "Select the server you want to manage."}
+        </p>
+        {servers.length ? (
+          <label>
+            Game server
+            <select value="" onChange={(event) => choose(event.target.value)}>
+              <option value="">Choose a server</option>
+              {servers.map((server) => (
+                <option key={server.id} value={server.id}>
+                  {server.name} · {server.role}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <p>No game servers are available to this staff account.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+function Dashboard({
+  me,
+  server,
+  servers,
+  signOut,
+}: {
+  me: Staff;
+  server: SelectedServer;
+  servers: SelectedServer[];
+  signOut: () => void;
+}) {
   const location = useLocation();
+  const navigate = useNavigate();
   const key = location.pathname.split("/").filter(Boolean)[0] || "overview";
   const page = Object.hasOwn(pages, key) ? (key as keyof typeof pages) : "overview";
   const gamePage = ["overview", "players", "whitelist", "bans", "announcements", "match"].includes(key);
@@ -192,7 +262,7 @@ function Dashboard({ me, signOut }: { me: Staff; signOut: () => void }) {
     }
     const controller = new AbortController();
     const requestedFreshness = freshness.current;
-    void api<Overview>("overview", { signal: controller.signal })
+    void api<Overview>(`servers/${server.id}/overview`, { signal: controller.signal })
       .then((value) => {
         if (!controller.signal.aborted) {
           setOverview(validateOverview(value));
@@ -207,7 +277,7 @@ function Dashboard({ me, signOut }: { me: Staff; signOut: () => void }) {
         }
       });
     return () => controller.abort();
-  }, [gamePage, refreshVersion]);
+  }, [gamePage, refreshVersion, server.id]);
   useEffect(() => {
     if (!overview) return;
     // Expire an unattended confirmation without adding another polling loop.
@@ -231,11 +301,17 @@ function Dashboard({ me, signOut }: { me: Staff; signOut: () => void }) {
     if (unsavedChanges) setLogoutRequested(true);
     else void logout();
   }
-  const staffPage = (element: React.ReactNode) => (me.role === "admin" ? element : <Navigate to="/overview" replace />);
+  const staffPage = (element: React.ReactNode, game = false) =>
+    (game ? server.role : me.role) === "admin" ? (
+      element
+    ) : (
+      <Navigate to={{ pathname: "/overview", search: location.search }} replace />
+    );
   return (
     <AdminContext.Provider
       value={{
         me,
+        server,
         overview,
         stale,
         busy,
@@ -262,14 +338,17 @@ function Dashboard({ me, signOut }: { me: Staff; signOut: () => void }) {
           <p className="nav-label">SERVER OPERATIONS</p>
           <nav aria-label="Dashboard sections">
             {Object.entries(pages)
-              .filter(
-                ([id]) =>
-                  me.role === "admin" || !["applications", "supporters", "settings", "votes", "events"].includes(id),
+              .filter(([id]) =>
+                id === "supporters"
+                  ? me.role === "admin"
+                  : ["applications", "settings", "votes", "events"].includes(id)
+                    ? server.role === "admin"
+                    : true,
               )
               .map(([id, item]) => (
                 <NavLink
                   key={id}
-                  to={`/${id}`}
+                  to={{ pathname: `/${id}`, search: location.search }}
                   className={({ isActive }) => (isActive ? "active" : "")}
                   onClick={(event) => {
                     if (busy || dialogOpen) event.preventDefault();
@@ -338,6 +417,24 @@ function Dashboard({ me, signOut }: { me: Staff; signOut: () => void }) {
             </div>
           </header>
           <div className="content">
+            <div className="server-selection">
+              <label>
+                Game server
+                <select
+                  value={server.id}
+                  disabled={busy || dialogOpen}
+                  onChange={(event) =>
+                    navigate({ pathname: location.pathname, search: `?server=${event.target.value}` })
+                  }
+                >
+                  {servers.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.name} · {option.role}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
             <div className="page-heading">
               <div>
                 <p className="eyebrow">✳ WARDOGS / COMMUNITY SERVER</p>
@@ -388,20 +485,20 @@ function Dashboard({ me, signOut }: { me: Staff; signOut: () => void }) {
             )}
             <section id="page" aria-live="polite">
               <Routes>
-                <Route index element={<Navigate to="/overview" replace />} />
+                <Route index element={<Navigate to={{ pathname: "/overview", search: location.search }} replace />} />
                 <Route path="overview" element={<OverviewPage />} />
                 <Route path="players" element={<PlayersPage />} />
                 <Route path="whitelist" element={<WhitelistPage />} />
                 <Route path="bans" element={<BansPage />} />
                 <Route path="announcements" element={<AnnouncementsPage />} />
                 <Route path="match" element={<MatchPage />} />
-                <Route path="votes" element={staffPage(<MapVotesPage />)} />
-                <Route path="events" element={staffPage(<EventsPage />)} />
+                <Route path="votes" element={staffPage(<MapVotesPage />, true)} />
+                <Route path="events" element={staffPage(<EventsPage />, true)} />
                 <Route path="audit" element={<AuditPage />} />
-                <Route path="settings" element={staffPage(<SettingsPage />)} />
+                <Route path="settings" element={staffPage(<SettingsPage />, true)} />
                 <Route path="permissions" element={<PermissionsPage />} />
                 <Route path="combat" element={<CombatPage />} />
-                <Route path="applications" element={staffPage(<ApplicationsPage />)} />
+                <Route path="applications" element={staffPage(<ApplicationsPage />, true)} />
                 <Route path="supporters" element={staffPage(<SupportersPage />)} />
                 <Route
                   path="*"

@@ -1,8 +1,12 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { and, desc, eq, gt, lt } from "drizzle-orm";
+import { and, desc, eq, gt, lt, sql } from "drizzle-orm";
 import { DATABASE, type Database } from "../database/database.types";
 import { adminActions, adminSessions } from "../database/schema";
 import type { ActionResult, AdminAction, Staff } from "./admin.types";
+import { LEGACY_SERVER_ID } from "../common/game-server";
+
+// Existing deployment records predate server selection and belong to its original server.
+const actionServer = sql<string>`coalesce(${adminActions.details}->>'serverId', ${LEGACY_SERVER_ID})`;
 
 const auditFields = {
   id: adminActions.id,
@@ -59,16 +63,25 @@ export class AdminStore {
   async finish(id: string, result: ActionResult) {
     await this.db
       .update(adminActions)
-      .set({ ...result, completedAt: new Date() })
+      .set({ state: result.state, message: result.message, completedAt: new Date() })
       .where(eq(adminActions.id, id));
   }
 
-  async history() {
-    return this.db.select(auditFields).from(adminActions).orderBy(desc(adminActions.createdAt)).limit(100);
+  async history(serverId = LEGACY_SERVER_ID) {
+    return this.db
+      .select(auditFields)
+      .from(adminActions)
+      .where(eq(actionServer, serverId))
+      .orderBy(desc(adminActions.createdAt))
+      .limit(100);
   }
 
-  async receipt(id: string) {
-    const [record] = await this.db.select(auditFields).from(adminActions).where(eq(adminActions.id, id)).limit(1);
+  async receipt(id: string, serverId = LEGACY_SERVER_ID) {
+    const [record] = await this.db
+      .select(auditFields)
+      .from(adminActions)
+      .where(and(eq(adminActions.id, id), eq(actionServer, serverId)))
+      .limit(1);
     return record ?? null;
   }
 }

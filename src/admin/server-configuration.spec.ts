@@ -6,6 +6,7 @@ import { auditAction, parseRotation } from "./server-configuration";
 import { SESSION, ROTATION } from "../common/server-settings";
 import { AdminService } from "./admin.service";
 import { AdminStore } from "./admin.store";
+import { fixtureServers } from "./game-server-fixture";
 
 const original = `[${SESSION}]\r\n; keep identity comment\r\nServerName="The UNCs"\r\nServerPassword="private-join-secret"\r\nServerMinPlayerCash=0\r\nServerMaxPlayerCash=0\r\n+DefaultReservedPlayerIds=76561198000000001\r\n[MatchState.Playing.KOTH]\r\nScorePeriod=24\r\n[${ROTATION}]\r\nbEnabled=True\r\nRotationMode=Ordered\r\n+RotationEntries=(Map="Kavkazi",Experiences="KOTH",Lighting="DayClear")\r\n+RotationEntries=(Map="Europe",Experiences="KOTH",Lighting="DayClear")\r\n[WDServerFeed]\r\nUrl=http://127.0.0.1:32190\r\nToken=private-feed-secret\r\n`;
 function fixture() {
@@ -136,7 +137,7 @@ describe("server configuration boundaries", () => {
       begin: jest.fn().mockResolvedValue({ created: true }),
       finish: jest.fn().mockResolvedValue(undefined),
     };
-    const service = new AdminService(f.game, store as unknown as AdminStore);
+    const service = new AdminService(fixtureServers(f.game), store as unknown as AdminStore);
     const action = save({ serverPassword: "replacement-secret" });
     await service.act({ id: "staff", name: "Staff", role: "admin", csrf: "csrf" }, action);
     expect(JSON.stringify(store.begin.mock.calls)).not.toContain("replacement-secret");
@@ -145,7 +146,7 @@ describe("server configuration boundaries", () => {
   });
   it.each(["viewer", "moderator"] as const)("refuses settings reads and writes by %s", async (role) => {
     const f = fixture();
-    const service = new AdminService(f.game, {} as AdminStore);
+    const service = new AdminService(fixtureServers(f.game), {} as AdminStore);
     const staff = { id: "staff", name: "Staff", role, csrf: "csrf" };
     await expect(service.configuration(staff)).rejects.toThrow("administrators");
     await expect(service.act(staff, save({ scorePeriod: 25 }))).rejects.toThrow("staff role");

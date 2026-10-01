@@ -1,4 +1,5 @@
 import { Injectable, ServiceUnavailableException } from "@nestjs/common";
+import { createHash } from "node:crypto";
 import { EnvService } from "../env/env.service";
 import { LEGACY_SERVER_ID, validRconUrl, type GameServerSummary, type RconConnection } from "../common/game-server";
 
@@ -61,7 +62,31 @@ export class AdminSettings {
   /** Labels only: a browser must never receive the endpoint or password. */
   servers(): GameServerSummary[] {
     const configured = this.env.get("WARDOGS_SERVERS");
-    return configured ? configured.map(({ id, name }) => ({ id, name })) : [{ id: LEGACY_SERVER_ID, name: "The UNCs" }];
+    const definitions = configured ?? [
+      { id: LEGACY_SERVER_ID, name: "The UNCs", rconUrl: this.env.get("WARDOGS_RCON_URL") ?? "" },
+    ];
+    return definitions.map(({ id, name, rconUrl }) => ({
+      id,
+      name,
+      version: createHash("sha256")
+        .update(`${id}\n${rconUrl.replace(/\/+$/, "")}`)
+        .digest("hex"),
+    }));
+  }
+
+  explicitServers() {
+    return this.env.get("WARDOGS_SERVERS") !== undefined;
+  }
+  feedToken(id: string) {
+    const configured = this.env.get("WARDOGS_SERVERS");
+    if (configured) return configured.find((server) => server.id === id)?.feedToken;
+    if (id !== LEGACY_SERVER_ID) return undefined;
+    const token = this.env.get("WARDOGS_FEED_TOKEN");
+    return token !== this.env.get("WARDOGS_RCON_PASSWORD") ? token : undefined;
+  }
+
+  serverRoles(id: string) {
+    return this.env.get("WARDOGS_SERVERS")?.find((server) => server.id === id)?.staffRoles;
   }
 
   connection(serverId: string): RconConnection {

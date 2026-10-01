@@ -68,9 +68,10 @@ export const whitelistApplications = pgTable(
   "whitelist_applications",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    discordUserId: text("discord_user_id").notNull().unique(),
+    serverId: text("server_id").notNull().default("primary"),
+    discordUserId: text("discord_user_id").notNull(),
     discordDisplayName: text("discord_display_name").notNull(),
-    steamId: text("steam_id").notNull().unique(),
+    steamId: text("steam_id").notNull(),
     relationship: text("relationship").$type<"unc_member" | "friend_regular" | "new_player">().notNull(),
     email: text("email"),
     emailVerified: boolean("email_verified").notNull().default(false),
@@ -94,7 +95,11 @@ export const whitelistApplications = pgTable(
     lastActionState: text("last_action_state"),
     lastActionMessage: text("last_action_message"),
   },
-  (table) => [index("whitelist_applications_submitted_idx").on(table.submittedAt)],
+  (table) => [
+    index("whitelist_applications_submitted_idx").on(table.serverId, table.submittedAt),
+    uniqueIndex("whitelist_applications_server_discord_idx").on(table.serverId, table.discordUserId),
+    uniqueIndex("whitelist_applications_server_steam_idx").on(table.serverId, table.steamId),
+  ],
 );
 
 // Record the review before touching RCON. Only completion fields are updated;

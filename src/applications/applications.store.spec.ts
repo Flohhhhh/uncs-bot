@@ -14,13 +14,22 @@ describe("atomic application review persistence", () => {
     await new ApplicationsStore(db as unknown as Database).list();
     const [statement, parameters] = query.mock.calls[0];
     expect(statement.text).toContain(
-      'order by case when "whitelist_applications"."status" in ($1, $2, $3) then 0 else 1 end',
+      'order by case when "whitelist_applications"."status" in ($2, $3, $4) then 0 else 1 end',
     );
     expect(statement.text).toContain('then "whitelist_applications"."submitted_at" end asc');
     expect(statement.text).toContain(
-      '"whitelist_applications"."submitted_at" desc, "whitelist_applications"."id" asc limit $7',
+      '"whitelist_applications"."submitted_at" desc, "whitelist_applications"."id" asc limit $8',
     );
-    expect(parameters).toEqual(["pending", "processing", "needs_review", "pending", "processing", "needs_review", 100]);
+    expect(parameters).toEqual([
+      "primary",
+      "pending",
+      "processing",
+      "needs_review",
+      "pending",
+      "processing",
+      "needs_review",
+      100,
+    ]);
   });
   it("claims only pending requests and writes its review in the same transaction", async () => {
     const applicationId = randomUUID(),
@@ -42,7 +51,7 @@ describe("atomic application review persistence", () => {
     const result = await store.claim(applicationId, { id: actionId, reason: "Reviewed evidence" }, "approve", staff);
     const query = new PgDialect().sqlToQuery(where.mock.calls[0][0]);
     expect(query.sql).toContain('"whitelist_applications"."status"');
-    expect(query.params).toEqual([applicationId, "pending"]);
+    expect(query.params).toEqual([applicationId, "primary", "pending"]);
     expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(insert).toHaveBeenCalledTimes(1);
     expect(result.claimed).toBe(true);

@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { useAdmin } from "../app/context";
 import { api } from "./client";
+import { isGameResource, useGameApi } from "./server-client";
 export function useResource<T>(path: string | null) {
   const { refreshVersion } = useAdmin();
+  const gameApi = useGameApi();
   const [version, setVersion] = useState(0);
   const [result, setResult] = useState<{ path: string | null; data: T | null; loading: boolean; error: string }>({
     path,
@@ -17,7 +19,7 @@ export function useResource<T>(path: string | null) {
       return;
     }
     setResult((previous) => ({ path, data: previous.path === path ? previous.data : null, loading: true, error: "" }));
-    void api<T>(path, { signal: controller.signal })
+    void (isGameResource(path) ? gameApi : api)<T>(path, { signal: controller.signal })
       .then((data) => {
         if (!controller.signal.aborted) setResult({ path, data, loading: false, error: "" });
       })
@@ -31,7 +33,7 @@ export function useResource<T>(path: string | null) {
           }));
       });
     return () => controller.abort();
-  }, [path, refreshVersion, version]);
+  }, [path, refreshVersion, version, gameApi]);
   const refresh = useCallback(() => setVersion((value) => value + 1), []);
   return {
     data: result.path === path ? result.data : null,

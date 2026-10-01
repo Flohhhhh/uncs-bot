@@ -1,10 +1,18 @@
 import { z } from "zod";
 import { isPublicIndividualSteamId } from "../common/steam-id";
 import type { StaffRole } from "../common/admin-policy";
+import { gameServerId } from "../common/game-server";
 export { canAct, moderatorActions } from "../common/admin-policy";
 export type { StaffRole } from "../common/admin-policy";
 
-export type Staff = { id: string; name: string; role: StaffRole; csrf: string };
+export type Staff = {
+  id: string;
+  name: string;
+  role: StaffRole;
+  csrf: string;
+  serverId?: string;
+  serverVersion?: string;
+};
 export type ActionResult = {
   state: "applied" | "accepted" | "pending" | "failed" | "unknown";
   message: string;
@@ -33,7 +41,15 @@ const selection = z
   .min(1)
   .max(150)
   .regex(/^[\w./-]+$/);
-const base = { id: z.uuid(), reason };
+const base = {
+  id: z.uuid(),
+  reason,
+  serverId: gameServerId.optional(),
+  serverVersion: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
+};
 const player = { ...base, steamId };
 const expectedRound = z.object({ map: selection, startedAt: z.number().finite().nonnegative() }).strict().optional();
 const revision = z

@@ -38,25 +38,33 @@ function mount() {
         JSON.stringify(
           url.endsWith("/me")
             ? { id: "staff", name: "Staff", role: "admin", csrf: "csrf" }
-            : url.endsWith("/settings")
-              ? snapshot
-              : url.endsWith("/catalog")
-                ? { maps: [{ id: "Europe" }, { id: "Kavkazi" }], experiences: [], lightings: [] }
-                : url.endsWith("/overview")
-                  ? {
-                      observedAt: new Date().toISOString(),
-                      status: {
-                        serverName: "Test server",
-                        map: "Europe",
-                        players: { current: 0, max: 100 },
-                        factionScores: [],
-                      },
-                      players: [],
-                      capabilities: { routes: [] },
-                    }
-                  : url.endsWith("/actions")
-                    ? { state: "pending", message: "Saved for next match." }
-                    : [],
+            : url.endsWith("/servers")
+              ? {
+                  legacy: true,
+                  servers: [
+                    { id: "primary", name: "Primary server", version: "0".repeat(64), role: "admin" },
+                    { id: "event", name: "Event server", version: "1".repeat(64), role: "admin" },
+                  ],
+                }
+              : url.endsWith("/settings")
+                ? snapshot
+                : url.endsWith("/catalog")
+                  ? { maps: [{ id: "Europe" }, { id: "Kavkazi" }], experiences: [], lightings: [] }
+                  : url.endsWith("/overview")
+                    ? {
+                        observedAt: new Date().toISOString(),
+                        status: {
+                          serverName: "Test server",
+                          map: "Europe",
+                          players: { current: 0, max: 100 },
+                          factionScores: [],
+                        },
+                        players: [],
+                        capabilities: { routes: [] },
+                      }
+                    : url.endsWith("/actions")
+                      ? { state: "pending", message: "Saved for next match." }
+                      : [],
         ),
       ),
   );
@@ -95,6 +103,35 @@ it("keeps a settings draft when leaving is cancelled, then discards only after c
   await waitFor(() => expect(router.state.location.pathname).toBe("/audit"));
   expect(unload()).toBe(false);
   expect(actionCalls(fetcher)).toHaveLength(0);
+});
+
+it("guards a server switch on the same page and remounts only after discarding the draft", async () => {
+  const { router, fetcher } = mount();
+  await editName();
+  fireEvent.change(screen.getByRole("combobox", { name: "Game server" }), { target: { value: "event" } });
+  expect(await screen.findByRole("dialog", { name: "Discard unsaved changes?" })).toBeInTheDocument();
+  expect(router.state.location.search).toBe("");
+  expect(fetcher.mock.calls.some(([url]) => url.includes("/servers/event/"))).toBe(false);
+  fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+  expect(screen.getByRole("textbox", { name: /Server name/ })).toHaveValue("Event night");
+  fireEvent.change(screen.getByRole("combobox", { name: "Game server" }), { target: { value: "event" } });
+  fireEvent.click(await screen.findByRole("button", { name: "Discard changes" }));
+  await waitFor(() => expect(router.state.location.search).toBe("?server=event"));
+  expect(await screen.findByRole("textbox", { name: /Server name/ })).toHaveValue("The UNCs");
+  expect(actionCalls(fetcher)).toHaveLength(0);
+});
+
+it("blocks Back/Forward to a different server while a review is open", async () => {
+  const { router } = mount();
+  await editName();
+  fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
+  expect(await screen.findByRole("dialog", { name: "Review server changes" })).toHaveTextContent("Primary server");
+  expect(screen.getByRole("combobox", { name: "Game server" })).toBeDisabled();
+  await act(async () => {
+    await router.navigate("/settings?server=event");
+  });
+  expect(router.state.location.search).toBe("");
+  expect(screen.getByRole("dialog", { name: "Review server changes" })).toHaveTextContent("Primary server");
 });
 
 it("guards browser Back and keeps editing when Escape dismisses the warning", async () => {
