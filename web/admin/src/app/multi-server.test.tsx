@@ -64,6 +64,8 @@ it("cancels a previous server read and ignores its late response after a switch"
   const { fetcher } = mount("/players?server=primary", (url) =>
     url.includes("/primary/") ? pending : Promise.resolve(json(overview("Events"))),
   );
+  expect(await screen.findByText("Connecting…")).toBeInTheDocument();
+  expect(screen.queryByText("Connection needs attention")).not.toBeInTheDocument();
   fireEvent.change(await screen.findByRole("combobox", { name: "Game server" }), { target: { value: "event" } });
   await screen.findByText("Events player");
   const first = fetcher.mock.calls.find(([url]) => url.includes("/primary/overview"))!;

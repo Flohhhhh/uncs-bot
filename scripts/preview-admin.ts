@@ -153,6 +153,8 @@ function createPreviewGame(name: string) {
     "GET /v1/players",
     "GET /v1/bans",
     "GET /v1/audit",
+    "GET /v1/server-id",
+    "GET /v1/sponsor",
     "GET /v1/reserved-slots",
     "GET /v1/config",
     "PUT /v1/config",
@@ -190,6 +192,8 @@ function createPreviewGame(name: string) {
           factionScores: factions.map(({ name, colorHex, score }) => ({ name, colorHex, score })),
         };
       if (path === "/v1/players") return { players };
+      if (path === "/v1/server-id") return { serverId: `preview-${name}` };
+      if (path === "/v1/sponsor") return { imageUrl: "https://example.com/preview-banner.png" };
       if (path === "/v1/audit?limit=100")
         return {
           entries: [

@@ -416,7 +416,7 @@ function Dashboard({
             <div className="topbar-right">
               {gamePage && (
                 <Badge kind={stale ? "warn" : "good"}>
-                  {stale ? "Connection needs attention" : "● Server responding"}
+                  {stale ? (!overview && !error ? "Connecting…" : "Connection needs attention") : "● Server responding"}
                 </Badge>
               )}
               <span className="private-label">STAFF ONLY</span>

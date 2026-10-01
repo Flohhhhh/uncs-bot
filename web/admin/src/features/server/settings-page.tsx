@@ -15,6 +15,7 @@ import type { ActionResult, Catalog } from "../../api/types";
 import { Badge, Card, Empty, Modal, Table } from "../../components/ui";
 import { errorMessage, rejectionState } from "../actions/policy";
 import { MapPicker } from "../actions/map-picker";
+import { ServerIdentityReadout } from "./server-identity";
 
 const timing: Record<string, string> = {
   live: "Now",
@@ -413,6 +414,7 @@ export function SettingsPage() {
       {group !== "Host controls" && (
         <Card title={group} badge={<Badge>{counts ? `${counts} unsaved` : "Saved configuration"}</Badge>}>
           <div className="card-body settings-grid">
+            {group === "Identity" && <ServerIdentityReadout />}
             {settingFields
               .filter((field) => field.group === group)
               .map((field) => {
