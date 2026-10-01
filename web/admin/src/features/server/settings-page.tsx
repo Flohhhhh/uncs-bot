@@ -581,6 +581,12 @@ export function PermissionsPage() {
             <td>—</td>
             <td>Manage</td>
           </tr>
+          <tr>
+            <td>Start, stop & restore optional 50v50 events</td>
+            <td>—</td>
+            <td>—</td>
+            <td>Manage</td>
+          </tr>
         </Table>
         <p className="muted">
           Members, supporters and founders receive no staff controls automatically. Owners currently share the admin

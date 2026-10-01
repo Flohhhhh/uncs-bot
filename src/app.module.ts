@@ -16,6 +16,7 @@ import { ApplicationsModule } from "./applications/applications.module";
 import { TelemModule } from "./telemetry/telemetry.module";
 import { SupportersModule } from "./supporters/supporters.module";
 import { ServerCommunityModule } from "./server-community/server-community.module";
+import { ServerEventsModule } from "./server-events/server-events.module";
 
 @Module({
   imports: [
@@ -32,6 +33,7 @@ import { ServerCommunityModule } from "./server-community/server-community.modul
     TelemModule,
     SupportersModule,
     ServerCommunityModule,
+    ServerEventsModule,
   ],
   providers: [AppService, { provide: APP_FILTER, useClass: AppExceptionFilter }],
   controllers: [AppController],

@@ -54,6 +54,7 @@ export class AdminPageController {
     "settings",
     "permissions",
     "votes",
+    "events",
   ])
   page(@Res() res: Response) {
     res.sendFile(join(process.cwd(), "dist", "src", "admin", "public", "index.html"));

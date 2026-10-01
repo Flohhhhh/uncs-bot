@@ -1,11 +1,7 @@
 import type { Overview, Player } from "../../api/types";
+import { factionColors as colors } from "../../../../../src/common/faction-colors";
 
 export type Faction = { name: string; color: string; code: string; label: string };
-const colors: Record<string, { code: string; label: string }> = {
-  "#d86060": { code: "RED", label: "Red" },
-  "#5b95d8": { code: "BLU", label: "Blue" },
-  "#7bc462": { code: "GRN", label: "Green" },
-};
 
 export function liveFactions(overview: Overview | null): Faction[] {
   const teams = overview?.status.factionScores ?? [];

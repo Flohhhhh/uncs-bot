@@ -71,7 +71,7 @@ export class AdminService {
     }
   }
 
-  async act(staff: Staff, input: unknown) {
+  async act(staff: Staff, input: unknown): Promise<ActionResult & { id: string }> {
     const parsed = actionSchema.safeParse(input);
     if (!parsed.success) throw new BadRequestException(parsed.error.issues.map((issue) => issue.message).join(" "));
     const action = parsed.data;
@@ -94,7 +94,10 @@ export class AdminService {
         throw new ConflictException("This action ID was already used for a different request.");
       return {
         id: action.id,
-        state: started.record.state === "started" ? "unknown" : started.record.state,
+        state: z
+          .enum(["applied", "accepted", "pending", "failed", "unknown"])
+          .catch("unknown")
+          .parse(started.record.state),
         message:
           started.record.state === "started"
             ? "This action was already started. Its result is unknown; check the game before submitting another action."

@@ -16,6 +16,9 @@ import type {
 import { AdminStore } from "../src/admin/admin.store";
 import type { Staff } from "../src/admin/admin.types";
 import { MapVotesStore } from "../src/map-votes/map-votes.store";
+import { ServerEventsStore } from "../src/server-events/server-events.store";
+import { eventFixture, eventStaff } from "../src/server-events/event-fixtures";
+import { operation } from "../src/server-events/event-planner";
 
 // Only the port is configurable. Never load the application's configuration or
 // DATABASE_URL: this suite requires an empty, disposable loopback test database.
@@ -27,6 +30,7 @@ describe("launch storage on isolated PostgreSQL", () => {
   let applications: ApplicationsStore;
   let admin: AdminStore;
   let votes: MapVotesStore;
+  let events: ServerEventsStore;
   function worker(pool: Pool) {
     const db = drizzle({ client: pool, schema });
     return {
@@ -34,6 +38,7 @@ describe("launch storage on isolated PostgreSQL", () => {
       supporters: new SupportersStore(db),
       applications: new ApplicationsStore(db),
       votes: new MapVotesStore(db),
+      events: new ServerEventsStore(db),
     };
   }
   async function waitForBlockedWorkers(expected: number) {
@@ -53,7 +58,7 @@ describe("launch storage on isolated PostgreSQL", () => {
   }
 
   async function overlap<T>(
-    table: "supporter_members" | "supporter_payments" | "whitelist_applications" | "map_votes",
+    table: "supporter_members" | "supporter_payments" | "whitelist_applications" | "map_votes" | "server_events",
     first: (stores: ReturnType<typeof worker>) => Promise<T>,
     second: (stores: ReturnType<typeof worker>) => Promise<T>,
   ) {
@@ -162,11 +167,29 @@ describe("launch storage on isolated PostgreSQL", () => {
       vote_id uuid NOT NULL REFERENCES map_votes(id), discord_user_id text NOT NULL, choice integer NOT NULL,
       updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (vote_id, discord_user_id)
     )`);
+    // Proposed-schema fixtures only; these do not validate or replace the human-owned migration.
+    await client.query(`CREATE TABLE server_events (
+      id uuid PRIMARY KEY, server_id text NOT NULL, server_name text NOT NULL, connection_hash text NOT NULL,
+      guild_id text NOT NULL, actor_id text NOT NULL, actor_name text NOT NULL, reason text NOT NULL, request_hash text NOT NULL,
+      options jsonb NOT NULL, original_lock boolean NOT NULL, initial_revision text NOT NULL, restore_revision text,
+      state text NOT NULL DEFAULT 'preparing', progress jsonb NOT NULL, operation_id uuid, version integer NOT NULL DEFAULT 1,
+      message text NOT NULL DEFAULT 'Preparing the optional event.', last_action_id uuid, stop jsonb,
+      created_at timestamptz NOT NULL DEFAULT now(), ends_at timestamptz NOT NULL, updated_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE UNIQUE INDEX server_events_active_server_idx ON server_events(server_id) WHERE state <> 'complete';
+    CREATE INDEX server_events_created_idx ON server_events(created_at);
+    CREATE TABLE server_event_operations (
+      id uuid PRIMARY KEY, event_id uuid NOT NULL REFERENCES server_events(id), actor_id text NOT NULL, actor_name text NOT NULL,
+      operation jsonb NOT NULL, state text NOT NULL DEFAULT 'started', message text NOT NULL DEFAULT 'Recorded before contacting the game.',
+      created_at timestamptz NOT NULL DEFAULT now(), completed_at timestamptz
+    );
+    CREATE INDEX server_event_operations_event_idx ON server_event_operations(event_id, created_at)`);
     const db = drizzle({ client, schema });
     supporters = new SupportersStore(db);
     applications = new ApplicationsStore(db);
     admin = new AdminStore(db);
     votes = new MapVotesStore(db);
+    events = new ServerEventsStore(db);
     workers = ["a", "b"].map((name) =>
       worker(new Pool({ ...connection, max: 1, application_name: `uncs_launch_worker_${name}` })),
     );
@@ -175,7 +198,7 @@ describe("launch storage on isolated PostgreSQL", () => {
   beforeEach(async () => {
     if (!initialized) return;
     await client.query(
-      "TRUNCATE map_vote_ballots, map_votes, supporter_actions, supporter_founders, supporter_payments, supporter_observations, supporter_members, whitelist_application_reviews, whitelist_applications, admin_actions, admin_sessions CASCADE",
+      "TRUNCATE server_event_operations, server_events, map_vote_ballots, map_votes, supporter_actions, supporter_founders, supporter_payments, supporter_observations, supporter_members, whitelist_application_reviews, whitelist_applications, admin_actions, admin_sessions CASCADE",
     );
   });
   afterAll(async () => {
@@ -202,6 +225,130 @@ describe("launch storage on isolated PostgreSQL", () => {
     currentIndex: 0,
     counts: [0, 0],
     closesAt: new Date(Date.now() + 60_000),
+  });
+  function eventInput() {
+    const { operation: _operation, ...record } = eventFixture();
+    return record;
+  }
+  const stopEvent = () => ({
+    id: randomUUID(),
+    actorId: eventStaff.id,
+    actorName: eventStaff.name,
+    reason: "Finished test event",
+    at: new Date().toISOString(),
+  });
+  it("allows one active event per server under concurrent starts", async () => {
+    const a = eventInput(),
+      b = eventInput();
+    const results = await overlap(
+      "server_events",
+      ({ events }) => events.create(a),
+      ({ events }) => events.create(b),
+    );
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((r) => r.status === "rejected")).toHaveLength(1);
+    const current = (await events.current("primary"))!;
+    expect((await events.create(current.id === a.id ? a : b)).created).toBe(false);
+    await expect(events.create({ ...a, id: current.id, requestHash: "changed" })).rejects.toThrow("already used");
+  });
+  it("claims an event effect once and compares replayed JSON structurally", async () => {
+    const event = (await events.create(eventInput())).event;
+    const op = operation(event, "ready", { action: "broadcast", message: "Ready" });
+    const claim = ({ events }: ReturnType<typeof worker>) =>
+      events.claim(event.id, event.version, op, eventStaff, event.progress);
+    const results = await overlap("server_events", claim, claim);
+    expect(results.every((r) => r.status === "fulfilled")).toBe(true);
+    expect(results.filter((r) => r.status === "fulfilled" && r.value !== null)).toHaveLength(1);
+    expect(await events.claim(event.id, event.version, op, eventStaff, event.progress)).toBeNull();
+    await expect(
+      events.claim(
+        event.id,
+        event.version,
+        { ...op, action: { ...op.action, reason: "Changed reason" } },
+        eventStaff,
+        event.progress,
+      ),
+    ).rejects.toThrow("different request");
+    expect(await events.operations(event.id)).toHaveLength(1);
+  });
+  it("keeps stop durable while an already-started effect settles", async () => {
+    const event = (await events.create(eventInput())).event,
+      op = operation(eventFixture(), "ready", { action: "broadcast", message: "Ready" });
+    await events.claim(event.id, event.version, op, eventStaff, event.progress);
+    const stopped = await events.stop(event.id, stopEvent());
+    expect(
+      await events.claim(
+        event.id,
+        stopped.version,
+        operation(event, "ready", { action: "broadcast", message: "Other" }),
+        eventStaff,
+        event.progress,
+      ),
+    ).toBeNull();
+    await events.settle(
+      event.id,
+      op.id,
+      { state: "accepted", message: "Confirmed" },
+      { state: "active", progress: event.progress, message: "Confirmed" },
+    );
+    expect(await events.get(event.id)).toMatchObject({ state: "stopping", operation: null, stop: stopped.stop });
+    expect(
+      await events.observe(event.id, stopped.version, { state: "active", progress: event.progress, message: "Stale" }),
+    ).toBe(false);
+  });
+  it("requires review for interrupted effects and retains a late receipt after manual restoration", async () => {
+    const event = (await events.create(eventInput())).event,
+      op = operation(eventFixture(), "ready", { action: "broadcast", message: "Ready" });
+    const claimed = (await events.claim(event.id, event.version, op, eventStaff, event.progress))!;
+    await events.recover(claimed, new Date(claimed.updatedAt.getTime() + 121_000));
+    let current = (await events.get(event.id))!;
+    expect(current).toMatchObject({ state: "needs_review", operation: op });
+    current = await events.stop(event.id, stopEvent());
+    const restore = operation(event, "restore_lock", {
+      action: "settings-save",
+      revision: "r2",
+      changes: { lockOverpopulated: true },
+    });
+    expect(await events.claim(event.id, current.version, restore, eventStaff, current.progress)).toBeNull();
+    expect(await events.claim(event.id, current.version, restore, eventStaff, current.progress, true)).not.toBeNull();
+    await events.settle(
+      event.id,
+      restore.id,
+      { state: "pending", message: "Saved" },
+      { state: "complete", progress: current.progress, message: "Restored" },
+    );
+    await events.settle(
+      event.id,
+      op.id,
+      { state: "accepted", message: "Late confirmation" },
+      { state: "active", progress: current.progress, message: "Old result" },
+    );
+    expect(await events.get(event.id)).toMatchObject({ state: "complete", lastActionId: restore.id });
+    expect((await events.operations(event.id)).find((record) => record.id === op.id)?.message).toBe(
+      "Late confirmation",
+    );
+    expect((await events.create(eventInput())).created).toBe(true);
+  });
+  it("never completes an unchanged-lock event without a durable stop or with an inflight action", async () => {
+    const event = (await events.create({ ...eventInput(), originalLock: false })).event;
+    expect((await events.completeUnchanged(event.id, event.version))?.state).toBe("active");
+    const op = operation(event, "ready", { action: "broadcast", message: "Ready" });
+    await events.claim(event.id, event.version, op, eventStaff, event.progress);
+    const stopped = await events.stop(event.id, stopEvent());
+    expect((await events.completeUnchanged(event.id, stopped.version))?.state).not.toBe("complete");
+    await events.settle(
+      event.id,
+      op.id,
+      { state: "accepted", message: "Done" },
+      { state: "stopping", progress: event.progress, message: "Stopped" },
+    );
+    const settled = (await events.get(event.id))!;
+    expect((await events.completeUnchanged(event.id, settled.version))?.state).toBe("complete");
+  });
+  it("fails closed when the inflight-operation pointer cannot be resolved", async () => {
+    const event = (await events.create(eventInput())).event;
+    await client.query("UPDATE server_events SET operation_id = $1 WHERE id = $2", [randomUUID(), event.id]);
+    await expect(events.current("primary")).rejects.toThrow("operation is unavailable");
   });
   const messageId = "345678901234567890";
   async function openBallot() {

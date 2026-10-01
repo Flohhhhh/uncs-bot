@@ -5,7 +5,14 @@ export { canAct, moderatorActions } from "../common/admin-policy";
 export type { StaffRole } from "../common/admin-policy";
 
 export type Staff = { id: string; name: string; role: StaffRole; csrf: string };
-export type ActionResult = { state: "applied" | "accepted" | "pending" | "failed" | "unknown"; message: string };
+export type ActionResult = {
+  state: "applied" | "accepted" | "pending" | "failed" | "unknown";
+  message: string;
+  /** A confirmed no-op or a team precondition refusal never needs a follow-up respawn. */
+  changed?: boolean;
+  /** Present only when the saved configuration exactly matches the intended document. */
+  revision?: string;
+};
 export const steamId = z
   .string()
   .refine(isPublicIndividualSteamId, "Enter a 17-digit SteamID64 for a personal Steam account.");
@@ -28,6 +35,7 @@ const selection = z
   .regex(/^[\w./-]+$/);
 const base = { id: z.uuid(), reason };
 const player = { ...base, steamId };
+const expectedRound = z.object({ map: selection, startedAt: z.number().finite().nonnegative() }).strict().optional();
 const revision = z
   .string()
   .min(1)
@@ -78,9 +86,27 @@ export const actionSchema = z.discriminatedUnion("action", [
   z.object({ ...player, action: z.literal("unban"), confirm: steamId }).strict(),
   z.object({ ...player, action: z.literal("whitelist-add") }).strict(),
   z.object({ ...player, action: z.literal("whitelist-remove"), confirm: steamId }).strict(),
-  z.object({ ...player, action: z.literal("kill"), confirm: steamId }).strict(),
+  z
+    .object({
+      ...player,
+      action: z.literal("kill"),
+      confirm: steamId,
+      expectedFaction: selection.optional(),
+      expectedRound,
+    })
+    .strict(),
   z.object({ ...player, action: z.literal("message"), message }).strict(),
-  z.object({ ...player, action: z.literal("team"), faction: selection, confirm: steamId }).strict(),
+  z
+    .object({
+      ...player,
+      action: z.literal("team"),
+      faction: selection,
+      expectedFaction: selection.optional(),
+      expectedRound,
+      maximumTargetPlayers: z.number().int().min(1).max(50).optional(),
+      confirm: steamId,
+    })
+    .strict(),
   z.object({ ...base, action: z.literal("broadcast"), message }).strict(),
   z.object({ ...base, action: z.literal("match-end"), confirm: z.literal("END MATCH") }).strict(),
   z.object({ ...base, action: z.literal("match-restart"), confirm: z.literal("RESTART MATCH") }).strict(),

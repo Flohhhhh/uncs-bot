@@ -57,6 +57,11 @@ export const Env = z.object({
     .default("false")
     .transform((value) => value === "true"),
   MAP_VOTES_CHANNEL_ID: discordId.optional(),
+  /** Optional event automation; requires a human-reviewed schema and controlled game rehearsal. */
+  SERVER_EVENTS_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
   /** Separate combat-event ingest credential. Existing host feed is never rewritten automatically. */
   WARDOGS_FEED_ENABLED: z
     .enum(["true", "false"])

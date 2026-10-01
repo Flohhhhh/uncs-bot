@@ -21,6 +21,7 @@ import { CombatPage } from "../features/combat/combat-page";
 import { SettingsPage, PermissionsPage } from "../features/server/settings-page";
 import { NavigationGuard } from "./navigation-guard";
 import { MapVotesPage } from "../features/map-votes/map-votes-page";
+import { EventsPage } from "../features/events/events-page";
 
 const pages = {
   overview: ["◫", "Overview", "Server overview", "Current match and server status."],
@@ -33,6 +34,7 @@ const pages = {
   announcements: ["↗", "Announcements", "Announcements", "Send a message to the server."],
   match: ["◇", "Match & maps", "Match & maps", "Control the current round using the options this server supports."],
   votes: ["✓", "Map votes", "Map votes", "Let the community choose the next map in Discord."],
+  events: ["⚑", "Events", "Optional events", "Run supervised 50v50 events and review their actions."],
   audit: ["◷", "Action history", "Action history", "Who changed what, why they did it, and what the game confirmed."],
   settings: ["⚙", "Server settings", "Server settings", "Identity, joining, gameplay and map rotation."],
   permissions: ["◈", "Permissions", "Staff permissions", "Which controls each staff role can use."],
@@ -261,7 +263,8 @@ function Dashboard({ me, signOut }: { me: Staff; signOut: () => void }) {
           <nav aria-label="Dashboard sections">
             {Object.entries(pages)
               .filter(
-                ([id]) => me.role === "admin" || !["applications", "supporters", "settings", "votes"].includes(id),
+                ([id]) =>
+                  me.role === "admin" || !["applications", "supporters", "settings", "votes", "events"].includes(id),
               )
               .map(([id, item]) => (
                 <NavLink
@@ -393,6 +396,7 @@ function Dashboard({ me, signOut }: { me: Staff; signOut: () => void }) {
                 <Route path="announcements" element={<AnnouncementsPage />} />
                 <Route path="match" element={<MatchPage />} />
                 <Route path="votes" element={staffPage(<MapVotesPage />)} />
+                <Route path="events" element={staffPage(<EventsPage />)} />
                 <Route path="audit" element={<AuditPage />} />
                 <Route path="settings" element={staffPage(<SettingsPage />)} />
                 <Route path="permissions" element={<PermissionsPage />} />
@@ -407,7 +411,9 @@ function Dashboard({ me, signOut }: { me: Staff; signOut: () => void }) {
             </section>
             <footer>
               <span>THE UNCs ✳ POWERED BY GRAMPS</span>
-              <span>Updates every 20 seconds while this page is visible</span>
+              <span>
+                {gamePage ? "Updates every 20 seconds while this page is visible" : "Refresh for the latest records"}
+              </span>
             </footer>
           </div>
         </main>

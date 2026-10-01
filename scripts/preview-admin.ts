@@ -31,6 +31,9 @@ import { MapVotesModule } from "../src/map-votes/map-votes.module";
 import { MapVotesStore } from "../src/map-votes/map-votes.store";
 import { MapVotesDiscord } from "../src/map-votes/map-votes.discord";
 import type { MapVoteRecord } from "../src/map-votes/map-votes.types";
+import { ServerEventsModule } from "../src/server-events/server-events.module";
+import { ServerEventsStore } from "../src/server-events/server-events.store";
+import type { EventRecord, EventOperation, EventProgress, EventStop } from "../src/server-events/server-events.types";
 import type {
   FounderPolicy,
   ManualMemberInput,
@@ -40,7 +43,7 @@ import type {
 } from "../src/supporters/supporters.types";
 
 const previewPort = Number(process.env.PREVIEW_PORT || 4317);
-const previewRoundStart = Date.now() - 600_000;
+let previewRoundStart = Date.now() - 600_000;
 
 const players = [
   { name: "UncDap", steamId: "76561198066952872", faction: "RED", kills: 18, deaths: 7, cash: 14300, pingMs: 32 },
@@ -235,6 +238,7 @@ class PreviewGame extends WardogsClient {
         })),
       };
     if (path === "/v1/match/map") currentMap = body.map;
+    if (path === "/v1/match/map" || path === "/v1/match/restart") previewRoundStart = Date.now();
     if (path === "/v1/world/lighting") lighting = body.lighting;
     const playerMatch = path.match(/^\/v1\/players\/(\d+)(?:\/(\w+))?$/);
     if (playerMatch) {
@@ -681,6 +685,7 @@ const supporterStore = {
 };
 const previewEnvironment: Record<string, unknown> = {
   MAP_VOTES_ENABLED: true,
+  SERVER_EVENTS_ENABLED: true,
   WARDOGS_RCON_URL: "https://game.example.test",
   ADMIN_GUILD_ID: "111111111111111111",
   MAP_VOTES_CHANNEL_ID: "222222222222222222",
@@ -709,6 +714,126 @@ const previewEnvironment: Record<string, unknown> = {
 class PreviewApplicationEnvironment {}
 
 const demoVotes = new Map<string, MapVoteRecord>();
+const demoServerEvents = new Map<string, EventRecord>();
+const demoEventOperations = new Map<
+  string,
+  {
+    id: string;
+    eventId: string;
+    actorName: string;
+    operation: EventOperation;
+    state: string;
+    message: string;
+    createdAt: Date;
+  }
+>();
+// In-memory rehearsal only. The production store's transactions are covered by isolated PostgreSQL tests.
+const eventStore = {
+  async get(id: string) {
+    return structuredClone(demoServerEvents.get(id) ?? null);
+  },
+  async current() {
+    return structuredClone([...demoServerEvents.values()].find((event) => event.state !== "complete") ?? null);
+  },
+  async history() {
+    return structuredClone([...demoServerEvents.values()].reverse().slice(0, 20));
+  },
+  async operations(id: string) {
+    return structuredClone(
+      [...demoEventOperations.values()]
+        .filter((op) => op.eventId === id)
+        .reverse()
+        .slice(0, 100),
+    );
+  },
+  async create(input: EventRecord) {
+    if (await this.current()) throw new ConflictException("A preview event is already active.");
+    const event: EventRecord = {
+      ...input,
+      operation: null,
+      state: "preparing",
+      version: 1,
+      stop: null,
+      restoreRevision: null,
+      lastActionId: null,
+      message: "Preparing simulated event. No live server is connected.",
+    };
+    demoServerEvents.set(event.id, event);
+    return { created: true, event: structuredClone(event) };
+  },
+  async observe(id: string, version: number, update: Partial<EventRecord>) {
+    const event = demoServerEvents.get(id)!;
+    if (event.version !== version || event.operation || event.stop) return false;
+    Object.assign(event, update, { version: version + 1, updatedAt: new Date() });
+    return true;
+  },
+  async claim(id: string, version: number, op: EventOperation, staff: Staff, progress: EventProgress, manual = false) {
+    const event = demoServerEvents.get(id)!;
+    if (
+      event.version !== version ||
+      event.state === "complete" ||
+      demoEventOperations.has(op.id) ||
+      (event.operation && !manual) ||
+      (event.stop && op.kind !== "restore_lock")
+    )
+      return null;
+    demoEventOperations.set(op.id, {
+      id: op.id,
+      eventId: id,
+      actorName: staff.name,
+      operation: op,
+      state: "started",
+      message: "Simulated action recorded",
+      createdAt: new Date(),
+    });
+    Object.assign(event, {
+      operation: op,
+      progress,
+      version: version + 1,
+      updatedAt: new Date(),
+      state: op.kind === "restore_lock" ? "stopping" : event.state,
+    });
+    return structuredClone(event);
+  },
+  async settle(id: string, opId: string, result: { state: string; message: string }, update: Partial<EventRecord>) {
+    Object.assign(demoEventOperations.get(opId)!, result);
+    const event = demoServerEvents.get(id)!;
+    if (event.operation?.id === opId)
+      Object.assign(event, update, {
+        state: event.stop && !["complete", "needs_review"].includes(update.state!) ? "stopping" : update.state,
+        operation: null,
+        lastActionId: opId,
+        version: event.version + 1,
+        updatedAt: new Date(),
+      });
+    return structuredClone(event);
+  },
+  async stop(id: string, stop: EventStop) {
+    const event = demoServerEvents.get(id)!;
+    if (!event.stop && event.state !== "complete")
+      Object.assign(event, {
+        stop,
+        state: event.state === "needs_review" ? "needs_review" : "stopping",
+        version: event.version + 1,
+        updatedAt: new Date(),
+        message: "Preview stop recorded. Restoration will be checked.",
+      });
+    return structuredClone(event);
+  },
+  async completeUnchanged(id: string, version: number) {
+    const event = demoServerEvents.get(id)!;
+    if (event.version === version && !event.operation && !event.originalLock && event.stop)
+      Object.assign(event, {
+        state: "complete",
+        version: version + 1,
+        message: "Preview event stopped. No settings restoration needed.",
+      });
+    return structuredClone(event);
+  },
+  async recover() {
+    /* Preview effects run in this one in-memory process only. */
+  },
+};
 const voteStore = {
   async get(id: string) {
     return structuredClone(demoVotes.get(id) ?? null);
@@ -786,6 +911,7 @@ async function main() {
       TelemModule,
       SupportersModule,
       MapVotesModule,
+      ServerEventsModule,
     ],
   })
     .overrideProvider(HttpAdapterHost)
@@ -808,6 +934,8 @@ async function main() {
     .useValue(supporterStore)
     .overrideProvider(MapVotesStore)
     .useValue(voteStore)
+    .overrideProvider(ServerEventsStore)
+    .useValue(eventStore)
     .overrideProvider(MapVotesDiscord)
     .useValue({
       check: async () => undefined,

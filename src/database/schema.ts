@@ -12,6 +12,13 @@ import {
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import type { MapVoteCancellation, MapVoteChoice, MapVoteState } from "../map-votes/map-votes.types";
+import type {
+  EventOperation,
+  EventOptions,
+  EventProgress,
+  EventState,
+  EventStop,
+} from "../server-events/server-events.types";
 export * from "./telemetry.schema";
 export * from "./supporters.schema";
 
@@ -159,4 +166,58 @@ export const mapVoteBallots = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [primaryKey({ columns: [table.voteId, table.discordUserId] })],
+);
+
+// Proposed event schema only. Migration generation and deployment remain human-owned.
+export const serverEvents = pgTable(
+  "server_events",
+  {
+    id: uuid("id").primaryKey(),
+    serverId: text("server_id").notNull(),
+    serverName: text("server_name").notNull(),
+    connectionHash: text("connection_hash").notNull(),
+    guildId: text("guild_id").notNull(),
+    actorId: text("actor_id").notNull(),
+    actorName: text("actor_name").notNull(),
+    reason: text("reason").notNull(),
+    requestHash: text("request_hash").notNull(),
+    options: jsonb("options").$type<EventOptions>().notNull(),
+    originalLock: boolean("original_lock").notNull(),
+    initialRevision: text("initial_revision").notNull(),
+    restoreRevision: text("restore_revision"),
+    state: text("state").$type<EventState>().notNull().default("preparing"),
+    progress: jsonb("progress").$type<EventProgress>().notNull(),
+    operationId: uuid("operation_id"),
+    version: integer("version").notNull().default(1),
+    message: text("message").notNull().default("Preparing the optional event."),
+    lastActionId: uuid("last_action_id"),
+    stop: jsonb("stop").$type<EventStop>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    endsAt: timestamp("ends_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("server_events_active_server_idx")
+      .on(table.serverId)
+      .where(sql`${table.state} <> 'complete'`),
+    index("server_events_created_idx").on(table.createdAt),
+  ],
+);
+
+export const serverEventOperations = pgTable(
+  "server_event_operations",
+  {
+    id: uuid("id").primaryKey(),
+    eventId: uuid("event_id")
+      .notNull()
+      .references(() => serverEvents.id),
+    actorId: text("actor_id").notNull(),
+    actorName: text("actor_name").notNull(),
+    operation: jsonb("operation").$type<EventOperation>().notNull(),
+    state: text("state").notNull().default("started"),
+    message: text("message").notNull().default("Recorded before contacting the game."),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (table) => [index("server_event_operations_event_idx").on(table.eventId, table.createdAt)],
 );

@@ -511,6 +511,59 @@ describe("live faction assignment", () => {
     return { client, request };
   }
 
+  it("rejects a changed expected faction without moving or killing the player", async () => {
+    const { client, request } = mockTeamChange({ before: "GRN" });
+    expect(await client.execute({ ...teamAction, expectedFaction: "Valkyra" })).toMatchObject({
+      state: "failed",
+      changed: false,
+    });
+    expect(request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+  });
+  it("does not treat an already-correct faction as a move requiring respawn", async () => {
+    const { client } = mockTeamChange({ before: "BLU" });
+    expect(await client.execute(teamAction)).toMatchObject({ state: "applied", changed: false });
+  });
+  it("rejects a move from a previous or unreadable round", async () => {
+    const { client, request } = mockTeamChange();
+    expect(
+      await client.execute({ ...teamAction, expectedRound: { map: "Kavkazi", startedAt: Date.now() - 120_000 } }),
+    ).toMatchObject({ state: "failed", changed: false });
+    expect(request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+  });
+  it.each(["wrong team", "wrong round", "missing", "duplicate", "valid"])(
+    "checks the %s condition immediately before an optional respawn",
+    async (condition) => {
+      const client = new WardogsClient(settings);
+      const request = jest.spyOn(client, "request").mockImplementation(async (_method, path) => {
+        if (path === "/v1/capabilities") return { routes: ["POST /v1/players/{id}/kill"] };
+        if (path === "/v1/status") return { ...status, matchSeconds: condition === "wrong round" ? 0 : 120 };
+        if (path === "/v1/players")
+          return {
+            players:
+              condition === "missing"
+                ? []
+                : Array.from({ length: condition === "duplicate" ? 2 : 1 }, () => ({
+                    steamId: id,
+                    faction: condition === "wrong team" ? "RED" : "BLU",
+                  })),
+          };
+        if (path.endsWith("/kill")) return { ok: true };
+        throw new Error("Unexpected test route");
+      });
+      const result = await client.execute({
+        id: randomUUID(),
+        action: "kill",
+        steamId: id,
+        confirm: id,
+        reason: "Reviewed optional respawn",
+        expectedFaction: "Lonestar",
+        expectedRound: { map: "Kavkazi", startedAt: Date.now() - 120_000 },
+      });
+      expect(result.state).toBe(condition === "valid" ? "accepted" : "failed");
+      expect(request.mock.calls.filter(([method]) => method === "POST")).toHaveLength(condition === "valid" ? 1 : 0);
+    },
+  );
+
   it.each([
     ["Lonestar", "BLU", "RED"],
     ["Valkyra", "RED", "GRN"],

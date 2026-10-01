@@ -70,7 +70,7 @@ describe("server configuration boundaries", () => {
   it("changes only reviewed fields, validates, uses If-Match and confirms the stored values", async () => {
     const { game, saved, request } = fixture();
     const result = await game.execute(save({ serverName: "The UNCs Event", scorePeriod: 30 }));
-    expect(result).toMatchObject({ state: "pending", message: expect.stringContaining("next match") });
+    expect(result).toMatchObject({ state: "pending", revision: "r2", message: expect.stringContaining("next match") });
     expect(saved().text).toBe(
       original
         .replace('ServerName="The UNCs"', 'ServerName="The UNCs Event"')
@@ -78,6 +78,19 @@ describe("server configuration boundaries", () => {
     );
     expect(request.mock.calls.filter(([method]) => method === "PUT")).toHaveLength(1);
     expect(request.mock.calls.filter(([, path]) => path === "/v1/config/validate")).toHaveLength(1);
+  });
+  it("does not provide an automatic restoration revision when unrelated saved text changed", async () => {
+    const { game, request } = fixture();
+    const originalRequest = request.getMockImplementation()!;
+    request.mockImplementation(async (...args) => {
+      const result = await originalRequest(...args);
+      return args[0] === "GET" && args[1] === "/v1/config" && result.revision === "r2"
+        ? { ...result, text: result.text + "; another edit\r\n", revision: "r3" }
+        : result;
+    });
+    const result = await game.execute(save({ serverName: "Event name" }));
+    expect(result.state).toBe("pending");
+    expect(result.revision).toBeUndefined();
   });
   it.each<Record<string, string | number | boolean>>([
     { scorePeriod: 19 },

@@ -236,8 +236,15 @@ export async function changeServerConfiguration(
     if (error instanceof z.ZodError) throw new RconError("The server returned an unsupported settings format.");
     throw new RconError(error instanceof Error ? error.message : "The settings could not be validated.");
   }
-  if (text === doc.text) return { state: "applied", message: "These settings are already saved. No change was sent." };
+  if (text === doc.text)
+    return {
+      state: "applied",
+      revision: doc.revision,
+      changed: false,
+      message: "These settings are already saved. No change was sent.",
+    };
   const result = await game.writeDocument(doc, text, capabilities);
+  let revision: string | undefined;
   try {
     const saved = await game.document();
     const confirmed =
@@ -249,6 +256,7 @@ export async function changeServerConfiguration(
         : JSON.stringify(parseRotation(saved.text)) === JSON.stringify(parseRotation(text));
     if (!confirmed)
       return { state: "unknown", message: "The saved values did not match. Refresh and review before trying again." };
+    if (saved.text === text) revision = saved.revision;
   } catch {
     return {
       state: "unknown",
@@ -269,6 +277,7 @@ export async function changeServerConfiguration(
   // Saved does not establish that gameplay has already adopted the new values.
   return {
     state: "pending",
+    ...(revision ? { revision } : {}),
     message: `Settings saved and verified. ${notes.join(" ") || "Check the running game to confirm when they take effect."}`,
   };
 }

@@ -12,6 +12,8 @@ import { hash } from "./admin.auth";
 import { AppController } from "../app.controller";
 import { MapVotesController } from "../map-votes/map-votes.controller";
 import { MapVotesService } from "../map-votes/map-votes.service";
+import { ServerEventsController } from "../server-events/server-events.controller";
+import { ServerEventsService } from "../server-events/server-events.service";
 
 describe("admin HTTP boundaries", () => {
   let app: INestApplication;
@@ -35,6 +37,13 @@ describe("admin HTTP boundaries", () => {
     list: jest.fn().mockResolvedValue({ enabled: false, votes: [] }),
     start: jest.fn(),
     cancel: jest.fn(),
+  };
+  const events = {
+    list: jest.fn().mockResolvedValue({ enabled: false, events: [] }),
+    history: jest.fn().mockResolvedValue({ operations: [] }),
+    start: jest.fn(),
+    stop: jest.fn(),
+    restore: jest.fn(),
   };
   const config = {
     origin: "https://admin.example.test",
@@ -62,8 +71,11 @@ describe("admin HTTP boundaries", () => {
     adapterHost.httpAdapter = adapter;
     const module = await Test.createTestingModule({
       imports: [AdminModule],
-      controllers: [AppController, MapVotesController],
-      providers: [{ provide: MapVotesService, useValue: votes }],
+      controllers: [AppController, MapVotesController, ServerEventsController],
+      providers: [
+        { provide: MapVotesService, useValue: votes },
+        { provide: ServerEventsService, useValue: events },
+      ],
     })
       .overrideProvider(HttpAdapterHost)
       .useValue(adapterHost)
@@ -177,6 +189,56 @@ describe("admin HTTP boundaries", () => {
       .expect(200);
     expect(result.headers["cache-control"]).toBe("no-store");
     expect(votes.list).toHaveBeenCalledWith(expect.objectContaining({ id: session.userId }));
+  });
+  it.each(["/admin/api/events", "/admin/api/events/d0a3cdd7-a1c7-4904-a99e-cf058b432c34/operations"])(
+    "keeps %s private and uncached",
+    async (path) => {
+      await request(app.getHttpServer()).get(path).expect(401);
+      expect(events.list).not.toHaveBeenCalled();
+      expect(events.history).not.toHaveBeenCalled();
+      const result = await request(app.getHttpServer())
+        .get(path)
+        .set("Cookie", `__Host-uncs_admin_session=${token}`)
+        .expect(200);
+      expect(result.headers["cache-control"]).toBe("no-store");
+    },
+  );
+  it.each([
+    "/admin/api/events",
+    "/admin/api/events/d0a3cdd7-a1c7-4904-a99e-cf058b432c34/stop",
+    "/admin/api/events/d0a3cdd7-a1c7-4904-a99e-cf058b432c34/restore",
+  ])("guards %s with session, origin and CSRF", async (path) => {
+    await request(app.getHttpServer()).post(path).send({}).expect(401);
+    for (const [origin, csrf] of [
+      ["https://evil.example.test", session.csrf],
+      [config.origin, "wrong"],
+      [config.origin, ""],
+    ])
+      await request(app.getHttpServer())
+        .post(path)
+        .set("Cookie", `__Host-uncs_admin_session=${token}`)
+        .set("Origin", origin)
+        .set("X-CSRF-Token", csrf)
+        .send({})
+        .expect(403);
+    expect(events.start).not.toHaveBeenCalled();
+    expect(events.stop).not.toHaveBeenCalled();
+    expect(events.restore).not.toHaveBeenCalled();
+    const body = { id: randomUUID(), reason: "Reviewed event" };
+    await request(app.getHttpServer())
+      .post(path)
+      .set("Cookie", `__Host-uncs_admin_session=${token}`)
+      .set("Origin", config.origin)
+      .set("X-CSRF-Token", session.csrf)
+      .send(body)
+      .expect(201);
+    const calls = path.endsWith("stop")
+      ? events.stop.mock.calls
+      : path.endsWith("restore")
+        ? events.restore.mock.calls
+        : events.start.mock.calls;
+    expect(calls).toHaveLength(1);
+    expect(calls[0].at(-1)).toEqual(body);
   });
   it.each(["/admin/api/map-votes", "/admin/api/map-votes/d0a3cdd7-a1c7-4904-a99e-cf058b432c34/cancel"])(
     "protects %s with session, origin and CSRF checks",
