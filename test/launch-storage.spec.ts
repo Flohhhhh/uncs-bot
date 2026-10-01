@@ -15,6 +15,7 @@ import type {
 } from "../src/supporters/supporters.types";
 import { AdminStore } from "../src/admin/admin.store";
 import type { Staff } from "../src/admin/admin.types";
+import { MapVotesStore } from "../src/map-votes/map-votes.store";
 
 // Only the port is configurable. Never load the application's configuration or
 // DATABASE_URL: this suite requires an empty, disposable loopback test database.
@@ -25,13 +26,34 @@ describe("launch storage on isolated PostgreSQL", () => {
   let supporters: SupportersStore;
   let applications: ApplicationsStore;
   let admin: AdminStore;
+  let votes: MapVotesStore;
   function worker(pool: Pool) {
     const db = drizzle({ client: pool, schema });
-    return { pool, supporters: new SupportersStore(db), applications: new ApplicationsStore(db) };
+    return {
+      pool,
+      supporters: new SupportersStore(db),
+      applications: new ApplicationsStore(db),
+      votes: new MapVotesStore(db),
+    };
+  }
+  async function waitForBlockedWorkers(expected: number) {
+    // PostgreSQL exposes no event for a backend entering a lock wait.
+    const deadline = Date.now() + 3_000;
+    let waiting = 0;
+    do {
+      const state = await client.query<{ count: number }>(`SELECT count(*)::int AS count
+        FROM pg_stat_activity WHERE datname = current_database()
+        AND application_name IN ('uncs_launch_worker_a', 'uncs_launch_worker_b')
+        AND wait_event_type = 'Lock'`);
+      waiting = state.rows[0].count;
+      if (waiting === expected) break;
+      await delay(20);
+    } while (Date.now() < deadline);
+    expect(waiting).toBe(expected);
   }
 
   async function overlap<T>(
-    table: "supporter_members" | "supporter_payments" | "whitelist_applications",
+    table: "supporter_members" | "supporter_payments" | "whitelist_applications" | "map_votes",
     first: (stores: ReturnType<typeof worker>) => Promise<T>,
     second: (stores: ReturnType<typeof worker>) => Promise<T>,
   ) {
@@ -41,20 +63,7 @@ describe("launch storage on isolated PostgreSQL", () => {
       await blocker.query("BEGIN");
       await blocker.query(`LOCK TABLE ${table} IN SHARE MODE`);
       results = Promise.allSettled([first(workers[0]), second(workers[1])]);
-      // PostgreSQL exposes no event for a backend entering a lock wait. Observe
-      // both independent connections waiting before releasing the fixture lock.
-      const deadline = Date.now() + 3_000;
-      let waiting = 0;
-      do {
-        const state = await client.query<{ count: number }>(`SELECT count(*)::int AS count
-          FROM pg_stat_activity WHERE datname = current_database()
-          AND application_name IN ('uncs_launch_worker_a', 'uncs_launch_worker_b')
-          AND wait_event_type = 'Lock'`);
-        waiting = state.rows[0].count;
-        if (waiting === 2) break;
-        await delay(20);
-      } while (Date.now() < deadline);
-      expect(waiting).toBe(2);
+      await waitForBlockedWorkers(2);
     } finally {
       await blocker.query("ROLLBACK");
       blocker.release();
@@ -136,10 +145,28 @@ describe("launch storage on isolated PostgreSQL", () => {
     for (const file of (await readdir(directory)).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort()) {
       await client.query(await readFile(join(directory, file), "utf8"));
     }
+    // Test-only fixture for the proposed source schema, NOT a deployment migration.
+    // A human must generate and review the real migration before enabling map votes.
+    await client.query(`CREATE TABLE map_votes (
+      id uuid PRIMARY KEY, server_id text NOT NULL, server_name text NOT NULL, connection_hash text NOT NULL,
+      guild_id text NOT NULL, channel_id text NOT NULL, message_id text,
+      actor_id text NOT NULL, actor_name text NOT NULL, reason text NOT NULL, request_hash text NOT NULL,
+      choices jsonb NOT NULL, revision text NOT NULL, current_map text NOT NULL, current_index integer NOT NULL,
+      round_started_at timestamptz, state text NOT NULL DEFAULT 'publishing', winner integer,
+      counts jsonb NOT NULL, message text NOT NULL DEFAULT 'Creating the Discord ballot.', cancellation jsonb,
+      created_at timestamptz NOT NULL DEFAULT now(), closes_at timestamptz NOT NULL, updated_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE UNIQUE INDEX map_votes_active_server_idx ON map_votes(server_id) WHERE state IN ('publishing', 'open', 'closing', 'needs_review');
+    CREATE INDEX map_votes_created_idx ON map_votes(created_at);
+    CREATE TABLE map_vote_ballots (
+      vote_id uuid NOT NULL REFERENCES map_votes(id), discord_user_id text NOT NULL, choice integer NOT NULL,
+      updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (vote_id, discord_user_id)
+    )`);
     const db = drizzle({ client, schema });
     supporters = new SupportersStore(db);
     applications = new ApplicationsStore(db);
     admin = new AdminStore(db);
+    votes = new MapVotesStore(db);
     workers = ["a", "b"].map((name) =>
       worker(new Pool({ ...connection, max: 1, application_name: `uncs_launch_worker_${name}` })),
     );
@@ -148,11 +175,134 @@ describe("launch storage on isolated PostgreSQL", () => {
   beforeEach(async () => {
     if (!initialized) return;
     await client.query(
-      "TRUNCATE supporter_actions, supporter_founders, supporter_payments, supporter_observations, supporter_members, whitelist_application_reviews, whitelist_applications, admin_actions, admin_sessions CASCADE",
+      "TRUNCATE map_vote_ballots, map_votes, supporter_actions, supporter_founders, supporter_payments, supporter_observations, supporter_members, whitelist_application_reviews, whitelist_applications, admin_actions, admin_sessions CASCADE",
     );
   });
   afterAll(async () => {
     await Promise.all([...workers.map(({ pool }) => pool.end()), client?.end()]);
+  });
+
+  const ballotInput = () => ({
+    id: randomUUID(),
+    serverId: "primary",
+    serverName: "Test",
+    connectionHash: "test-connection",
+    guildId: "123456789012345678",
+    channelId: "234567890123456789",
+    actorId: staff.id,
+    actorName: staff.name,
+    reason: "Test ballot",
+    requestHash: randomUUID(),
+    choices: [
+      { map: "Europe", experiences: [] },
+      { map: "Islands", experiences: [] },
+    ],
+    revision: "r1",
+    currentMap: "Kavkazi",
+    currentIndex: 0,
+    counts: [0, 0],
+    closesAt: new Date(Date.now() + 60_000),
+  });
+  const messageId = "345678901234567890";
+  async function openBallot() {
+    const input = ballotInput();
+    await votes.create(input);
+    await votes.published(input.id, messageId);
+    return input;
+  }
+  it("allows one active ballot per server across simultaneous workers and replays only the exact request", async () => {
+    const a = ballotInput(),
+      b = ballotInput();
+    const results = await overlap(
+      "map_votes",
+      ({ votes }) => votes.create(a),
+      ({ votes }) => votes.create(b),
+    );
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const [saved] = await votes.history("primary");
+    const original = saved.id === a.id ? a : b;
+    expect(await votes.create(original)).toMatchObject({ created: false, record: { id: saved.id } });
+    await expect(votes.create({ ...original, requestHash: "different" })).rejects.toMatchObject({ status: 409 });
+    await expect(votes.create({ ...original, actorId: "other" })).rejects.toMatchObject({ status: 409 });
+    expect((await votes.create({ ...b, id: randomUUID(), serverId: "another-server" })).created).toBe(true);
+  });
+  it("upserts one choice per member and rejects forged message contexts", async () => {
+    const vote = await openBallot();
+    await votes.cast(vote.id, staff.id, 0, vote.guildId, vote.channelId, messageId);
+    await votes.cast(vote.id, staff.id, 1, vote.guildId, vote.channelId, messageId);
+    expect((await client.query("SELECT choice FROM map_vote_ballots")).rows).toEqual([{ choice: 1 }]);
+    for (const [guild, channel, message, choice] of [
+      ["other", vote.channelId, messageId, 0],
+      [vote.guildId, "other", messageId, 0],
+      [vote.guildId, vote.channelId, "other", 0],
+      [vote.guildId, vote.channelId, messageId, 4],
+    ] as const)
+      await expect(votes.cast(vote.id, staff.id, choice, guild, channel, message)).rejects.toMatchObject({
+        status: 409,
+      });
+    expect((await client.query("SELECT choice FROM map_vote_ballots")).rows).toEqual([{ choice: 1 }]);
+  });
+  it("claims a due ballot once across workers and counts the final choices with the published tie rule", async () => {
+    const vote = await openBallot();
+    await votes.cast(vote.id, staff.id, 0, vote.guildId, vote.channelId, messageId);
+    await votes.cast(vote.id, "999999999999999999", 1, vote.guildId, vote.channelId, messageId);
+    await client.query("UPDATE map_votes SET closes_at = now() - interval '1 second' WHERE id = $1", [vote.id]);
+    const results = await overlap(
+      "map_votes",
+      ({ votes }) => votes.claimClose(vote.id),
+      ({ votes }) => votes.claimClose(vote.id),
+    );
+    expect(results.filter((result) => result.status === "fulfilled" && result.value)).toHaveLength(1);
+    expect(await votes.get(vote.id)).toMatchObject({ state: "closing", winner: 0, counts: [1, 1] });
+    await expect(votes.cast(vote.id, staff.id, 1, vote.guildId, vote.channelId, messageId)).rejects.toMatchObject({
+      status: 409,
+    });
+    await expect(votes.cancel(vote.id, randomUUID(), staff, "Close now")).rejects.toMatchObject({ status: 409 });
+    await votes.finish(vote.id, "queued", "Saved next map");
+    expect(await votes.finish(vote.id, "needs_review", "late completion")).toBeNull();
+  });
+  it("rechecks the deadline after a waiting voter acquires the lock", async () => {
+    const vote = await openBallot();
+    const blocker = await client.connect();
+    let result: Promise<PromiseSettledResult<unknown>[]> | undefined;
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT id FROM map_votes WHERE id = $1 FOR UPDATE", [vote.id]);
+      result = Promise.allSettled([
+        workers[0].votes.cast(vote.id, staff.id, 0, vote.guildId, vote.channelId, messageId),
+      ]);
+      await waitForBlockedWorkers(1);
+      await blocker.query("UPDATE map_votes SET closes_at = now() - interval '1 second' WHERE id = $1", [vote.id]);
+      await blocker.query("COMMIT");
+      expect((await result)[0]).toMatchObject({ status: "rejected", reason: { status: 409 } });
+      expect((await client.query("SELECT count(*)::int AS count FROM map_vote_ballots")).rows).toEqual([{ count: 0 }]);
+    } finally {
+      await blocker.query("ROLLBACK");
+      blocker.release();
+      await result;
+    }
+  });
+  it("preserves the original uncertain result and exact cancelling identity without permitting replays with changed reasons", async () => {
+    const vote = await openBallot();
+    await client.query(
+      "UPDATE map_votes SET state = 'closing', updated_at = now() - interval '3 minutes' WHERE id = $1",
+      [vote.id],
+    );
+    expect(await votes.recover(new Date())).toMatchObject([{ id: vote.id, state: "needs_review" }]);
+    expect(await votes.due(new Date())).toEqual([]);
+    await expect(votes.create(ballotInput())).rejects.toMatchObject({ status: 409 });
+    const id = randomUUID();
+    const closed = await votes.cancel(vote.id, id, staff, "Inspected Discord and receipt");
+    expect(closed).toMatchObject({
+      state: "cancelled",
+      cancellation: { id, actorId: staff.id, previousState: "needs_review" },
+    });
+    expect(await votes.cancel(vote.id, id, staff, "Inspected Discord and receipt")).toEqual(closed);
+    await expect(votes.cancel(vote.id, id, staff, "Changed reason")).rejects.toMatchObject({ status: 409 });
+    await expect(
+      votes.cancel(vote.id, id, { ...staff, id: "other" }, "Inspected Discord and receipt"),
+    ).rejects.toMatchObject({ status: 409 });
+    expect((await votes.create(ballotInput())).created).toBe(true);
   });
 
   it("saves a manual member once and replays its exact receipt without creating payment evidence", async () => {

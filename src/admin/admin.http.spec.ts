@@ -10,6 +10,8 @@ import { AdminStore } from "./admin.store";
 import { WardogsClient } from "./wardogs.client";
 import { hash } from "./admin.auth";
 import { AppController } from "../app.controller";
+import { MapVotesController } from "../map-votes/map-votes.controller";
+import { MapVotesService } from "../map-votes/map-votes.service";
 
 describe("admin HTTP boundaries", () => {
   let app: INestApplication;
@@ -29,6 +31,11 @@ describe("admin HTTP boundaries", () => {
     history: jest.fn(),
   };
   const game = { overview: jest.fn(), execute: jest.fn(), configuration: jest.fn() };
+  const votes = {
+    list: jest.fn().mockResolvedValue({ enabled: false, votes: [] }),
+    start: jest.fn(),
+    cancel: jest.fn(),
+  };
   const config = {
     origin: "https://admin.example.test",
     clientId: "123",
@@ -53,7 +60,11 @@ describe("admin HTTP boundaries", () => {
     const adapter = new ExpressAdapter();
     const adapterHost = new HttpAdapterHost();
     adapterHost.httpAdapter = adapter;
-    const module = await Test.createTestingModule({ imports: [AdminModule], controllers: [AppController] })
+    const module = await Test.createTestingModule({
+      imports: [AdminModule],
+      controllers: [AppController, MapVotesController],
+      providers: [{ provide: MapVotesService, useValue: votes }],
+    })
       .overrideProvider(HttpAdapterHost)
       .useValue(adapterHost)
       .overrideProvider(AdminSettings)
@@ -122,7 +133,7 @@ describe("admin HTTP boundaries", () => {
     expect(traversal.text).not.toContain("clientSecret");
   });
   it("supports dashboard deep links without swallowing API, auth, or missing-file errors", async () => {
-    for (const path of ["players", "applications", "supporters", "combat", "match"]) {
+    for (const path of ["players", "applications", "supporters", "combat", "match", "votes"]) {
       const page = await request(app.getHttpServer()).get(`/admin/${path}`).expect(200);
       expect(page.text).toContain('<div id="root"></div>');
       expect(page.headers["content-security-policy"]).toContain("script-src 'self'");
@@ -157,6 +168,48 @@ describe("admin HTTP boundaries", () => {
     expect(game.execute).toHaveBeenCalledTimes(1);
     expect(store.begin.mock.invocationCallOrder[0]).toBeLessThan(game.execute.mock.invocationCallOrder[0]);
   });
+  it("keeps map ballot data private and prevents shared caching", async () => {
+    await request(app.getHttpServer()).get("/admin/api/map-votes").expect(401);
+    expect(votes.list).not.toHaveBeenCalled();
+    const result = await request(app.getHttpServer())
+      .get("/admin/api/map-votes")
+      .set("Cookie", `__Host-uncs_admin_session=${token}`)
+      .expect(200);
+    expect(result.headers["cache-control"]).toBe("no-store");
+    expect(votes.list).toHaveBeenCalledWith(expect.objectContaining({ id: session.userId }));
+  });
+  it.each(["/admin/api/map-votes", "/admin/api/map-votes/d0a3cdd7-a1c7-4904-a99e-cf058b432c34/cancel"])(
+    "protects %s with session, origin and CSRF checks",
+    async (path) => {
+      await request(app.getHttpServer()).post(path).send({}).expect(401);
+      for (const [origin, csrf] of [
+        ["https://evil.example.test", session.csrf],
+        [config.origin, "wrong"],
+        [config.origin, ""],
+      ]) {
+        await request(app.getHttpServer())
+          .post(path)
+          .set("Cookie", `__Host-uncs_admin_session=${token}`)
+          .set("Origin", origin)
+          .set("X-CSRF-Token", csrf)
+          .send({})
+          .expect(403);
+      }
+      expect(votes.start).not.toHaveBeenCalled();
+      expect(votes.cancel).not.toHaveBeenCalled();
+      const body = { id: randomUUID(), reason: "Test ballot" };
+      await request(app.getHttpServer())
+        .post(path)
+        .set("Cookie", `__Host-uncs_admin_session=${token}`)
+        .set("Origin", config.origin)
+        .set("X-CSRF-Token", session.csrf)
+        .send(body)
+        .expect(201);
+      const calls = path.endsWith("cancel") ? votes.cancel.mock.calls : votes.start.mock.calls;
+      expect(calls).toHaveLength(1);
+      expect(calls[0].at(-1)).toEqual(body);
+    },
+  );
   it.each(["Discord outage", "removed staff role"])(
     "allows sign-out during %s without a membership request",
     async (failure) => {

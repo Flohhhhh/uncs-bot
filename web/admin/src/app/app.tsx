@@ -20,6 +20,7 @@ import { SupportersPage } from "../features/supporters";
 import { CombatPage } from "../features/combat/combat-page";
 import { SettingsPage, PermissionsPage } from "../features/server/settings-page";
 import { NavigationGuard } from "./navigation-guard";
+import { MapVotesPage } from "../features/map-votes/map-votes-page";
 
 const pages = {
   overview: ["◫", "Overview", "Server overview", "Current match and server status."],
@@ -31,6 +32,7 @@ const pages = {
   bans: ["⊘", "Bans", "Server bans", "Review restrictions and keep moderation decisions accountable."],
   announcements: ["↗", "Announcements", "Announcements", "Send a message to the server."],
   match: ["◇", "Match & maps", "Match & maps", "Control the current round using the options this server supports."],
+  votes: ["✓", "Map votes", "Map votes", "Let the community choose the next map in Discord."],
   audit: ["◷", "Action history", "Action history", "Who changed what, why they did it, and what the game confirmed."],
   settings: ["⚙", "Server settings", "Server settings", "Identity, joining, gameplay and map rotation."],
   permissions: ["◈", "Permissions", "Staff permissions", "Which controls each staff role can use."],
@@ -258,7 +260,9 @@ function Dashboard({ me, signOut }: { me: Staff; signOut: () => void }) {
           <p className="nav-label">SERVER OPERATIONS</p>
           <nav aria-label="Dashboard sections">
             {Object.entries(pages)
-              .filter(([id]) => me.role === "admin" || !["applications", "supporters", "settings"].includes(id))
+              .filter(
+                ([id]) => me.role === "admin" || !["applications", "supporters", "settings", "votes"].includes(id),
+              )
               .map(([id, item]) => (
                 <NavLink
                   key={id}
@@ -388,6 +392,7 @@ function Dashboard({ me, signOut }: { me: Staff; signOut: () => void }) {
                 <Route path="bans" element={<BansPage />} />
                 <Route path="announcements" element={<AnnouncementsPage />} />
                 <Route path="match" element={<MatchPage />} />
+                <Route path="votes" element={staffPage(<MapVotesPage />)} />
                 <Route path="audit" element={<AuditPage />} />
                 <Route path="settings" element={staffPage(<SettingsPage />)} />
                 <Route path="permissions" element={<PermissionsPage />} />

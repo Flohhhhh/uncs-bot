@@ -51,6 +51,12 @@ export const Env = z.object({
   ADMIN_VIEWER_ROLE_IDS: discordIds,
   WARDOGS_RCON_URL: z.url().optional(),
   WARDOGS_RCON_PASSWORD: nonEmptyString.optional(),
+  /** Requires a human-reviewed map-vote migration and a configured guild channel. */
+  MAP_VOTES_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  MAP_VOTES_CHANNEL_ID: discordId.optional(),
   /** Separate combat-event ingest credential. Existing host feed is never rewritten automatically. */
   WARDOGS_FEED_ENABLED: z
     .enum(["true", "false"])

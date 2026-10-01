@@ -1,4 +1,17 @@
-import { boolean, index, jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import {
+  boolean,
+  index,
+  integer,
+  jsonb,
+  pgTable,
+  primaryKey,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
+} from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import type { MapVoteCancellation, MapVoteChoice, MapVoteState } from "../map-votes/map-votes.types";
 export * from "./telemetry.schema";
 export * from "./supporters.schema";
 
@@ -96,4 +109,54 @@ export const whitelistApplicationReviews = pgTable(
     completedAt: timestamp("completed_at", { withTimezone: true }),
   },
   (table) => [index("whitelist_application_reviews_application_idx").on(table.applicationId)],
+);
+
+// New source schema only: a human must generate/review its migration before enabling map votes.
+export const mapVotes = pgTable(
+  "map_votes",
+  {
+    id: uuid("id").primaryKey(),
+    serverId: text("server_id").notNull(),
+    serverName: text("server_name").notNull(),
+    connectionHash: text("connection_hash").notNull(),
+    guildId: text("guild_id").notNull(),
+    channelId: text("channel_id").notNull(),
+    messageId: text("message_id"),
+    actorId: text("actor_id").notNull(),
+    actorName: text("actor_name").notNull(),
+    reason: text("reason").notNull(),
+    requestHash: text("request_hash").notNull(),
+    choices: jsonb("choices").$type<MapVoteChoice[]>().notNull(),
+    revision: text("revision").notNull(),
+    currentMap: text("current_map").notNull(),
+    currentIndex: integer("current_index").notNull(),
+    roundStartedAt: timestamp("round_started_at", { withTimezone: true }),
+    state: text("state").$type<MapVoteState>().notNull().default("publishing"),
+    winner: integer("winner"),
+    counts: jsonb("counts").$type<number[]>().notNull(),
+    message: text("message").notNull().default("Creating the Discord ballot."),
+    cancellation: jsonb("cancellation").$type<MapVoteCancellation>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    closesAt: timestamp("closes_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("map_votes_active_server_idx")
+      .on(table.serverId)
+      .where(sql`${table.state} in ('publishing', 'open', 'closing', 'needs_review')`),
+    index("map_votes_created_idx").on(table.createdAt),
+  ],
+);
+
+export const mapVoteBallots = pgTable(
+  "map_vote_ballots",
+  {
+    voteId: uuid("vote_id")
+      .notNull()
+      .references(() => mapVotes.id),
+    discordUserId: text("discord_user_id").notNull(),
+    choice: integer("choice").notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.voteId, table.discordUserId] })],
 );

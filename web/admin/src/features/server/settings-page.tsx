@@ -575,11 +575,18 @@ export function PermissionsPage() {
             <td>—</td>
             <td>Manage</td>
           </tr>
+          <tr>
+            <td>Create, close & review Discord map ballots</td>
+            <td>—</td>
+            <td>—</td>
+            <td>Manage</td>
+          </tr>
         </Table>
         <p className="muted">
           Members, supporters and founders receive no staff controls automatically. Owners currently share the admin
           permission level. Discord role assignment remains with the community’s owners.
         </p>
+        <p className="muted">Screened Discord members can vote in a published ballot. Voting grants no staff access.</p>
       </div>
     </Card>
   );

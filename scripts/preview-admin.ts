@@ -27,6 +27,10 @@ import { TelemetryStore } from "../src/telemetry/telemetry.store";
 import type { CombatStats } from "../src/telemetry/telemetry.types";
 import { SupportersModule } from "../src/supporters/supporters.module";
 import { SupportersStore } from "../src/supporters/supporters.store";
+import { MapVotesModule } from "../src/map-votes/map-votes.module";
+import { MapVotesStore } from "../src/map-votes/map-votes.store";
+import { MapVotesDiscord } from "../src/map-votes/map-votes.discord";
+import type { MapVoteRecord } from "../src/map-votes/map-votes.types";
 import type {
   FounderPolicy,
   ManualMemberInput,
@@ -36,6 +40,7 @@ import type {
 } from "../src/supporters/supporters.types";
 
 const previewPort = Number(process.env.PREVIEW_PORT || 4317);
+const previewRoundStart = Date.now() - 600_000;
 
 const players = [
   { name: "UncDap", steamId: "76561198066952872", faction: "RED", kills: 18, deaths: 7, cash: 14300, pingMs: 32 },
@@ -168,6 +173,7 @@ class PreviewGame extends WardogsClient {
       return {
         serverName: scalarValue(text, SESSION, "ServerName") || "Local preview",
         map: currentMap,
+        matchSeconds: (Date.now() - previewRoundStart) / 1000,
         lighting,
         experiences: ["King of the Hill"],
         scoreTick: { current: 24, min: 18, max: 30 },
@@ -309,6 +315,9 @@ const store = {
   },
 };
 const auth = {
+  async role() {
+    return "admin";
+  },
   async authenticate(req: Request) {
     if (
       !["GET", "HEAD"].includes(req.method) &&
@@ -671,6 +680,10 @@ const supporterStore = {
   },
 };
 const previewEnvironment: Record<string, unknown> = {
+  MAP_VOTES_ENABLED: true,
+  WARDOGS_RCON_URL: "https://game.example.test",
+  ADMIN_GUILD_ID: "111111111111111111",
+  MAP_VOTES_CHANNEL_ID: "222222222222222222",
   WHITELIST_APPLICATIONS_ENABLED: true,
   WHITELIST_APPLICATION_EMAIL_REQUIRED: true,
   WARDOGS_FEED_ENABLED: true,
@@ -695,6 +708,70 @@ const previewEnvironment: Record<string, unknown> = {
 })
 class PreviewApplicationEnvironment {}
 
+const demoVotes = new Map<string, MapVoteRecord>();
+const voteStore = {
+  async get(id: string) {
+    return structuredClone(demoVotes.get(id) ?? null);
+  },
+  async history() {
+    return structuredClone([...demoVotes.values()].reverse().slice(0, 20));
+  },
+  async create(input: MapVoteRecord) {
+    if ([...demoVotes.values()].some((vote) => ["publishing", "open", "closing", "needs_review"].includes(vote.state)))
+      throw new ConflictException("A preview ballot is already active.");
+    const record: MapVoteRecord = {
+      ...input,
+      state: "publishing",
+      messageId: null,
+      winner: null,
+      cancellation: null,
+      message: "Creating simulated ballot.",
+    };
+    demoVotes.set(record.id, record);
+    return { created: true, record: structuredClone(record) };
+  },
+  async published(id: string) {
+    const vote = demoVotes.get(id)!;
+    vote.state = "open";
+    vote.message = "Simulated ballot opened. Nothing was posted to Discord.";
+    return structuredClone(vote);
+  },
+  async recover() {
+    return [];
+  },
+  async due(now: Date) {
+    return structuredClone([...demoVotes.values()].filter((vote) => vote.state === "open" && vote.closesAt <= now));
+  },
+  async claimClose(id: string) {
+    const vote = demoVotes.get(id);
+    if (!vote || vote.state !== "open") return null;
+    vote.state = "closing";
+    return structuredClone(vote);
+  },
+  async finish(id: string, state: MapVoteRecord["state"], message: string) {
+    const vote = demoVotes.get(id)!;
+    Object.assign(vote, { state, message });
+    return structuredClone(vote);
+  },
+  async cancel(id: string, requestId: string, staff: Staff, reason: string) {
+    const vote = demoVotes.get(id);
+    if (!vote || !["open", "needs_review"].includes(vote.state))
+      throw new ConflictException("Preview ballot cannot be closed.");
+    vote.cancellation = {
+      id: requestId,
+      actorId: staff.id,
+      actorName: staff.name,
+      reason,
+      previousState: vote.state,
+      previousMessage: vote.message,
+      at: new Date().toISOString(),
+    };
+    vote.state = "cancelled";
+    vote.message = "Preview ballot closed. No game changes were reversed.";
+    return structuredClone(vote);
+  },
+};
+
 async function main() {
   // ServeStaticModule selects its loader during dependency creation, so the test
   // application must provide its adapter before compiling the isolated preview.
@@ -702,7 +779,14 @@ async function main() {
   const adapterHost = new HttpAdapterHost();
   adapterHost.httpAdapter = adapter;
   const module = await Test.createTestingModule({
-    imports: [PreviewApplicationEnvironment, AdminModule, ApplicationsModule, TelemModule, SupportersModule],
+    imports: [
+      PreviewApplicationEnvironment,
+      AdminModule,
+      ApplicationsModule,
+      TelemModule,
+      SupportersModule,
+      MapVotesModule,
+    ],
   })
     .overrideProvider(HttpAdapterHost)
     .useValue(adapterHost)
@@ -722,6 +806,14 @@ async function main() {
     .useValue(telemetryStore)
     .overrideProvider(SupportersStore)
     .useValue(supporterStore)
+    .overrideProvider(MapVotesStore)
+    .useValue(voteStore)
+    .overrideProvider(MapVotesDiscord)
+    .useValue({
+      check: async () => undefined,
+      publish: async () => "333333333333333333",
+      update: async () => undefined,
+    })
     .compile();
   const app = module.createNestApplication(adapter, { rawBody: true });
   await app.listen(previewPort, "127.0.0.1");
