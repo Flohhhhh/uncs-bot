@@ -20,6 +20,10 @@ The overnight changes are prepared as draft pull requests with isolated tests. T
 
 The website's current clean package is `.wrangler/releases/multi-server-review-2026-10-01/uncs-pages.zip` in the companion checkout, sourced from `42843c5`, with its hashes and validation below. The scan-tested banner remains in the task's `outputs/uncs-server-assets` folder. Neither artifact has been applied to the live server. The detailed [community operating guide](SERVER_COMMUNITY.md) and [research record](WARDOGS_2026-09-30.md) contain configuration and evidence.
 
+### CI runtime follow-up
+
+The completed multi-server run reported GitHub's deprecated Node 20 action runtime and a forthcoming change behind `ubuntu-latest`. The `codex/ci-runtime-refresh` follow-up pins Ubuntu 24.04 and verified release commits for [checkout v7.0.1](https://github.com/actions/checkout/releases/tag/v7.0.1) and [setup-node v7.0.0](https://github.com/actions/setup-node/releases/tag/v7.0.0). Their manifests use Node 24; the application still builds/tests on Node 22.23.3. Checkout no longer persists credentials because these checks never push. Job names, triggers, permissions, caches, test commands and the existing human integration migration gate are unchanged. No migration generation is invoked by this stacked PR. Validation and its final CI run are recorded in the follow-up PR.
+
 ## October 1 overnight scope — work in progress
 
 The owner requested a complete current-settings review, bug/refactoring/layout/copy cleanup, and optional event modes. Continue independent work when Floh-only access or merges block a step. Server settings are in draft PR #8 on `codex/server-settings-controls`; table usability follows on `codex/dashboard-table-usability`. Keep later changes separately reviewable and do not expand PR #7 with unrelated work.
