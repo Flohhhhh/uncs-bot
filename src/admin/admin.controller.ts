@@ -63,23 +63,20 @@ export class AdminPageController {
   callback(@Req() req: Request, @Res() res: Response) {
     return this.auth.callback(req, res);
   }
+  @Post("api/logout")
+  logout(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
+    return this.auth.logout(req, res);
+  }
 }
 
 @Controller("admin/api")
 @UseFilters(AdminExceptionFilter)
 @UseGuards(AdminGuard)
 export class AdminApiController {
-  constructor(
-    private readonly service: AdminService,
-    private readonly auth: AdminAuth,
-  ) {}
+  constructor(private readonly service: AdminService) {}
   @Get("me")
   me(@Req() req: StaffRequest) {
     return req.staff;
-  }
-  @Post("logout")
-  logout(@Req() req: StaffRequest, @Res({ passthrough: true }) res: Response) {
-    return this.auth.logout(req, res);
   }
   @Post("actions")
   act(@Req() req: StaffRequest, @Body() body: unknown) {

@@ -184,7 +184,7 @@ export class AdminAuth {
     res.redirect("/admin");
   }
 
-  async authenticate(req: Request): Promise<Staff> {
+  private async readSession(req: Request) {
     const config = this.settings.get();
     const token = cookie(req, this.cookieName("session"));
     if (!/^[a-f0-9]{64}$/.test(token)) throw new UnauthorizedException("Sign in with Discord to continue.");
@@ -200,6 +200,12 @@ export class AdminAuth {
     ) {
       throw new ForbiddenException("This request did not come from your dashboard session.");
     }
+    return session;
+  }
+
+  async authenticate(req: Request): Promise<Staff> {
+    const session = await this.readSession(req);
+    const mutation = req.method !== "GET" && req.method !== "HEAD";
     this.limit(session.userId, mutation);
     return {
       id: session.userId,
@@ -210,8 +216,13 @@ export class AdminAuth {
   }
 
   async logout(req: Request, res: Response) {
+    if (req.method !== "POST") throw new ForbiddenException("Use the sign-out button to end this staff session.");
+    // Revoking this browser's session must work after role removal or while
+    // Discord is unavailable. Keep the same session, origin and CSRF checks.
+    await this.readSession(req);
     await this.store.deleteSession(hash(cookie(req, this.cookieName("session"))));
     res.clearCookie(this.cookieName("session"), this.cookieOptions());
+    res.clearCookie(this.cookieName("oauth"), this.cookieOptions());
     return { ok: true };
   }
 }

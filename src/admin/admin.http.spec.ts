@@ -149,6 +149,74 @@ describe("admin HTTP boundaries", () => {
     expect(game.execute).toHaveBeenCalledTimes(1);
     expect(store.begin.mock.invocationCallOrder[0]).toBeLessThan(game.execute.mock.invocationCallOrder[0]);
   });
+  it.each(["Discord outage", "removed staff role"])(
+    "allows sign-out during %s without a membership request",
+    async (failure) => {
+      const network = jest.mocked(fetch);
+      if (failure === "Discord outage") network.mockRejectedValue(new Error("Discord unavailable"));
+      else network.mockResolvedValue(new Response(JSON.stringify({ roles: [] })));
+      const result = await request(app.getHttpServer())
+        .post("/admin/api/logout")
+        .set("Cookie", `__Host-uncs_admin_session=${token}`)
+        .set("Origin", config.origin)
+        .set("X-CSRF-Token", session.csrf)
+        .send({})
+        .expect(201, { ok: true });
+      expect(store.deleteSession).toHaveBeenCalledWith(hash(token));
+      expect(String(result.headers["set-cookie"])).toContain("__Host-uncs_admin_session=;");
+      expect(network).not.toHaveBeenCalled();
+      expect(game.overview).not.toHaveBeenCalled();
+      expect(game.execute).not.toHaveBeenCalled();
+    },
+  );
+  it.each([
+    ["https://evil.example.test", session.csrf],
+    [config.origin, "wrong-csrf"],
+    [config.origin, ""],
+  ])("rejects sign-out with invalid origin/CSRF (%s, %s)", async (origin, csrf) => {
+    await request(app.getHttpServer())
+      .post("/admin/api/logout")
+      .set("Cookie", `__Host-uncs_admin_session=${token}`)
+      .set("Origin", origin)
+      .set("X-CSRF-Token", csrf)
+      .send({})
+      .expect(403);
+    expect(store.deleteSession).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it("rejects anonymous sign-out and does not revoke sessions on GET", async () => {
+    await request(app.getHttpServer()).post("/admin/api/logout").set("Origin", config.origin).send({}).expect(401);
+    await request(app.getHttpServer())
+      .get("/admin/api/logout")
+      .set("Cookie", `__Host-uncs_admin_session=${token}`)
+      .expect(404);
+    expect(store.deleteSession).not.toHaveBeenCalled();
+  });
+  it("rejects expired sign-out sessions without contacting Discord", async () => {
+    store.session.mockResolvedValue({ ...session, expiresAt: new Date(Date.now() - 1) });
+    await request(app.getHttpServer())
+      .post("/admin/api/logout")
+      .set("Cookie", `__Host-uncs_admin_session=${token}`)
+      .set("Origin", config.origin)
+      .set("X-CSRF-Token", session.csrf)
+      .send({})
+      .expect(401);
+    expect(store.deleteSession).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it("does not confirm sign-out or clear cookies when session revocation fails", async () => {
+    store.deleteSession.mockRejectedValueOnce(new Error("private database connection details"));
+    const result = await request(app.getHttpServer())
+      .post("/admin/api/logout")
+      .set("Cookie", `__Host-uncs_admin_session=${token}`)
+      .set("Origin", config.origin)
+      .set("X-CSRF-Token", session.csrf)
+      .send({})
+      .expect(503);
+    expect(result.headers["set-cookie"]).toBeUndefined();
+    expect(result.text).not.toContain("private database");
+    expect(fetch).not.toHaveBeenCalled();
+  });
   it("rejects foreign origins even when forwarded headers pretend to be the website", async () => {
     await request(app.getHttpServer())
       .post("/admin/api/actions")
