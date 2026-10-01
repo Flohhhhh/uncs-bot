@@ -503,17 +503,28 @@ export function SettingsPage() {
         />
       </div>
       {group === "Host controls" && (
-        <Card title="Managed through the host" subtitle="These controls do not have a verified dashboard connection.">
+        <Card
+          className="host-controls"
+          title="Managed through the host"
+          subtitle="These controls do not have a verified dashboard connection."
+        >
           <div className="card-body">
-            <Table headers={["CONTROL", "WHERE IT BELONGS"]}>
+            <Table label="Host controls" headers={["CONTROL", "WHERE IT BELONGS"]} scrollable>
               <tr>
                 <td>Daily restart time</td>
-                <td>Host startup settings. The 0.1.2 notes specify UTC; confirm how the host displays it.</td>
+                <td>xREALM Schedules. Confirm its timezone and next run; the game's separate daily time uses UTC.</td>
               </tr>
               <tr>
                 <td>Restart after the match</td>
                 <td>
-                  Requires a verified host restart control and match-end signal. Restart match only reloads the round.
+                  xREALM has a match-end restart task with announcements.{" "}
+                  <a
+                    href="https://www.xrealm.com/en/blog/wardogs-server-restart-after-match-end"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    Setup guide ↗
+                  </a>
                 </td>
               </tr>
               <tr>
@@ -529,6 +540,10 @@ export function SettingsPage() {
                 <td>No verified game configuration key in the current official template.</td>
               </tr>
             </Table>
+            <p className="muted">
+              Use the selected server's host panel. This dashboard does not read or change host schedules. Restart match
+              only reloads the round.
+            </p>
           </div>
         </Card>
       )}
@@ -558,7 +573,7 @@ export function PermissionsPage() {
       subtitle={`Your access${server ? ` on ${server.name}` : ""}: ${me.role}. Assigned through configured Discord roles.`}
     >
       <div className="card-body">
-        <Table headers={["ACCESS", "VIEWER", "MODERATOR", "ADMIN / OWNER"]}>
+        <Table label="Staff access by role" headers={["ACCESS", "VIEWER", "MODERATOR", "ADMIN / OWNER"]} scrollable>
           <tr>
             <td>Server, players & action history</td>
             <td>Read</td>

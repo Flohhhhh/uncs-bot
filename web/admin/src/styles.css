@@ -734,6 +734,14 @@ textarea::placeholder {
   position: relative;
   overflow: auto;
 }
+.host-controls table {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.host-controls td {
+  vertical-align: top;
+  line-height: 1.6;
+}
 .table-wrap.scrollable {
   max-height: min(70vh, 720px);
   scrollbar-gutter: stable;

@@ -10,7 +10,15 @@ Welcomes and round messages share wording and feature flags, but each server has
 
 Each server may have a unique `feedToken`, separate from every game password. Deliver to `/api/ingest/servers/ID/events`. The receiver derives the stable identity from that authenticated route, never the payload's per-boot UUID or display name. Public labels use `/community/api/servers`; rankings use `/community/api/servers/ID/leaderboard`. Staff routes use `/admin/api/servers/ID/...` with ordinary session/role checks; mutations also require the endpoint version from the staff server list. Registry credentials never belong in website files.
 
-The [release audit](ADMIN_RELEASE_AUDIT.md#multiple-server-implementation--isolated-validation-in-progress) records migration and cutover requirements. Applications and combat need reviewed schema changes even for a single server. An application approval is scoped to its server; supporter status grants no game access. New website selectors depend on this backend release. No live expansion or feature activation has been performed.
+The [release audit](ADMIN_RELEASE_AUDIT.md#multiple-server-implementation--draft-review-and-isolated-validation) records migration and cutover requirements. Applications and combat need reviewed schema changes even for a single server. An application approval is scoped to its server; supporter status grants no game access. New website selectors depend on this backend release. No live expansion or feature activation has been performed.
+
+## Host restart schedules
+
+[xREALM's general scheduler](https://xrealm.com/en/blog/how-to-add-schedules-to-your-server) separates a schedule's timing from its tasks. In the selected server's host panel, review existing schedules, create the desired cadence, then add a task. Confirm the displayed timezone and next-run timestamp; the public guide does not establish its timezone. No live schedule was inspected or changed here.
+
+For WARDOGS, select **[Wardogs] Restart after match-ending**, as documented in [xREALM's dedicated guide](https://www.xrealm.com/en/blog/wardogs-server-restart-after-match-end). Enable the schedule and online-only option. The scheduled time begins waiting; the restart follows at map loading. Configure initial/near-end announcements and a leading-score threshold (documented default: 90 points). Leave the task offset at zero unless intentional. Ordinary power-restart tasks can interrupt play; review them before adding another schedule.
+
+The provider documents an early restart below 20 players with all scores zero, after at least a minute and another check. It waits 90 seconds after detecting shutdown before starting again. Its English guide also describes a separate game uptime restart. These are provider claims, not verified UNCs behavior. Verify build-specific timing, recovery and announcement visibility with the owner. Gramps has no verified scheduler API; its round restart is a different action.
 
 ## Configuration
 
