@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, within, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
+import { MemoryRouter } from "react-router-dom";
 import { MapVotesPage } from "./map-votes-page";
 import { api } from "../../api/client";
 import { AdminContext } from "../../app/context";
@@ -58,6 +59,7 @@ function show(role: "admin" | "viewer" | "moderator" = "admin") {
     <AdminContext.Provider value={state}>
       <MapVotesPage />
     </AdminContext.Provider>,
+    { wrapper: ({ children }) => <MemoryRouter initialEntries={["/votes?server=primary"]}>{children}</MemoryRouter> },
   );
   return { ...view, state };
 }
@@ -73,7 +75,8 @@ it.each(["viewer", "moderator"] as const)("does not read private votes for %s", 
 it("does not query settings or catalog when disabled", async () => {
   enabled = false;
   show();
-  await screen.findByText("Map voting is not enabled");
+  await screen.findByRole("heading", { name: "Discord map voting is off" });
+  expect(screen.getByRole("link", { name: "Open match & maps" })).toHaveAttribute("href", "/match?server=primary");
   expect(request.mock.calls.map(([path]) => path)).toEqual(["map-votes"]);
 });
 it("excludes the current map and duplicate choices, and requires two options", async () => {

@@ -5,6 +5,7 @@ import { useGameApi } from "../../api/server-client";
 import { useResource } from "../../api/use-resource";
 import type { Catalog } from "../../api/types";
 import { useGameAdmin as useAdmin } from "../../app/context";
+import { ServerLink as Link } from "../../app/server-link";
 import { Badge, Card, Empty, Modal, date } from "../../components/ui";
 import { CopyValue, DataTable } from "../../components/data-table";
 import { MapPicker } from "../actions/map-picker";
@@ -122,10 +123,22 @@ export function MapVotesPage() {
   if (!resource.data) return <Empty title={resource.error || "Loading map votes…"} />;
   if (!resource.data.enabled)
     return (
-      <Empty
-        title="Map voting is not enabled"
-        detail="Choose a Discord voting channel and enable map voting in the bot configuration."
-      />
+      <Card title="Discord map voting is off" subtitle="You can still choose maps manually." badge={<Badge>OFF</Badge>}>
+        <div className="card-body">
+          <p>
+            <Link className="button primary" to="/match">
+              Open match &amp; maps
+            </Link>
+          </p>
+          <details>
+            <summary>How to enable voting</summary>
+            <p>
+              A server owner needs to choose a Discord voting channel and enable map voting in Gramps. This setup is not
+              available in the dashboard yet.
+            </p>
+          </details>
+        </div>
+      </Card>
     );
   return (
     <EnabledMapVotes

@@ -16,14 +16,15 @@ import { errorMessage, rejectionState } from "../actions/policy";
 import { MapPicker } from "../actions/map-picker";
 
 const timing: Record<string, string> = {
-  live: "Live",
-  applied: "Live",
+  live: "Now",
+  applied: "Now",
   "next-match": "Next match",
   "next-restart": "Server restart",
   pending: "Pending",
   overridden: "Host override",
   unknown: "Checked on save",
 };
+const timingSymbol: Record<string, string> = { live: "⚡", applied: "⚡", "next-match": "⏭", "next-restart": "↻" };
 type DraftAction =
   | { action: "settings-save"; revision: string; changes: Record<string, SettingValue> }
   | { action: "rotation-save"; revision: string; entries: MapSelection[] }
@@ -382,6 +383,9 @@ export function SettingsPage() {
                   <label key={field.id}>
                     {field.label}
                     <span className="setting-timing">
+                      {observed?.editable && timingSymbol[observed.state] && (
+                        <span aria-hidden="true">{timingSymbol[observed.state]} </span>
+                      )}
                       {observed?.editable ? timing[observed.state] || timing.unknown : "Read-only"}
                     </span>
                     {field.type === "boolean" || field.type === "select" ? (

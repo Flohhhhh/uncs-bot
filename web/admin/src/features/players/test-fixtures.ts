@@ -57,7 +57,6 @@ export function context(overrides: Partial<AdminContextValue> = {}): AdminContex
     refreshVersion: 0,
     refresh: vi.fn(),
     invalidateOverview: vi.fn(),
-    notify: vi.fn(),
     openAction: vi.fn(),
     ...overrides,
   };
