@@ -2105,11 +2105,32 @@ dialog textarea {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 22px;
 }
-.settings-grid label {
+.settings-grid .setting-field {
   display: flex;
   flex-direction: column;
   gap: 8px;
   min-width: 0;
+}
+.setting-field > label {
+  font: inherit;
+}
+.setting-range {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.setting-range input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  accent-color: var(--orange);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+.setting-range input[type="number"] {
+  width: 78px;
+  flex: 0 0 78px;
 }
 .settings-grid small {
   color: var(--muted);

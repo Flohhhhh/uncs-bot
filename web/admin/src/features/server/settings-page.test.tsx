@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, within, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
+import { MemoryRouter } from "react-router-dom";
 import { SettingsPage, PermissionsPage } from "./settings-page";
 import { api } from "../../api/client";
 import { AdminContext } from "../../app/context";
@@ -59,12 +60,14 @@ beforeEach(() => {
     throw new Error(`Unexpected path ${path}`);
   });
 });
-const show = (role: "viewer" | "moderator" | "admin" = "admin") => {
+const show = (role: "viewer" | "moderator" | "admin" = "admin", path = "/settings") => {
   const state = context();
   state.me.role = role;
   return render(
     <AdminContext.Provider value={state}>
-      <SettingsPage />
+      <MemoryRouter initialEntries={[path]}>
+        <SettingsPage />
+      </MemoryRouter>
     </AdminContext.Provider>,
   );
 };
@@ -75,9 +78,9 @@ it("reviews changed values and records the save without extra typing", async () 
   expect(request.mock.calls.some(([path]) => path === "actions")).toBe(false);
   fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
   const dialog = screen.getByRole("dialog");
-  expect(within(dialog).getByText("Server name: The UNCs Events")).toBeInTheDocument();
+  expect(within(dialog).getByText("Server name: The UNCs → The UNCs Events · Next match")).toBeInTheDocument();
   expect(screen.queryByRole("textbox", { name: "Reason" })).not.toBeInTheDocument();
-  fireEvent.click(within(dialog).getByRole("button", { name: "Confirm changes" }));
+  fireEvent.click(within(dialog).getByRole("button", { name: "Save settings" }));
   await screen.findByText("Saved for next match.");
   const sent = request.mock.calls.filter(([path]) => path === "actions");
   expect(sent).toHaveLength(1);
@@ -87,7 +90,7 @@ it("reviews changed values and records the save without extra typing", async () 
     changes: { serverName: "The UNCs Events" },
     reason: "Staff reviewed server changes.",
   });
-  expect(within(dialog).queryByRole("button", { name: "Confirm changes" })).not.toBeInTheDocument();
+  expect(within(dialog).queryByRole("button", { name: "Save settings" })).not.toBeInTheDocument();
 });
 it.each(["viewer", "moderator"] as const)("does not request private settings for %s", (role) => {
   show(role);
@@ -121,7 +124,7 @@ it("queues a map independently of ending the current match", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Queue next map" }));
   const dialog = screen.getByRole("dialog");
   expect(screen.queryByRole("textbox", { name: "Reason" })).not.toBeInTheDocument();
-  fireEvent.click(within(dialog).getByRole("button", { name: "Confirm changes" }));
+  fireEvent.click(within(dialog).getByRole("button", { name: "Queue next map" }));
   await waitFor(() => expect(request.mock.calls.some(([path]) => path === "actions")).toBe(true));
   expect(JSON.parse(String(request.mock.calls.find(([path]) => path === "actions")![1]?.body))).toMatchObject({
     action: "map-next",
@@ -166,10 +169,65 @@ it("retains an unknown receipt without resending after a lost settings response"
   fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
   const dialog = screen.getByRole("dialog");
   expect(screen.queryByRole("textbox", { name: "Reason" })).not.toBeInTheDocument();
-  const form = within(dialog).getByRole("button", { name: "Confirm changes" }).closest("form")!;
+  const form = within(dialog).getByRole("button", { name: "Save settings" }).closest("form")!;
   fireEvent.submit(form);
   fireEvent.submit(form);
   await within(dialog).findByText(/Connection lost/);
   expect(request.mock.calls.filter(([path]) => path === "actions")).toHaveLength(1);
-  expect(within(dialog).queryByRole("button", { name: "Confirm changes" })).not.toBeInTheDocument();
+  expect(within(dialog).queryByRole("button", { name: "Save settings" })).not.toBeInTheDocument();
+});
+it("keeps slider and exact value together and removes changes when restored", async () => {
+  show();
+  fireEvent.click(await screen.findByRole("button", { name: "Gameplay" }));
+  const slider = screen.getByRole("slider", { name: "Scoring interval slider" });
+  const number = screen.getByRole("spinbutton", { name: "Scoring interval (seconds)" });
+  fireEvent.change(slider, { target: { value: "25" } });
+  expect(number).toHaveValue(25);
+  expect(slider).toHaveAttribute("aria-valuetext", "25 seconds");
+  fireEvent.change(number, { target: { value: "26" } });
+  expect(slider).toHaveValue("26");
+  fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
+  expect(screen.getByRole("dialog")).toHaveTextContent("24s → 26s · Next match");
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  fireEvent.change(number, { target: { value: "24" } });
+  expect(screen.queryByRole("button", { name: "Review changes" })).not.toBeInTheDocument();
+  expect(request.mock.calls.some(([path]) => path === "actions")).toBe(false);
+});
+it("rejects exact scoring values outside the server's range", async () => {
+  show();
+  fireEvent.click(await screen.findByRole("button", { name: "Gameplay" }));
+  fireEvent.change(screen.getByRole("spinbutton", { name: /Scoring interval/ }), { target: { value: "31" } });
+  fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
+  expect(screen.getByRole("alert")).toHaveTextContent("18 to 30 seconds");
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+it("clearing a replacement leaves the password unchanged; removing it is explicit", async () => {
+  show();
+  fireEvent.click(await screen.findByRole("button", { name: "Joining" }));
+  const password = screen.getByLabelText("Join password");
+  fireEvent.change(password, { target: { value: "sample-not-a-secret" } });
+  fireEvent.change(password, { target: { value: "" } });
+  expect(screen.queryByRole("button", { name: "Review changes" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Clear join password" }));
+  expect(password).toHaveAttribute("placeholder", "Password will be removed");
+  fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
+  expect(screen.getByRole("dialog")).toHaveTextContent("Password removed");
+  fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+  await screen.findByText("Saved for next match.");
+  expect(JSON.parse(String(request.mock.calls.find(([path]) => path === "actions")![1]?.body)).changes).toEqual({
+    serverPassword: "",
+  });
+});
+it("opens the rotation shortcut and does not save a cancelled or reversed edit", async () => {
+  show("admin", "/settings?server=primary#rotation");
+  await screen.findByRole("combobox", { name: "Map" });
+  expect(screen.getByRole("button", { name: "Rotation" })).toHaveAttribute("aria-pressed", "true");
+  fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+  expect(screen.getByRole("button", { name: "Queue next map" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "Cancel entry edit" }));
+  expect(screen.queryByRole("button", { name: "Review rotation" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Move Europe up" }));
+  expect(screen.getByRole("button", { name: "Review rotation" })).toBeEnabled();
+  fireEvent.click(screen.getByRole("button", { name: "Move Europe down" }));
+  expect(screen.queryByRole("button", { name: "Review rotation" })).not.toBeInTheDocument();
 });

@@ -449,7 +449,7 @@ export function MatchPage() {
         <Card title="Map rotation" badge={<Badge>{error ? "UNAVAILABLE" : rotation?.mode || "LOADING"}</Badge>}>
           {me.role === "admin" && (
             <div className="card-body">
-              <Link className="button secondary" to="/settings">
+              <Link className="button secondary" to="/settings#rotation">
                 Edit rotation & queue next map →
               </Link>
             </div>
@@ -467,7 +467,7 @@ export function MatchPage() {
                   <td>{entry.lighting || "—"}</td>
                   <td>
                     <Badge kind={entry.status === "now" ? "good" : "neutral"}>
-                      {entry.denied ? "Unavailable" : entry.status || "Queued"}
+                      {entry.denied ? "Unavailable" : entry.status || "In rotation"}
                     </Badge>
                   </td>
                 </tr>

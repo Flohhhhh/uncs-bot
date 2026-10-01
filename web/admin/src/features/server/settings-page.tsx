@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useLocation } from "react-router-dom";
 import {
   settingFields,
   settingValue,
@@ -25,6 +26,7 @@ const timing: Record<string, string> = {
   unknown: "Checked on save",
 };
 const timingSymbol: Record<string, string> = { live: "⚡", applied: "⚡", "next-match": "⏭", "next-restart": "↻" };
+const saveLabels = { "settings-save": "Save settings", "rotation-save": "Save rotation", "map-next": "Queue next map" };
 type DraftAction =
   | { action: "settings-save"; revision: string; changes: Record<string, SettingValue> }
   | { action: "rotation-save"; revision: string; entries: MapSelection[] }
@@ -73,7 +75,7 @@ function ReviewChanges({
     }
   }
   return (
-    <Modal serverScoped title="Review server changes" onClose={close} busy={admin.busy}>
+    <Modal serverScoped title={saveLabels[action.action]} onClose={close} busy={admin.busy}>
       <ul className="change-summary">
         {summary.map((item, index) => (
           <li key={index}>{item}</li>
@@ -99,7 +101,7 @@ function ReviewChanges({
               Cancel
             </button>
             <button className="button primary" disabled={admin.busy}>
-              {admin.busy ? "Saving…" : "Confirm changes"}
+              {admin.busy ? "Saving…" : saveLabels[action.action]}
             </button>
           </div>
         </form>
@@ -128,9 +130,14 @@ function RotationEditor({
   const entries = draft?.entries ?? snapshot.rotation.entries;
   const locked = disabled || !snapshot.rotation.editable;
   const changedElsewhere = draft && draft.revision !== snapshot.revision;
-  useEffect(() => onUnsavedChange(!!draft), [draft, onUnsavedChange]);
+  const selectionChanged = editIndex !== null && JSON.stringify(selection) !== JSON.stringify(entries[editIndex]);
+  useEffect(() => onUnsavedChange(!!draft || selectionChanged), [draft, selectionChanged, onUnsavedChange]);
   function update(next: MapSelection[]) {
-    setDraft({ revision: draft?.revision ?? snapshot.revision, entries: next });
+    setDraft(
+      JSON.stringify(next) === JSON.stringify(snapshot.rotation.entries)
+        ? null
+        : { revision: draft?.revision ?? snapshot.revision, entries: next },
+    );
   }
   const summarize = (entry: MapSelection) =>
     [entry.map, ...entry.experiences, entry.lighting, entry.zoneAlternator].filter(Boolean).join(" · ");
@@ -188,7 +195,6 @@ function RotationEditor({
                   onClick={() => {
                     setSelection(entry);
                     setEditIndex(index);
-                    update([...entries]);
                   }}
                   className="button secondary"
                 >
@@ -258,6 +264,7 @@ function RotationEditor({
                 disabled={
                   locked ||
                   !!draft ||
+                  editIndex !== null ||
                   !selection.map ||
                   !snapshot.rotation.enabled ||
                   snapshot.rotation.mode !== "Ordered" ||
@@ -315,8 +322,12 @@ function RotationEditor({
 }
 export function SettingsPage() {
   const admin = useAdmin();
+  const location = useLocation();
   const resource = useResource<SettingsSnapshot>(admin.me.role === "admin" ? "settings" : null);
-  const [group, setGroup] = useState("Identity");
+  const [group, setGroup] = useState(location.hash === "#rotation" ? "Rotation" : "Identity");
+  useEffect(() => {
+    if (location.hash === "#rotation") setGroup("Rotation");
+  }, [location.hash]);
   const [draft, setDraft] = useState<{ snapshot: SettingsSnapshot; changes: Record<string, SettingValue> } | null>(
     null,
   );
@@ -332,9 +343,20 @@ export function SettingsPage() {
   const disabled = admin.busy || !!resource.error || document.hidden;
   const outdated = !!draft && draft.snapshot.revision !== resource.data.revision;
   const counts = Object.keys(draft?.changes ?? {}).length;
-  const update = (id: string, value: SettingValue) => {
+  const update = (id: string, value: SettingValue, clearPassword = false) => {
     setValidation("");
-    setDraft((old) => ({ snapshot: old?.snapshot ?? resource.data!, changes: { ...old?.changes, [id]: value } }));
+    setDraft((old) => {
+      const original = old?.snapshot ?? resource.data!;
+      const changes = { ...old?.changes };
+      const secret = settingFields.find((field) => field.id === id)?.secret;
+      if (
+        (secret && value === "" && !clearPassword) ||
+        (!secret && value === original.fields.find((field) => field.id === id)?.value)
+      ) {
+        delete changes[id];
+      } else changes[id] = value;
+      return Object.keys(changes).length ? { snapshot: original, changes } : null;
+    });
   };
   function reviewSettings() {
     if (!draft) return;
@@ -342,7 +364,25 @@ export function SettingsPage() {
       const summary = Object.entries(draft.changes).map(([id, value]) => {
         const field = settingFields.find((entry) => entry.id === id)!;
         settingValue(field, value);
-        return `${field.label}: ${field.secret ? "Password updated" : String(value)}`;
+        if (
+          id === "scorePeriod" &&
+          snapshot.scoreTick &&
+          (Number(value) < snapshot.scoreTick.min || Number(value) > snapshot.scoreTick.max)
+        ) {
+          throw new Error(
+            `Choose a scoring interval from ${snapshot.scoreTick.min} to ${snapshot.scoreTick.max} seconds.`,
+          );
+        }
+        const before = draft.snapshot.fields.find((entry) => entry.id === id);
+        const display = (input: SettingValue | null | undefined) =>
+          input === null || input === undefined
+            ? "Not set"
+            : typeof input === "boolean"
+              ? input
+                ? "On"
+                : "Off"
+              : `${input}${id === "scorePeriod" ? "s" : ""}`;
+        return `${field.label}: ${field.secret ? (value === "" ? "Password removed" : "Password updated") : `${display(before?.value)} → ${display(value)}`} · ${timing[before?.state ?? "unknown"] || timing.unknown}`;
       });
       setReview({
         action: { action: "settings-save", revision: draft.snapshot.revision, changes: draft.changes },
@@ -379,9 +419,12 @@ export function SettingsPage() {
                 const observed = snapshot.fields.find((entry) => entry.id === field.id);
                 const value = draft?.changes[field.id] ?? observed?.value ?? "";
                 const locked = disabled || !observed?.editable;
+                const controlId = `setting-${field.id}`;
+                const range = field.id === "scorePeriod" ? snapshot.scoreTick : null;
+                const removingPassword = field.secret && draft?.changes[field.id] === "";
                 return (
-                  <label key={field.id}>
-                    {field.label}
+                  <div className="setting-field" key={field.id}>
+                    <label htmlFor={controlId}>{field.label}</label>
                     <span className="setting-timing">
                       {observed?.editable && timingSymbol[observed.state] && (
                         <span aria-hidden="true">{timingSymbol[observed.state]} </span>
@@ -390,6 +433,8 @@ export function SettingsPage() {
                     </span>
                     {field.type === "boolean" || field.type === "select" ? (
                       <select
+                        id={controlId}
+                        aria-describedby={`${controlId}-help`}
                         value={String(value)}
                         disabled={locked}
                         onChange={(event) =>
@@ -408,8 +453,41 @@ export function SettingsPage() {
                           </option>
                         ))}
                       </select>
+                    ) : range ? (
+                      <div className="setting-range">
+                        <input
+                          type="range"
+                          aria-label="Scoring interval slider"
+                          aria-describedby={`${controlId}-help`}
+                          min={range.min}
+                          max={range.max}
+                          step={1}
+                          value={
+                            typeof value === "number" ? Math.max(range.min, Math.min(range.max, value)) : range.current
+                          }
+                          aria-valuetext={`${typeof value === "number" ? Math.max(range.min, Math.min(range.max, value)) : range.current} seconds`}
+                          disabled={locked}
+                          onChange={(event) => update(field.id, Number(event.target.value))}
+                        />
+                        <input
+                          id={controlId}
+                          type="number"
+                          min={range.min}
+                          max={range.max}
+                          step={1}
+                          aria-describedby={`${controlId}-help`}
+                          value={String(value)}
+                          disabled={locked}
+                          onChange={(event) =>
+                            update(field.id, event.target.value === "" ? "" : Number(event.target.value))
+                          }
+                        />
+                        <span aria-hidden="true">s</span>
+                      </div>
                     ) : (
                       <input
+                        id={controlId}
+                        aria-describedby={`${controlId}-help`}
                         type={
                           field.type === "password"
                             ? "password"
@@ -421,7 +499,13 @@ export function SettingsPage() {
                         }
                         autoComplete={field.secret ? "new-password" : "off"}
                         value={String(value)}
-                        placeholder={field.secret ? "Leave unchanged" : "Not set in file"}
+                        placeholder={
+                          field.secret
+                            ? removingPassword
+                              ? "Password will be removed"
+                              : "Leave unchanged"
+                            : "Not set in file"
+                        }
                         disabled={locked}
                         min={field.id === "scorePeriod" ? snapshot.scoreTick?.min : field.min}
                         max={
@@ -445,7 +529,7 @@ export function SettingsPage() {
                         }
                       />
                     )}
-                    <small>{observed?.note || field.help}</small>
+                    <small id={`${controlId}-help`}>{observed?.note || field.help}</small>
                     {field.id === "scorePeriod" && snapshot.scoreTick && (
                       <small>
                         Running: {snapshot.scoreTick.current}s · Allowed: {snapshot.scoreTick.min}–
@@ -457,12 +541,13 @@ export function SettingsPage() {
                         type="button"
                         className="button secondary small"
                         disabled={locked}
-                        onClick={() => update(field.id, "")}
+                        onClick={() => update(field.id, "", true)}
                       >
                         Clear join password
                       </button>
                     )}
-                  </label>
+                    {removingPassword && <small role="status">Join password will be removed on save.</small>}
+                  </div>
                 );
               })}
           </div>
@@ -513,7 +598,10 @@ export function SettingsPage() {
             <Table label="Host controls" headers={["CONTROL", "WHERE IT BELONGS"]} scrollable>
               <tr>
                 <td>Daily restart time</td>
-                <td>xREALM Schedules. Confirm its timezone and next run; the game's separate daily time uses UTC.</td>
+                <td>
+                  xREALM Settings → daily restart time. Enter your local time, save, then restart the server to apply
+                  it. The host stores it in UTC.
+                </td>
               </tr>
               <tr>
                 <td>Restart after the match</td>
@@ -538,7 +626,10 @@ export function SettingsPage() {
               </tr>
               <tr>
                 <td>Server description</td>
-                <td>No verified game configuration key in the current official template.</td>
+                <td>
+                  The official console saves its description in that browser only. It does not change the game server
+                  listing.
+                </td>
               </tr>
             </Table>
             <p className="muted">
