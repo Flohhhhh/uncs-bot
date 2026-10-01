@@ -21,6 +21,7 @@ import { roundStamp, sameRound, type RoundStamp } from "../common/game-round";
 import { RconError, rejected } from "./rcon-protocol";
 import { GAME_LOG_LIMIT, parseGameLog, type GameLog } from "./game-log";
 import type { RconConnectionSource } from "../common/game-server";
+import type { IdentityValue, ServerIdentity } from "../common/server-identity";
 export { RconError } from "./rcon-protocol";
 export { serves } from "../common/admin-policy";
 
@@ -163,6 +164,39 @@ export class WardogsClient {
     const available = serves(await this.capabilities(), "GET", "/v1/audit");
     const entries = available ? parseGameLog(await this.request("GET", `/v1/audit?limit=${GAME_LOG_LIMIT}`)) : [];
     return { available, entries, limit: GAME_LOG_LIMIT, observedAt: new Date().toISOString() };
+  }
+
+  async identity(): Promise<ServerIdentity> {
+    const capabilities = await this.capabilities();
+    const read = async (path: string, field: string, banner = false): Promise<IdentityValue> => {
+      if (!serves(capabilities, "GET", path)) return { available: false, value: null };
+      try {
+        const response = await this.request("GET", path);
+        const value = z
+          .string()
+          .max(banner ? 2048 : 512)
+          .refine((text) => [...text].every((char) => char.charCodeAt(0) >= 32 && char.charCodeAt(0) !== 127))
+          .parse(response?.[field])
+          .trim();
+        if (banner && value) {
+          const url = new URL(value);
+          if (!["http:", "https:"].includes(url.protocol) || url.username || url.password)
+            throw new Error("Invalid image URL");
+        }
+        return { available: true, value: value || null };
+      } catch {
+        return {
+          available: true,
+          value: null,
+          error: banner ? "The current banner could not be read." : "The server ID could not be read.",
+        };
+      }
+    };
+    const [serverId, banner] = await Promise.all([
+      read("/v1/server-id", "serverId"),
+      read("/v1/sponsor", "imageUrl", true),
+    ]);
+    return { serverId, banner };
   }
 
   async document(): Promise<ConfigDocument> {

@@ -56,6 +56,7 @@ describe("two-server HTTP isolation", () => {
         overview: jest.fn(async () => ({ status: { serverName: id }, players: [{ steamId, name: `${id} player` }] })),
         whitelist: jest.fn(async () => ({ entries: [{ steamId, active: id === "east" }] })),
         gameLog: jest.fn(async () => ({ available: true, entries: [], serverMarker: id })),
+        identity: jest.fn(async () => ({ serverId: { available: true, value: id } })),
         execute: jest.fn(async () => ({ state: "accepted", message: `Accepted by ${id}` })),
       },
     ]),
@@ -191,6 +192,20 @@ describe("two-server HTTP isolation", () => {
     expect((await read(`servers/east/audit/${action.id}`)).body.record.details.serverId).toBe("east");
     expect((await read(`servers/central/audit/${action.id}`)).body.record).toBeNull();
     expect((await read("servers/central/audit")).body).toEqual([]);
+  });
+  it("keeps public identity reads and caches server scoped without issuing actions", async () => {
+    centralAccess = "viewer";
+    expect((await read("servers/east/server-identity").expect(200)).body.serverId.value).toBe("east");
+    expect((await read("servers/central/server-identity").expect(200)).body.serverId.value).toBe("central");
+    await read("servers/east/server-identity").expect(200);
+    expect(games.east.identity).toHaveBeenCalledTimes(1);
+    expect(games.central.identity).toHaveBeenCalledTimes(1);
+    centralAccess = "none";
+    await read("servers/central/server-identity").expect(403);
+    await read("server-identity").expect(400);
+    expect(games.central.identity).toHaveBeenCalledTimes(1);
+    expect(games.east.execute).not.toHaveBeenCalled();
+    expect(games.central.execute).not.toHaveBeenCalled();
   });
   it("keeps game log reads and caches server scoped and denies viewers", async () => {
     centralAccess = "admin";

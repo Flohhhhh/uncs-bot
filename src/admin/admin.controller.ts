@@ -109,7 +109,7 @@ export class AdminGameController {
   act(@Req() req: StaffRequest, @Body() body: unknown) {
     return this.service.act(req.staff, body);
   }
-  @Get(["overview", "bans", "whitelist", "catalog", "rotation", "audit"])
+  @Get(["overview", "bans", "whitelist", "catalog", "rotation", "audit", "server-identity"])
   read(@Req() req: StaffRequest) {
     const resource = req.path.replace(/\/$/, "").split("/").at(-1) ?? "";
     return this.service.read(resource, req.staff.serverId);
