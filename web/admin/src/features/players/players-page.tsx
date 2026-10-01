@@ -61,6 +61,9 @@ export function PlayersPage() {
     setDestinations((previous) => Object.fromEntries(Object.entries(previous).filter(([id]) => !attempted.has(id))));
   }
 
+  if (!admin.overview)
+    return <Empty title="Waiting for the player list" detail="The roster will appear when the server responds." />;
+
   return (
     <>
       {!!admin.overview?.unlinkedPlayerCount && (
@@ -172,24 +175,26 @@ export function PlayersPage() {
         >
           Clear
         </button>
-        <div className="bulk-team-controls">
-          <select
-            aria-label="Destination team for selected players"
-            value={bulkFaction}
-            onChange={(event) => setBulkFaction(event.target.value)}
-            disabled={!canMove || !selection.length}
-          >
-            <FactionOptions teams={teams} />
-          </select>
-          <button
-            type="button"
-            className="button primary"
-            disabled={!canMove || !selection.length || !teams.some((team) => team.name === bulkFaction)}
-            onClick={() => openMove(selection, bulkFaction)}
-          >
-            Review move
-          </button>
-        </div>
+        {selection.length > 0 && (
+          <div className="bulk-team-controls">
+            <select
+              aria-label="Destination team for selected players"
+              value={bulkFaction}
+              onChange={(event) => setBulkFaction(event.target.value)}
+              disabled={!canMove || !selection.length}
+            >
+              <FactionOptions teams={teams} />
+            </select>
+            <button
+              type="button"
+              className="button primary"
+              disabled={!canMove || !selection.length || !teams.some((team) => team.name === bulkFaction)}
+              onClick={() => openMove(selection, bulkFaction)}
+            >
+              Review move
+            </button>
+          </div>
+        )}
       </div>
       {lastMove && (
         <details className="team-results" open={lastMove.stopped || undefined}>
@@ -206,6 +211,7 @@ export function PlayersPage() {
         </details>
       )}
       <Card
+        className="player-roster"
         title={`${found.length} player${found.length === 1 ? "" : "s"} shown`}
         subtitle={`${players.length} in the current roster · click a column to sort`}
         badge={<Badge kind={admin.stale ? "warn" : "good"}>{admin.stale ? "LAST ROSTER" : "LIVE ROSTER"}</Badge>}
@@ -220,6 +226,7 @@ export function PlayersPage() {
               { label: "Team", value: (player) => playerFaction(player, teams)?.label ?? player.faction },
               { label: "Kills", value: (player) => player.kills, firstDirection: "descending" },
               { label: "Deaths", value: (player) => player.deaths, firstDirection: "descending" },
+              { label: "Cash", value: (player) => player.cash, firstDirection: "descending" },
               { label: "Ping", value: (player) => player.pingMs },
               { label: "Team / actions" },
             ]}
@@ -238,7 +245,7 @@ export function PlayersPage() {
                       onChange={(event) => toggle(player.steamId, event.target.checked)}
                     />
                   </td>
-                  <td>
+                  <td className="player-identity">
                     <div className="player-name">
                       <span className="player-icon">{player.name.slice(0, 2).toUpperCase()}</span>
                       <div>
@@ -249,15 +256,16 @@ export function PlayersPage() {
                       </div>
                     </div>
                   </td>
-                  <td>
+                  <td className="player-team" data-label="Team">
                     <FactionChip team={current} fallback={player.faction || "Choosing team"} />
                   </td>
-                  <td>{player.kills ?? "—"}</td>
-                  <td>{player.deaths ?? "—"}</td>
-                  <td>
+                  <td data-label="Kills">{player.kills ?? "—"}</td>
+                  <td data-label="Deaths">{player.deaths ?? "—"}</td>
+                  <td data-label="Cash">{player.cash?.toLocaleString() ?? "—"}</td>
+                  <td data-label="Ping">
                     {player.pingMs ?? "—"} <span className="muted">ms</span>
                   </td>
-                  <td>
+                  <td className="player-controls">
                     <div className="row-actions">
                       <div className="team-row-controls">
                         <select

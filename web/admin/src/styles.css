@@ -830,6 +830,95 @@ td strong {
   align-items: center;
   gap: 11px;
 }
+@media (max-width: 700px) {
+  .player-roster table,
+  .player-roster thead,
+  .player-roster tbody {
+    display: block;
+    width: 100%;
+  }
+  .player-roster thead tr {
+    display: flex;
+    flex-wrap: wrap;
+    padding: 8px;
+  }
+  .player-roster th {
+    padding: 0;
+  }
+  .player-roster th:first-child,
+  .player-roster th:last-child {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+  .player-roster .table-sort {
+    min-height: 44px;
+    padding: 8px;
+  }
+  .player-roster tbody tr {
+    position: relative;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    padding: 16px;
+    border-top: 1px solid var(--line);
+  }
+  .player-roster td {
+    min-width: 0;
+    padding: 0;
+    border: 0;
+  }
+  .player-roster .player-identity {
+    grid-column: 1 / -1;
+    grid-row: 1;
+    padding-right: 28px;
+    overflow-wrap: anywhere;
+  }
+  .player-roster .player-icon {
+    display: none;
+  }
+  .player-roster .select-cell {
+    position: absolute;
+    top: 12px;
+    right: 8px;
+    width: 32px;
+    height: 32px;
+  }
+  .player-roster .select-cell input {
+    width: 24px;
+    height: 24px;
+  }
+  .player-roster .player-controls {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+  .player-roster .player-team {
+    grid-column: 1 / -1;
+  }
+  .player-roster td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 4px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .player-roster .team-row-controls {
+    flex: 1;
+    min-width: 0;
+  }
+  .player-roster .team-row-controls select {
+    flex: 1;
+    min-width: 0;
+    max-width: none;
+    width: 100%;
+  }
+  .player-roster .row-actions .button,
+  .player-roster .team-row-controls select {
+    min-height: 44px;
+  }
+}
 .sr-only {
   position: absolute;
   width: 1px;
