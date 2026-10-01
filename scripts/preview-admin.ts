@@ -33,6 +33,9 @@ import { MapVotesStore } from "../src/map-votes/map-votes.store";
 import { MapVotesDiscord } from "../src/map-votes/map-votes.discord";
 import type { MapVoteRecord } from "../src/map-votes/map-votes.types";
 import { ServerEventsModule } from "../src/server-events/server-events.module";
+import { ServerCommunityController } from "../src/server-community/server-community.controller";
+import { ServerCommunityService } from "../src/server-community/server-community.service";
+import type { CommunityMessagesStatus } from "../src/common/community-messages";
 import { ServerEventsStore } from "../src/server-events/server-events.store";
 import type { EventRecord, EventOperation, EventProgress, EventStop } from "../src/server-events/server-events.types";
 import type {
@@ -980,6 +983,32 @@ async function main() {
   const adapterHost = new HttpAdapterHost();
   adapterHost.httpAdapter = adapter;
   const module = await Test.createTestingModule({
+    controllers: [ServerCommunityController],
+    providers: [
+      {
+        provide: ServerCommunityService,
+        useValue: {
+          status: (id: string): CommunityMessagesStatus => ({
+            enabled: id === "primary",
+            workerStarted: id === "primary",
+            lastObservedAt: id === "primary" ? new Date().toISOString() : null,
+            lastMessageAcknowledgedAt: null,
+            lastStatusCardUpdatedAt: null,
+            welcome: {
+              enabled: id === "primary",
+              messages: [
+                "Welcome to The UNCs! Find the crew at theuncsgaming.com.",
+                "Free whitelist details and seeding info are on our website.",
+              ],
+              delaySeconds: 10,
+              spacingSeconds: 20,
+            },
+            round: { enabled: false, message: "GG! Thanks for playing with The UNCs." },
+            discordStatus: { enabled: false, configured: false },
+          }),
+        },
+      },
+    ],
     imports: [
       PreviewApplicationEnvironment,
       AdminModule,

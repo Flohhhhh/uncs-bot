@@ -11,6 +11,8 @@ import { GameServers } from "./game-servers";
 import { WardogsClient } from "./wardogs.client";
 import { hash } from "./admin.auth";
 import type { AdminAction, Staff } from "./admin.types";
+import { ServerCommunityController } from "../server-community/server-community.controller";
+import { ServerCommunityService } from "../server-community/server-community.service";
 
 describe("two-server HTTP isolation", () => {
   let app: INestApplication;
@@ -114,7 +116,13 @@ describe("two-server HTTP isolation", () => {
     const adapter = new ExpressAdapter(),
       host = new HttpAdapterHost();
     host.httpAdapter = adapter;
-    const module = await Test.createTestingModule({ imports: [AdminModule] })
+    const module = await Test.createTestingModule({
+      imports: [AdminModule],
+      controllers: [ServerCommunityController],
+      providers: [
+        { provide: ServerCommunityService, useValue: { status: (serverId: string) => ({ serverId, enabled: false }) } },
+      ],
+    })
       .overrideProvider(HttpAdapterHost)
       .useValue(host)
       .overrideProvider(AdminSettings)
@@ -132,6 +140,19 @@ describe("two-server HTTP isolation", () => {
   afterEach(async () => {
     await app.close();
     jest.restoreAllMocks();
+  });
+  it("scopes read-only community status to the selected accessible server", async () => {
+    centralAccess = "viewer";
+    expect((await read("servers/central/community-messages").expect(200)).body.serverId).toBe("central");
+    await read("community-messages").expect(400);
+    expect(games.east.overview).not.toHaveBeenCalled();
+    expect(games.central.overview).not.toHaveBeenCalled();
+    expect(games.central.execute).not.toHaveBeenCalled();
+  });
+  it("does not expose community status without a staff session or server access", async () => {
+    centralAccess = "none";
+    await read("servers/central/community-messages").expect(403);
+    await request(app.getHttpServer()).get("/admin/api/servers/east/community-messages").expect(401);
   });
   it("requires selection even with valid staff access and returns only safe permitted labels", async () => {
     centralAccess = "none";

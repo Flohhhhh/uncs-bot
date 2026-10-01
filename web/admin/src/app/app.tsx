@@ -524,7 +524,7 @@ function Dashboard({
             <footer>
               <span>THE UNCs ✳ POWERED BY GRAMPS</span>
               <span>
-                {gamePage ? "Updates every 20 seconds while this page is visible" : "Refresh for the latest records"}
+                {gamePage ? "Server status updates every 20 seconds while visible" : "Refresh for the latest records"}
               </span>
             </footer>
           </div>

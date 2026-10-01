@@ -64,6 +64,21 @@ function fixture(overrides: Record<string, unknown> = {}, serverId = "primary") 
 }
 
 describe("optional community worker", () => {
+  it("reports observations and acknowledged messages, never failed attempts", async () => {
+    const { service, game, look } = fixture();
+    expect(service.observations()).toEqual({
+      lastObservedAt: null,
+      lastMessageAcknowledgedAt: null,
+      lastStatusCardUpdatedAt: null,
+    });
+    await service.tick();
+    expect(service.observations().lastObservedAt).toBe(time.toISOString());
+    game.execute.mockResolvedValueOnce({ state: "failed", message: "Not sent" });
+    await look([firstId, secondId]);
+    expect(service.observations().lastMessageAcknowledgedAt).toBeNull();
+    await look([firstId, secondId, "76561198000000003"]);
+    expect(service.observations().lastMessageAcknowledgedAt).toBe(new Date().toISOString());
+  });
   it("keeps same-player welcomes and outage cancellation independent between servers", async () => {
     const first = fixture({ SERVER_COMMUNITY_WELCOME_MESSAGES: ["Welcome", "Follow-up"] }, "primary");
     const second = fixture({ SERVER_COMMUNITY_WELCOME_MESSAGES: ["Welcome", "Follow-up"] }, "event");

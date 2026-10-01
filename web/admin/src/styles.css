@@ -373,6 +373,19 @@ a.breadcrumb:hover {
 .mobile-navigation {
   display: none;
 }
+.message-observations {
+  margin-top: 24px;
+}
+.message-observations dl > div {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 12px 0;
+}
+.message-observations dd {
+  margin: 0;
+}
 .private-label {
   font-size: 8px;
   letter-spacing: 1.5px;
