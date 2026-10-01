@@ -8,6 +8,7 @@ import { CopyValue, DataTable } from "../../components/data-table";
 import { actionDefinitions, allowed } from "../actions/policy";
 import { FactionChip, liveFactions, playerFaction } from "../players/factions";
 import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
+import { PlayerActions } from "../players/player-actions";
 function ActionButton({
   action,
   steamId,
@@ -34,6 +35,7 @@ function ActionButton({
 }
 export function OverviewPage() {
   const { overview, me, stale, busy, openAction } = useAdmin();
+  const [managedId, setManagedId] = useState<string | null>(null);
   if (!overview)
     return <Empty title="Waiting for the server" detail="Connection details will appear when the server responds." />;
   const { status, players } = overview;
@@ -139,9 +141,9 @@ export function OverviewPage() {
                 </td>
                 <td>{player.pingMs ?? "—"} ms</td>
                 <td>
-                  <Link className="text-button" to="/players">
+                  <button type="button" className="text-button" onClick={() => setManagedId(player.steamId)}>
                     View player →
-                  </Link>
+                  </button>
                 </td>
               </tr>
             ))}
@@ -150,6 +152,7 @@ export function OverviewPage() {
           <Empty title="The server is quiet" detail="Players will appear here as they join." />
         )}
       </Card>
+      {managedId && <PlayerActions steamId={managedId} onClose={() => setManagedId(null)} />}
     </>
   );
 }
@@ -283,7 +286,7 @@ export function BansPage() {
   if (!data) return <Empty title={error ? "Bans could not be loaded" : "Loading bans…"} detail={error} />;
   const invalidCount = data.filter((ban) => !isPublicIndividualSteamId(ban.steamId)).length;
   const rows = data.filter((ban) =>
-    [ban.steamId, ban.reason, ban.bannedBy].some((value) => value?.toLowerCase().includes(query.toLowerCase())),
+    [ban.steamId, ban.reason, ban.bannedBy].some((value) => value?.toLowerCase().includes(query.trim().toLowerCase())),
   );
   return (
     <>
@@ -495,7 +498,7 @@ export function AuditPage() {
           entry.target,
           entry.message,
           entry.details.reason,
-        ].some((value) => value.toLowerCase().includes(query.toLowerCase())),
+        ].some((value) => value.toLowerCase().includes(query.trim().toLowerCase())),
       );
   return (
     <>
