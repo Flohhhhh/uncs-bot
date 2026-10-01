@@ -1,4 +1,4 @@
-import { configuredWhitelist, editWhitelist } from "./whitelist-document";
+import { configuredWhitelist, editWhitelist, inspectConfiguredWhitelist } from "./whitelist-document";
 const existing = "76561198066952872",
   added = "76561198123456789";
 const document = {
@@ -24,6 +24,21 @@ const unrelatedLines = (text: string) =>
   text.split(/\r?\n/).filter((line) => !/^\s*[+.!-]?DefaultReservedPlayerIds\s*=/i.test(line));
 
 describe("targeted whitelist edits", () => {
+  it("reads valid saved IDs beside a short numeric ID but still refuses to rewrite that document", () => {
+    const text = document.text.replace(
+      `+DefaultReservedPlayerIds=${existing}`,
+      `!DefaultReservedPlayerIds=ClearArray\r\n.DefaultReservedPlayerIds=7656119800000000\r\n.DefaultReservedPlayerIds=${existing}`,
+    );
+    expect(inspectConfiguredWhitelist(text)).toEqual({ ids: [existing], invalidEntryCount: 1 });
+    expect(() => configuredWhitelist(text)).toThrow("unsupported");
+    expect(() => editWhitelist({ ...document, text }, added, true)).toThrow("unsupported");
+    expect(() => inspectConfiguredWhitelist(text + "\r\n[/Script/WDGame.WDGameSession]")).toThrow("ambiguous");
+    const cleared = text.replace(
+      `.DefaultReservedPlayerIds=${existing}`,
+      `!DefaultReservedPlayerIds=ClearArray\r\n.DefaultReservedPlayerIds=${existing}`,
+    );
+    expect(inspectConfiguredWhitelist(cleared)).toEqual({ ids: [existing], invalidEntryCount: 0 });
+  });
   it("preserves valid IDs beyond the old prefix through add and remove", () => {
     const nextId = "76561200000000000";
     const updated = editWhitelist(document, nextId, true);

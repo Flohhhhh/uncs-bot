@@ -11,7 +11,7 @@ const normalizeKey = (value: string) =>
 
 // Work on only the one array. Do not round-trip the whole INI through a parser:
 // unrelated comments, credentials, host settings and ordering must survive intact.
-function locate(text: string) {
+function locate(text: string, strictIds = true) {
   const newline = text.includes("\r\n") ? "\r\n" : "\n";
   const lines = text.split(/\r?\n/);
   const starts = lines.flatMap((line, index) =>
@@ -28,14 +28,14 @@ function locate(text: string) {
     const line = lines[index];
     if (!/^\s*[+.!-]?\s*DefaultReservedPlayerIds\s*=/i.test(line)) continue;
     const match = line.match(
-      /^\s*([+.!-]?)\s*DefaultReservedPlayerIds\s*=\s*(?:"([0-9]{17}|ClearArray)"|([0-9]{17}|ClearArray))\s*(?:(?:[;#]|\/\/).*)?$/i,
+      /^\s*([+.!-]?)\s*DefaultReservedPlayerIds\s*=\s*(?:"([0-9]+|ClearArray)"|([0-9]+|ClearArray))\s*(?:(?:[;#]|\/\/).*)?$/i,
     );
     if (!match) throw new Error("The whitelist uses an unsupported array format. Review it in the host panel.");
     const operator = match[1];
     const value = match[2] ?? match[3];
     if (
       (operator === "!") !== (value.toLowerCase() === "cleararray") ||
-      (operator !== "!" && !isPublicIndividualSteamId(value))
+      (strictIds && operator !== "!" && !isPublicIndividualSteamId(value))
     )
       throw new Error("The whitelist uses an unsupported array format. Review it in the host panel.");
     indices.push(index);
@@ -51,6 +51,13 @@ function locate(text: string) {
 
 export function configuredWhitelist(text: string) {
   return locate(text).ids;
+}
+
+/** Display valid saved entries without making a malformed document eligible for writes. */
+export function inspectConfiguredWhitelist(text: string) {
+  const { ids } = locate(text, false);
+  const valid = ids.filter(isPublicIndividualSteamId);
+  return { ids: valid, invalidEntryCount: ids.length - valid.length };
 }
 
 export function editWhitelist(document: ConfigDocument, steamId: string, add: boolean) {

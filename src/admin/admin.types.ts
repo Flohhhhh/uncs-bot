@@ -164,7 +164,9 @@ export const playersSchema = z
     players: z.array(
       z.object({
         name: z.string(),
-        steamId: steamId.nullable(),
+        // An unavailable or malformed identity must not hide the rest of the
+        // roster. It remains unlinked and cannot become an action target.
+        steamId: steamId.nullable().catch(null),
         faction: z.string().nullable().optional(),
         kills: z.number().optional(),
         deaths: z.number().optional(),
@@ -182,7 +184,9 @@ export const playersSchema = z
 export const bansSchema = z.object({
   bans: z.array(
     z.object({
-      steamId,
+      // The game can load malformed IDs from its configuration. Keep those
+      // records visible; actionSchema still requires a valid personal SteamID.
+      steamId: z.string(),
       bannedAtUtc: z.string().nullable().optional(),
       bannedBy: z.string().nullable().optional(),
       reason: z.string().nullable().optional(),

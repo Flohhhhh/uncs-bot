@@ -104,9 +104,16 @@ describe("roster identity compatibility", () => {
     });
   });
   it.each([undefined, "invalid", "", Number(id)])(
-    "still rejects an undocumented or malformed identity: %s",
+    "counts an undocumented or malformed roster identity as unlinked without accepting actions: %s",
     (steamId) => {
-      expect(playersSchema.safeParse({ players: [{ name: "Player", steamId }] }).success).toBe(false);
+      expect(
+        playersSchema.parse({
+          players: [
+            { name: "Known", steamId: id },
+            { name: "Player", steamId },
+          ],
+        }),
+      ).toEqual({ players: [{ name: "Known", steamId: id }], unlinkedPlayerCount: 1 });
       expect(
         actionSchema.safeParse({ id: randomUUID(), action: "kick", reason: "Identity check", steamId }).success,
       ).toBe(false);
@@ -116,6 +123,30 @@ describe("roster identity compatibility", () => {
     expect(
       actionSchema.safeParse({ id: randomUUID(), action: "kick", reason: "Identity check", steamId: null }).success,
     ).toBe(false);
+  });
+});
+
+describe("ban list compatibility", () => {
+  it("shows valid bans beside a malformed configured ID without allowing that ID as an action target", async () => {
+    const client = new WardogsClient(settings);
+    const invalid = "76561197960265728";
+    const bans = [
+      { steamId: invalid, bannedAtUtc: "0001-01-01T00:00:00.000Z", bannedBy: "config", reason: null },
+      { steamId: id, reason: "Existing ban" },
+    ];
+    const request = jest.spyOn(client, "request").mockResolvedValue({ bans });
+    await expect(client.bans()).resolves.toEqual(bans);
+    expect(request).toHaveBeenCalledWith("GET", "/v1/bans");
+    for (const action of ["ban", "unban"])
+      expect(
+        actionSchema.safeParse({ id: randomUUID(), action, steamId: invalid, reason: "Review ban", confirm: invalid })
+          .success,
+      ).toBe(false);
+  });
+  it("does not present a malformed ban-list response as an empty list", async () => {
+    const client = new WardogsClient(settings);
+    jest.spyOn(client, "request").mockResolvedValue({ bans: null });
+    await expect(client.bans()).rejects.toThrow();
   });
 });
 
@@ -160,16 +191,61 @@ describe("Wardogs action outcomes", () => {
     });
     expect(request.mock.calls.every(([method]) => method === "GET")).toBe(true);
   });
+  it("keeps saved whitelist status available beside malformed numeric config entries", async () => {
+    const client = new WardogsClient(settings);
+    const shortId = "7656119800000000";
+    const request = jest.spyOn(client, "request").mockImplementation(async (_method, path) => {
+      if (path === "/v1/reserved-slots") return { reservedSlots: [existing, shortId] };
+      if (path === "/v1/config")
+        return {
+          ...document,
+          text: document.text.replace(
+            `+DefaultReservedPlayerIds=${existing}`,
+            `!DefaultReservedPlayerIds=ClearArray\n.DefaultReservedPlayerIds=${shortId}\n.DefaultReservedPlayerIds=${existing}\n.DefaultReservedPlayerIds=${id}`,
+          ),
+        };
+      throw new Error("Unexpected route");
+    });
+    await expect(client.whitelist()).resolves.toEqual({
+      entries: [
+        { steamId: existing, active: true, configured: true },
+        { steamId: id, active: false, configured: true },
+      ],
+      configurationAvailable: true,
+      invalidEntryCount: 1,
+      configuredInvalidEntryCount: 1,
+    });
+    expect(request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+  });
   it("rejects an invalid reserved-list envelope instead of claiming the server whitelist is empty", async () => {
     const client = new WardogsClient(settings);
     jest.spyOn(client, "request").mockResolvedValue({ reservedSlots: null });
     await expect(client.whitelist()).rejects.toThrow();
   });
-  it("does not use a partially malformed list to confirm a whitelist mutation", async () => {
+  it.each([true, false])("confirms only the target ID beside unrelated malformed strings (add=%s)", async (add) => {
+    const client = new WardogsClient(settings);
+    const request = jest.spyOn(client, "request").mockImplementation(async (method, path) => {
+      if (path === "/v1/capabilities") return { routes: ["POST /v1/reserved-slots", "DELETE /v1/reserved-slots/{id}"] };
+      if (method !== "GET") return { ok: true };
+      if (path === "/v1/reserved-slots")
+        return { reservedSlots: [existing, "7656119800000000", "76561197960265728", ...(add ? [id] : [])] };
+      throw new Error("Unexpected route");
+    });
+    await expect(
+      client.execute({
+        id: randomUUID(),
+        ...(add ? { action: "whitelist-add" as const } : { action: "whitelist-remove" as const, confirm: id }),
+        steamId: id,
+        reason: "Test approval",
+      }),
+    ).resolves.toMatchObject({ state: "applied" });
+    expect(request.mock.calls.filter(([method]) => method !== "GET")).toHaveLength(1);
+  });
+  it("does not coerce numeric or structurally malformed readback values to confirm a whitelist mutation", async () => {
     const client = new WardogsClient(settings);
     jest.spyOn(client, "request").mockImplementation(async (method, path) => {
       if (path === "/v1/capabilities") return { routes: ["POST /v1/reserved-slots"] };
-      if (path === "/v1/reserved-slots") return method === "POST" ? { ok: true } : { reservedSlots: [id, "bad-id"] };
+      if (path === "/v1/reserved-slots") return method === "POST" ? { ok: true } : { reservedSlots: [id, Number(id)] };
       throw new Error("Unexpected route");
     });
     await expect(
