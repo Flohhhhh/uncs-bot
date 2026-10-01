@@ -189,7 +189,7 @@ it("does not abandon a review or a pending save through browser history", async 
       : original(url),
   );
   const review = screen.getByRole("dialog", { name: "Review server changes" });
-  fireEvent.change(within(review).getByRole("textbox", { name: "Reason" }), { target: { value: "Event setup" } });
+  expect(screen.queryByRole("textbox", { name: "Reason" })).not.toBeInTheDocument();
   fireEvent.click(within(review).getByRole("button", { name: "Confirm changes" }));
   await act(async () => {
     await router.navigate(-1);

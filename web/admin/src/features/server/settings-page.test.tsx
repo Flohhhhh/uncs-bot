@@ -68,7 +68,7 @@ const show = (role: "viewer" | "moderator" | "admin" = "admin") => {
     </AdminContext.Provider>,
   );
 };
-it("requires a review and reason before sending edited settings", async () => {
+it("reviews changed values and records the save without extra typing", async () => {
   show();
   const name = await screen.findByRole("textbox", { name: /Server name/ });
   fireEvent.change(name, { target: { value: "The UNCs Events" } });
@@ -76,7 +76,7 @@ it("requires a review and reason before sending edited settings", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
   const dialog = screen.getByRole("dialog");
   expect(within(dialog).getByText("Server name: The UNCs Events")).toBeInTheDocument();
-  fireEvent.change(within(dialog).getByRole("textbox", { name: "Reason" }), { target: { value: "Local rehearsal" } });
+  expect(screen.queryByRole("textbox", { name: "Reason" })).not.toBeInTheDocument();
   fireEvent.click(within(dialog).getByRole("button", { name: "Confirm changes" }));
   await screen.findByText("Saved for next match.");
   const sent = request.mock.calls.filter(([path]) => path === "actions");
@@ -85,7 +85,7 @@ it("requires a review and reason before sending edited settings", async () => {
     action: "settings-save",
     revision: "r1",
     changes: { serverName: "The UNCs Events" },
-    reason: "Local rehearsal",
+    reason: "Staff reviewed server changes.",
   });
   expect(within(dialog).queryByRole("button", { name: "Confirm changes" })).not.toBeInTheDocument();
 });
@@ -120,7 +120,7 @@ it("queues a map independently of ending the current match", async () => {
   await screen.findByRole("checkbox", { name: "KOTH_InfantryOnly" });
   fireEvent.click(screen.getByRole("button", { name: "Queue next map" }));
   const dialog = screen.getByRole("dialog");
-  fireEvent.change(within(dialog).getByRole("textbox", { name: "Reason" }), { target: { value: "Next round event" } });
+  expect(screen.queryByRole("textbox", { name: "Reason" })).not.toBeInTheDocument();
   fireEvent.click(within(dialog).getByRole("button", { name: "Confirm changes" }));
   await waitFor(() => expect(request.mock.calls.some(([path]) => path === "actions")).toBe(true));
   expect(JSON.parse(String(request.mock.calls.find(([path]) => path === "actions")![1]?.body))).toMatchObject({
@@ -165,7 +165,7 @@ it("retains an unknown receipt without resending after a lost settings response"
   fireEvent.change(await screen.findByRole("textbox", { name: /Server name/ }), { target: { value: "Event night" } });
   fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
   const dialog = screen.getByRole("dialog");
-  fireEvent.change(within(dialog).getByRole("textbox", { name: "Reason" }), { target: { value: "Event setup" } });
+  expect(screen.queryByRole("textbox", { name: "Reason" })).not.toBeInTheDocument();
   const form = within(dialog).getByRole("button", { name: "Confirm changes" }).closest("form")!;
   fireEvent.submit(form);
   fireEvent.submit(form);

@@ -86,7 +86,7 @@ it("excludes the current map and duplicate choices, and requires two options", a
   await choose("Islands");
   expect(screen.getByRole("button", { name: "Review ballot" })).toBeEnabled();
 });
-it("reviews a frozen, reasoned ballot and sends exactly one request", async () => {
+it("reviews a frozen ballot without extra typing and sends exactly one request", async () => {
   show();
   await choose("Europe");
   await choose("Islands");
@@ -94,9 +94,7 @@ it("reviews a frozen, reasoned ballot and sends exactly one request", async () =
   const dialog = screen.getByRole("dialog");
   expect(dialog).toHaveTextContent("Ties use the first listed option");
   expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
-  fireEvent.change(within(dialog).getByRole("textbox", { name: "Reason" }), {
-    target: { value: "Community map night" },
-  });
+  expect(screen.queryByRole("textbox", { name: "Reason" })).not.toBeInTheDocument();
   const publish = within(dialog).getByRole("button", { name: "Publish ballot" });
   fireEvent.click(publish);
   fireEvent.click(publish);
@@ -107,7 +105,7 @@ it("reviews a frozen, reasoned ballot and sends exactly one request", async () =
     serverId: "primary",
     revision: "r1",
     minutes: 5,
-    reason: "Community map night",
+    reason: "Staff started map vote.",
     choices: ballot.choices,
   });
   expect(within(dialog).queryByRole("button", { name: "Publish ballot" })).not.toBeInTheDocument();
@@ -122,7 +120,7 @@ it("keeps uncertain requests reviewable without offering an automatic retry", as
   await choose("Europe");
   await choose("Islands");
   fireEvent.click(screen.getByRole("button", { name: "Review ballot" }));
-  fireEvent.change(screen.getByRole("textbox", { name: "Reason" }), { target: { value: "Map night" } });
+  expect(screen.queryByRole("textbox", { name: "Reason" })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Publish ballot" }));
   await screen.findByText(/This request will not be sent again/);
   expect(screen.getByRole("button", { name: /Copy ballot receipt/ })).toBeInTheDocument();
@@ -148,7 +146,7 @@ it("blocks a draft after settings change instead of silently adopting a new revi
   await screen.findByText("Server settings changed. Discard this draft and refresh.");
   expect(screen.getByRole("button", { name: "Review ballot" })).toBeDisabled();
 });
-it("shows saved results and closes an active ballot with a separate reasoned request", async () => {
+it("shows saved results and closes an active ballot with a separate recorded request", async () => {
   votes = [ballot];
   show();
   await screen.findByText(/An active ballot/);
@@ -157,12 +155,12 @@ it("shows saved results and closes an active ballot with a separate reasoned req
   expect(screen.getByRole("link", { name: /View in Discord/ })).toHaveAttribute("href", ballot.messageUrl);
   fireEvent.click(screen.getByRole("button", { name: "Close ballot" }));
   expect(screen.getByRole("dialog")).toHaveTextContent("This does not undo a queued map");
-  fireEvent.change(screen.getByRole("textbox", { name: "Reason" }), { target: { value: "Event cancelled" } });
+  expect(screen.queryByRole("textbox", { name: "Reason" })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Confirm close" }));
   await screen.findByText("Voting is open.");
   const sent = request.mock.calls.find(([, init]) => init?.method === "POST")!;
   expect(sent[0]).toBe(`map-votes/${ballot.id}/cancel`);
-  expect(JSON.parse(String(sent[1]?.body))).toMatchObject({ reason: "Event cancelled", id: expect.any(String) });
+  expect(JSON.parse(String(sent[1]?.body))).toMatchObject({ reason: "Staff closed map vote.", id: expect.any(String) });
 });
 it("does not invent a zero-vote total when staff close an uncounted ballot", async () => {
   votes = [{ ...ballot, state: "cancelled", message: "Closed before counting." }];

@@ -11,8 +11,8 @@ import { useGameAdmin as useAdmin } from "../../app/context";
 import { useResource } from "../../api/use-resource";
 import { useGameApi } from "../../api/server-client";
 import type { ActionResult, Catalog } from "../../api/types";
-import { Badge, Card, Empty, Modal, ReasonField, Table } from "../../components/ui";
-import { errorMessage, rejectionState, singleLine } from "../actions/policy";
+import { Badge, Card, Empty, Modal, Table } from "../../components/ui";
+import { errorMessage, rejectionState } from "../actions/policy";
 import { MapPicker } from "../actions/map-picker";
 
 const timing: Record<string, string> = {
@@ -47,14 +47,12 @@ function ReviewChanges({
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (admin.busy || submitted.current) return;
-    const reason = String(new FormData(event.currentTarget).get("reason") ?? "").trim();
-    if (!singleLine(reason, 3)) return;
     submitted.current = true;
     admin.setBusy(true);
     try {
       const response = await api<ActionResult>("actions", {
         method: "POST",
-        body: JSON.stringify({ ...action, id, reason }),
+        body: JSON.stringify({ ...action, id, reason: "Staff reviewed server changes." }),
       });
       setResult({
         ...response,
@@ -95,7 +93,6 @@ function ReviewChanges({
         </>
       ) : (
         <form onSubmit={(event) => void submit(event)}>
-          <ReasonField />
           <div className="dialog-actions">
             <button type="button" disabled={admin.busy} onClick={close} className="button secondary">
               Cancel
