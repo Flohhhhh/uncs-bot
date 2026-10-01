@@ -125,13 +125,13 @@ it("blocks Back/Forward to a different server while a review is open", async () 
   const { router } = mount();
   await editName();
   fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
-  expect(await screen.findByRole("dialog", { name: "Review server changes" })).toHaveTextContent("Primary server");
+  expect(await screen.findByRole("dialog", { name: "Save settings" })).toHaveTextContent("Primary server");
   expect(screen.getByRole("combobox", { name: "Game server" })).toBeDisabled();
   await act(async () => {
     await router.navigate("/settings?server=event");
   });
   expect(router.state.location.search).toBe("");
-  expect(screen.getByRole("dialog", { name: "Review server changes" })).toHaveTextContent("Primary server");
+  expect(screen.getByRole("dialog", { name: "Save settings" })).toHaveTextContent("Primary server");
 });
 
 it("guards browser Back and keeps editing when Escape dismisses the warning", async () => {
@@ -188,9 +188,9 @@ it("does not abandon a review or a pending save through browser history", async 
         })
       : original(url),
   );
-  const review = screen.getByRole("dialog", { name: "Review server changes" });
+  const review = screen.getByRole("dialog", { name: "Save settings" });
   expect(screen.queryByRole("textbox", { name: "Reason" })).not.toBeInTheDocument();
-  fireEvent.click(within(review).getByRole("button", { name: "Confirm changes" }));
+  fireEvent.click(within(review).getByRole("button", { name: "Save settings" }));
   await act(async () => {
     await router.navigate(-1);
   });

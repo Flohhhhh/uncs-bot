@@ -74,3 +74,12 @@ it("does not silently fall back when an unavailable server is in a deep link", a
   await screen.findByText("That server is unavailable or outside your staff access.");
   await waitFor(() => expect(fetcher.mock.calls).toHaveLength(2));
 });
+it("preserves the server and opens Rotation from the match shortcut", async () => {
+  const { router } = mount("/match?server=primary", async (url) =>
+    url.endsWith("/rotation") ? json({ mode: "Ordered", enabled: true, entries: [] }) : json(overview("Primary")),
+  );
+  const link = await screen.findByRole("link", { name: "Edit rotation & queue next map →" });
+  expect(link).toHaveAttribute("href", "/settings?server=primary#rotation");
+  // The target is a real fragment, not a percent-encoded pathname.
+  expect(router.state.location.search).toBe("?server=primary");
+});
