@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { createMemoryRouter, RouterProvider } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./app";
 import type { Overview } from "../api/types";
@@ -28,9 +28,7 @@ function mount(path = "/overview", role = "admin") {
   );
   vi.stubGlobal("fetch", fetcher);
   render(
-    <MemoryRouter initialEntries={[path]}>
-      <App />
-    </MemoryRouter>,
+    <RouterProvider router={createMemoryRouter([{ path: "/*", element: <App /> }], { initialEntries: [path] })} />,
   );
   return fetcher;
 }
@@ -47,11 +45,7 @@ describe("React staff shell", () => {
       "fetch",
       vi.fn().mockResolvedValue(new Response(JSON.stringify({ message: "Sign in required" }), { status: 401 })),
     );
-    render(
-      <MemoryRouter>
-        <App />
-      </MemoryRouter>,
-    );
+    render(<RouterProvider router={createMemoryRouter([{ path: "/*", element: <App /> }])} />);
     expect(await screen.findByRole("link", { name: /Continue with Discord/ })).toHaveAttribute(
       "href",
       "/admin/auth/login",

@@ -53,6 +53,7 @@ export function context(overrides: Partial<AdminContextValue> = {}): AdminContex
     dialogOpen: false,
     setBusy: vi.fn(),
     setDialogOpen: vi.fn(),
+    setUnsavedChanges: vi.fn(),
     refreshVersion: 0,
     refresh: vi.fn(),
     invalidateOverview: vi.fn(),

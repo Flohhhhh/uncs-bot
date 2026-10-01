@@ -19,6 +19,7 @@ const context: AdminContextValue = {
   refreshVersion: 0,
   setBusy: vi.fn(),
   setDialogOpen: vi.fn(),
+  setUnsavedChanges: vi.fn(),
   refresh: vi.fn(),
   invalidateOverview: vi.fn(),
   notify: vi.fn(),

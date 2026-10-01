@@ -8,6 +8,7 @@ export type AdminContextValue = {
   setBusy: (value: boolean) => void;
   dialogOpen: boolean;
   setDialogOpen: (value: boolean) => void;
+  setUnsavedChanges: (value: boolean) => void;
   refreshVersion: number;
   refresh: () => void;
   invalidateOverview: () => void;

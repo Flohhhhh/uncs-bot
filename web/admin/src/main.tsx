@@ -1,9 +1,6 @@
 import { createRoot } from "react-dom/client";
-import { BrowserRouter } from "react-router-dom";
+import { createBrowserRouter, RouterProvider } from "react-router-dom";
 import { App } from "./app/app";
 import "./styles.css";
-createRoot(document.getElementById("root")!).render(
-  <BrowserRouter basename="/admin">
-    <App />
-  </BrowserRouter>,
-);
+const router = createBrowserRouter([{ path: "/*", element: <App /> }], { basename: "/admin" });
+createRoot(document.getElementById("root")!).render(<RouterProvider router={router} />);

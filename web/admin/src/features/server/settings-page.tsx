@@ -113,11 +113,13 @@ function RotationEditor({
   reload,
   disabled,
   active,
+  onUnsavedChange,
 }: {
   snapshot: SettingsSnapshot;
   reload: () => void;
   disabled: boolean;
   active: boolean;
+  onUnsavedChange: (value: boolean) => void;
 }) {
   const { data: catalog, error } = useResource<Catalog>(active ? "catalog" : null);
   const [draft, setDraft] = useState<{ revision: string; entries: MapSelection[] } | null>(null);
@@ -127,7 +129,7 @@ function RotationEditor({
   const entries = draft?.entries ?? snapshot.rotation.entries;
   const locked = disabled || !snapshot.rotation.editable;
   const changedElsewhere = draft && draft.revision !== snapshot.revision;
-  useUnsavedWarning(!!draft);
+  useEffect(() => onUnsavedChange(!!draft), [draft, onUnsavedChange]);
   function update(next: MapSelection[]) {
     setDraft({ revision: draft?.revision ?? snapshot.revision, entries: next });
   }
@@ -321,7 +323,10 @@ export function SettingsPage() {
   );
   const [review, setReview] = useState<{ action: DraftAction; summary: string[] } | null>(null);
   const [validation, setValidation] = useState("");
-  useUnsavedWarning(!!draft);
+  const [rotationUnsaved, setRotationUnsaved] = useState(false);
+  const { setUnsavedChanges } = admin;
+  useEffect(() => setUnsavedChanges(!!draft || rotationUnsaved), [draft, rotationUnsaved, setUnsavedChanges]);
+  useEffect(() => () => setUnsavedChanges(false), [setUnsavedChanges]);
   if (admin.me.role !== "admin") return <Empty title="Administrator access required" />;
   if (!resource.data) return <Empty title={resource.error || "Loading server settings…"} />;
   const snapshot = draft?.snapshot ?? resource.data;
@@ -493,6 +498,7 @@ export function SettingsPage() {
           reload={resource.refresh}
           disabled={disabled || !!draft}
           active={group === "Rotation"}
+          onUnsavedChange={setRotationUnsaved}
         />
       </div>
       {group === "Host controls" && (
@@ -537,17 +543,6 @@ export function SettingsPage() {
       )}
     </>
   );
-}
-function useUnsavedWarning(unsaved: boolean) {
-  useEffect(() => {
-    if (!unsaved) return;
-    const guard = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      event.returnValue = "";
-    };
-    window.addEventListener("beforeunload", guard);
-    return () => window.removeEventListener("beforeunload", guard);
-  }, [unsaved]);
 }
 export function PermissionsPage() {
   const { me } = useAdmin();

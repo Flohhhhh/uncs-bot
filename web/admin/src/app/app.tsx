@@ -19,6 +19,7 @@ import { ApplicationsPage } from "../features/applications";
 import { SupportersPage } from "../features/supporters";
 import { CombatPage } from "../features/combat/combat-page";
 import { SettingsPage, PermissionsPage } from "../features/server/settings-page";
+import { NavigationGuard } from "./navigation-guard";
 
 const pages = {
   overview: ["◫", "Overview", "Server overview", "Current match and server status."],
@@ -141,6 +142,8 @@ function Dashboard({ me, signOut }: { me: Staff; signOut: () => void }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [unsavedChanges, setUnsavedChanges] = useState(false);
+  const [logoutRequested, setLogoutRequested] = useState(false);
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [notice, setNotice] = useState({ message: "", kind: "" });
   const [action, setAction] = useState<{ action: ActionName; steamId?: string; key: string } | null>(null);
@@ -207,16 +210,6 @@ function Dashboard({ me, signOut }: { me: Staff; signOut: () => void }) {
     const timer = window.setTimeout(() => setStale(true), 60_000);
     return () => window.clearTimeout(timer);
   }, [overview]);
-  useEffect(() => {
-    const guard = (event: BeforeUnloadEvent) => {
-      if (busy) {
-        event.preventDefault();
-        event.returnValue = "";
-      }
-    };
-    window.addEventListener("beforeunload", guard);
-    return () => window.removeEventListener("beforeunload", guard);
-  }, [busy]);
   async function logout() {
     if (busy) return;
     setBusy(true);
@@ -229,6 +222,11 @@ function Dashboard({ me, signOut }: { me: Staff; signOut: () => void }) {
       setBusy(false);
     }
   }
+  function requestLogout() {
+    if (busy || dialogOpen) return;
+    if (unsavedChanges) setLogoutRequested(true);
+    else void logout();
+  }
   const staffPage = (element: React.ReactNode) => (me.role === "admin" ? element : <Navigate to="/overview" replace />);
   return (
     <AdminContext.Provider
@@ -240,6 +238,7 @@ function Dashboard({ me, signOut }: { me: Staff; signOut: () => void }) {
         setBusy,
         dialogOpen,
         setDialogOpen,
+        setUnsavedChanges,
         refreshVersion,
         refresh,
         invalidateOverview,
@@ -288,8 +287,8 @@ function Dashboard({ me, signOut }: { me: Staff; signOut: () => void }) {
                 className="icon-button"
                 title="Sign out"
                 aria-label="Sign out"
-                disabled={busy}
-                onClick={() => void logout()}
+                disabled={busy || dialogOpen}
+                onClick={requestLogout}
               >
                 ↪
               </button>
@@ -324,8 +323,8 @@ function Dashboard({ me, signOut }: { me: Staff; signOut: () => void }) {
                 className="icon-button mobile-only"
                 title="Sign out"
                 aria-label="Sign out"
-                disabled={busy}
-                onClick={() => void logout()}
+                disabled={busy || dialogOpen}
+                onClick={requestLogout}
               >
                 ↪
               </button>
@@ -416,6 +415,15 @@ function Dashboard({ me, signOut }: { me: Staff; signOut: () => void }) {
           onClose={() => setAction(null)}
         />
       )}
+      <NavigationGuard
+        unsaved={unsavedChanges}
+        logoutRequested={logoutRequested}
+        cancelLogout={() => setLogoutRequested(false)}
+        confirmLogout={() => {
+          setLogoutRequested(false);
+          void logout();
+        }}
+      />
     </AdminContext.Provider>
   );
 }
