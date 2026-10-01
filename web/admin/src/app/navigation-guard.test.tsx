@@ -121,12 +121,24 @@ it("guards a server switch on the same page and remounts only after discarding t
   expect(actionCalls(fetcher)).toHaveLength(0);
 });
 
+it("keeps the section picker on settings when a draft navigation is cancelled", async () => {
+  const { router } = mount();
+  await editName();
+  fireEvent.change(screen.getByRole("combobox", { name: "Dashboard section" }), { target: { value: "audit" } });
+  expect(await screen.findByRole("dialog", { name: "Discard unsaved changes?" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+  expect(router.state.location.pathname).toBe("/settings");
+  expect(screen.getByRole("combobox", { name: "Dashboard section" })).toHaveValue("settings");
+  expect(screen.getByRole("textbox", { name: /Server name/ })).toHaveValue("Event night");
+});
+
 it("blocks Back/Forward to a different server while a review is open", async () => {
   const { router } = mount();
   await editName();
   fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
   expect(await screen.findByRole("dialog", { name: "Save settings" })).toHaveTextContent("Primary server");
   expect(screen.getByRole("combobox", { name: "Game server" })).toBeDisabled();
+  expect(screen.getByRole("combobox", { name: "Dashboard section" })).toBeDisabled();
   await act(async () => {
     await router.navigate("/settings?server=event");
   });
