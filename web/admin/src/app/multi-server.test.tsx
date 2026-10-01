@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createMemoryRouter, RouterProvider } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 import { App } from "./app";
@@ -41,7 +41,20 @@ it("requires an explicit selection before any game read and hides inaccessible g
   expect(screen.queryByRole("link", { name: /Server settings/ })).not.toBeInTheDocument();
   expect(screen.queryByRole("link", { name: /Applications/ })).not.toBeInTheDocument();
   expect(screen.getByRole("link", { name: /Supporters/ })).toBeInTheDocument();
+  const sections = within(screen.getByRole("combobox", { name: "Dashboard section" }));
+  expect(sections.queryByRole("option", { name: "Server settings" })).not.toBeInTheDocument();
+  expect(sections.queryByRole("option", { name: "Applications" })).not.toBeInTheDocument();
+  expect(sections.getByRole("option", { name: "Supporters" })).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Review move" })).not.toBeInTheDocument();
+});
+it("retains the selected server when using the compact section picker", async () => {
+  const { router } = mount("/players?server=event");
+  fireEvent.change(await screen.findByRole("combobox", { name: "Dashboard section" }), {
+    target: { value: "permissions" },
+  });
+  await waitFor(() => expect(router.state.location.pathname).toBe("/permissions"));
+  expect(router.state.location.search).toBe("?server=event");
+  expect(screen.getByRole("combobox", { name: "Dashboard section" })).toHaveValue("permissions");
 });
 it("cancels a previous server read and ignores its late response after a switch", async () => {
   let complete!: (response: Response) => void;

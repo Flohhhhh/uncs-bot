@@ -369,7 +369,8 @@ a.breadcrumb:hover {
   gap: 22px;
   align-items: center;
 }
-.mobile-only {
+.mobile-only,
+.mobile-navigation {
   display: none;
 }
 .private-label {
@@ -1965,21 +1966,18 @@ dialog textarea {
     display: none;
   }
   .sidebar nav {
-    display: flex;
-    overflow-x: auto;
-    gap: 7px;
-    margin-top: 24px;
-    padding-bottom: 6px;
-    scrollbar-width: thin;
-  }
-  .sidebar nav a {
-    white-space: nowrap;
-    padding: 10px 13px;
-    font-size: 11px;
-    min-height: 39px;
-  }
-  .sidebar nav a span {
     display: none;
+  }
+  .mobile-navigation {
+    display: grid;
+    gap: 8px;
+    margin-top: 16px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .mobile-navigation select {
+    width: 100%;
+    min-height: 44px;
   }
   .topbar {
     min-height: 61px;
