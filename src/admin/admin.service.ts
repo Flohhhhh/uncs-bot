@@ -11,6 +11,7 @@ import { z } from "zod";
 import { AdminStore } from "./admin.store";
 import { actionSchema, canAct, type ActionResult, type Staff } from "./admin.types";
 import { RconError, WardogsClient } from "./wardogs.client";
+import { auditAction } from "./server-configuration";
 
 @Injectable()
 export class AdminService {
@@ -49,6 +50,27 @@ export class AdminService {
     }
   }
 
+  async configuration(staff: Staff) {
+    if (staff.role !== "admin") throw new ForbiddenException("Only administrators can read server settings.");
+    try {
+      return await this.game.configuration();
+    } catch (error) {
+      throw new ServiceUnavailableException(
+        error instanceof RconError ? error.message : "Server settings could not be read safely. Check the host panel.",
+      );
+    }
+  }
+  async mapOptions(map: string) {
+    if (!/^[\w./-]{1,150}$/.test(map)) throw new BadRequestException("Choose a valid map.");
+    try {
+      return await this.game.mapOptions(map);
+    } catch (error) {
+      throw new ServiceUnavailableException(
+        error instanceof RconError ? error.message : "The map options could not be read.",
+      );
+    }
+  }
+
   async act(staff: Staff, input: unknown) {
     const parsed = actionSchema.safeParse(input);
     if (!parsed.success) throw new BadRequestException(parsed.error.issues.map((issue) => issue.message).join(" "));
@@ -63,7 +85,7 @@ export class AdminService {
     const requestHash = createHash("sha256").update(JSON.stringify(action)).digest("hex");
     let started: Awaited<ReturnType<AdminStore["begin"]>>;
     try {
-      started = await this.store.begin(staff, action, requestHash);
+      started = await this.store.begin(staff, auditAction(action), requestHash);
     } catch {
       throw new ServiceUnavailableException("The action could not be recorded, so nothing was sent to the game.");
     }

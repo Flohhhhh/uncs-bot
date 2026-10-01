@@ -51,6 +51,8 @@ export class AdminPageController {
     "announcements",
     "match",
     "audit",
+    "settings",
+    "permissions",
   ])
   page(@Res() res: Response) {
     res.sendFile(join(process.cwd(), "dist", "src", "admin", "public", "index.html"));
@@ -77,6 +79,14 @@ export class AdminApiController {
   @Get("me")
   me(@Req() req: StaffRequest) {
     return req.staff;
+  }
+  @Get("settings")
+  settings(@Req() req: StaffRequest) {
+    return this.service.configuration(req.staff);
+  }
+  @Get("catalog/maps/:map")
+  mapOptions(@Param("map") map: string) {
+    return this.service.mapOptions(map);
   }
   @Post("actions")
   act(@Req() req: StaffRequest, @Body() body: unknown) {

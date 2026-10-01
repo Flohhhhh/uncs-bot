@@ -15,33 +15,13 @@ import {
   type ConfigDocument,
 } from "./admin.types";
 import { configuredWhitelist, editWhitelist } from "./whitelist-document";
+import { readServerConfiguration, changeServerConfiguration, validateMapSelection } from "./server-configuration";
+import { serves } from "../common/admin-policy";
+import { RconError, rejected } from "./rcon-protocol";
+export { RconError } from "./rcon-protocol";
+export { serves } from "../common/admin-policy";
 
-export class RconError extends Error {
-  constructor(
-    message: string,
-    readonly unknownResult = false,
-  ) {
-    super(message);
-  }
-}
-export function serves(capabilities: Capabilities, method: string, path: string) {
-  const normalize = (value: string) =>
-    value
-      .trim()
-      .replace(/\{[^}]*\}|:[^/\s]+/g, "*")
-      .replace(/\s+/g, " ");
-  return capabilities.routes.some((route) => normalize(route) === normalize(`${method} ${path}`));
-}
 const catalogItem = z.object({ id: z.string(), displayName: z.string().optional() });
-const hasProblems = (value: unknown) => value === true || (Array.isArray(value) && value.length > 0);
-const rejected = (result: any) =>
-  !result ||
-  typeof result !== "object" ||
-  result.ok === false ||
-  !!result.error ||
-  hasProblems(result.errors) ||
-  hasProblems(result.conflict) ||
-  hasProblems(result.stripped);
 // These are the exact palette/code pairs used by the current official RCON
 // client. Status exposes faction names, while player rows expose these codes.
 // Names are always read from the current status rather than assumed from a map.
@@ -200,6 +180,25 @@ export class WardogsClient {
     return parsed.data;
   }
 
+  configuration() {
+    return readServerConfiguration(this);
+  }
+
+  async writeDocument(doc: ConfigDocument, text: string, capabilities: Capabilities) {
+    if (!serves(capabilities, "PUT", "/v1/config") || capabilities.config?.writable === false)
+      throw new RconError("This server does not allow configuration changes.");
+    if (capabilities.limits?.maxBodyBytes && Buffer.byteLength(text, "utf8") > capabilities.limits.maxBodyBytes)
+      throw new RconError("The updated configuration exceeds the server’s request limit.");
+    if (serves(capabilities, "POST", "/v1/config/validate")) {
+      if (rejected(await this.request("POST", "/v1/config/validate", text)))
+        throw new RconError("The game refused this configuration. Nothing was saved.");
+    }
+    const result = await this.request("PUT", "/v1/config", text, doc.revision);
+    if (rejected(result))
+      throw new RconError("The game did not confirm the configuration change. Refresh before trying again.", true);
+    return result;
+  }
+
   async whitelist() {
     // Tolerate individual bad rows for display, without weakening action input
     // validation or the strict readback used to confirm a whitelist mutation.
@@ -235,6 +234,25 @@ export class WardogsClient {
       read("/v1/catalog/experiences", "experiences"),
     ]);
     return { maps, lightings, experiences };
+  }
+
+  async mapOptions(map: string) {
+    const [capabilities, catalog] = await Promise.all([this.capabilities(), this.catalog()]);
+    if (!catalog.maps.some((entry) => entry.id === map)) throw new RconError("Choose a map from the current catalog.");
+    let experiences = catalog.experiences;
+    if (serves(capabilities, "GET", "/v1/catalog/maps/{map}/experiences")) {
+      const result = z
+        .object({ experiences: z.array(z.string()) })
+        .parse(await this.request("GET", `/v1/catalog/maps/${encodeURIComponent(map)}/experiences`));
+      experiences = experiences.filter((entry) => result.experiences.includes(entry.id));
+    }
+    const zones = serves(capabilities, "GET", "/v1/catalog/maps/{map}/alternators")
+      ? z
+          .object({ alternators: z.array(z.object({ tag: z.string() })) })
+          .parse(await this.request("GET", `/v1/catalog/maps/${encodeURIComponent(map)}/alternators`))
+          .alternators.map((entry) => entry.tag)
+      : null;
+    return { experiences, zones };
   }
 
   async rotation() {
@@ -279,20 +297,7 @@ export class WardogsClient {
         throw new RconError((error as Error).message);
       }
       if (text !== doc.text) {
-        if (capabilities.limits?.maxBodyBytes && Buffer.byteLength(text, "utf8") > capabilities.limits.maxBodyBytes)
-          throw new RconError("The updated configuration exceeds the game server's request limit. No change was sent.");
-        if (serves(capabilities, "POST", "/v1/config/validate")) {
-          const validation = await this.request("POST", "/v1/config/validate", text);
-          if (rejected(validation))
-            throw new RconError("The game could not validate a safe whitelist edit. No change was sent.");
-        }
-        const result = await this.request("PUT", "/v1/config", text, doc.revision);
-        if (rejected(result)) {
-          throw new RconError(
-            "The game did not fully accept the whitelist change. Refresh and review the running and configured lists.",
-            true,
-          );
-        }
+        await this.writeDocument(doc, text, capabilities);
       }
     }
     try {
@@ -384,6 +389,8 @@ export class WardogsClient {
     if (action.action === "whitelist-add" || action.action === "whitelist-remove")
       return this.whitelistAction(action, capabilities);
     if (action.action === "team") return this.teamAction(action, capabilities);
+    if (action.action === "settings-save" || action.action === "rotation-save" || action.action === "map-next")
+      return changeServerConfiguration(this, action, capabilities);
     let method = "POST",
       path: string,
       route: string,
@@ -439,36 +446,12 @@ export class WardogsClient {
     }
     if (!serves(capabilities, method, route))
       throw new RconError("The current game build does not expose this action.");
-    if (action.action === "map" || action.action === "lighting") {
+    if (action.action === "map") {
+      await validateMapSelection(this, { ...action, experiences: action.experiences ?? [] }, capabilities);
+    } else if (action.action === "lighting") {
       const catalog = await this.catalog();
-      if (
-        ("map" in action && !catalog.maps.some((item) => item.id === action.map)) ||
-        (action.lighting && !catalog.lightings.some((item) => item.id === action.lighting))
-      )
-        throw new RconError("Choose a map or lighting option from the current server catalog.");
-      if (
-        action.action === "map" &&
-        action.experiences?.some((id) => !catalog.experiences.some((item) => item.id === id))
-      )
-        throw new RconError("The selected experience is not available on this server.");
-      if (action.action === "map" && action.experiences?.length) {
-        if (serves(capabilities, "GET", "/v1/catalog/maps/{map}/experiences")) {
-          const available = z
-            .object({ experiences: z.array(z.string()) })
-            .parse(await this.request("GET", `/v1/catalog/maps/${encodeURIComponent(action.map)}/experiences`));
-          if (action.experiences.some((id) => !available.experiences.includes(id)))
-            throw new RconError("The selected experience is not available for this map.");
-        }
-      }
-      if (action.action === "map" && action.zoneAlternator && action.zoneAlternator !== "None") {
-        if (!serves(capabilities, "GET", "/v1/catalog/maps/{map}/alternators"))
-          throw new RconError("This server cannot verify the selected zone layout. Leave it unset.");
-        const available = z
-          .object({ alternators: z.array(z.object({ tag: z.string() })) })
-          .parse(await this.request("GET", `/v1/catalog/maps/${encodeURIComponent(action.map)}/alternators`));
-        if (!available.alternators.some((item) => item.tag === action.zoneAlternator))
-          throw new RconError("The selected zone layout is not available for this map.");
-      }
+      if (!catalog.lightings.some((entry) => entry.id === action.lighting))
+        throw new RconError("Choose lighting from the current server catalog.");
     }
     const result = await this.request(method, path, body);
     if (rejected(result)) throw new RconError("The game did not accept this action.");

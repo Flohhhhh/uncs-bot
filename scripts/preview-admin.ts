@@ -12,6 +12,9 @@ import { AdminSettings } from "../src/admin/admin.settings";
 import { AdminStore } from "../src/admin/admin.store";
 import { WardogsClient } from "../src/admin/wardogs.client";
 import { configuredWhitelist } from "../src/admin/whitelist-document";
+import { settingFields, SESSION, ROTATION } from "../src/common/server-settings";
+import { scalarValue } from "../src/admin/config-document";
+import { parseRotation, auditAction } from "../src/admin/server-configuration";
 import type { ActionResult, AdminAction, Staff } from "../src/admin/admin.types";
 import { ApplicationsModule } from "../src/applications/applications.module";
 import { ApplicationsStore } from "../src/applications/applications.store";
@@ -95,10 +98,40 @@ const bans: { steamId: string; reason: string; bannedBy: string; bannedAtUtc: st
     bannedAtUtc: new Date().toISOString(),
   },
 ];
-let text = `[/Script/WDGame.WDGameSession]\nMaxReservedSlots=0\n${players
-  .slice(0, 3)
-  .map((p) => `+DefaultReservedPlayerIds=${p.steamId}`)
-  .join("\n")}\n[WDServerFeed]\nUrl=http://127.0.0.1:32190\n`;
+const sampleSettings: Record<string, string | number | boolean> = {
+  serverName: "The UNCs | Local event preview",
+  imageUrl: "",
+  serverPassword: "",
+  maxPlayers: 100,
+  maxReservedSlots: 0,
+  minPlayerCash: 0,
+  maxPlayerCash: 0,
+  minPlayerLevel: 0,
+  maxPlayerLevel: 0,
+  minRequiredPlayers: 60,
+  scorePeriod: 24,
+  lockOverpopulated: true,
+  overpopThreshold: 2,
+  rotationEnabled: true,
+  rotationMode: "Ordered",
+};
+let text =
+  [...new Set(settingFields.map((field) => field.section))]
+    .map((section) => {
+      const values = settingFields
+        .filter((field) => field.section === section)
+        .map((field) => `${field.key}=${sampleSettings[field.id]}`);
+      if (section === SESSION)
+        values.push(...players.slice(0, 3).map((player) => `+DefaultReservedPlayerIds=${player.steamId}`));
+      if (section === ROTATION)
+        values.push(
+          ...["Lonestar", "Kavkazi", "Europe"].map(
+            (map) => `+RotationEntries=(Map="${map}",Experiences="",Lighting="DayClear")`,
+          ),
+        );
+      return `[${section}]\n${values.join("\n")}\n`;
+    })
+    .join("\n") + "[WDServerFeed]\nUrl=http://127.0.0.1:32190\n";
 let revision = 1,
   currentMap = "Lonestar",
   lighting = "DayClear";
@@ -109,6 +142,7 @@ const routes = [
   "GET /v1/reserved-slots",
   "GET /v1/config",
   "PUT /v1/config",
+  "POST /v1/config/validate",
   "POST /v1/bans",
   "DELETE /v1/bans/{id}",
   "POST /v1/players/{id}/kick",
@@ -132,17 +166,29 @@ class PreviewGame extends WardogsClient {
       return { routes, build: "LOCAL PREVIEW · SAMPLE DATA", config: { writable: true } };
     if (path === "/v1/status")
       return {
-        serverName: "The UNCs | Adult Gaming Community | Boosted XP & Cash",
+        serverName: scalarValue(text, SESSION, "ServerName") || "Local preview",
         map: currentMap,
         lighting,
         experiences: ["King of the Hill"],
+        scoreTick: { current: 24, min: 18, max: 30 },
+        rotation: { nowIndex: 0, nextIndex: 1 },
         players: { current: players.length, max: 100 },
         factionScores: factions.map(({ name, colorHex, score }) => ({ name, colorHex, score })),
       };
     if (path === "/v1/players") return { players };
     if (path === "/v1/reserved-slots") return { reservedSlots: configuredWhitelist(text) };
+    if (path === "/v1/config/validate") return { ok: true };
     if (path === "/v1/config") {
-      if (method === "GET") return { text, revision: String(revision), writable: true };
+      if (method === "GET")
+        return {
+          text,
+          revision: String(revision),
+          writable: true,
+          sections: [...new Set(settingFields.map((field) => field.section))].map((section) => ({
+            section,
+            appliesWhen: section === "MatchState.Playing.KOTH" ? "next-match" : "live",
+          })),
+        };
       if (expectedRevision !== String(revision)) throw new Error("Preview revision conflict");
       text = body;
       revision++;
@@ -175,9 +221,9 @@ class PreviewGame extends WardogsClient {
       return {
         enabled: true,
         mode: "ordered",
-        entries: ["Lonestar", "Kavkazi", "Europe"].map((map, index) => ({
+        entries: parseRotation(text).map((entry, index) => ({
+          ...entry,
           index,
-          map,
           lighting: "DayClear",
           status: index === 0 ? "now" : index === 1 ? "next" : null,
         })),
@@ -233,7 +279,7 @@ const store = {
       requestHash,
       action: action.action,
       target: "steamId" in action ? action.steamId : "server",
-      details: action,
+      details: auditAction(action),
       state: "started",
       message: "Started",
       createdAt: new Date(),

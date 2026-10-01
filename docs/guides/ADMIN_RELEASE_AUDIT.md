@@ -1,6 +1,29 @@
 # September 30 dashboard release audit
 
+## October 1 overnight scope — work in progress
+
+The owner requested a complete current-settings review, bug/refactoring/layout/copy cleanup, and optional event modes. Continue independent work when Floh-only access or merges block a step. Work on `codex/server-settings-controls`, based on the reviewed launch branch; do not add these larger changes to PR #7 without a separate review boundary.
+
+- Implement and test documented server identity, joining restrictions, scoring interval, team balancing, map rotation and next-map controls. Preserve unrelated INI entries, refuse stale revisions and host locks, redact secrets, and report saved versus live accurately.
+- Verify 0.1.2 update coverage: daily restart time (UTC in official patch notes), restart-after-match behavior, RCON AllowedHosts, capped messages, Standard response detail/config redaction and server image validation. Do not invent an unsupported host restart endpoint or undocumented INI key.
+- Research Reddit's 50v50 reports and verify the mechanism against official capabilities. The owner chose **optional event mode**, with team balancing, advance purchasing warnings and a stop control. Leave it disabled until a controlled test is possible. Other optional events should use advertised map/mode/lighting selections.
+- Investigate map voting separately: no voting route was found in the current official console. A community ballot is a separate feature with identity, duplicate-vote, closure, tie and next-map confirmation rules.
+- Audit shared permissions, map validation and UI components for duplicated code; reduce verbose copy, test desktop/mobile layout, and maintain an honest morning handoff for Floh.
+- Audit everyday usability across every data table: sortable headings, search and filters, clear row actions, selection stability, unsaved edits, keyboard access and mobile layouts. Add useful shared behavior without introducing a second table framework or changing a rotation's intentional order.
+
+The active goal and hourly overnight heartbeat track this scope. No production game reads or mutations, protected-branch bypasses, migration generation/edits, or external messages are authorized by this development work.
+
 This is a source and isolated-preview audit. It does not certify the live game, production sign-in, payment intake or deployed website. The full game server was not used for test actions or read probes.
+
+### Server settings and rotation implementation
+
+The settings branch exposes the 15 fields in the [official console](http://rcon.wardogs.com/app.html) and [standalone template](http://rcon.wardogs.com/ServerSettings.ini), reviewed October 1. These cover server name/banner, join password, total/reserved capacity, cash/level limits, match-start population, scoring interval, team population locks and rotation enable/order. The server's current scoring range and per-key application timing are displayed separately from saved values. Shared map selection covers map-specific modes, lighting and advertised zone layouts in both map travel and rotation editing. No invented 50v50 mode, description key or network tick-rate control is included.
+
+Administrator-only writes require a reviewed draft, reason, revision and durable action receipt. They preserve unrelated configuration, honor metadata locks, optionally validate before If-Match writes, and read back the saved values without claiming immediate gameplay adoption. Password values never enter API reads or audit payloads. Ordered next-map changes edit the rotation without ending the round. Full rotation edits support adding, editing, reordering and removing entries; editing preserves the entry's position and drafts survive switching setting groups. Reloading warns about unsaved edits; navigating to another dashboard page currently discards the draft.
+
+Shared action permissions, map validation, table markup and map inputs replace duplicate implementations. The isolated backend suite passes **388 tests**, and the dashboard suite passes **129 tests**. Production build, global formatting, scoped lint, backend/frontend typechecks and whitespace checks pass. Browser rehearsal saved a scoring change while showing its distinct running value, and queued a fictional infantry map with receipt `f71aa55f-311e-4336-8ae2-a8e454f77223`. Rotation controls fit both desktop and a phone viewport without page overflow. All game/identity/storage providers were simulated. No dependency, database schema or migration change is required.
+
+The [0.1.2 announcement](https://steamcommunity.com/app/1867240/announcements/) describes daily restart scheduling, RCON AllowedHosts, message caps, response-detail redaction and banner validation. The public template does not provide a verified restart-time or AllowedHosts key, and no xREALM restart API has been established. Host scheduling, restart-after-match, RCON transport credentials and feed destinations remain explicit host controls; the dashboard does not pretend that restarting a match restarts the server process. Optional event automation, community ballots and the table-usability pass remain separate unfinished work.
 
 ## Reviewed delivery boundaries
 

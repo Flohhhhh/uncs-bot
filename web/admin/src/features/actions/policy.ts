@@ -1,6 +1,14 @@
 import type { ActionName, Overview, Staff } from "../../api/types";
+import { canAct, serves } from "../../../../../src/common/admin-policy";
 
 export const actionDefinitions: Record<ActionName, readonly [string, string, string]> = {
+  "settings-save": ["Save settings", "Save the reviewed server settings.", "PUT /v1/config"],
+  "rotation-save": ["Save rotation", "Save the reviewed map rotation.", "PUT /v1/config"],
+  "map-next": [
+    "Queue next map",
+    "Place this selection after the current map in the ordered rotation.",
+    "PUT /v1/config",
+  ],
   kick: ["Kick player", "Disconnect this player from the current game. They can rejoin.", "POST /v1/players/{id}/kick"],
   ban: [
     "Ban player",
@@ -48,7 +56,6 @@ export const actionDefinitions: Record<ActionName, readonly [string, string, str
   lighting: ["Change lighting", "Apply a lighting preset to the current game.", "PUT /v1/world/lighting"],
 };
 
-const moderatorActions: ActionName[] = ["kick", "ban", "unban", "message", "kill", "team", "broadcast"];
 export const playerActions: ActionName[] = [
   "kick",
   "ban",
@@ -82,17 +89,21 @@ export function allowed(
   stale: boolean,
   busy: boolean,
 ) {
-  if (busy || stale || !me || me.role === "viewer" || (me.role === "moderator" && !moderatorActions.includes(action)))
-    return false;
+  if (busy || stale || !me || !canAct(me.role, action)) return false;
   const caps = overview?.capabilities;
-  const routes = caps?.routes.map((route) => route.replace(/\{[^}]+\}/g, "{id}")) ?? [];
+  if (!caps) return false;
   if (actionDefinitions[action][2] === "whitelist") {
     return (
-      routes.includes(action === "whitelist-add" ? "POST /v1/reserved-slots" : "DELETE /v1/reserved-slots/{id}") ||
-      (routes.includes("PUT /v1/config") && caps?.config?.writable !== false)
+      serves(
+        caps,
+        action === "whitelist-add" ? "POST" : "DELETE",
+        action === "whitelist-add" ? "/v1/reserved-slots" : "/v1/reserved-slots/{id}",
+      ) ||
+      (serves(caps, "PUT", "/v1/config") && caps.config?.writable !== false)
     );
   }
-  return routes.includes(actionDefinitions[action][2]);
+  const [method, path] = actionDefinitions[action][2].split(" ");
+  return serves(caps, method, path) && (path !== "/v1/config" || caps.config?.writable !== false);
 }
 
 export function errorMessage(error: unknown) {

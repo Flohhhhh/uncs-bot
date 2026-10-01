@@ -1,19 +1,7 @@
 // Browser DTOs contain JSON values only; server modules and secrets are never imported here.
 export type Staff = { id: string; name: string; role: "viewer" | "moderator" | "admin"; csrf: string; demo?: boolean };
-export type ActionName =
-  | "kick"
-  | "ban"
-  | "unban"
-  | "whitelist-add"
-  | "whitelist-remove"
-  | "kill"
-  | "message"
-  | "team"
-  | "broadcast"
-  | "match-end"
-  | "match-restart"
-  | "map"
-  | "lighting";
+import type { ActionName } from "../../../../src/common/admin-policy";
+export type { ActionName } from "../../../../src/common/admin-policy";
 export type ActionResult = {
   id?: string;
   state: "applied" | "accepted" | "pending" | "failed" | "unknown";

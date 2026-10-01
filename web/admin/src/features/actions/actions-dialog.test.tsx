@@ -94,7 +94,9 @@ describe("server action review", () => {
             experiences: [{ id: "Conquest" }],
             lightings: [{ id: "Day" }],
           }
-        : { state: "accepted", message: "Travel requested" },
+        : path.startsWith("catalog/maps/")
+          ? { experiences: [{ id: "Conquest" }], zones: null }
+          : { state: "accepted", message: "Travel requested" },
     );
     render(
       <AdminContext.Provider value={context()}>
@@ -102,6 +104,8 @@ describe("server action review", () => {
       </AdminContext.Provider>,
     );
     await screen.findByRole("option", { name: "Harbor" });
+    fireEvent.change(screen.getByRole("combobox", { name: "Map" }), { target: { value: "Harbor" } });
+    await screen.findByRole("checkbox", { name: "Conquest" });
     fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "Community map change" } });
     fireEvent.change(screen.getByPlaceholderText("CHANGE MAP"), { target: { value: "CHANGE MAP" } });
     fireEvent.click(screen.getByRole("button", { name: "Confirm action" }));
@@ -136,21 +140,25 @@ describe("server action review", () => {
     );
     const { rerender } = render(tree(0));
     await screen.findByRole("option", { name: "Harbor" });
+    request.mockResolvedValueOnce({ experiences: [], zones: null });
+    fireEvent.change(screen.getByRole("combobox", { name: "Map" }), { target: { value: "Harbor" } });
+    await waitFor(() => expect(request.mock.calls.some(([path]) => path === "catalog/maps/Harbor")).toBe(true));
     fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "Community map change" } });
     fireEvent.change(screen.getByPlaceholderText("CHANGE MAP"), { target: { value: "CHANGE MAP" } });
     expect(screen.getByRole("button", { name: "Confirm action" })).toBeEnabled();
     let reject!: (error: Error) => void;
-    request.mockImplementationOnce(
-      () =>
-        new Promise((_resolve, fail) => {
-          reject = fail;
-        }),
+    request.mockImplementation((path) =>
+      path === "catalog"
+        ? new Promise((_resolve, fail) => {
+            reject = fail;
+          })
+        : Promise.resolve({ experiences: [], zones: null }),
     );
     rerender(tree(1));
     expect(screen.getByRole("button", { name: "Confirm action" })).toBeDisabled();
     reject(new Error("Server options unavailable"));
     await screen.findByText("The server options could not be loaded. Close this review and try again.");
     fireEvent.submit(screen.getByRole("button", { name: "Confirm action" }).closest("form")!);
-    expect(request.mock.calls.every(([path]) => path === "catalog")).toBe(true);
+    expect(request.mock.calls.every(([path]) => path.startsWith("catalog"))).toBe(true);
   });
 });

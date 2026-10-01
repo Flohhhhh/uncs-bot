@@ -1,0 +1,188 @@
+import { randomUUID } from "node:crypto";
+import { WardogsClient } from "./wardogs.client";
+import { AdminSettings } from "./admin.settings";
+import { actionSchema, type ConfigDocument } from "./admin.types";
+import { auditAction, parseRotation } from "./server-configuration";
+import { SESSION, ROTATION } from "../common/server-settings";
+import { AdminService } from "./admin.service";
+import { AdminStore } from "./admin.store";
+
+const original = `[${SESSION}]\r\n; keep identity comment\r\nServerName="The UNCs"\r\nServerPassword="private-join-secret"\r\nServerMinPlayerCash=0\r\nServerMaxPlayerCash=0\r\n+DefaultReservedPlayerIds=76561198000000001\r\n[MatchState.Playing.KOTH]\r\nScorePeriod=24\r\n[${ROTATION}]\r\nbEnabled=True\r\nRotationMode=Ordered\r\n+RotationEntries=(Map="Kavkazi",Experiences="KOTH",Lighting="DayClear")\r\n+RotationEntries=(Map="Europe",Experiences="KOTH",Lighting="DayClear")\r\n[WDServerFeed]\r\nUrl=http://127.0.0.1:32190\r\nToken=private-feed-secret\r\n`;
+function fixture() {
+  let document: ConfigDocument = {
+    text: original,
+    revision: "r1",
+    writable: true,
+    sections: [{ section: "MatchState.Playing.KOTH", appliesWhen: "next-match" }],
+  };
+  const capabilities = {
+    routes: [
+      "GET /v1/config",
+      "PUT /v1/config",
+      "POST /v1/config/validate",
+      "GET /v1/catalog/maps",
+      "GET /v1/catalog/lightings",
+      "GET /v1/catalog/experiences",
+    ],
+  };
+  const status = {
+    serverName: "The UNCs",
+    map: "Kavkazi",
+    players: { current: 2, max: 100 },
+    scoreTick: { current: 24, min: 20, max: 30 },
+    rotation: { nowIndex: 0 },
+  };
+  const game = new WardogsClient({} as AdminSettings);
+  const request = jest.spyOn(game, "request").mockImplementation(async (method, path, body, revision) => {
+    if (path === "/v1/capabilities") return capabilities;
+    if (path === "/v1/status") return status;
+    if (path === "/v1/config/validate") return { ok: true };
+    if (path === "/v1/config" && method === "GET") return document;
+    if (path === "/v1/config" && method === "PUT") {
+      expect(revision).toBe(document.revision);
+      document = { ...document, text: String(body), revision: "r2" };
+      return { ok: true, outcomes: [{ section: "MatchState.Playing.KOTH", state: "next-match" }] };
+    }
+    if (path === "/v1/catalog/maps") return { maps: [{ id: "Kavkazi" }, { id: "Europe" }] };
+    if (path === "/v1/catalog/lightings") return { lightings: [{ id: "DayClear" }] };
+    if (path === "/v1/catalog/experiences") return { experiences: [{ id: "KOTH" }, { id: "KOTH_InfantryOnly" }] };
+    throw new Error("Unexpected test route");
+  });
+  return { game, request, status, capabilities, document, saved: () => document };
+}
+const save = (changes: Record<string, string | number | boolean>, revision = "r1") =>
+  actionSchema.parse({
+    id: randomUUID(),
+    reason: "Reviewed server settings",
+    action: "settings-save",
+    revision,
+    changes,
+  });
+describe("server configuration boundaries", () => {
+  it("shows documented values and timings without disclosing passwords, raw INI or feed credentials", async () => {
+    const { game } = fixture();
+    const view = await game.configuration();
+    expect(view.fields.find((field) => field.id === "serverPassword")).toMatchObject({ value: null, editable: true });
+    expect(view.fields.find((field) => field.id === "scorePeriod")).toMatchObject({ value: 24, state: "next-match" });
+    expect(view.scoreTick).toMatchObject({ min: 20, max: 30 });
+    expect(JSON.stringify(view)).not.toMatch(/private-|WDServerFeed|DefaultReservedPlayerIds/);
+  });
+  it("changes only reviewed fields, validates, uses If-Match and confirms the stored values", async () => {
+    const { game, saved, request } = fixture();
+    const result = await game.execute(save({ serverName: "The UNCs Event", scorePeriod: 30 }));
+    expect(result).toMatchObject({ state: "pending", message: expect.stringContaining("next match") });
+    expect(saved().text).toBe(
+      original
+        .replace('ServerName="The UNCs"', 'ServerName="The UNCs Event"')
+        .replace("ScorePeriod=24", "ScorePeriod=30"),
+    );
+    expect(request.mock.calls.filter(([method]) => method === "PUT")).toHaveLength(1);
+    expect(request.mock.calls.filter(([, path]) => path === "/v1/config/validate")).toHaveLength(1);
+  });
+  it.each<Record<string, string | number | boolean>>([
+    { scorePeriod: 19 },
+    { scorePeriod: 31 },
+    { scorePeriod: 24.5 },
+    { serverName: "bad\nPassword=injected" },
+    { imageUrl: "javascript:alert(1)" },
+    { unknown: true },
+    { minPlayerCash: 100, maxPlayerCash: 50 },
+  ])("refuses invalid settings %j without a write", async (changes) => {
+    const { game, request } = fixture();
+    await expect(game.execute(save(changes))).rejects.toThrow();
+    expect(request.mock.calls.some(([method]) => method === "PUT")).toBe(false);
+  });
+  it("refuses stale drafts without automatic rebasing or retries", async () => {
+    const { game, request } = fixture();
+    await expect(game.execute(save({ scorePeriod: 25 }, "r0"))).rejects.toThrow("changed");
+    expect(request.mock.calls.some(([method]) => method !== "GET")).toBe(false);
+  });
+  it.each(["redacted", "locked", "notAllowed"])("refuses a %s document or key", async (kind) => {
+    const f = fixture();
+    if (kind === "redacted") f.document.redacted = true;
+    if (kind === "locked")
+      f.document.sections = [{ section: SESSION, keyOverrides: [{ key: "ServerName", lockedBy: "command-line" }] }];
+    if (kind === "notAllowed") f.document.sections = [{ section: SESSION, allowedKeys: ["MaxReservedSlots"] }];
+    await expect(f.game.execute(save({ serverName: "New" }))).rejects.toThrow();
+    expect(f.request.mock.calls.some(([method]) => method === "PUT")).toBe(false);
+  });
+  it("retains failure context without forwarding upstream strings", async () => {
+    const { game, request } = fixture();
+    const originalRequest = request.getMockImplementation()!;
+    request.mockImplementation(async (method, path, body, revision) =>
+      path === "/v1/config/validate"
+        ? { ok: false, errors: [{ message: "Password=private" }] }
+        : originalRequest(method, path, body, revision),
+    );
+    await expect(game.execute(save({ scorePeriod: 25 }))).rejects.toThrow("refused");
+    expect(request.mock.calls.some(([method]) => method === "PUT")).toBe(false);
+  });
+  it("redacts join passwords in audit storage while sending the intended value to the game", async () => {
+    const f = fixture();
+    const store = {
+      begin: jest.fn().mockResolvedValue({ created: true }),
+      finish: jest.fn().mockResolvedValue(undefined),
+    };
+    const service = new AdminService(f.game, store as unknown as AdminStore);
+    const action = save({ serverPassword: "replacement-secret" });
+    await service.act({ id: "staff", name: "Staff", role: "admin", csrf: "csrf" }, action);
+    expect(JSON.stringify(store.begin.mock.calls)).not.toContain("replacement-secret");
+    expect(f.saved().text).toContain('ServerPassword="replacement-secret"');
+    expect(JSON.stringify(auditAction(action))).toContain("[redacted]");
+  });
+  it.each(["viewer", "moderator"] as const)("refuses settings reads and writes by %s", async (role) => {
+    const f = fixture();
+    const service = new AdminService(f.game, {} as AdminStore);
+    const staff = { id: "staff", name: "Staff", role, csrf: "csrf" };
+    await expect(service.configuration(staff)).rejects.toThrow("administrators");
+    await expect(service.act(staff, save({ scorePeriod: 25 }))).rejects.toThrow("staff role");
+    expect(f.request).not.toHaveBeenCalled();
+  });
+  it("queues a supported next map without ending the current round", async () => {
+    const f = fixture();
+    const result = await f.game.execute({
+      id: randomUUID(),
+      reason: "Event next round",
+      action: "map-next",
+      revision: "r1",
+      currentIndex: 0,
+      currentMap: "Kavkazi",
+      entry: { map: "Europe", experiences: ["KOTH_InfantryOnly"], lighting: "DayClear" },
+    });
+    expect(result.state).toBe("pending");
+    expect(parseRotation(f.saved().text)[1]).toMatchObject({ map: "Europe", experiences: ["KOTH_InfantryOnly"] });
+    expect(f.request.mock.calls.some(([, path]) => path.startsWith("/v1/match"))).toBe(false);
+  });
+  it.each(["round", "random", "disabled", "unknown-mode"])("refuses unsafe next-map selection: %s", async (kind) => {
+    const f = fixture();
+    if (kind === "round") f.status.map = "Europe";
+    if (kind === "random") f.document.text = original.replace("RotationMode=Ordered", "RotationMode=Random");
+    if (kind === "disabled") f.document.text = original.replace("bEnabled=True", "bEnabled=False");
+    await expect(
+      f.game.execute({
+        id: randomUUID(),
+        reason: "Event next round",
+        action: "map-next",
+        revision: "r1",
+        currentIndex: 0,
+        currentMap: "Kavkazi",
+        entry: { map: "Europe", experiences: [kind === "unknown-mode" ? "Invented50v50" : "KOTH"] },
+      }),
+    ).rejects.toThrow();
+    expect(f.request.mock.calls.some(([method]) => method === "PUT")).toBe(false);
+  });
+  it("does not discard unknown rotation fields during editing", async () => {
+    const f = fixture();
+    f.document.text = original.replace('Map="Europe"', 'Unrecognized="keep-me",Map="Europe"');
+    await expect(
+      f.game.execute({
+        id: randomUUID(),
+        reason: "Review rotation",
+        action: "rotation-save",
+        revision: "r1",
+        entries: [{ map: "Europe", experiences: [] }],
+      }),
+    ).rejects.toThrow("unsupported");
+    expect(f.request.mock.calls.some(([method]) => method === "PUT")).toBe(false);
+  });
+});

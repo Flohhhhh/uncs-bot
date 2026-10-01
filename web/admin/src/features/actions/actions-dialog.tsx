@@ -1,11 +1,13 @@
 import { useRef, useState, type FormEvent } from "react";
 import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
+import type { MapSelection } from "../../../../../src/common/server-settings";
 import { api } from "../../api/client";
 import type { ActionName, ActionResult, Catalog } from "../../api/types";
 import { useResource } from "../../api/use-resource";
 import { useAdmin } from "../../app/context";
 import { Modal, ReasonField } from "../../components/ui";
 import { TeamMoveDialog } from "../players/team-move";
+import { MapPicker } from "./map-picker";
 import {
   actionDefinitions,
   allowed,
@@ -47,6 +49,7 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<ActionResult | null>(null);
+  const [selection, setSelection] = useState<MapSelection>({ map: "", experiences: [] });
   const permitted = allowed(action, admin.me, admin.overview, admin.stale, admin.busy);
   const needsCatalog = action === "map" || action === "lighting";
   const catalog = useResource<Catalog>(
@@ -91,15 +94,14 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
     }
     if (needsCatalog) {
       const data = catalog.data!;
-      const lighting = String(values.get("lighting") ?? "");
+      const lighting = action === "map" ? selection.lighting : String(values.get("lighting") ?? "");
       if ((lighting || action === "lighting") && !data.lightings.some((entry) => entry.id === lighting)) {
         setError("Choose a supported lighting preset.");
         return;
       }
       if (lighting) input.lighting = lighting;
       if (action === "map") {
-        const map = String(values.get("map") ?? "");
-        const experiences = values.getAll("experiences").map(String);
+        const { map, experiences, zoneAlternator } = selection;
         if (
           !data.maps.some((entry) => entry.id === map) ||
           experiences.length > 10 ||
@@ -110,6 +112,7 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
         }
         input.map = map;
         if (experiences.length) input.experiences = experiences;
+        if (zoneAlternator) input.zoneAlternator = zoneAlternator;
       }
     }
     submitted.current = true;
@@ -207,34 +210,17 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
                 </p>
               )}
               {action === "map" && catalog.data && (
-                <>
-                  <label>
-                    Map
-                    <select name="map" required defaultValue={admin.overview?.status.map}>
-                      {catalog.data.maps.map((entry) => (
-                        <option key={entry.id} value={entry.id}>
-                          {entry.displayName || entry.id}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    Experiences <span className="muted">(optional; Ctrl / Cmd to select several)</span>
-                    <select name="experiences" multiple>
-                      {catalog.data.experiences.map((entry) => (
-                        <option key={entry.id} value={entry.id}>
-                          {entry.displayName || entry.id}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                </>
+                <MapPicker
+                  value={selection}
+                  change={setSelection}
+                  catalog={catalog.data}
+                  disabled={!catalogReady || sending}
+                />
               )}
-              {needsCatalog && catalog.data && (
+              {action === "lighting" && catalog.data && (
                 <label>
                   Lighting
                   <select name="lighting" required={action === "lighting"}>
-                    {action === "map" && <option value="">Game default</option>}
                     {catalog.data.lightings.map((entry) => (
                       <option key={entry.id} value={entry.id}>
                         {entry.displayName || entry.id}
@@ -271,7 +257,9 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
             <button
               type="submit"
               className="button primary"
-              disabled={!permitted || sending || submitted.current || !catalogReady}
+              disabled={
+                !permitted || sending || submitted.current || !catalogReady || (action === "map" && !selection.map)
+              }
             >
               {sending ? "Sending…" : "Confirm action"}
             </button>

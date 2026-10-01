@@ -3,25 +3,9 @@ import { Link } from "react-router-dom";
 import { useAdmin } from "../../app/context";
 import { useResource } from "../../api/use-resource";
 import type { ActionName, Audit, Ban, Rotation, Whitelist } from "../../api/types";
-import { Badge, Card, Empty, Metric, Search, date } from "../../components/ui";
+import { Badge, Card, Empty, Metric, Search, Table, date } from "../../components/ui";
 import { actionDefinitions, allowed } from "../actions/policy";
 import { FactionChip, liveFactions, playerFaction } from "../players/factions";
-function Table({ headers, children }: { headers: string[]; children: ReactNode }) {
-  return (
-    <div className="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            {headers.map((header) => (
-              <th key={header}>{header}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>{children}</tbody>
-      </table>
-    </div>
-  );
-}
 function ActionButton({
   action,
   steamId,
@@ -337,7 +321,7 @@ export function AnnouncementsPage() {
   );
 }
 export function MatchPage() {
-  const { overview } = useAdmin();
+  const { overview, me } = useAdmin();
   const { data: rotation, error } = useResource<Rotation>("rotation");
   if (!overview) return <Empty title="Waiting for the server" />;
   const { status } = overview;
@@ -375,6 +359,13 @@ export function MatchPage() {
           </div>
         </Card>
         <Card title="Map rotation" badge={<Badge>{error ? "UNAVAILABLE" : rotation?.mode || "LOADING"}</Badge>}>
+          {me.role === "admin" && (
+            <div className="card-body">
+              <Link className="button secondary" to="/settings">
+                Edit rotation & queue next map →
+              </Link>
+            </div>
+          )}
           {error && (
             <p className="notice error" role="alert">
               {error}

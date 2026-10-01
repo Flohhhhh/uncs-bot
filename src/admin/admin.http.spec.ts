@@ -28,7 +28,7 @@ describe("admin HTTP boundaries", () => {
     finish: jest.fn(),
     history: jest.fn(),
   };
-  const game = { overview: jest.fn(), execute: jest.fn() };
+  const game = { overview: jest.fn(), execute: jest.fn(), configuration: jest.fn() };
   const config = {
     origin: "https://admin.example.test",
     clientId: "123",
@@ -70,6 +70,14 @@ describe("admin HTTP boundaries", () => {
   afterEach(async () => {
     await app.close();
     jest.restoreAllMocks();
+  });
+  it.each(["viewer", "moderator"])("keeps settings private from %s", async (role) => {
+    jest.mocked(globalThis.fetch).mockResolvedValue(new Response(JSON.stringify({ roles: [role] })));
+    await request(app.getHttpServer())
+      .get("/admin/api/settings")
+      .set("Cookie", `__Host-uncs_admin_session=${token}`)
+      .expect(403);
+    expect(game.configuration).not.toHaveBeenCalled();
   });
   it("opens staff tools at the admin host root while health checks stay independent of the game", async () => {
     await request(app.getHttpServer())

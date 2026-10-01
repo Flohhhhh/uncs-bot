@@ -18,33 +18,21 @@ import { ActionsDialog } from "../features/actions/actions-dialog";
 import { ApplicationsPage } from "../features/applications";
 import { SupportersPage } from "../features/supporters";
 import { CombatPage } from "../features/combat/combat-page";
+import { SettingsPage, PermissionsPage } from "../features/server/settings-page";
 
 const pages = {
-  overview: ["◫", "Overview", "Server overview", "Keep an eye on the match. Take care of the community."],
-  players: ["♟", "Live players", "Live players", "The people in your server, and the tools to look after them."],
+  overview: ["◫", "Overview", "Server overview", "Current match and server status."],
+  players: ["♟", "Live players", "Live players", "Player search and moderation."],
   combat: ["⌁", "Combat history", "Combat history", "Recorded kills, player history, and the server leaderboard."],
-  whitelist: [
-    "☷",
-    "Whitelist",
-    "Community whitelist",
-    "Manage queue access while keeping the current community list intact.",
-  ],
-  applications: [
-    "✉",
-    "Applications",
-    "Whitelist applications",
-    "Review community requests and grant access when they’re ready.",
-  ],
-  supporters: [
-    "✳",
-    "Supporters",
-    "Community supporters",
-    "Match Patreon support to the crew and review future founder benefits.",
-  ],
+  whitelist: ["☷", "Whitelist", "Community whitelist", "Manage community queue access."],
+  applications: ["✉", "Applications", "Whitelist applications", "Review and approve community requests."],
+  supporters: ["✳", "Supporters", "Community supporters", "Patreon records and founder promises."],
   bans: ["⊘", "Bans", "Server bans", "Review restrictions and keep moderation decisions accountable."],
-  announcements: ["↗", "Announcements", "Announcements", "Keep the crew in the loop, directly from your dashboard."],
+  announcements: ["↗", "Announcements", "Announcements", "Send a message to the server."],
   match: ["◇", "Match & maps", "Match & maps", "Control the current round using the options this server supports."],
   audit: ["◷", "Action history", "Action history", "Who changed what, why they did it, and what the game confirmed."],
+  settings: ["⚙", "Server settings", "Server settings", "Identity, joining, gameplay and map rotation."],
+  permissions: ["◈", "Permissions", "Staff permissions", "Which controls each staff role can use."],
 } as const;
 function Brand({ className = "" }: { className?: string }) {
   return (
@@ -271,7 +259,7 @@ function Dashboard({ me, signOut }: { me: Staff; signOut: () => void }) {
           <p className="nav-label">SERVER OPERATIONS</p>
           <nav aria-label="Dashboard sections">
             {Object.entries(pages)
-              .filter(([id]) => me.role === "admin" || !["applications", "supporters"].includes(id))
+              .filter(([id]) => me.role === "admin" || !["applications", "supporters", "settings"].includes(id))
               .map(([id, item]) => (
                 <NavLink
                   key={id}
@@ -402,6 +390,8 @@ function Dashboard({ me, signOut }: { me: Staff; signOut: () => void }) {
                 <Route path="announcements" element={<AnnouncementsPage />} />
                 <Route path="match" element={<MatchPage />} />
                 <Route path="audit" element={<AuditPage />} />
+                <Route path="settings" element={staffPage(<SettingsPage />)} />
+                <Route path="permissions" element={<PermissionsPage />} />
                 <Route path="combat" element={<CombatPage />} />
                 <Route path="applications" element={staffPage(<ApplicationsPage />)} />
                 <Route path="supporters" element={staffPage(<SupportersPage />)} />
