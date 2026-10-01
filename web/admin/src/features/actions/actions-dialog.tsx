@@ -131,14 +131,6 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
           : "unknown",
       };
       setResult(outcome);
-      admin.notify(
-        `${outcome.message} Action ID: ${id}`,
-        outcome.state === "failed"
-          ? "error"
-          : ["unknown", "pending", "accepted"].includes(outcome.state)
-            ? "warning"
-            : "success",
-      );
     } catch (failure) {
       setResult({
         id,
@@ -173,8 +165,11 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
                       : "Unconfirmed"}
             </strong>
             <p>{result.message}</p>
-            <small>Action ID: {id}</small>
-            <p>No repeat request will be sent from this review. Check Action history before starting another action.</p>
+            {result.state !== "applied" && <p>Check Action history before trying again.</p>}
+            <details>
+              <summary>Action details</summary>
+              <small>Action ID: {id}</small>
+            </details>
           </div>
         ) : (
           <>

@@ -14,7 +14,6 @@ export type AdminContextValue = {
   refreshVersion: number;
   refresh: () => void;
   invalidateOverview: () => void;
-  notify: (message: string, kind?: string) => void;
   openAction: (action: ActionName, steamId?: string) => void;
 };
 export const AdminContext = createContext<AdminContextValue | null>(null);

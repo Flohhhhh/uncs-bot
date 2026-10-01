@@ -219,7 +219,7 @@ function Dashboard({
   const [unsavedChanges, setUnsavedChanges] = useState(false);
   const [logoutRequested, setLogoutRequested] = useState(false);
   const [refreshVersion, setRefreshVersion] = useState(0);
-  const [notice, setNotice] = useState({ message: "", kind: "" });
+  const [logoutError, setLogoutError] = useState("");
   const [action, setAction] = useState<{ action: ActionName; steamId?: string; key: string } | null>(null);
   const pause = useRef(false);
   const freshness = useRef(0);
@@ -230,7 +230,6 @@ function Dashboard({
     freshness.current++;
     setStale(true);
   }, []);
-  const notify = useCallback((message: string, kind = "") => setNotice({ message, kind }), []);
   const openAction = useCallback(
     (action: ActionName, steamId?: string) => setAction({ action, steamId, key: crypto.randomUUID() }),
     [],
@@ -286,12 +285,13 @@ function Dashboard({
   }, [overview]);
   async function logout() {
     if (busy) return;
+    setLogoutError("");
     setBusy(true);
     try {
       await api("logout", { method: "POST", body: "{}" });
       signOut();
     } catch (error) {
-      notify(error instanceof Error ? error.message : "Sign out failed.", "error");
+      setLogoutError(error instanceof Error ? error.message : "Sign out failed.");
     } finally {
       setBusy(false);
     }
@@ -322,7 +322,6 @@ function Dashboard({
         refreshVersion,
         refresh,
         invalidateOverview,
-        notify,
         openAction,
       }}
     >
@@ -478,9 +477,9 @@ function Dashboard({
                 Server details need a fresh check. Close any open dialog and refresh before making changes.
               </div>
             )}
-            {notice.message && (
-              <div className={`notice ${notice.kind}`} role="status">
-                {notice.message}
+            {logoutError && (
+              <div className="notice error" role="alert">
+                {logoutError}
               </div>
             )}
             <section id="page" aria-live="polite">

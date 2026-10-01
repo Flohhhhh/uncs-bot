@@ -19,7 +19,6 @@ const context: AdminContextValue = {
   setUnsavedChanges: vi.fn(),
   refresh: vi.fn(),
   invalidateOverview: vi.fn(),
-  notify: vi.fn(),
   openAction: vi.fn(),
 };
 const record: WhitelistApplication = {
