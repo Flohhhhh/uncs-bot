@@ -149,6 +149,7 @@ function createPreviewGame(name: string) {
     "GET /v1/status",
     "GET /v1/players",
     "GET /v1/bans",
+    "GET /v1/audit",
     "GET /v1/reserved-slots",
     "GET /v1/config",
     "PUT /v1/config",
@@ -186,6 +187,14 @@ function createPreviewGame(name: string) {
           factionScores: factions.map(({ name, colorHex, score }) => ({ name, colorHex, score })),
         };
       if (path === "/v1/players") return { players };
+      if (path === "/v1/audit?limit=100")
+        return {
+          entries: [
+            { timestampUtc: new Date().toISOString(), event: "HTTP", detail: "POST /v1/broadcast -> 200" },
+            { timestampUtc: new Date().toISOString(), event: "HTTP", detail: "GET /v1/players -> 200" },
+            { timestampUtc: new Date().toISOString(), event: "AUTH_OK", detail: null },
+          ],
+        };
       if (path === "/v1/reserved-slots") return { reservedSlots: configuredWhitelist(text) };
       if (path === "/v1/config/validate") return { ok: true };
       if (path === "/v1/config") {

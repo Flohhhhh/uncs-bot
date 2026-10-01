@@ -9,6 +9,7 @@ import { actionDefinitions, allowed } from "../actions/policy";
 import { FactionChip, liveFactions, playerFaction } from "../players/factions";
 import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 import { PlayerActions } from "../players/player-actions";
+import { GameLogView } from "./game-log";
 function ActionButton({
   action,
   steamId,
@@ -486,6 +487,29 @@ export function MatchPage() {
   );
 }
 export function AuditPage() {
+  const { me } = useAdmin();
+  const [source, setSource] = useState("dashboard");
+  return (
+    <>
+      {me.role === "admin" && (
+        <div className="settings-tabs" role="group" aria-label="History source">
+          <button
+            className="button secondary"
+            aria-pressed={source === "dashboard"}
+            onClick={() => setSource("dashboard")}
+          >
+            Dashboard actions
+          </button>
+          <button className="button secondary" aria-pressed={source === "game"} onClick={() => setSource("game")}>
+            Game command log
+          </button>
+        </div>
+      )}
+      {source === "game" && me.role === "admin" ? <GameLogView /> : <DashboardHistory />}
+    </>
+  );
+}
+function DashboardHistory() {
   const [query, setQuery] = useState("");
   const lookupId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(query.trim())
     ? query.trim().toLowerCase()
@@ -529,7 +553,7 @@ export function AuditPage() {
           : "Search the latest 100 actions, or paste a complete action ID to retrieve an older receipt."}
       </p>
       <Card
-        title={lookupId ? "Action receipt" : "Recent staff actions"}
+        title={lookupId ? "Action receipt" : "Recent dashboard actions"}
         badge={<Badge>{lookupId ? "EXACT ID" : "LAST 100"}</Badge>}
       >
         {loading ? (

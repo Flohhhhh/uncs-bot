@@ -35,7 +35,7 @@ const pages = {
   match: ["◇", "Match & maps", "Match & maps", "Control the current round using the options this server supports."],
   votes: ["✓", "Map votes", "Map votes", "Let the community choose the next map in Discord."],
   events: ["⚑", "Events", "Optional events", "Run supervised 50v50 events and review their actions."],
-  audit: ["◷", "Action history", "Action history", "Who changed what, why they did it, and what the game confirmed."],
+  audit: ["◷", "Action history", "Action history", "Dashboard receipts and recent game requests."],
   settings: ["⚙", "Server settings", "Server settings", "Identity, joining, gameplay and map rotation."],
   permissions: ["◈", "Permissions", "Staff permissions", "Which controls each staff role can use."],
 } as const;

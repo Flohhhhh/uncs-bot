@@ -33,6 +33,7 @@ export class AdminService {
       catalog: () => game().catalog(),
       rotation: () => game().rotation(),
       audit: () => this.store.history(id),
+      "game-log": () => game().gameLog(),
     };
     if (!Object.hasOwn(readers, resource)) throw new BadRequestException("Unknown dashboard page.");
     const key = `${id}:${resource}`;
@@ -65,6 +66,10 @@ export class AdminService {
         error instanceof RconError ? error.message : "Server settings could not be read safely. Check the host panel.",
       );
     }
+  }
+  gameLog(staff: Staff) {
+    if (staff.role !== "admin") throw new ForbiddenException("Only administrators can read the game command log.");
+    return this.read("game-log", staff.serverId);
   }
   async mapOptions(map: string, serverId?: string) {
     if (!/^[\w./-]{1,150}$/.test(map)) throw new BadRequestException("Choose a valid map.");

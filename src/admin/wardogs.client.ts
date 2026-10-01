@@ -19,6 +19,7 @@ import { serves } from "../common/admin-policy";
 import { assignedFaction } from "../common/faction-colors";
 import { roundStamp, sameRound, type RoundStamp } from "../common/game-round";
 import { RconError, rejected } from "./rcon-protocol";
+import { GAME_LOG_LIMIT, parseGameLog, type GameLog } from "./game-log";
 import type { RconConnectionSource } from "../common/game-server";
 export { RconError } from "./rcon-protocol";
 export { serves } from "../common/admin-policy";
@@ -156,6 +157,12 @@ export class WardogsClient {
 
   async bans() {
     return bansSchema.parse(await this.request("GET", "/v1/bans")).bans;
+  }
+
+  async gameLog(): Promise<GameLog> {
+    const available = serves(await this.capabilities(), "GET", "/v1/audit");
+    const entries = available ? parseGameLog(await this.request("GET", `/v1/audit?limit=${GAME_LOG_LIMIT}`)) : [];
+    return { available, entries, limit: GAME_LOG_LIMIT, observedAt: new Date().toISOString() };
   }
 
   async document(): Promise<ConfigDocument> {
