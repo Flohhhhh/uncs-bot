@@ -7,6 +7,7 @@ import { Badge, Card, Empty, Metric, Search, Table, date } from "../../component
 import { CopyValue, DataTable } from "../../components/data-table";
 import { actionDefinitions, allowed } from "../actions/policy";
 import { FactionChip, liveFactions, playerFaction } from "../players/factions";
+import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 function ActionButton({
   action,
   steamId,
@@ -158,6 +159,7 @@ export function WhitelistPage() {
   const [filter, setFilter] = useState("");
   if (!data)
     return <Empty title={error ? "Whitelist could not be loaded" : "Loading whitelist…"} detail={error || ""} />;
+  const savedIdsInvalid = (data.configuredInvalidEntryCount ?? 0) > 0;
   const rows = data.entries.filter(
     (entry) =>
       entry.steamId.includes(query.trim()) &&
@@ -181,6 +183,12 @@ export function WhitelistPage() {
         <div className="notice warning">
           <strong>{data.invalidEntryCount} malformed reserved-slot entries.</strong> Valid SteamIDs are shown below.
           Review malformed entries in the server configuration; this view does not change the server list.
+        </div>
+      )}
+      {savedIdsInvalid && (
+        <div className="notice warning" role="status">
+          {data.configuredInvalidEntryCount} saved whitelist entries have invalid SteamIDs. Saved status is shown for
+          valid entries. Configuration-based edits need those IDs corrected in the host panel.
         </div>
       )}
       {!data.configurationAvailable && (
@@ -273,6 +281,7 @@ export function BansPage() {
   const { data, error } = useResource<Ban[]>("bans");
   const [query, setQuery] = useState("");
   if (!data) return <Empty title={error ? "Bans could not be loaded" : "Loading bans…"} detail={error} />;
+  const invalidCount = data.filter((ban) => !isPublicIndividualSteamId(ban.steamId)).length;
   const rows = data.filter((ban) =>
     [ban.steamId, ban.reason, ban.bannedBy].some((value) => value?.toLowerCase().includes(query.toLowerCase())),
   );
@@ -281,6 +290,12 @@ export function BansPage() {
       {error && (
         <div className="notice error" role="alert">
           {error} Showing the last successful list.
+        </div>
+      )}
+      {invalidCount > 0 && (
+        <div className="notice warning" role="status">
+          {invalidCount} ban {invalidCount === 1 ? "entry has an invalid SteamID" : "entries have invalid SteamIDs"}.{" "}
+          All entries are shown. Review invalid IDs in the host panel; they cannot be changed here.
         </div>
       )}
       <Search value={query} onChange={setQuery} placeholder="Search SteamID or reason">
@@ -315,6 +330,7 @@ export function BansPage() {
                   <strong>
                     <CopyValue value={ban.steamId} />
                   </strong>
+                  {!isPublicIndividualSteamId(ban.steamId) && <Badge kind="warning">Invalid SteamID</Badge>}
                 </td>
                 <td>
                   {ban.bannedAtUtc && !ban.bannedAtUtc.startsWith("0001") ? date(ban.bannedAtUtc) : "Date not provided"}
@@ -322,7 +338,11 @@ export function BansPage() {
                 <td className="audit-detail">{ban.reason || "No reason supplied by the game"}</td>
                 <td>{ban.bannedBy || "—"}</td>
                 <td>
-                  <ActionButton action="unban" steamId={ban.steamId} disabled={!!error}>
+                  <ActionButton
+                    action="unban"
+                    steamId={ban.steamId}
+                    disabled={!!error || !isPublicIndividualSteamId(ban.steamId)}
+                  >
                     Remove ban
                   </ActionButton>
                 </td>

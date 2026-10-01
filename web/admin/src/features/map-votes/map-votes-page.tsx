@@ -131,7 +131,7 @@ export function MapVotesPage() {
     return (
       <Empty
         title="Map voting is not enabled"
-        detail="The owner needs to finish database setup and choose a Discord voting channel."
+        detail="Choose a Discord voting channel and enable map voting in the bot configuration."
       />
     );
   return (

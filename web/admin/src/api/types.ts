@@ -46,6 +46,7 @@ export type Catalog = {
 export type Whitelist = {
   entries: { steamId: string; active: boolean; configured: boolean | null }[];
   configurationAvailable: boolean;
+  configuredInvalidEntryCount?: number;
   invalidEntryCount: number;
 };
 export type Ban = { steamId: string; bannedAtUtc?: string | null; bannedBy?: string | null; reason?: string | null };

@@ -401,7 +401,7 @@ export function EventsPage() {
     return (
       <Empty
         title="Optional events are not enabled"
-        detail="The owner needs to finish database setup and verify game controls before enabling events."
+        detail="Verify game controls in a supervised session before enabling optional events in the bot configuration."
       />
     );
   const active = resource.data.events.some((event) => event.state !== "complete");

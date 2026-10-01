@@ -1,6 +1,30 @@
 # Dashboard release audit
 
-## October 1 morning review — current handoff
+## October 1 afternoon — live read audit
+
+The migration repair was merged through bot PRs [#19](https://github.com/Flohhhhh/uncs-bot/pull/19) and [#20](https://github.com/Flohhhhh/uncs-bot/pull/20). Railway deployed main `d05913a`. Staff sign-in then failed because `ADMIN_ORIGIN` still pointed at the generated Railway domain while staff entered through `admin.theuncsgaming.com`. Dennis's Railway account could edit it, and Discord already accepted the canonical callback. The single-variable correction was deployed successfully as `15a21122-f015-4d92-a20c-a8f3dce9f1ad`; a fresh unauthenticated login request now redirects to `https://admin.theuncsgaming.com/admin/auth/callback`, and health returns 200.
+
+Dennis subsequently authorized read-only testing against the live server. No game mutation, announcement, restart, player change, whitelist change or configuration write was sent during this audit. Existing staff activity in Action history is not audit-generated activity.
+
+| Surface                              | Verified result                                                                                                                                                                                                                |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Bans                                 | Dashboard failed while the official console displayed 48 bans. One returned ID was outside the valid personal SteamID range. The dashboard's strict whole-list parser hid all entries.                                         |
+| Whitelist                            | 126 valid running entries and three malformed entries were visible. The official configuration view confirmed three 16-digit numeric IDs; the dashboard could not show saved status because its parser rejected those entries. |
+| Overview / players                   | Current server observations and roster loaded. Search, empty results and keyboard sorting worked. No moderation actions were submitted.                                                                                        |
+| Settings / match                     | Identity settings, current match and rotation loaded. No values, maps or round controls were changed.                                                                                                                          |
+| Applications / history / permissions | Read views loaded, including existing action receipts and the role matrix. No application decisions or permission changes were submitted.                                                                                      |
+| Combat / Patreon                     | Pages loaded but reported that the combat feed and automatic Patreon updates were not connected. These are incomplete integrations, not demonstrated list-loading bugs.                                                        |
+| Votes / events                       | Both reported disabled. They remain disabled; their previous copy incorrectly assumed unfinished database setup was the reason.                                                                                                |
+
+The follow-up code fix retains malformed string IDs in the ban display with invalid targets disabled, reads valid saved whitelist IDs alongside a count of malformed numeric entries, and keeps strict configuration-write validation. Local regression cases also cover malformed roster IDs (counted as unlinked, not allowed as action targets) and whitelist confirmation beside unrelated invalid strings. Numeric/non-string confirmation data remains ambiguous and is never coerced. Game response-validation errors now identify unreadable game data rather than claiming a database problem. **These follow-up changes need release before the live dashboard has the fixes.**
+
+Additional read checks: scoring interval and joining rules loaded; player capacity was read-only, and the official configuration file view contained no `MaxPlayers` entry. Host controls correctly describe schedules as host-managed. The announcements screen rendered without sending a message. A separate credential-free loopback preview containing deliberately malformed ban and roster IDs showed both ban records (invalid removal disabled) and six valid players plus the unlinked-player notice.
+
+Validation: production build, backend and frontend typechecks, formatting, touched-file lint and whitespace checks pass. The full local suites passed at 593 backend / 175 frontend tests; two further whitelist-confirmation cases passed in the final 116-test focused backend run, and the final frontend suite remained 175. Use the follow-up PR's CI for the complete final count. No schema or migration changes are included.
+
+Remaining acceptance: deploy the follow-up and recheck bans/saved whitelist status; have staff resolve the malformed source IDs without guessing their intended identities; finish the public website application configuration and publication; connect/rehearse optional integrations separately. Read-only checks do not certify destructive controls or event automation.
+
+## October 1 morning review — historical handoff
 
 Overnight preparation is complete for Floh's review. Backend changes remain in review branches; the website changes are now merged. They are **not deployed or certified against the live game**. The current combined local totals are **588 backend, 173 dashboard and 60 website tests**; CI also passes **31 native PostgreSQL storage/concurrency checks**. Builds, formatting, touched-file lint, typechecks and handler validation pass. Each PR records its reviewed head and CI results; #16 updates the CI runtime and #17 adds verified host-restart guidance. Older counts below are historical checkpoints.
 

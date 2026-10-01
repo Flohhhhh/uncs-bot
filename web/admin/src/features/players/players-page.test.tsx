@@ -16,7 +16,7 @@ describe("live player controls", () => {
       </AdminContext.Provider>,
     );
     expect(screen.getByRole("status", { name: "Incomplete player roster" })).toHaveTextContent(
-      "2 roster entries have no SteamID.",
+      "2 roster entries have no usable SteamID.",
     );
     expect(screen.getByRole("status", { name: "Incomplete player roster" })).toHaveTextContent(
       "team counts below exclude them",

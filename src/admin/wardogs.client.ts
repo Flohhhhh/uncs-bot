@@ -6,7 +6,6 @@ import {
   capabilitiesSchema,
   configDocumentSchema,
   playersSchema,
-  reservedSchema,
   steamId,
   statusSchema,
   type ActionResult,
@@ -14,7 +13,7 @@ import {
   type Capabilities,
   type ConfigDocument,
 } from "./admin.types";
-import { configuredWhitelist, editWhitelist } from "./whitelist-document";
+import { editWhitelist, inspectConfiguredWhitelist } from "./whitelist-document";
 import { readServerConfiguration, changeServerConfiguration, validateMapSelection } from "./server-configuration";
 import { serves } from "../common/admin-policy";
 import { assignedFaction } from "../common/faction-colors";
@@ -197,8 +196,11 @@ export class WardogsClient {
       return parsed.success ? [parsed.data] : [];
     });
     let configured: string[] | null = null;
+    let configuredInvalidEntryCount = 0;
     try {
-      configured = configuredWhitelist((await this.document()).text);
+      const saved = inspectConfiguredWhitelist((await this.document()).text);
+      configured = saved.ids;
+      configuredInvalidEntryCount = saved.invalidEntryCount;
     } catch {
       /* Live list remains useful when document access is unavailable. */
     }
@@ -208,7 +210,12 @@ export class WardogsClient {
       active: live.includes(id),
       configured: configured === null ? null : configured.includes(id),
     }));
-    return { entries, configurationAvailable: configured !== null, invalidEntryCount: slots.length - live.length };
+    return {
+      entries,
+      configurationAvailable: configured !== null,
+      invalidEntryCount: slots.length - live.length,
+      configuredInvalidEntryCount,
+    };
   }
 
   async catalog() {
@@ -288,7 +295,11 @@ export class WardogsClient {
       }
     }
     try {
-      const live = reservedSchema.parse(await this.request("GET", "/v1/reserved-slots")).reservedSlots;
+      // Confirm this exact target without rejecting unrelated malformed strings
+      // loaded from the config. Non-string values remain ambiguous: never coerce IDs.
+      const live = z
+        .object({ reservedSlots: z.array(z.string()) })
+        .parse(await this.request("GET", "/v1/reserved-slots")).reservedSlots;
       return live.includes(action.steamId) === add
         ? {
             state: "applied",

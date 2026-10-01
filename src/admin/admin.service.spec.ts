@@ -4,6 +4,7 @@ import { AdminStore } from "./admin.store";
 import { RconError } from "./wardogs.client";
 import { fixtureServers } from "./game-server-fixture";
 import type { Staff } from "./admin.types";
+import { bansSchema } from "./admin.types";
 const staff: Staff = { id: "123456789012345678", name: "Admin", role: "admin", csrf: "csrf" };
 const input = () => ({
   id: randomUUID(),
@@ -22,6 +23,12 @@ function fixture() {
   return { game, store, service };
 }
 describe("staff action safeguards", () => {
+  it("distinguishes unreadable game data from a database outage without exposing response contents", async () => {
+    const parsed = bansSchema.safeParse({ bans: "private upstream data" });
+    const game = { bans: jest.fn().mockRejectedValue(parsed.error) };
+    const service = new AdminService(fixtureServers(game), {} as AdminStore);
+    await expect(service.read("bans")).rejects.toThrow("The game returned data this dashboard could not read");
+  });
   it("enforces permissions and target confirmation before recording or sending", async () => {
     const { service, game, store } = fixture();
     await expect(service.act({ ...staff, role: "viewer" }, input())).rejects.toThrow("staff role");
