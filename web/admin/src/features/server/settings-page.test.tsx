@@ -97,6 +97,76 @@ it.each(["viewer", "moderator"] as const)("does not request private settings for
   expect(screen.getByText("Administrator access required")).toBeInTheDocument();
   expect(request).not.toHaveBeenCalled();
 });
+
+it.each([false, true])("keeps a settings draft after a definite rejection (HTTP: %s)", async (http) => {
+  show();
+  fireEvent.change(await screen.findByRole("textbox", { name: /Server name/ }), {
+    target: { value: "The UNCs Events" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
+  const fallback = request.getMockImplementation()!;
+  request.mockImplementation(async (path, options) => {
+    if (path !== "actions") return fallback(path, options);
+    if (http) throw Object.assign(new Error("Settings rejected"), { status: 422 });
+    return { state: "failed", message: "Settings rejected" } as never;
+  });
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Save settings" }));
+  await screen.findByText(/Settings rejected/);
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Back to edits" }));
+  expect(screen.getByRole("textbox", { name: /Server name/ })).toHaveValue("The UNCs Events");
+  expect(screen.getByRole("button", { name: "Review changes" })).toBeEnabled();
+  expect(request.mock.calls.filter(([path]) => path === "actions")).toHaveLength(1);
+  fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Save settings" }));
+  await screen.findByText("Settings rejected");
+  const attempts = request.mock.calls
+    .filter(([path]) => path === "actions")
+    .map(([, options]) => JSON.parse(String(options?.body)));
+  expect(attempts).toHaveLength(2);
+  expect(attempts[0].id).not.toBe(attempts[1].id);
+  expect(attempts[1].changes).toEqual(attempts[0].changes);
+});
+
+it.each(["pending", "unknown", "invalid-state", "timeout"])(
+  "does not leave a one-click retry for a possibly saved change (%s)",
+  async (state) => {
+    show();
+    fireEvent.change(await screen.findByRole("textbox", { name: /Server name/ }), {
+      target: { value: "The UNCs Events" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
+    const fallback = request.getMockImplementation()!;
+    request.mockImplementation(async (path, options) => {
+      if (path !== "actions") return fallback(path, options);
+      if (state === "timeout") throw new Error("Timed out");
+      return { state, message: "Result received" } as never;
+    });
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Save settings" }));
+    await screen.findByText(state === "timeout" ? "Timed out" : "Result received");
+    if (state !== "pending") expect(screen.getByText(/Check this receipt/)).toBeInTheDocument();
+    expect(within(screen.getByRole("dialog")).queryByRole("button", { name: "Save settings" })).not.toBeInTheDocument();
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("button", { name: "Review changes" })).not.toBeInTheDocument();
+    expect(request.mock.calls.filter(([path]) => path === "actions")).toHaveLength(1);
+  },
+);
+
+it("preserves reordered maps after a rejected rotation save", async () => {
+  show("admin", "/settings#rotation");
+  fireEvent.click(await screen.findByRole("button", { name: "Move Europe up" }));
+  fireEvent.click(screen.getByRole("button", { name: "Review rotation" }));
+  const fallback = request.getMockImplementation()!;
+  request.mockImplementation(async (path, options) =>
+    path === "actions" ? ({ state: "failed", message: "Rotation rejected" } as never) : fallback(path, options),
+  );
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Save rotation" }));
+  await screen.findByText("Rotation rejected");
+  fireEvent.click(screen.getByRole("button", { name: "Back to edits" }));
+  expect(screen.getByRole("button", { name: "Review rotation" })).toBeEnabled();
+  fireEvent.click(screen.getByRole("button", { name: "Review rotation" }));
+  const changes = within(screen.getByRole("dialog")).getAllByRole("listitem");
+  expect(changes[0]).toHaveTextContent("Europe");
+});
 it("shows the running scoring interval and server range", async () => {
   show();
   await screen.findByRole("button", { name: "Gameplay" });
