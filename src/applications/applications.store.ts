@@ -14,20 +14,21 @@ export class ApplicationsStore {
     return created;
   }
 
-  async own(discordUserId: string) {
+  async own(discordUserId: string, serverId = "primary") {
     const [record] = await this.db
       .select()
       .from(whitelistApplications)
-      .where(eq(whitelistApplications.discordUserId, discordUserId))
+      .where(and(eq(whitelistApplications.discordUserId, discordUserId), eq(whitelistApplications.serverId, serverId)))
       .limit(1);
     return record;
   }
 
-  async list() {
+  async list(serverId = "primary") {
     const awaitingReview = inArray(whitelistApplications.status, ["pending", "processing", "needs_review"]);
     return this.db
       .select()
       .from(whitelistApplications)
+      .where(eq(whitelistApplications.serverId, serverId))
       .orderBy(
         sql`case when ${awaitingReview} then 0 else 1 end`,
         sql`case when ${awaitingReview} then ${whitelistApplications.submittedAt} end asc`,
@@ -62,6 +63,7 @@ export class ApplicationsStore {
         .where(
           and(
             eq(whitelistApplications.id, applicationId),
+            eq(whitelistApplications.serverId, staff.serverId ?? "primary"),
             eq(whitelistApplications.status, kind === "recheck" ? "needs_review" : "pending"),
           ),
         )
@@ -70,7 +72,12 @@ export class ApplicationsStore {
         const [current] = await tx
           .select()
           .from(whitelistApplications)
-          .where(eq(whitelistApplications.id, applicationId))
+          .where(
+            and(
+              eq(whitelistApplications.id, applicationId),
+              eq(whitelistApplications.serverId, staff.serverId ?? "primary"),
+            ),
+          )
           .limit(1);
         return { claimed: false, application: current };
       }

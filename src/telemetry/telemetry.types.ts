@@ -1,5 +1,6 @@
 import { BadRequestException } from "@nestjs/common";
 import { z } from "zod";
+import { isPublicIndividualSteamId } from "../common/steam-id";
 
 export const MAX_FEED_BYTES = 65_536;
 export const periodSchema = z.enum(["day", "week", "month"]);
@@ -9,7 +10,7 @@ export const periodMilliseconds: Record<TelemetryPeriod, number> = {
   week: 7 * 86_400_000,
   month: 30 * 86_400_000,
 };
-export const telemetrySteamId = z.string().regex(/^7656119\d{10}$/);
+export const telemetrySteamId = z.string().refine(isPublicIndividualSteamId);
 const linkedId = z
   .unknown()
   .transform((value) => (telemetrySteamId.safeParse(value).success ? (value as string) : null));

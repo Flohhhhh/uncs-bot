@@ -51,16 +51,16 @@ export class ApplicantAuth {
   constructor(private readonly settings: AdminSettings) {}
 
   private cookieName(kind: "oauth" | "session") {
-    return `${this.settings.get().secure ? "__Host-" : ""}uncs_applicant_${kind}`;
+    return `${this.settings.applicant().secure ? "__Host-" : ""}uncs_applicant_${kind}`;
   }
 
   private cookieOptions() {
-    const secure = this.settings.get().secure;
+    const secure = this.settings.applicant().secure;
     return { httpOnly: true, secure, sameSite: "lax" as const, path: secure ? "/" : "/apply" };
   }
 
   private sign(purpose: "oauth" | "session", value: string) {
-    const config = this.settings.get();
+    const config = this.settings.applicant();
     // Different purposes, origin and guild are cryptographically bound. An
     // applicant signature cannot be substituted for a staff cookie or state.
     return createHmac("sha256", config.secret)
@@ -69,7 +69,7 @@ export class ApplicantAuth {
   }
 
   login(_req: Request, res: Response) {
-    const config = this.settings.get();
+    const config = this.settings.applicant();
     const nonce = randomBytes(32).toString("hex");
     const value = `${nonce}.${Date.now()}`;
     res.cookie(this.cookieName("oauth"), `${value}.${this.sign("oauth", value)}`, {
@@ -105,7 +105,7 @@ export class ApplicantAuth {
   }
 
   private async membership(userId: string) {
-    const config = this.settings.get();
+    const config = this.settings.applicant();
     const parsed = memberSchema.safeParse(
       await this.discord(`/guilds/${config.guildId}/members/${userId}`, {
         headers: { Authorization: `Bot ${config.botToken}` },
@@ -118,7 +118,7 @@ export class ApplicantAuth {
   }
 
   async callback(req: Request, res: Response) {
-    const config = this.settings.get();
+    const config = this.settings.applicant();
     const [nonce, issued, signature, extra] = cookie(req, this.cookieName("oauth")).split(".");
     res.clearCookie(this.cookieName("oauth"), this.cookieOptions());
     const age = Date.now() - Number(issued);
@@ -208,7 +208,7 @@ export class ApplicantAuth {
 
   private checkMutation(req: Request, session: Applicant) {
     if (
-      req.headers.origin !== this.settings.get().origin ||
+      req.headers.origin !== this.settings.applicant().origin ||
       typeof req.headers["x-csrf-token"] !== "string" ||
       !equal(req.headers["x-csrf-token"], session.csrf)
     )

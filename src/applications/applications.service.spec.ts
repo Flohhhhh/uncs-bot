@@ -4,7 +4,7 @@ import type { ApplicationsStore } from "./applications.store";
 import type { AdminService } from "../admin/admin.service";
 import type { EnvService } from "../env/env.service";
 import type { ActionResult, Staff } from "../admin/admin.types";
-import type { WardogsClient } from "../admin/wardogs.client";
+import { fixtureServers } from "../admin/game-server-fixture";
 import type { ApplicantIdentity, WhitelistApplication } from "./applications.types";
 
 const applicant: ApplicantIdentity = {
@@ -23,6 +23,7 @@ const input = {
 };
 const record = (overrides: Partial<WhitelistApplication> = {}): WhitelistApplication => ({
   id: applicationId,
+  serverId: "primary",
   discordUserId: applicant.userId,
   discordDisplayName: applicant.displayName,
   steamId: input.steamId,
@@ -111,7 +112,7 @@ function fixture(
       store as unknown as ApplicationsStore,
       admin as unknown as AdminService,
       env as unknown as EnvService,
-      game as unknown as WardogsClient,
+      fixtureServers(game),
     ),
     store,
     admin,
@@ -159,7 +160,7 @@ describe("private website whitelist requests", () => {
       initial: record({ reviewReason: "Private staff note", reviewedBy: staff.id }),
     });
     const result = await service.me(applicant);
-    expect(store.own).toHaveBeenCalledWith(applicant.userId);
+    expect(store.own).toHaveBeenCalledWith(applicant.userId, "primary");
     expect(result).toMatchObject({ userId: applicant.userId, csrf: applicant.csrf, emailRequired: true });
     expect(JSON.stringify(result)).not.toContain("Private staff note");
     expect(result.application).not.toHaveProperty("reviewedBy");
@@ -182,7 +183,7 @@ describe("private website whitelist requests", () => {
     const { service, store, admin } = fixture({ enabled: false });
     await expect(service.me(applicant)).rejects.toMatchObject({
       status: 503,
-      message: expect.stringContaining("discord.gg/t5NSzurtRS"),
+      message: expect.stringContaining("check back on this website"),
     });
     await expect(service.submit(applicant, input)).rejects.toMatchObject({ status: 503 });
     await expect(service.list(staff)).rejects.toMatchObject({ status: 503 });
@@ -215,12 +216,16 @@ describe("durable application decisions", () => {
       const review = { id: randomUUID(), reason: "Application reviewed" };
       const result = await service.review(staff, applicationId, "approve", review);
       expect(result.application.status).toBe(state === "applied" ? "approved" : "needs_review");
-      expect(admin.act).toHaveBeenCalledWith(staff, {
-        id: review.id,
-        reason: `Website whitelist application ${applicationId} approved.`,
-        action: "whitelist-add",
-        steamId: input.steamId,
-      });
+      expect(admin.act).toHaveBeenCalledWith(
+        { ...staff, serverId: "primary" },
+        {
+          id: review.id,
+          serverId: "primary",
+          reason: `Website whitelist application ${applicationId} approved.`,
+          action: "whitelist-add",
+          steamId: input.steamId,
+        },
+      );
       expect(store.claim.mock.invocationCallOrder[0]).toBeLessThan(admin.act.mock.invocationCallOrder[0]);
       expect(JSON.stringify(admin.act.mock.calls)).not.toContain(input.email);
       expect(JSON.stringify(admin.act.mock.calls)).not.toContain("unc_member");

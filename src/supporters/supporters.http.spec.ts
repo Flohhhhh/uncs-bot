@@ -25,7 +25,7 @@ class TestEnvModule {}
 describe("private supporters HTTP boundary", () => {
   let app: INestApplication;
   const sessionToken = "c".repeat(64);
-  const store = { ingest: jest.fn(), list: jest.fn(), mutate: jest.fn() };
+  const store = { ingest: jest.fn(), list: jest.fn(), mutate: jest.fn(), register: jest.fn() };
   const adminStore = { session: jest.fn() };
   const game = { execute: jest.fn() };
   const config = {
@@ -46,6 +46,7 @@ describe("private supporters HTTP boundary", () => {
     store.ingest.mockResolvedValue({ duplicate: false });
     store.list.mockResolvedValue([]);
     store.mutate.mockResolvedValue({ ok: true, replayed: false });
+    store.register.mockResolvedValue({ ok: true, replayed: false });
     adminStore.session.mockImplementation(async (key) =>
       key === hash(sessionToken)
         ? { userId: "123456789012345678", displayName: "Admin", csrf: "csrf", expiresAt: new Date(Date.now() + 60_000) }
@@ -178,5 +179,78 @@ describe("private supporters HTTP boundary", () => {
       .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
       .expect(503);
     expect(result.text).not.toMatch(/postgres|secret|private-db|private receipt/);
+  });
+  it("authorizes and bounds search before reading all campaign records", async () => {
+    jest.mocked(fetch).mockImplementation(async () => new Response(JSON.stringify({ roles: ["staff"] })));
+    await request(app.getHttpServer()).get("/admin/api/supporters?search=old-member").expect(401);
+    await request(app.getHttpServer())
+      .get("/admin/api/supporters")
+      .query({ search: ["one", "two"] })
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .expect(400);
+    expect(store.list).not.toHaveBeenCalled();
+    const result = await request(app.getHttpServer())
+      .get("/admin/api/supporters")
+      .query({ search: "old%_member" })
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .expect(200);
+    expect(store.list).toHaveBeenCalledWith("123", expect.any(Object), undefined, "old%_member");
+    expect(result.body).toMatchObject({ search: "old%_member", limit: 100 });
+  });
+  it("requires admin, same-origin CSRF and campaign attestation for manual donor entry", async () => {
+    const endpoint = "/admin/api/supporters/manual-member";
+    const body = {
+      id: randomUUID(),
+      patreonMemberId: "member-123",
+      campaignMembershipVerified: true,
+      reason: "Checked this member on the UNC Patreon page",
+    };
+    await request(app.getHttpServer()).post(endpoint).send(body).expect(401);
+    await request(app.getHttpServer())
+      .post(endpoint)
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .send(body)
+      .expect(403);
+    await request(app.getHttpServer())
+      .post(endpoint)
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .set("Origin", "https://other.example")
+      .set("X-CSRF-Token", "csrf")
+      .send(body)
+      .expect(403);
+    jest.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ roles: ["moderator"] })));
+    await request(app.getHttpServer())
+      .post(endpoint)
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .set("Origin", config.origin)
+      .set("X-CSRF-Token", "csrf")
+      .send(body)
+      .expect(403);
+    expect(store.register).not.toHaveBeenCalled();
+    jest.mocked(fetch).mockImplementation(async () => new Response(JSON.stringify({ roles: ["staff"] })));
+    await request(app.getHttpServer())
+      .post(endpoint)
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .set("Origin", config.origin)
+      .set("X-CSRF-Token", "csrf")
+      .send({ ...body, campaignMembershipVerified: false })
+      .expect(400);
+    await request(app.getHttpServer())
+      .post(endpoint)
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .set("Origin", config.origin)
+      .set("X-CSRF-Token", "csrf")
+      .send(body)
+      .expect(201);
+    expect(store.register).toHaveBeenCalledTimes(1);
+    expect(store.register).toHaveBeenCalledWith(
+      expect.objectContaining({ ...body, displayName: null }),
+      expect.objectContaining({ role: "admin" }),
+      "123",
+      expect.any(Object),
+    );
+    expect(store.mutate).not.toHaveBeenCalled();
+    expect(store.ingest).not.toHaveBeenCalled();
+    expect(game.execute).not.toHaveBeenCalled();
   });
 });

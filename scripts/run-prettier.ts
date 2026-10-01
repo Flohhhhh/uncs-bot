@@ -7,7 +7,10 @@ if (mode !== "--write" && mode !== "--check") {
   process.exit(1);
 }
 
-const files = requestedFiles.length > 0 ? requestedFiles : ["src/**/*.ts", "scripts/**/*.ts"];
+const files =
+  requestedFiles.length > 0
+    ? requestedFiles
+    : ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "web/admin/**/*.{ts,tsx,mts,css,html,json}"];
 const prettierCli = require.resolve("prettier/bin/prettier.cjs");
 const result = spawnSync(process.execPath, [prettierCli, mode, ...files], { stdio: "inherit" });
 

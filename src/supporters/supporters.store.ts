@@ -10,11 +10,71 @@ import {
   supporterPayments,
 } from "../database/supporters.schema";
 import type { Staff } from "../admin/admin.types";
-import type { FounderPolicy, PatreonObservation, SupporterMutation, SupporterView } from "./supporters.types";
+import { isPublicIndividualSteamId } from "../common/steam-id";
+import type {
+  FounderPolicy,
+  ManualMemberInput,
+  PatreonObservation,
+  SupporterMutation,
+  SupporterView,
+} from "./supporters.types";
 
 @Injectable()
 export class SupportersStore {
   constructor(@Inject(DATABASE) private readonly db: Database) {}
+
+  async register(input: ManualMemberInput, staff: Staff, campaignId: string, policy: FounderPolicy) {
+    const fingerprint = createHash("sha256")
+      .update(JSON.stringify({ kind: "manual-member", campaignId, ...input }))
+      .digest("hex");
+    const result = await this.db.transaction(async (tx) => {
+      const now = new Date();
+      const [inserted] = await tx
+        .insert(supporterMembers)
+        .values({
+          id: randomUUID(),
+          campaignId,
+          patreonMemberId: input.patreonMemberId,
+          displayName: input.displayName,
+          observedAt: now,
+          reviewState: "unverified",
+        })
+        .onConflictDoNothing({ target: [supporterMembers.campaignId, supporterMembers.patreonMemberId] })
+        .returning({ id: supporterMembers.id });
+      const [member] = await tx
+        .select()
+        .from(supporterMembers)
+        .where(
+          and(eq(supporterMembers.campaignId, campaignId), eq(supporterMembers.patreonMemberId, input.patreonMemberId)),
+        )
+        .for("update");
+      // The provider uniqueness check serializes concurrent copies before the
+      // receipt is read, including retries after a response was lost.
+      const [previous] = await tx.select().from(supporterActions).where(eq(supporterActions.id, input.id));
+      if (previous) {
+        if (previous.memberId !== member.id || previous.actorId !== staff.id || previous.fingerprint !== fingerprint)
+          throw new ConflictException("This action ID was already used for another review.");
+        return { replayed: true, memberId: member.id };
+      }
+      if (!inserted)
+        throw new ConflictException(
+          "This Patreon membership is already recorded. Search its membership ID before reviewing.",
+        );
+      await tx.insert(supporterActions).values({
+        id: input.id,
+        memberId: member.id,
+        actorId: staff.id,
+        actorName: staff.name,
+        kind: "manual-member",
+        reason: input.reason,
+        fingerprint,
+        details: { patreonMemberId: input.patreonMemberId, campaignMembershipVerified: 1 },
+        createdAt: now,
+      });
+      return { replayed: false, memberId: member.id };
+    });
+    return { ok: true, replayed: result.replayed, supporter: await this.get(result.memberId, campaignId, policy) };
+  }
 
   async ingest(observation: PatreonObservation) {
     return this.db.transaction(async (tx) => {
@@ -96,7 +156,7 @@ export class SupportersStore {
     });
   }
 
-  async list(campaignId: string, policy: FounderPolicy, memberId?: string): Promise<SupporterView[]> {
+  async list(campaignId: string, policy: FounderPolicy, memberId?: string, search = ""): Promise<SupporterView[]> {
     const payment = (alias: string) =>
       sql.raw(
         `json_build_object('id', ${alias}.id, 'paidAt', ${alias}.paid_at, 'amountCents', ${alias}.amount_cents, 'currency', ${alias}.currency, 'source', ${alias}.source, 'reference', ${alias}.reference, 'verificationState', ${alias}.verification_state, 'firstSuccessfulPaymentVerified', ${alias}.first_successful_payment_verified)`,
@@ -118,6 +178,16 @@ export class SupportersStore {
         'founder', (SELECT json_build_object('awardedAt', f.awarded_at, 'paymentId', f.payment_id) FROM supporter_founders f WHERE f.member_id = m.id)
       ) AS supporter FROM supporter_members m WHERE m.campaign_id = ${campaignId}
       ${memberId ? sql`AND m.id = ${memberId}` : sql``}
+      ${
+        search
+          ? sql`AND (
+        strpos(lower(coalesce(m.display_name, '')), lower(${search})) > 0
+        OR strpos(lower(m.patreon_member_id), lower(${search})) > 0
+        OR strpos(coalesce(m.discord_id, ''), ${search}) > 0
+        OR strpos(coalesce(m.steam_id, ''), ${search}) > 0
+      )`
+          : sql``
+      }
       ORDER BY m.observed_at DESC, m.id LIMIT 100
     `);
     return result.rows.map((row) => row.supporter);
@@ -189,7 +259,7 @@ export class SupportersStore {
         if (
           !policy.configured ||
           !member.discordId ||
-          !member.steamId ||
+          !isPublicIndividualSteamId(member.steamId) ||
           !payment ||
           payment.source !== "manual_receipt" ||
           payment.verificationState !== "verified" ||

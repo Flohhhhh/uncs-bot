@@ -40,7 +40,7 @@ Ingestion purges event rows older than 90 days at most once per day. If ingestio
 
 The existing UNCs host feed destination is `127.0.0.1:32190`. **It has not been changed.** First identify which host service owns that receiver and whether it supports authenticated forwarding/fan-out. Do not replace it and silently break the host's logging. The observed game appends `/api/ingest/events` to the configured base URL and reads feed settings at startup; confirm behavior on this host before any change or restart.
 
-The database schema is provided in `src/database/telemetry.schema.ts` and exported by the main schema. The combined launch migration has been generated under the owner's explicit September 30 override of the human-only preparation rule; see [Database prerequisite](ADMIN_DASHBOARD.md#database-prerequisite--launch-migration-prepared). It has not been applied to a database. Keep ingestion disabled until the migration, deployment, separate secret and host integration are verified.
+The database schema is provided in `src/database/telemetry.schema.ts` and exported by the main schema. The combined launch migration was applied to the identified production database on September 30 under the owner's explicit authorization, and schema checks passed; see [Database prerequisite](ADMIN_DASHBOARD.md#database-prerequisite--launch-migration-applied). The production Node 22.23.3 runtime and disabled loopback responses are verified. Ingestion remains disabled. Verify the separate secret, public route and host integration before activation; the existing game-feed destination has not been changed.
 
 The local preview overrides the store with explicit simulated events and cannot accept a live game feed. No real player history is imported into the preview.
 

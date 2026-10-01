@@ -69,6 +69,8 @@ npm run db:migrate
 
 The production bot starts only after pending migrations succeed.
 
+The September 30, 2026 launch migration was applied to the identified production Neon database through that existing Railway pre-deploy command, following the owner's explicit launch exception. Read-only schema and migration-journal checks passed, and the existing welcome-settings row and content were preserved. The initial release passed its loopback checks with the new features disabled. Floh subsequently enabled dashboard/application settings and supplied connection variables; those initial checks do not verify the later configuration or completed public login flows. See [current delivery status](docs/guides/ADMIN_DASHBOARD.md#current-delivery-status) and the [release audit](docs/guides/ADMIN_RELEASE_AUDIT.md). The general migration workflow above remains unchanged for future work.
+
 ## Useful commands
 
 ```bash

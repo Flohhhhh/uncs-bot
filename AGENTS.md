@@ -6,6 +6,12 @@
 - Handler registration/validation: `npm run validate:handlers` passes for command or event-handler changes.
 - Whitespace Issues: `git diff --check` ran and passes
 
+# Development Workflow
+
+- Small features or changes can be committed directly to development.
+- Larger changes or features should be made on feature branches then merged into development.
+- Main commits should only be pull requests from development done periodically.
+
 # Database migration ownership
 
 - Agents must never run `npm run db:generate` or `drizzle-kit generate`.

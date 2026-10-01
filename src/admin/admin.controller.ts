@@ -8,7 +8,6 @@ import {
   HttpException,
   Injectable,
   Param,
-  NotFoundException,
   Post,
   Req,
   Res,
@@ -17,7 +16,7 @@ import {
 } from "@nestjs/common";
 import type { Request, Response } from "express";
 import { join } from "node:path";
-import { AdminAuth, AdminGuard, type StaffRequest } from "./admin.auth";
+import { AdminAuth, AdminGuard, AdminServerGuard, type StaffRequest } from "./admin.auth";
 import { AdminService } from "./admin.service";
 
 @Catch()
@@ -40,28 +39,25 @@ export class AdminExceptionFilter implements ExceptionFilter {
 @UseFilters(AdminExceptionFilter)
 export class AdminPageController {
   constructor(private readonly auth: AdminAuth) {}
-  @Get()
+  @Get([
+    "",
+    "overview",
+    "players",
+    "combat",
+    "whitelist",
+    "applications",
+    "supporters",
+    "bans",
+    "announcements",
+    "match",
+    "audit",
+    "settings",
+    "permissions",
+    "votes",
+    "events",
+  ])
   page(@Res() res: Response) {
-    res.sendFile(join(__dirname, "public", "index.html"));
-  }
-  @Get("app.js")
-  script(@Res() res: Response) {
-    res.sendFile(join(__dirname, "public", "app.js"));
-  }
-  @Get("style.css")
-  style(@Res() res: Response) {
-    res.sendFile(join(__dirname, "public", "style.css"));
-  }
-  @Get("assets/:file")
-  asset(@Param("file") file: string, @Res() res: Response) {
-    const assets: Record<string, string> = {
-      "uncs-mascot.png": "image/png",
-      "barlow-condensed-bold.ttf": "font/ttf",
-      "barlow-condensed-extrabold.ttf": "font/ttf",
-      "dm-sans.ttf": "font/ttf",
-    };
-    if (!Object.hasOwn(assets, file)) throw new NotFoundException("Asset not found.");
-    res.type(assets[file]).sendFile(join(__dirname, "public", "assets", file));
+    res.sendFile(join(process.cwd(), "dist", "src", "admin", "public", "index.html"));
   }
   @Get("auth/login")
   login(@Res() res: Response) {
@@ -71,31 +67,51 @@ export class AdminPageController {
   callback(@Req() req: Request, @Res() res: Response) {
     return this.auth.callback(req, res);
   }
+  @Post("api/logout")
+  logout(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
+    return this.auth.logout(req, res);
+  }
 }
 
 @Controller("admin/api")
 @UseFilters(AdminExceptionFilter)
 @UseGuards(AdminGuard)
 export class AdminApiController {
-  constructor(
-    private readonly service: AdminService,
-    private readonly auth: AdminAuth,
-  ) {}
+  constructor(private readonly auth: AdminAuth) {}
   @Get("me")
   me(@Req() req: StaffRequest) {
     return req.staff;
   }
-  @Post("logout")
-  logout(@Req() req: StaffRequest, @Res({ passthrough: true }) res: Response) {
-    return this.auth.logout(req, res);
+  @Get("servers")
+  servers(@Req() req: StaffRequest) {
+    return this.auth.serverList(req.staff);
+  }
+}
+
+@Controller(["admin/api", "admin/api/servers/:serverId"])
+@UseFilters(AdminExceptionFilter)
+@UseGuards(AdminGuard, AdminServerGuard)
+export class AdminGameController {
+  constructor(private readonly service: AdminService) {}
+  @Get("settings")
+  settings(@Req() req: StaffRequest) {
+    return this.service.configuration(req.staff);
+  }
+  @Get("catalog/maps/:map")
+  mapOptions(@Req() req: StaffRequest, @Param("map") map: string) {
+    return this.service.mapOptions(map, req.staff.serverId);
   }
   @Post("actions")
   act(@Req() req: StaffRequest, @Body() body: unknown) {
     return this.service.act(req.staff, body);
   }
   @Get(["overview", "bans", "whitelist", "catalog", "rotation", "audit"])
-  read(@Req() req: Request) {
+  read(@Req() req: StaffRequest) {
     const resource = req.path.replace(/\/$/, "").split("/").at(-1) ?? "";
-    return this.service.read(resource);
+    return this.service.read(resource, req.staff.serverId);
+  }
+  @Get("audit/:id")
+  receipt(@Req() req: StaffRequest, @Param("id") id: string) {
+    return this.service.receipt(id, req.staff.serverId);
   }
 }

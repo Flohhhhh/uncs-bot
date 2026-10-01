@@ -1,4 +1,5 @@
 import type { ConfigDocument } from "./admin.types";
+import { isPublicIndividualSteamId } from "../common/steam-id";
 
 const sectionName = "/Script/WDGame.WDGameSession";
 const key = "DefaultReservedPlayerIds";
@@ -27,12 +28,15 @@ function locate(text: string) {
     const line = lines[index];
     if (!/^\s*[+.!-]?\s*DefaultReservedPlayerIds\s*=/i.test(line)) continue;
     const match = line.match(
-      /^\s*([+.!-]?)\s*DefaultReservedPlayerIds\s*=\s*(?:"(7656119\d{10}|ClearArray)"|(7656119\d{10}|ClearArray))\s*(?:(?:[;#]|\/\/).*)?$/i,
+      /^\s*([+.!-]?)\s*DefaultReservedPlayerIds\s*=\s*(?:"([0-9]{17}|ClearArray)"|([0-9]{17}|ClearArray))\s*(?:(?:[;#]|\/\/).*)?$/i,
     );
     if (!match) throw new Error("The whitelist uses an unsupported array format. Review it in the host panel.");
     const operator = match[1];
     const value = match[2] ?? match[3];
-    if ((operator === "!") !== (value.toLowerCase() === "cleararray"))
+    if (
+      (operator === "!") !== (value.toLowerCase() === "cleararray") ||
+      (operator !== "!" && !isPublicIndividualSteamId(value))
+    )
       throw new Error("The whitelist uses an unsupported array format. Review it in the host panel.");
     indices.push(index);
     // Match Unreal's documented array commands, also used by the official RCON
@@ -50,7 +54,7 @@ export function configuredWhitelist(text: string) {
 }
 
 export function editWhitelist(document: ConfigDocument, steamId: string, add: boolean) {
-  if (!/^7656119\d{10}$/.test(steamId)) throw new Error("Invalid SteamID64.");
+  if (!isPublicIndividualSteamId(steamId)) throw new Error("Invalid SteamID64.");
   if (!document.writable) throw new Error("The game reports that its configuration is read-only.");
   if (
     document.redacted ||

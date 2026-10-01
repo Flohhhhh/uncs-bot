@@ -11,6 +11,17 @@ function batch(event: Record<string, unknown> = {}) {
   };
 }
 describe("Wardogs feed parsing", () => {
+  it("keeps valid boundary IDs linked and never coerces numeric or invalid account IDs", () => {
+    expect(
+      parseFeed(batch({ killerSteamId: "76561197960265729", victimSteamId: "76561202255233023" })).events[0],
+    ).toMatchObject({ killerSteamId: "76561197960265729", victimSteamId: "76561202255233023" });
+    expect(
+      parseFeed(batch({ killerSteamId: "76561200000000000", victimSteamId: 76561200000000000 })).events[0],
+    ).toMatchObject({ killerSteamId: "76561200000000000", victimSteamId: null });
+    expect(
+      parseFeed(batch({ killerSteamId: "76561197960265728", victimSteamId: "76561202255233024" })).events[0],
+    ).toMatchObject({ killerSteamId: null, victimSteamId: null });
+  });
   it("keeps the game clock separate and strips non-game fields", () => {
     const input = batch({
       killerSteamId: killer,

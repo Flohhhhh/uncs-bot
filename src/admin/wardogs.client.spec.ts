@@ -1,12 +1,16 @@
 import { AdminSettings } from "./admin.settings";
+import { AdminService } from "./admin.service";
+import type { AdminStore } from "./admin.store";
 import { RconError, serves, WardogsClient } from "./wardogs.client";
-import { actionSchema, type AdminAction } from "./admin.types";
+import { actionSchema, playersSchema, type AdminAction } from "./admin.types";
 import { configuredWhitelist } from "./whitelist-document";
 import { randomUUID } from "node:crypto";
+import { ServiceUnavailableException } from "@nestjs/common";
+import { fixtureServers } from "./game-server-fixture";
 const id = "76561198123456789",
   existing = "76561198066952872";
 const settings = {
-  get: () => ({ rconUrl: "https://rcon.example.test", password: "never-send-to-browser" }),
+  rcon: () => ({ rconUrl: "https://rcon.example.test", password: "never-send-to-browser" }),
 } as AdminSettings;
 const document = {
   revision: "r1",
@@ -14,8 +18,177 @@ const document = {
   text: `[/Script/WDGame.WDGameSession]\nMaxReservedSlots=0\n+DefaultReservedPlayerIds=${existing}\n[WDServerFeed]\nToken=secret\n`,
 };
 
+describe("shared dashboard and community observations", () => {
+  let now = 1_800_000_000_000;
+  beforeEach(() => jest.spyOn(Date, "now").mockImplementation(() => now));
+  afterEach(() => jest.restoreAllMocks());
+
+  function fixture() {
+    const transport = jest.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const path = new URL(String(input)).pathname;
+      const body =
+        path === "/v1/capabilities"
+          ? { routes: [] }
+          : path === "/v1/status"
+            ? { serverName: "UNCs", map: "Test", players: { current: 0, max: 100 } }
+            : path === "/v1/players"
+              ? { players: [] }
+              : { ok: true };
+      return new Response(JSON.stringify(body));
+    });
+    const client = new WardogsClient(settings);
+    const dashboard = new AdminService(fixtureServers(client), {} as AdminStore);
+    const playerReads = () => transport.mock.calls.filter(([url]) => String(url).endsWith("/v1/players")).length;
+    return { transport, client, dashboard, playerReads };
+  }
+
+  it("shares concurrent and recent roster reads, then refreshes at five seconds", async () => {
+    const { client, dashboard, playerReads } = fixture();
+    const [staff, community] = await Promise.all([dashboard.read("overview"), client.overview()]);
+    expect(staff).toEqual(community);
+    expect(playerReads()).toBe(1);
+    now += 4_999;
+    await dashboard.read("overview");
+    expect(playerReads()).toBe(1);
+    now += 1;
+    await client.overview();
+    expect(playerReads()).toBe(2);
+  });
+
+  it.each([false, true])("reads fresh state after a mutation, including a lost response (lost=%s)", async (lost) => {
+    const { transport, client, dashboard, playerReads } = fixture();
+    await dashboard.read("overview");
+    if (lost) transport.mockRejectedValueOnce(new Error("Lost response"));
+    const action = client.request("POST", "/v1/broadcast", { message: "Test" });
+    if (lost) await expect(action).rejects.toMatchObject({ unknownResult: true });
+    else await action;
+    await dashboard.read("overview");
+    expect(playerReads()).toBe(2);
+  });
+
+  it("does not cache a failed observation", async () => {
+    const { transport, client, dashboard, playerReads } = fixture();
+    transport.mockRejectedValueOnce(new Error("Unavailable"));
+    await expect(client.overview()).rejects.toThrow("could not be reached");
+    await dashboard.read("overview");
+    expect(playerReads()).toBe(1);
+  });
+});
+
+describe("roster identity compatibility", () => {
+  it("keeps known player controls available beside the official null-SteamID shape", async () => {
+    const client = new WardogsClient(settings);
+    const request = jest.spyOn(client, "request").mockImplementation(async (_method, path) => {
+      if (path === "/v1/capabilities") return { routes: [] };
+      if (path === "/v1/status") return { serverName: "Local test", map: "Test", players: { current: 3, max: 100 } };
+      if (path === "/v1/players")
+        return {
+          players: [
+            { name: "Tea", steamId: id, faction: "RED" },
+            { name: "Tea", steamId: null, faction: "BLU" },
+            { name: "Tea", steamId: existing, faction: "GRN" },
+          ],
+        };
+      throw new Error("Unexpected route");
+    });
+    const result = await client.overview();
+    expect(result.players.map((player) => player.steamId)).toEqual([id, existing]);
+    expect(result.unlinkedPlayerCount).toBe(1);
+    expect(result.status.players.current).toBe(3);
+    expect(request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+  });
+  it("reports an entirely unlinked roster without manufacturing player IDs", () => {
+    expect(playersSchema.parse({ players: [{ name: "Unlinked", steamId: null }] })).toEqual({
+      players: [],
+      unlinkedPlayerCount: 1,
+    });
+  });
+  it.each([undefined, "invalid", "", Number(id)])(
+    "still rejects an undocumented or malformed identity: %s",
+    (steamId) => {
+      expect(playersSchema.safeParse({ players: [{ name: "Player", steamId }] }).success).toBe(false);
+      expect(
+        actionSchema.safeParse({ id: randomUUID(), action: "kick", reason: "Identity check", steamId }).success,
+      ).toBe(false);
+    },
+  );
+  it("never accepts an unlinked identity as an action target", () => {
+    expect(
+      actionSchema.safeParse({ id: randomUUID(), action: "kick", reason: "Identity check", steamId: null }).success,
+    ).toBe(false);
+  });
+});
+
 describe("Wardogs action outcomes", () => {
   afterEach(() => jest.restoreAllMocks());
+  it("reads and confirms a whitelist addition beyond the old SteamID prefix", async () => {
+    const steamId = "76561200000000000";
+    const client = new WardogsClient(settings);
+    const request = jest.spyOn(client, "request").mockImplementation(async (method, path) => {
+      if (path === "/v1/capabilities") return { routes: ["POST /v1/reserved-slots"] };
+      if (path === "/v1/reserved-slots")
+        return method === "POST" ? { ok: true } : { reservedSlots: [existing, steamId] };
+      if (path === "/v1/config") return document;
+      throw new Error("Unexpected route");
+    });
+    await expect(client.whitelist()).resolves.toMatchObject({
+      entries: [
+        { steamId: existing, active: true },
+        { steamId, active: true },
+      ],
+      invalidEntryCount: 0,
+    });
+    await expect(
+      client.execute({ id: randomUUID(), action: "whitelist-add", steamId, reason: "Requested access" }),
+    ).resolves.toMatchObject({ state: "applied" });
+    expect(request).toHaveBeenCalledWith("POST", "/v1/reserved-slots", { steamId });
+  });
+  it("keeps valid whitelist entries visible when one or more reserved slots are malformed", async () => {
+    const client = new WardogsClient(settings);
+    const request = jest.spyOn(client, "request").mockImplementation(async (_method, path) => {
+      if (path === "/v1/reserved-slots") return { reservedSlots: [existing, "not-a-steam-id", id, null, Number(id)] };
+      if (path === "/v1/config") return document;
+      throw new Error("Unexpected route");
+    });
+    await expect(client.whitelist()).resolves.toMatchObject({
+      entries: [
+        { steamId: existing, active: true, configured: true },
+        { steamId: id, active: true, configured: false },
+      ],
+      invalidEntryCount: 3,
+      configurationAvailable: true,
+    });
+    expect(request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+  });
+  it("rejects an invalid reserved-list envelope instead of claiming the server whitelist is empty", async () => {
+    const client = new WardogsClient(settings);
+    jest.spyOn(client, "request").mockResolvedValue({ reservedSlots: null });
+    await expect(client.whitelist()).rejects.toThrow();
+  });
+  it("does not use a partially malformed list to confirm a whitelist mutation", async () => {
+    const client = new WardogsClient(settings);
+    jest.spyOn(client, "request").mockImplementation(async (method, path) => {
+      if (path === "/v1/capabilities") return { routes: ["POST /v1/reserved-slots"] };
+      if (path === "/v1/reserved-slots") return method === "POST" ? { ok: true } : { reservedSlots: [id, "bad-id"] };
+      throw new Error("Unexpected route");
+    });
+    await expect(
+      client.execute({ id: randomUUID(), action: "whitelist-add", steamId: id, reason: "Test approval" }),
+    ).resolves.toMatchObject({ state: "unknown" });
+  });
+  it("reports an unconfigured game as unsent instead of an uncertain mutation", async () => {
+    const transport = jest.spyOn(globalThis, "fetch");
+    const client = new WardogsClient({
+      rcon: () => {
+        throw new ServiceUnavailableException("The game server has not been connected yet.");
+      },
+    } as unknown as AdminSettings);
+    await expect(client.request("POST", "/v1/bans", { steamId: id })).rejects.toMatchObject({
+      unknownResult: false,
+      message: "The game server has not been connected yet.",
+    });
+    expect(transport).not.toHaveBeenCalled();
+  });
   it.each([true, false])("reads the actual whitelist after a config change (live = %s)", async (live) => {
     const client = new WardogsClient(settings);
     const request = jest.spyOn(client, "request").mockImplementation(async (method, path) => {
@@ -338,6 +511,59 @@ describe("live faction assignment", () => {
     });
     return { client, request };
   }
+
+  it("rejects a changed expected faction without moving or killing the player", async () => {
+    const { client, request } = mockTeamChange({ before: "GRN" });
+    expect(await client.execute({ ...teamAction, expectedFaction: "Valkyra" })).toMatchObject({
+      state: "failed",
+      changed: false,
+    });
+    expect(request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+  });
+  it("does not treat an already-correct faction as a move requiring respawn", async () => {
+    const { client } = mockTeamChange({ before: "BLU" });
+    expect(await client.execute(teamAction)).toMatchObject({ state: "applied", changed: false });
+  });
+  it("rejects a move from a previous or unreadable round", async () => {
+    const { client, request } = mockTeamChange();
+    expect(
+      await client.execute({ ...teamAction, expectedRound: { map: "Kavkazi", startedAt: Date.now() - 120_000 } }),
+    ).toMatchObject({ state: "failed", changed: false });
+    expect(request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+  });
+  it.each(["wrong team", "wrong round", "missing", "duplicate", "valid"])(
+    "checks the %s condition immediately before an optional respawn",
+    async (condition) => {
+      const client = new WardogsClient(settings);
+      const request = jest.spyOn(client, "request").mockImplementation(async (_method, path) => {
+        if (path === "/v1/capabilities") return { routes: ["POST /v1/players/{id}/kill"] };
+        if (path === "/v1/status") return { ...status, matchSeconds: condition === "wrong round" ? 0 : 120 };
+        if (path === "/v1/players")
+          return {
+            players:
+              condition === "missing"
+                ? []
+                : Array.from({ length: condition === "duplicate" ? 2 : 1 }, () => ({
+                    steamId: id,
+                    faction: condition === "wrong team" ? "RED" : "BLU",
+                  })),
+          };
+        if (path.endsWith("/kill")) return { ok: true };
+        throw new Error("Unexpected test route");
+      });
+      const result = await client.execute({
+        id: randomUUID(),
+        action: "kill",
+        steamId: id,
+        confirm: id,
+        reason: "Reviewed optional respawn",
+        expectedFaction: "Lonestar",
+        expectedRound: { map: "Kavkazi", startedAt: Date.now() - 120_000 },
+      });
+      expect(result.state).toBe(condition === "valid" ? "accepted" : "failed");
+      expect(request.mock.calls.filter(([method]) => method === "POST")).toHaveLength(condition === "valid" ? 1 : 0);
+    },
+  );
 
   it.each([
     ["Lonestar", "BLU", "RED"],

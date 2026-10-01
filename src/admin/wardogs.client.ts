@@ -1,4 +1,4 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, ServiceUnavailableException } from "@nestjs/common";
 import { z } from "zod";
 import { AdminSettings } from "./admin.settings";
 import {
@@ -7,6 +7,7 @@ import {
   configDocumentSchema,
   playersSchema,
   reservedSchema,
+  steamId,
   statusSchema,
   type ActionResult,
   type AdminAction,
@@ -14,64 +15,45 @@ import {
   type ConfigDocument,
 } from "./admin.types";
 import { configuredWhitelist, editWhitelist } from "./whitelist-document";
+import { readServerConfiguration, changeServerConfiguration, validateMapSelection } from "./server-configuration";
+import { serves } from "../common/admin-policy";
+import { assignedFaction } from "../common/faction-colors";
+import { roundStamp, sameRound, type RoundStamp } from "../common/game-round";
+import { RconError, rejected } from "./rcon-protocol";
+import type { RconConnectionSource } from "../common/game-server";
+export { RconError } from "./rcon-protocol";
+export { serves } from "../common/admin-policy";
 
-export class RconError extends Error {
-  constructor(
-    message: string,
-    readonly unknownResult = false,
-  ) {
-    super(message);
-  }
-}
-export function serves(capabilities: Capabilities, method: string, path: string) {
-  const normalize = (value: string) =>
-    value
-      .trim()
-      .replace(/\{[^}]*\}|:[^/\s]+/g, "*")
-      .replace(/\s+/g, " ");
-  return capabilities.routes.some((route) => normalize(route) === normalize(`${method} ${path}`));
-}
 const catalogItem = z.object({ id: z.string(), displayName: z.string().optional() });
-const hasProblems = (value: unknown) => value === true || (Array.isArray(value) && value.length > 0);
-const rejected = (result: any) =>
-  !result ||
-  typeof result !== "object" ||
-  result.ok === false ||
-  !!result.error ||
-  hasProblems(result.errors) ||
-  hasProblems(result.conflict) ||
-  hasProblems(result.stripped);
-// These are the exact palette/code pairs used by the current official RCON
-// client. Status exposes faction names, while player rows expose these codes.
-// Names are always read from the current status rather than assumed from a map.
-const factionCodesByColor: Record<string, string> = {
-  "#d86060": "RED",
-  "#5b95d8": "BLU",
-  "#7bc462": "GRN",
+type Overview = {
+  status: z.infer<typeof statusSchema>;
+  players: z.infer<typeof playersSchema>["players"];
+  unlinkedPlayerCount?: number;
+  capabilities: Capabilities;
+  observedAt: string;
 };
-type CurrentFaction = z.infer<typeof statusSchema>["factionScores"][number];
 const teamPlayersSchema = z.object({
   players: z.array(z.object({ steamId: z.string().nullable().optional(), faction: z.string().nullable().optional() })),
 });
-function assignedTo(faction: string | null | undefined, target: CurrentFaction, factions: CurrentFaction[]) {
-  if (!faction) return false;
-  if (!["RED", "BLU", "GRN"].includes(faction)) return faction === target.name;
-  const sameCode = factions.filter(
-    (entry) => factionCodesByColor[entry.colorHex?.trim().toLowerCase() ?? ""] === faction,
-  );
-  return sameCode.length === 1 && sameCode[0].name === target.name;
-}
 
 @Injectable()
 export class WardogsClient {
   private capabilitiesCache?: { until: number; value: Capabilities };
+  private overviewCache?: { until: number; promise: Promise<Overview> };
   private holdUntil = 0;
-  constructor(private readonly settings: AdminSettings) {}
+  constructor(private readonly settings: RconConnectionSource) {}
 
   async request(method: string, path: string, body?: unknown, revision?: string): Promise<any> {
     if (Date.now() < this.holdUntil) throw new RconError("The game requested a short pause. Wait before trying again.");
-    const config = this.settings.get();
+    let config: ReturnType<AdminSettings["rcon"]>;
+    try {
+      config = this.settings.rcon();
+    } catch (error) {
+      if (error instanceof ServiceUnavailableException) throw new RconError(error.message);
+      throw error;
+    }
     const mutates = method !== "GET" && !(method === "POST" && path === "/v1/config/validate");
+    if (mutates) this.overviewCache = undefined;
     let response: Response;
     try {
       response = await fetch(`${config.rconUrl.replace(/\/$/, "")}${path}`, {
@@ -93,6 +75,9 @@ export class WardogsClient {
           : "The connection ended before confirmation. Check the server before repeating this action.",
         mutates,
       );
+    } finally {
+      // Discard observations started during an action, including uncertain ones.
+      if (mutates) this.overviewCache = undefined;
     }
     if (!response.ok) {
       // Translate only known codes. Never forward upstream text, which can
@@ -147,13 +132,27 @@ export class WardogsClient {
     return value;
   }
 
-  async overview() {
+  async overview(): Promise<Overview> {
+    if (this.overviewCache && this.overviewCache.until > Date.now()) return this.overviewCache.promise;
+    const entry = { until: Infinity, promise: this.readOverview() };
+    this.overviewCache = entry;
+    try {
+      const value = await entry.promise;
+      entry.until = Date.now() + 5_000;
+      return value;
+    } catch (error) {
+      if (this.overviewCache === entry) this.overviewCache = undefined;
+      throw error;
+    }
+  }
+
+  private async readOverview(): Promise<Overview> {
     const capabilities = await this.capabilities();
-    const [status, players] = await Promise.all([
+    const [status, roster] = await Promise.all([
       this.request("GET", "/v1/status").then((data) => statusSchema.parse(data)),
-      this.request("GET", "/v1/players").then((data) => playersSchema.parse(data).players),
+      this.request("GET", "/v1/players").then((data) => playersSchema.parse(data)),
     ]);
-    return { status, players, capabilities, observedAt: new Date().toISOString() };
+    return { status, ...roster, capabilities, observedAt: new Date().toISOString() };
   }
 
   async bans() {
@@ -168,8 +167,35 @@ export class WardogsClient {
     return parsed.data;
   }
 
+  configuration() {
+    return readServerConfiguration(this);
+  }
+
+  async writeDocument(doc: ConfigDocument, text: string, capabilities: Capabilities) {
+    if (!serves(capabilities, "PUT", "/v1/config") || capabilities.config?.writable === false)
+      throw new RconError("This server does not allow configuration changes.");
+    if (capabilities.limits?.maxBodyBytes && Buffer.byteLength(text, "utf8") > capabilities.limits.maxBodyBytes)
+      throw new RconError("The updated configuration exceeds the server’s request limit.");
+    if (serves(capabilities, "POST", "/v1/config/validate")) {
+      if (rejected(await this.request("POST", "/v1/config/validate", text)))
+        throw new RconError("The game refused this configuration. Nothing was saved.");
+    }
+    const result = await this.request("PUT", "/v1/config", text, doc.revision);
+    if (rejected(result))
+      throw new RconError("The game did not confirm the configuration change. Refresh before trying again.", true);
+    return result;
+  }
+
   async whitelist() {
-    const live = reservedSchema.parse(await this.request("GET", "/v1/reserved-slots")).reservedSlots;
+    // Tolerate individual bad rows for display, without weakening action input
+    // validation or the strict readback used to confirm a whitelist mutation.
+    const slots = z
+      .object({ reservedSlots: z.array(z.unknown()) })
+      .parse(await this.request("GET", "/v1/reserved-slots")).reservedSlots;
+    const live = slots.flatMap((value) => {
+      const parsed = steamId.safeParse(value);
+      return parsed.success ? [parsed.data] : [];
+    });
     let configured: string[] | null = null;
     try {
       configured = configuredWhitelist((await this.document()).text);
@@ -182,7 +208,7 @@ export class WardogsClient {
       active: live.includes(id),
       configured: configured === null ? null : configured.includes(id),
     }));
-    return { entries, configurationAvailable: configured !== null };
+    return { entries, configurationAvailable: configured !== null, invalidEntryCount: slots.length - live.length };
   }
 
   async catalog() {
@@ -195,6 +221,25 @@ export class WardogsClient {
       read("/v1/catalog/experiences", "experiences"),
     ]);
     return { maps, lightings, experiences };
+  }
+
+  async mapOptions(map: string) {
+    const [capabilities, catalog] = await Promise.all([this.capabilities(), this.catalog()]);
+    if (!catalog.maps.some((entry) => entry.id === map)) throw new RconError("Choose a map from the current catalog.");
+    let experiences = catalog.experiences;
+    if (serves(capabilities, "GET", "/v1/catalog/maps/{map}/experiences")) {
+      const result = z
+        .object({ experiences: z.array(z.string()) })
+        .parse(await this.request("GET", `/v1/catalog/maps/${encodeURIComponent(map)}/experiences`));
+      experiences = experiences.filter((entry) => result.experiences.includes(entry.id));
+    }
+    const zones = serves(capabilities, "GET", "/v1/catalog/maps/{map}/alternators")
+      ? z
+          .object({ alternators: z.array(z.object({ tag: z.string() })) })
+          .parse(await this.request("GET", `/v1/catalog/maps/${encodeURIComponent(map)}/alternators`))
+          .alternators.map((entry) => entry.tag)
+      : null;
+    return { experiences, zones };
   }
 
   async rotation() {
@@ -239,20 +284,7 @@ export class WardogsClient {
         throw new RconError((error as Error).message);
       }
       if (text !== doc.text) {
-        if (capabilities.limits?.maxBodyBytes && Buffer.byteLength(text, "utf8") > capabilities.limits.maxBodyBytes)
-          throw new RconError("The updated configuration exceeds the game server's request limit. No change was sent.");
-        if (serves(capabilities, "POST", "/v1/config/validate")) {
-          const validation = await this.request("POST", "/v1/config/validate", text);
-          if (rejected(validation))
-            throw new RconError("The game could not validate a safe whitelist edit. No change was sent.");
-        }
-        const result = await this.request("PUT", "/v1/config", text, doc.revision);
-        if (rejected(result)) {
-          throw new RconError(
-            "The game did not fully accept the whitelist change. Refresh and review the running and configured lists.",
-            true,
-          );
-        }
+        await this.writeDocument(doc, text, capabilities);
       }
     }
     try {
@@ -278,22 +310,30 @@ export class WardogsClient {
     }
   }
 
+  private async playerTeams(steamId: string) {
+    const [status, data] = await Promise.all([
+      this.request("GET", "/v1/status").then((value) => statusSchema.parse(value)),
+      this.request("GET", "/v1/players").then((value) => teamPlayersSchema.parse(value)),
+    ]);
+    return {
+      factions: status.factionScores,
+      players: data.players.filter((player) => player.steamId === steamId),
+      roster: data.players,
+      round: roundStamp(status, Date.now()),
+    };
+  }
+
+  private changedRound(expected: RoundStamp | undefined, actual: RoundStamp | null) {
+    return expected && (!actual || !sameRound(expected, actual));
+  }
+
   private async teamAction(
     action: Extract<AdminAction, { action: "team" }>,
     capabilities: Capabilities,
   ): Promise<ActionResult> {
     if (!serves(capabilities, "PATCH", "/v1/players/{id}"))
       throw new RconError("The current game build does not expose team changes.");
-    const readTeams = async () => {
-      const [status, data] = await Promise.all([
-        this.request("GET", "/v1/status").then((value) => statusSchema.parse(value)),
-        this.request("GET", "/v1/players").then((value) => teamPlayersSchema.parse(value)),
-      ]);
-      return {
-        factions: status.factionScores,
-        players: data.players.filter((player) => player.steamId === action.steamId),
-      };
-    };
+    const readTeams = () => this.playerTeams(action.steamId);
     let before: Awaited<ReturnType<typeof readTeams>>;
     try {
       before = await readTeams();
@@ -308,8 +348,37 @@ export class WardogsClient {
       throw new RconError("The selected player is no longer connected. Refresh the player list.");
     if (before.players.length !== 1)
       throw new RconError("The game returned an ambiguous player identity. Refresh before moving anyone.");
-    if (assignedTo(before.players[0].faction, targets[0], before.factions))
-      return { state: "applied", message: `The player is already assigned to ${action.faction}. No move was sent.` };
+    if (this.changedRound(action.expectedRound, before.round))
+      return { state: "failed", changed: false, message: "The round changed before this move. No move was sent." };
+    if (assignedFaction(before.players[0].faction, before.factions) === targets[0].name)
+      return {
+        state: "applied",
+        changed: false,
+        message: `The player is already assigned to ${action.faction}. No move was sent.`,
+      };
+    if (
+      action.expectedFaction &&
+      assignedFaction(before.players[0].faction, before.factions) !== action.expectedFaction
+    )
+      return {
+        state: "failed",
+        changed: false,
+        message: "The player's team changed before this move. No move was sent.",
+      };
+    if (action.maximumTargetPlayers) {
+      const teams = before.roster.map((player) => assignedFaction(player.faction, before.factions));
+      if (
+        before.roster.some((player) => !player.steamId) ||
+        new Set(before.roster.map((player) => player.steamId)).size !== before.roster.length ||
+        teams.some((team) => team === null) ||
+        teams.filter((team) => team === action.faction).length >= action.maximumTargetPlayers
+      )
+        return {
+          state: "failed",
+          changed: false,
+          message: "The target team is full or the roster is incomplete. No move was sent.",
+        };
+    }
 
     const result = await this.request("PATCH", `/v1/players/${action.steamId}`, { faction: targets[0].name });
     if (rejected(result)) throw new RconError("The game did not accept the team change.");
@@ -322,9 +391,10 @@ export class WardogsClient {
           message:
             "The move was accepted, but the player or team is no longer available to confirm it. Refresh before another move.",
         };
-      if (assignedTo(after.players[0].faction, currentTargets[0], after.factions))
+      if (assignedFaction(after.players[0].faction, after.factions) === currentTargets[0].name)
         return {
           state: "applied",
+          changed: true,
           message: `Faction assignment confirmed for ${action.faction}. The player may still need to respawn; no forced kill was sent.`,
         };
       return {
@@ -344,6 +414,22 @@ export class WardogsClient {
     if (action.action === "whitelist-add" || action.action === "whitelist-remove")
       return this.whitelistAction(action, capabilities);
     if (action.action === "team") return this.teamAction(action, capabilities);
+    if (action.action === "kill" && (action.expectedFaction || action.expectedRound)) {
+      const before = await this.playerTeams(action.steamId);
+      if (
+        before.players.length !== 1 ||
+        this.changedRound(action.expectedRound, before.round) ||
+        (action.expectedFaction &&
+          assignedFaction(before.players[0].faction, before.factions) !== action.expectedFaction)
+      )
+        return {
+          state: "failed",
+          changed: false,
+          message: "The player or round changed before this respawn. No respawn was sent.",
+        };
+    }
+    if (action.action === "settings-save" || action.action === "rotation-save" || action.action === "map-next")
+      return changeServerConfiguration(this, action, capabilities);
     let method = "POST",
       path: string,
       route: string,
@@ -399,36 +485,12 @@ export class WardogsClient {
     }
     if (!serves(capabilities, method, route))
       throw new RconError("The current game build does not expose this action.");
-    if (action.action === "map" || action.action === "lighting") {
+    if (action.action === "map") {
+      await validateMapSelection(this, { ...action, experiences: action.experiences ?? [] }, capabilities);
+    } else if (action.action === "lighting") {
       const catalog = await this.catalog();
-      if (
-        ("map" in action && !catalog.maps.some((item) => item.id === action.map)) ||
-        (action.lighting && !catalog.lightings.some((item) => item.id === action.lighting))
-      )
-        throw new RconError("Choose a map or lighting option from the current server catalog.");
-      if (
-        action.action === "map" &&
-        action.experiences?.some((id) => !catalog.experiences.some((item) => item.id === id))
-      )
-        throw new RconError("The selected experience is not available on this server.");
-      if (action.action === "map" && action.experiences?.length) {
-        if (serves(capabilities, "GET", "/v1/catalog/maps/{map}/experiences")) {
-          const available = z
-            .object({ experiences: z.array(z.string()) })
-            .parse(await this.request("GET", `/v1/catalog/maps/${encodeURIComponent(action.map)}/experiences`));
-          if (action.experiences.some((id) => !available.experiences.includes(id)))
-            throw new RconError("The selected experience is not available for this map.");
-        }
-      }
-      if (action.action === "map" && action.zoneAlternator && action.zoneAlternator !== "None") {
-        if (!serves(capabilities, "GET", "/v1/catalog/maps/{map}/alternators"))
-          throw new RconError("This server cannot verify the selected zone layout. Leave it unset.");
-        const available = z
-          .object({ alternators: z.array(z.object({ tag: z.string() })) })
-          .parse(await this.request("GET", `/v1/catalog/maps/${encodeURIComponent(action.map)}/alternators`));
-        if (!available.alternators.some((item) => item.tag === action.zoneAlternator))
-          throw new RconError("The selected zone layout is not available for this map.");
-      }
+      if (!catalog.lightings.some((entry) => entry.id === action.lighting))
+        throw new RconError("Choose lighting from the current server catalog.");
     }
     const result = await this.request(method, path, body);
     if (rejected(result)) throw new RconError("The game did not accept this action.");

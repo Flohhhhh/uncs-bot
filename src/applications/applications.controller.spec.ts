@@ -1,10 +1,11 @@
-import { type INestApplication } from "@nestjs/common";
+import { ForbiddenException, UnauthorizedException, type INestApplication } from "@nestjs/common";
 import { Test } from "@nestjs/testing";
 import request from "supertest";
-import { AdminApiController, AdminExceptionFilter } from "../admin/admin.controller";
-import { AdminAuth, AdminGuard } from "../admin/admin.auth";
+import { AdminApiController, AdminGameController, AdminExceptionFilter } from "../admin/admin.controller";
+import { AdminAuth, AdminGuard, AdminServerGuard } from "../admin/admin.auth";
 import { AdminService } from "../admin/admin.service";
-import { WardogsClient } from "../admin/wardogs.client";
+import { GameServers } from "../admin/game-servers";
+import { fixtureServers } from "../admin/game-server-fixture";
 import type { Staff } from "../admin/admin.types";
 import { EnvService } from "../env/env.service";
 import { ApplicantAuth } from "./applicant.auth";
@@ -41,15 +42,23 @@ describe("application HTTP routing and privacy", () => {
     finishApproval: jest.fn(),
   };
   const admin = { read: jest.fn(async (resource: string) => ({ resource })), act: jest.fn() };
+  const applicantAuth = { authenticate: async () => identity, login: jest.fn(), callback: jest.fn() };
 
   beforeAll(async () => {
     const module = await Test.createTestingModule({
       // Deliberately register the existing controller first. Its old generic
       // resource route would steal the applications endpoint in this order.
-      controllers: [AdminApiController, StaffApplicationsController, ApplicantApiController, ApplicantAuthController],
+      controllers: [
+        AdminApiController,
+        AdminGameController,
+        StaffApplicationsController,
+        ApplicantApiController,
+        ApplicantAuthController,
+      ],
       providers: [
         ApplicationsService,
         AdminGuard,
+        AdminServerGuard,
         ApplicantGuard,
         ApplicationsEnabledGuard,
         ApplicationsExceptionFilter,
@@ -60,9 +69,15 @@ describe("application HTTP routing and privacy", () => {
           provide: EnvService,
           useValue: { get: (key: string) => (key === "WHITELIST_APPLICATIONS_ENABLED" ? enabled : true) },
         },
-        { provide: WardogsClient, useValue: {} },
-        { provide: AdminAuth, useValue: { authenticate: async () => staff } },
-        { provide: ApplicantAuth, useValue: { authenticate: async () => identity } },
+        { provide: GameServers, useValue: fixtureServers({}) },
+        {
+          provide: AdminAuth,
+          useValue: {
+            authenticate: async () => staff,
+            serverStaff: async (actor: Staff, serverId: string) => ({ ...actor, serverId }),
+          },
+        },
+        { provide: ApplicantAuth, useValue: applicantAuth },
       ],
     }).compile();
     app = module.createNestApplication({ logger: false });
@@ -75,9 +90,33 @@ describe("application HTTP routing and privacy", () => {
   });
   afterAll(async () => app.close());
 
+  it.each([
+    [new UnauthorizedException("Expired OAuth state"), "sign_in"],
+    [new ForbiddenException("Membership screening pending"), "discord_access"],
+    [new Error("private upstream details"), "unavailable"],
+  ])("returns failed browser sign-in to the application without private details: %p", async (error, code) => {
+    applicantAuth.callback.mockRejectedValueOnce(error);
+    const response = await request(app.getHttpServer())
+      .get("/apply/auth/callback?code=private-oauth-code&state=private-state&redirect=https://example.org")
+      .expect(303);
+    expect(response.headers.location).toBe(`/whitelist?auth=${code}`);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.headers["referrer-policy"]).toBe("no-referrer");
+    expect(response.text).not.toMatch(/private-|screening/);
+  });
+
+  it("returns disabled login to the website while keeping disabled API requests as JSON errors", async () => {
+    enabled = false;
+    const response = await request(app.getHttpServer()).get("/apply/auth/login").expect(303);
+    expect(response.headers.location).toBe("/whitelist?auth=unavailable");
+    const api = await request(app.getHttpServer()).get("/apply/api/me").expect(503);
+    expect(api.headers.location).toBeUndefined();
+    expect(api.body.message).toBeDefined();
+  });
+
   it("routes the administrator applications list separately from existing resources", async () => {
     const response = await request(app.getHttpServer()).get("/admin/api/applications").expect(200);
-    expect(response.body).toEqual({ applications: [privateRow] });
+    expect(response.body).toEqual({ serverId: "primary", applications: [privateRow] });
     expect(admin.read).not.toHaveBeenCalled();
     expect(store.list).toHaveBeenCalledTimes(1);
   });
@@ -86,7 +125,7 @@ describe("application HTTP routing and privacy", () => {
     async (resource) => {
       const response = await request(app.getHttpServer()).get(`/admin/api/${resource}`).expect(200);
       expect(response.body).toEqual({ resource });
-      expect(admin.read).toHaveBeenCalledWith(resource);
+      expect(admin.read).toHaveBeenCalledWith(resource, "primary");
     },
   );
   it.each(["moderator", "viewer"] as const)("does not send private contact data to %s", async (role) => {
@@ -97,7 +136,7 @@ describe("application HTTP routing and privacy", () => {
   });
   it("ignores an attempted identity selector and returns only the signed-in applicant's public projection", async () => {
     const response = await request(app.getHttpServer()).get("/apply/api/me?userId=999999999999999999").expect(200);
-    expect(store.own).toHaveBeenCalledWith(identity.userId);
+    expect(store.own).toHaveBeenCalledWith(identity.userId, "primary");
     expect(response.body.userId).toBe(identity.userId);
     expect(response.body.emailRequired).toBe(true);
     expect(response.body.application).not.toHaveProperty("reviewReason");
@@ -121,10 +160,11 @@ describe("application HTTP routing and privacy", () => {
       .expect(400);
     expect(store.create).not.toHaveBeenCalled();
   });
-  it("returns the Discord fallback while applications are disabled", async () => {
+  it("keeps application data unavailable while applications are disabled", async () => {
     enabled = false;
     const response = await request(app.getHttpServer()).get("/apply/api/me").expect(503);
-    expect(response.body.message).toContain("discord.gg/t5NSzurtRS");
+    expect(response.body.message).toContain("this website");
+    expect(response.body.message).not.toContain("discord.gg");
     await request(app.getHttpServer()).get("/admin/api/applications").expect(503);
     expect(store.own).not.toHaveBeenCalled();
     expect(store.list).not.toHaveBeenCalled();

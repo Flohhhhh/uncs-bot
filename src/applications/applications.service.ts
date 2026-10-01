@@ -10,7 +10,8 @@ import {
 import { z } from "zod";
 import { AdminService } from "../admin/admin.service";
 import type { ActionResult, Staff } from "../admin/admin.types";
-import { WardogsClient } from "../admin/wardogs.client";
+import { GameServers } from "../admin/game-servers";
+import { LEGACY_SERVER_ID } from "../common/game-server";
 import { EnvService } from "../env/env.service";
 import { ApplicationsStore } from "./applications.store";
 import {
@@ -28,13 +29,13 @@ export class ApplicationsService {
     private readonly store: ApplicationsStore,
     private readonly admin: AdminService,
     private readonly env: EnvService,
-    private readonly game: WardogsClient,
+    private readonly servers: GameServers,
   ) {}
 
   enabled() {
     if (!this.env.get("WHITELIST_APPLICATIONS_ENABLED"))
       throw new ServiceUnavailableException(
-        "Website applications are not open yet. Use the whitelisting channel at discord.gg/t5NSzurtRS.",
+        "Website applications are not open yet. Please check back on this website.",
       );
   }
 
@@ -47,12 +48,15 @@ export class ApplicationsService {
     if (staff.role !== "admin") throw new ForbiddenException("Only administrators can review private applications.");
   }
 
-  async me(identity: ApplicantIdentity) {
+  async me(identity: ApplicantIdentity, selected?: string) {
     this.enabled();
+    const serverId = this.servers.resolve(selected ?? LEGACY_SERVER_ID);
     return {
       ...identity,
       emailRequired: this.emailRequired(),
-      application: ownApplication(await this.store.own(identity.userId)),
+      serverId,
+      servers: this.servers.list().map(({ id, name }) => ({ id, name })),
+      application: ownApplication(await this.store.own(identity.userId, serverId)),
     };
   }
 
@@ -61,6 +65,7 @@ export class ApplicationsService {
     const parsed = applicationSchema.safeParse(input);
     if (!parsed.success)
       throw new BadRequestException("Check your SteamID64, relationship, email and required agreements.");
+    const serverId = this.servers.resolve(parsed.data.serverId);
     if (this.emailRequired() && !parsed.data.email)
       throw new BadRequestException("Enter an email for application and access updates.");
     const now = Date.now();
@@ -75,6 +80,7 @@ export class ApplicationsService {
     const data = parsed.data;
     const submittedAt = new Date();
     const application = await this.store.create({
+      serverId,
       discordUserId: identity.userId,
       discordDisplayName: identity.displayName,
       steamId: data.steamId,
@@ -99,7 +105,10 @@ export class ApplicationsService {
 
   async list(staff: Staff) {
     this.requireAdmin(staff);
-    return { applications: await this.store.list() };
+    return {
+      serverId: this.servers.resolve(staff.serverId),
+      applications: await this.store.list(this.servers.resolve(staff.serverId)),
+    };
   }
 
   async review(staff: Staff, applicationId: string, kind: "approve" | "decline" | "recheck", input: unknown) {
@@ -108,8 +117,11 @@ export class ApplicationsService {
     if (!z.uuid().safeParse(applicationId).success || !parsed.success)
       throw new BadRequestException("A valid application, action ID and review reason are required.");
     const request = parsed.data;
-    const claim = await this.store.claim(applicationId, request, kind, staff);
+    const serverId = this.servers.resolve(staff.serverId);
+    const actor = { ...staff, serverId };
+    const claim = await this.store.claim(applicationId, request, kind, actor);
     if (!claim.application) throw new NotFoundException("Application not found.");
+    if (claim.application.serverId !== serverId) throw new NotFoundException("Application not found on this server.");
     if (!claim.claimed) {
       const record = claim.application;
       const sameKind = record.reviewKind === kind;
@@ -143,7 +155,7 @@ export class ApplicationsService {
     let outcome: ActionResult;
     try {
       if (kind === "recheck") {
-        const list = await this.game.whitelist();
+        const list = await this.servers.get(serverId).whitelist();
         const active = list.entries.some((entry) => entry.steamId === claim.application.steamId && entry.active);
         outcome = active
           ? { state: "applied", message: "Whitelist access is confirmed in the running game. No game change was sent." }
@@ -153,8 +165,9 @@ export class ApplicationsService {
                 "Access is not confirmed in the running whitelist. The application still needs review. No game change was sent.",
             };
       } else {
-        const result = await this.admin.act(staff, {
+        const result = await this.admin.act(actor, {
           id: request.id,
+          serverId,
           action: "whitelist-add",
           steamId: claim.application.steamId,
           // The shared RCON audit is visible to more staff roles than private

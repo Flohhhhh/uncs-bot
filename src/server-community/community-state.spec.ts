@@ -157,7 +157,7 @@ describe("community observation semantics", () => {
   });
 
   it("bounds remembered players and deduplicates identical player rows", () => {
-    const ids = Array.from({ length: 700 }, (_, index) => `7656119${String(index).padStart(10, "0")}`);
+    const ids = Array.from({ length: 700 }, (_, index) => `765611980${String(index).padStart(8, "0")}`);
     const before = observeCommunity(initialCommunityState(), snapshot([...ids, ...ids]), 1_000);
     expect(before.state.present.size).toBe(MAX_ROSTER);
   });

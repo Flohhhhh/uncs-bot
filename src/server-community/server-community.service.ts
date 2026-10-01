@@ -1,11 +1,12 @@
 import { Injectable, Logger, type OnApplicationBootstrap, type OnModuleDestroy } from "@nestjs/common";
 import { Client } from "discord.js";
 import { createHash, randomUUID } from "node:crypto";
-import { AdminSettings } from "../admin/admin.settings";
 import { AdminStore } from "../admin/admin.store";
 import { actionSchema, type ActionResult, type AdminAction, type Staff } from "../admin/admin.types";
 import { RconError, WardogsClient } from "../admin/wardogs.client";
 import { EnvService } from "../env/env.service";
+import { GameServers } from "../admin/game-servers";
+import type { GameServerSummary } from "../common/game-server";
 import { initialCommunityState, observeCommunity, statusCard, type CommunitySnapshot } from "./community-state";
 
 const SYSTEM_ACTOR: Staff = {
@@ -17,11 +18,49 @@ const SYSTEM_ACTOR: Staff = {
 const MAX_QUEUE = 64;
 const MAX_SENDS_PER_TICK = 1;
 const MESSAGE_TTL_MS = 60_000;
-type QueuedMessage = { action: AdminAction; expiresAt: number };
+type QueuedMessage = { action: AdminAction; readyAt: number; expiresAt: number; followUps: string[] };
 
 @Injectable()
 export class ServerCommunityService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(ServerCommunityService.name);
+  private readonly workers: ServerCommunityWorker[] = [];
+  constructor(
+    private readonly servers: GameServers,
+    private readonly store: AdminStore,
+    private readonly env: EnvService,
+    private readonly discord: Client,
+  ) {}
+  onApplicationBootstrap() {
+    if (!this.env.get("SERVER_COMMUNITY_ENABLED")) return;
+    for (const server of this.servers.list()) {
+      const configured = this.env.get("WARDOGS_SERVERS");
+      const card = configured?.find((entry) => entry.id === server.id)?.communityStatus;
+      // A registry never reuses the legacy shared status message for every server.
+      try {
+        const worker = new ServerCommunityWorker(
+          this.servers.get(server.id),
+          this.store,
+          this.env,
+          this.discord,
+          server,
+          configured ? (card ?? null) : undefined,
+        );
+        this.workers.push(worker);
+        worker.onApplicationBootstrap();
+      } catch {
+        this.logger.warn(`Community messages for ${server.id} need connection setup. Other servers remain available.`);
+      }
+    }
+  }
+  onModuleDestroy() {
+    for (const worker of this.workers) worker.onModuleDestroy();
+    this.workers.length = 0;
+  }
+}
+
+/** Each server owns its observation baseline, message queue and backoff timer. */
+export class ServerCommunityWorker implements OnApplicationBootstrap, OnModuleDestroy {
+  private readonly logger = new Logger(ServerCommunityWorker.name);
   private state = initialCommunityState();
   private queue: QueuedMessage[] = [];
   private snapshot: CommunitySnapshot | null = null;
@@ -35,15 +74,18 @@ export class ServerCommunityService implements OnApplicationBootstrap, OnModuleD
   constructor(
     private readonly game: WardogsClient,
     private readonly store: AdminStore,
-    private readonly settings: AdminSettings,
     private readonly env: EnvService,
     private readonly discord: Client,
+    private readonly server: GameServerSummary = { id: "primary", name: "The UNCs", version: "0".repeat(64) },
+    private readonly card?: { channelId: string; messageId: string } | null,
   ) {}
 
   private options() {
     const enabled = this.env.get("SERVER_COMMUNITY_ENABLED") === true;
-    const channelId = this.env.get("SERVER_COMMUNITY_DISCORD_CHANNEL_ID");
-    const messageId = this.env.get("SERVER_COMMUNITY_DISCORD_MESSAGE_ID");
+    const channelId =
+      this.card === undefined ? this.env.get("SERVER_COMMUNITY_DISCORD_CHANNEL_ID") : this.card?.channelId;
+    const messageId =
+      this.card === undefined ? this.env.get("SERVER_COMMUNITY_DISCORD_MESSAGE_ID") : this.card?.messageId;
     const welcome = enabled && this.env.get("SERVER_COMMUNITY_WELCOME_ENABLED") === true;
     const round = enabled && this.env.get("SERVER_COMMUNITY_ROUND_ENABLED") === true;
     const status =
@@ -98,24 +140,43 @@ export class ServerCommunityService implements OnApplicationBootstrap, OnModuleD
       this.snapshot = current;
       const options = this.options();
       if (observation.baseline) this.queue = [];
-      if (options.round && observation.round)
-        this.enqueue({ action: "broadcast", message: this.env.get("SERVER_COMMUNITY_ROUND_MESSAGE") }, now, true);
-      if (options.welcome) {
-        const available = MAX_QUEUE - this.queue.length;
-        if (observation.joined.length > available)
-          this.logger.warn("Community message queue is full; excess welcomes were skipped.");
-        for (const steamId of observation.joined.slice(0, available))
-          this.enqueue({ action: "message", steamId, message: this.env.get("SERVER_COMMUNITY_WELCOME_MESSAGE") }, now);
-      }
       const connected = new Set(
         current.status.players.current > 0 ? current.players.map((player) => player.steamId) : [],
       );
       this.queue = this.queue.filter(
-        ({ action, expiresAt }) => expiresAt > now && (!("steamId" in action) || connected.has(action.steamId)),
+        ({ action, expiresAt }) =>
+          expiresAt > now &&
+          (action.action === "message" ? options.welcome && connected.has(action.steamId) : options.round),
       );
+      if (options.round && observation.round)
+        this.enqueue({ action: "broadcast", message: this.env.get("SERVER_COMMUNITY_ROUND_MESSAGE") }, now, true);
+      if (options.welcome) {
+        const messages = this.env.get("SERVER_COMMUNITY_WELCOME_MESSAGES") ?? [
+          this.env.get("SERVER_COMMUNITY_WELCOME_MESSAGE"),
+        ];
+        const readyAt = now + this.env.get("SERVER_COMMUNITY_WELCOME_DELAY_SECONDS") * 1000;
+        const available = MAX_QUEUE - this.queue.length;
+        if (observation.joined.length > available)
+          this.logger.warn("Community message queue is full; excess welcomes were skipped.");
+        for (const steamId of observation.joined.slice(0, available))
+          this.enqueue({ action: "message", steamId, message: messages[0] }, readyAt, false, messages.slice(1));
+      }
       for (let sent = 0; sent < MAX_SENDS_PER_TICK && this.queue.length && !this.stopped; sent++) {
-        const next = this.queue.shift()!;
-        if (next.expiresAt > Date.now()) await this.deliver(next.action);
+        // A future welcome must not hold up another recipient or a ready round message.
+        const index = this.queue.findIndex((item) => item.readyAt <= Date.now() && item.expiresAt > Date.now());
+        if (index < 0) break;
+        const [next] = this.queue.splice(index, 1);
+        const confirmed = await this.deliver(next.action);
+        if (confirmed && !this.stopped && next.action.action === "message" && next.followUps.length) {
+          // Space from the actual send, so a delayed queue never dumps several messages at once.
+          const readyAt = Date.now() + this.env.get("SERVER_COMMUNITY_WELCOME_SPACING_SECONDS") * 1000;
+          this.enqueue(
+            { action: "message", steamId: next.action.steamId, message: next.followUps[0] },
+            readyAt,
+            false,
+            next.followUps.slice(1),
+          );
+        }
       }
       if (!this.stopped) await this.updateCard(true);
       return current.status.players.current > 0 ? 5_000 : 15_000;
@@ -124,10 +185,12 @@ export class ServerCommunityService implements OnApplicationBootstrap, OnModuleD
     }
   }
 
-  private enqueue(input: Record<string, unknown>, now: number, first = false) {
+  private enqueue(input: Record<string, unknown>, readyAt: number, first = false, followUps: string[] = []) {
     const parsed = actionSchema.safeParse({
       ...input,
       id: randomUUID(),
+      serverId: this.server.id,
+      serverVersion: this.server.version,
       reason:
         input.action === "message"
           ? "Automatic observed-join welcome."
@@ -137,7 +200,7 @@ export class ServerCommunityService implements OnApplicationBootstrap, OnModuleD
       this.logger.warn("Community message was skipped because its configured text is invalid.");
       return;
     }
-    const item = { action: parsed.data, expiresAt: now + MESSAGE_TTL_MS };
+    const item = { action: parsed.data, readyAt, expiresAt: readyAt + MESSAGE_TTL_MS, followUps };
     if (first) this.queue.unshift(item);
     else this.queue.push(item);
     if (this.queue.length > MAX_QUEUE) {
@@ -148,11 +211,15 @@ export class ServerCommunityService implements OnApplicationBootstrap, OnModuleD
   private async deliver(action: AdminAction) {
     const requestHash = createHash("sha256").update(JSON.stringify(action)).digest("hex");
     try {
-      const started = await this.store.begin(SYSTEM_ACTOR, action, requestHash);
-      if (!started.created || this.stopped) return;
+      const started = await this.store.begin(
+        { ...SYSTEM_ACTOR, serverId: this.server.id, serverVersion: this.server.version },
+        action,
+        requestHash,
+      );
+      if (!started.created || this.stopped) return false;
     } catch {
       this.logger.warn("Community message was not sent because its audit record could not be saved.");
-      return;
+      return false;
     }
     let result: ActionResult;
     try {
@@ -169,7 +236,9 @@ export class ServerCommunityService implements OnApplicationBootstrap, OnModuleD
       this.logger.warn(
         "Community message result could not be saved; inspect its started audit record. No retry is scheduled.",
       );
+      return false;
     }
+    return result.state === "accepted" || result.state === "applied";
   }
 
   private async updateCard(online: boolean) {
@@ -182,7 +251,8 @@ export class ServerCommunityService implements OnApplicationBootstrap, OnModuleD
     if (key === this.cardKey && now - this.cardSavedAt < 300_000) return;
     this.cardAttemptAt = now;
     try {
-      const guildId = this.settings.get().guildId;
+      const guildId = this.env.get("ADMIN_GUILD_ID");
+      if (!guildId) return;
       const channel = await this.discord.channels.fetch(options.channelId!);
       if (!channel || !("guildId" in channel) || channel.guildId !== guildId || !("messages" in channel)) return;
       const message = await channel.messages.fetch(options.messageId!);

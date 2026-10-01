@@ -1,9 +1,29 @@
 import { z } from "zod";
+import { isPublicIndividualSteamId } from "../common/steam-id";
+import type { StaffRole } from "../common/admin-policy";
+import { gameServerId } from "../common/game-server";
+export { canAct, moderatorActions } from "../common/admin-policy";
+export type { StaffRole } from "../common/admin-policy";
 
-export type StaffRole = "viewer" | "moderator" | "admin";
-export type Staff = { id: string; name: string; role: StaffRole; csrf: string };
-export type ActionResult = { state: "applied" | "accepted" | "pending" | "failed" | "unknown"; message: string };
-export const steamId = z.string().regex(/^7656119\d{10}$/, "Enter a SteamID64 (17 digits starting with 7656119).");
+export type Staff = {
+  id: string;
+  name: string;
+  role: StaffRole;
+  csrf: string;
+  serverId?: string;
+  serverVersion?: string;
+};
+export type ActionResult = {
+  state: "applied" | "accepted" | "pending" | "failed" | "unknown";
+  message: string;
+  /** A confirmed no-op or a team precondition refusal never needs a follow-up respawn. */
+  changed?: boolean;
+  /** Present only when the saved configuration exactly matches the intended document. */
+  revision?: string;
+};
+export const steamId = z
+  .string()
+  .refine(isPublicIndividualSteamId, "Enter a 17-digit SteamID64 for a personal Steam account.");
 const reason = z
   .string()
   .trim()
@@ -21,17 +41,88 @@ const selection = z
   .min(1)
   .max(150)
   .regex(/^[\w./-]+$/);
-const base = { id: z.uuid(), reason };
+const base = {
+  id: z.uuid(),
+  reason,
+  serverId: gameServerId.optional(),
+  serverVersion: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
+};
 const player = { ...base, steamId };
+const expectedRound = z.object({ map: selection, startedAt: z.number().finite().nonnegative() }).strict().optional();
+const revision = z
+  .string()
+  .min(1)
+  .max(200)
+  .regex(/^[^\r\n"]+$/);
+export const mapSelectionSchema = z
+  .object({
+    map: selection,
+    experiences: z.array(selection).max(10),
+    lighting: selection.optional(),
+    zoneAlternator: selection.optional(),
+  })
+  .strict();
 export const actionSchema = z.discriminatedUnion("action", [
+  z
+    .object({
+      ...base,
+      action: z.literal("settings-save"),
+      revision,
+      changes: z
+        .record(z.string(), z.union([z.string().max(2048), z.number().finite(), z.boolean()]))
+        .refine(
+          (changes) => Object.keys(changes).length > 0 && Object.keys(changes).length <= 15,
+          "Choose settings to change.",
+        ),
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      action: z.literal("rotation-save"),
+      revision,
+      entries: z.array(mapSelectionSchema).min(1).max(100),
+    })
+    .strict(),
+  z
+    .object({
+      ...base,
+      action: z.literal("map-next"),
+      revision,
+      currentIndex: z.number().int().min(0),
+      currentMap: selection,
+      entry: mapSelectionSchema,
+    })
+    .strict(),
   z.object({ ...player, action: z.literal("kick") }).strict(),
   z.object({ ...player, action: z.literal("ban"), confirm: steamId }).strict(),
   z.object({ ...player, action: z.literal("unban"), confirm: steamId }).strict(),
   z.object({ ...player, action: z.literal("whitelist-add") }).strict(),
   z.object({ ...player, action: z.literal("whitelist-remove"), confirm: steamId }).strict(),
-  z.object({ ...player, action: z.literal("kill"), confirm: steamId }).strict(),
+  z
+    .object({
+      ...player,
+      action: z.literal("kill"),
+      confirm: steamId,
+      expectedFaction: selection.optional(),
+      expectedRound,
+    })
+    .strict(),
   z.object({ ...player, action: z.literal("message"), message }).strict(),
-  z.object({ ...player, action: z.literal("team"), faction: selection, confirm: steamId }).strict(),
+  z
+    .object({
+      ...player,
+      action: z.literal("team"),
+      faction: selection,
+      expectedFaction: selection.optional(),
+      expectedRound,
+      maximumTargetPlayers: z.number().int().min(1).max(50).optional(),
+      confirm: steamId,
+    })
+    .strict(),
   z.object({ ...base, action: z.literal("broadcast"), message }).strict(),
   z.object({ ...base, action: z.literal("match-end"), confirm: z.literal("END MATCH") }).strict(),
   z.object({ ...base, action: z.literal("match-restart"), confirm: z.literal("RESTART MATCH") }).strict(),
@@ -50,10 +141,6 @@ export const actionSchema = z.discriminatedUnion("action", [
 ]);
 export type AdminAction = z.infer<typeof actionSchema>;
 export type ActionName = AdminAction["action"];
-export const moderatorActions: ActionName[] = ["kick", "ban", "unban", "message", "kill", "team", "broadcast"];
-export function canAct(role: StaffRole, action: ActionName) {
-  return role === "admin" || (role === "moderator" && moderatorActions.includes(action));
-}
 
 export const statusSchema = z.object({
   serverName: z.string(),
@@ -72,19 +159,26 @@ export const statusSchema = z.object({
   matchSeconds: z.number().optional(),
   scoreCap: z.number().optional(),
 });
-export const playersSchema = z.object({
-  players: z.array(
-    z.object({
-      name: z.string(),
-      steamId,
-      faction: z.string().nullable().optional(),
-      kills: z.number().optional(),
-      deaths: z.number().optional(),
-      cash: z.number().optional(),
-      pingMs: z.number().optional(),
-    }),
-  ),
-});
+export const playersSchema = z
+  .object({
+    players: z.array(
+      z.object({
+        name: z.string(),
+        steamId: steamId.nullable(),
+        faction: z.string().nullable().optional(),
+        kills: z.number().optional(),
+        deaths: z.number().optional(),
+        cash: z.number().optional(),
+        pingMs: z.number().optional(),
+      }),
+    ),
+  })
+  .transform(({ players }) => ({
+    // The official demo includes an unlinked player. Never invent an actionable
+    // identity for that row, or hide that player controls show only part of a roster.
+    players: players.flatMap((player) => (player.steamId === null ? [] : [{ ...player, steamId: player.steamId }])),
+    unlinkedPlayerCount: players.filter((player) => player.steamId === null).length,
+  }));
 export const bansSchema = z.object({
   bans: z.array(
     z.object({
@@ -122,9 +216,17 @@ export const configDocumentSchema = z.object({
         section: z.string(),
         writable: z.boolean().optional(),
         allowedKeys: z.array(z.string()).optional(),
+        appliesWhen: z.string().optional(),
+        state: z.string().optional(),
         keyOverrides: z
           .array(
-            z.object({ key: z.string(), writable: z.boolean().optional(), lockedBy: z.string().nullable().optional() }),
+            z.object({
+              key: z.string(),
+              writable: z.boolean().optional(),
+              lockedBy: z.string().nullable().optional(),
+              appliesWhen: z.string().optional(),
+              state: z.string().optional(),
+            }),
           )
           .optional(),
       }),

@@ -6,7 +6,7 @@ import type { Client } from "pg";
 import type { Database } from "../database/database.types";
 import { supporterActions, supporterMembers, supporterPayments } from "../database/supporters.schema";
 import { SupportersStore } from "./supporters.store";
-import type { FounderPolicy, PatreonObservation, SupporterMutation } from "./supporters.types";
+import type { FounderPolicy, ManualMemberInput, PatreonObservation, SupporterMutation } from "./supporters.types";
 import type { Staff } from "../admin/admin.types";
 
 const id = randomUUID();
@@ -63,12 +63,20 @@ function fixture() {
     recordedAt: new Date(),
     verifiedBy: staff.id,
   };
-  const state: { duplicate: boolean; earlier: boolean; action: Record<string, unknown> | null } = {
+  const state: {
+    duplicate: boolean;
+    manualDuplicate: boolean;
+    earlier: boolean;
+    action: Record<string, unknown> | null;
+  } = {
     duplicate: false,
+    manualDuplicate: false,
     earlier: false,
     action: null,
   };
   const query = jest.fn(async (config: { text: string }, _params: unknown[]) => {
+    if (config.text.startsWith('insert into "supporter_members"') && config.text.includes("returning"))
+      return { rows: state.manualDuplicate ? [] : [[id]] };
     if (config.text.includes('from "supporter_members"') && config.text.endsWith("for update"))
       return { rows: [row(supporterMembers, member)] };
     if (config.text.includes('from "supporter_actions"'))
@@ -89,6 +97,87 @@ function fixture() {
   };
 }
 describe("supporter persistence and founder eligibility", () => {
+  it("searches the campaign's full ledger before the result cap using literal bound parameters", async () => {
+    const { store, query } = fixture();
+    const search = "old%_member';--";
+    await store.list("123", policy, undefined, search);
+    const [statement, values] = query.mock.calls[0];
+    expect(statement.text).not.toContain(search);
+    expect(values).toContain(search);
+    expect(values).toContain("123");
+    expect(statement.text).toContain("WHERE m.campaign_id =");
+    expect(statement.text).toContain("strpos(lower(coalesce(m.display_name, ''))");
+    expect(statement.text).toContain("strpos(lower(m.patreon_member_id)");
+    expect(statement.text).toContain("strpos(coalesce(m.discord_id, '')");
+    expect(statement.text).toContain("strpos(coalesce(m.steam_id, '')");
+    expect(statement.text.indexOf("strpos(")).toBeLessThan(statement.text.indexOf("LIMIT 100"));
+  });
+  const manualInput = (): ManualMemberInput => ({
+    id: randomUUID(),
+    patreonMemberId: "member-123",
+    displayName: "Member checked by staff",
+    campaignMembershipVerified: true,
+    reason: "Checked this membership on the UNC creator page",
+  });
+  it("atomically records a manual member and durable audit without inventing signed or payment evidence", async () => {
+    const { store, query } = fixture();
+    const input = manualInput();
+    await expect(store.register(input, staff, "123", policy)).resolves.toMatchObject({ ok: true, replayed: false });
+    const [insert, values] = query.mock.calls.find(([config]) =>
+      config.text.startsWith('insert into "supporter_members"'),
+    )!;
+    expect(insert.text).toContain('on conflict ("campaign_id","patreon_member_id") do nothing');
+    expect(values).toContain("unverified");
+    expect(values).not.toContain("Paid");
+    expect(values).not.toContain("active_patron");
+    const [, audit] = query.mock.calls.find(([config]) => config.text.startsWith('insert into "supporter_actions"'))!;
+    expect(audit).toEqual(expect.arrayContaining([input.id, staff.id, "manual-member", input.reason]));
+    expect(audit).toContain(JSON.stringify({ patreonMemberId: input.patreonMemberId, campaignMembershipVerified: 1 }));
+    expect(
+      query.mock.calls.some(([config]) =>
+        /insert into "supporter_(payments|founders|observations)"|^update /.test(config.text),
+      ),
+    ).toBe(false);
+    expect(query.mock.calls[0][0].text).toBe("begin");
+    expect(query.mock.calls.some(([config]) => config.text === "commit")).toBe(true);
+  });
+  it("does not overwrite a provider member already created by a webhook or another staff request", async () => {
+    const { store, query, state } = fixture();
+    state.manualDuplicate = true;
+    await expect(store.register(manualInput(), staff, "123", policy)).rejects.toMatchObject({ status: 409 });
+    expect(
+      query.mock.calls.some(
+        ([config]) => config.text.startsWith("update") || config.text.startsWith('insert into "supporter_actions"'),
+      ),
+    ).toBe(false);
+    expect(query.mock.calls.at(-1)![0].text).toBe("rollback");
+  });
+  it("replays manual registration only for its original actor, campaign and exact payload", async () => {
+    const { store, state } = fixture();
+    const input = manualInput();
+    state.manualDuplicate = true;
+    state.action = {
+      id: input.id,
+      memberId: id,
+      actorId: staff.id,
+      actorName: staff.name,
+      kind: "manual-member",
+      reason: input.reason,
+      fingerprint: createHash("sha256")
+        .update(JSON.stringify({ kind: "manual-member", campaignId: "123", ...input }))
+        .digest("hex"),
+      details: {},
+      createdAt: new Date(),
+    };
+    await expect(store.register(input, staff, "123", policy)).resolves.toMatchObject({ replayed: true });
+    await expect(
+      store.register({ ...input, reason: "Different evidence" }, staff, "123", policy),
+    ).rejects.toMatchObject({ status: 409 });
+    await expect(store.register(input, { ...staff, id: "999999999999999999" }, "123", policy)).rejects.toMatchObject({
+      status: 409,
+    });
+    await expect(store.register(input, staff, "456", policy)).rejects.toMatchObject({ status: 409 });
+  });
   it("deduplicates before changing member state and commits signed receipt processing atomically", async () => {
     const { store, query, state } = fixture();
     state.duplicate = true;
@@ -127,7 +216,7 @@ describe("supporter persistence and founder eligibility", () => {
     );
     expect(query.mock.calls.some(([config]) => config.text.startsWith('insert into "supporter_payments"'))).toBe(false);
   });
-  it.each(["low", "end", "before", "signed", "not-first", "unlinked", "earlier"])(
+  it.each(["low", "end", "before", "signed", "not-first", "unlinked", "invalid-steam", "earlier"])(
     "rejects founder award for %s evidence",
     async (caseName) => {
       const { store, query, payment, member, state } = fixture();
@@ -137,6 +226,7 @@ describe("supporter persistence and founder eligibility", () => {
       if (caseName === "signed") payment.source = "signed_status";
       if (caseName === "not-first") payment.firstSuccessfulPaymentVerified = false;
       if (caseName === "unlinked") member.discordId = "";
+      if (caseName === "invalid-steam") member.steamId = "76561190000000001";
       if (caseName === "earlier") state.earlier = true;
       await expect(
         store.mutate(

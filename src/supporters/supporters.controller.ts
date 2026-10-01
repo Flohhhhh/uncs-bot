@@ -10,6 +10,7 @@ import {
   Injectable,
   Param,
   Post,
+  Query,
   Req,
   UseFilters,
   UseGuards,
@@ -54,8 +55,12 @@ export class PatreonWebhookController {
 export class SupportersAdminController {
   constructor(private readonly service: SupportersService) {}
   @Get()
-  list(@Req() req: StaffRequest) {
-    return this.service.list(req.staff);
+  list(@Req() req: StaffRequest, @Query("search") search: unknown) {
+    return this.service.list(req.staff, search);
+  }
+  @Post("manual-member")
+  register(@Req() req: StaffRequest, @Body() body: unknown) {
+    return this.service.register(req.staff, body);
   }
   @Post(":id/link")
   link(@Req() req: StaffRequest, @Param("id") id: string, @Body() body: unknown) {

@@ -3,6 +3,9 @@ import type { EnvService } from "../env/env.service";
 import { TelemetryService } from "./telemetry.service";
 import type { TelemetryStore } from "./telemetry.store";
 import { emptyTotals, periodMilliseconds } from "./telemetry.types";
+import { fixtureServers } from "../admin/game-server-fixture";
+import { GameServers } from "../admin/game-servers";
+import { AdminSettings } from "../admin/admin.settings";
 
 const token = "dedicated-feed-token-".repeat(3);
 const steamId = "76561198000000001";
@@ -19,9 +22,12 @@ function fixture(enabled = true, secret = token, rcon = "different-rcon-password
     tracking: jest.fn().mockResolvedValue(null),
     events: jest.fn().mockResolvedValue([]),
   };
+  const servers = fixtureServers({});
+  servers.feedToken = () => (secret !== rcon ? secret : undefined);
   const service = new TelemetryService(
     store as unknown as TelemetryStore,
     { get: (key: string) => values[key] } as EnvService,
+    servers,
   );
   const payload = {
     serverId: randomUUID(),
@@ -31,6 +37,40 @@ function fixture(enabled = true, secret = token, rcon = "different-rcon-password
   return { service, store, payload };
 }
 describe("telemetry authorization and reporting", () => {
+  it("binds feed authorization and snapshot caches to configured servers, never the payload UUID", async () => {
+    const f = fixture();
+    const values: Record<string, unknown> = {
+      WARDOGS_FEED_ENABLED: true,
+      WARDOGS_SERVERS: [
+        { id: "east", name: "East", rconUrl: "https://east.example.test", password: "east-rcon", feedToken: token },
+        {
+          id: "event",
+          name: "Events",
+          rconUrl: "https://events.example.test",
+          password: "event-rcon",
+          feedToken: token + "-event",
+        },
+      ],
+    };
+    const env = { get: (key: string) => values[key] } as EnvService;
+    const service = new TelemetryService(
+      f.store as unknown as TelemetryStore,
+      env,
+      new GameServers(new AdminSettings(env)),
+    );
+    await expect(service.ingest(`Bearer ${token}`, f.payload)).rejects.toMatchObject({ status: 400 });
+    await expect(service.ingest(`Bearer ${token}`, f.payload, "event")).rejects.toMatchObject({ status: 401 });
+    expect(f.store.ingest).not.toHaveBeenCalled();
+    await service.leaderboard("week", "east");
+    await service.leaderboard("week", "event");
+    await service.ingest(`Bearer ${token}`, f.payload, "east");
+    expect(f.store.ingest).toHaveBeenCalledWith(expect.objectContaining({ serverId: f.payload.serverId }), now, "east");
+    await service.leaderboard("week", "event");
+    expect(f.store.snapshot).toHaveBeenCalledTimes(2);
+    await service.leaderboard("week", "east");
+    expect(f.store.snapshot).toHaveBeenCalledTimes(3);
+    expect(f.store.snapshot.mock.calls.map((call) => call[3])).toEqual(["east", "event", "east"]);
+  });
   beforeEach(() => jest.useFakeTimers().setSystemTime(now));
   afterEach(() => jest.useRealTimers());
   it("stays disconnected with no database reads when disabled", async () => {
@@ -82,6 +122,7 @@ describe("telemetry authorization and reporting", () => {
         events: [expect.objectContaining({ eventTime: 12.5, victimSteamId: steamId })],
       }),
       now,
+      "primary",
     );
     store.tracking.mockResolvedValue({ firstReceivedAt: now, lastReceivedAt: now });
     await expect(service.leaderboard()).resolves.toMatchObject({
@@ -95,8 +136,8 @@ describe("telemetry authorization and reporting", () => {
     const { service, store } = fixture();
     const result = await service.combat(period);
     const since = new Date(now.getTime() - periodMilliseconds[period]);
-    expect(store.snapshot).toHaveBeenCalledWith(since, now, undefined);
-    expect(store.events).toHaveBeenCalledWith(since, now);
+    expect(store.snapshot).toHaveBeenCalledWith(since, now, undefined, "primary");
+    expect(store.events).toHaveBeenCalledWith(since, now, undefined, "primary");
     expect(result).toMatchObject({ period, windowStartedAt: since.toISOString(), asOf: now.toISOString() });
   });
   it("labels quiet history without claiming the game server is offline", async () => {
@@ -133,7 +174,17 @@ describe("telemetry authorization and reporting", () => {
     await expect(service.player("7656119' OR 1=1")).rejects.toMatchObject({ status: 400 });
     expect(store.snapshot).not.toHaveBeenCalled();
     await service.player(steamId, "week");
-    expect(store.snapshot).toHaveBeenCalledWith(new Date(now.getTime() - periodMilliseconds.week), now, steamId);
-    expect(store.events).toHaveBeenCalledWith(new Date(now.getTime() - periodMilliseconds.week), now, steamId);
+    expect(store.snapshot).toHaveBeenCalledWith(
+      new Date(now.getTime() - periodMilliseconds.week),
+      now,
+      steamId,
+      "primary",
+    );
+    expect(store.events).toHaveBeenCalledWith(
+      new Date(now.getTime() - periodMilliseconds.week),
+      now,
+      steamId,
+      "primary",
+    );
   });
 });
