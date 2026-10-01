@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useState, type CSSProperties, type ReactNode } from "react";
 import { ServerLink as Link } from "../../app/server-link";
 import { useGameAdmin as useAdmin } from "../../app/context";
 import { useResource } from "../../api/use-resource";
@@ -72,7 +72,16 @@ export function OverviewPage() {
                     <span>{team.name}</span>
                     <strong>{team.score.toLocaleString()}</strong>
                   </div>
-                  <progress max={max} value={team.score} aria-label={`${team.name} score`} />
+                  <progress
+                    max={max}
+                    value={team.score}
+                    aria-label={`${team.name} score`}
+                    style={
+                      {
+                        "--faction-color": teams.find((entry) => entry.name === team.name)?.color || undefined,
+                      } as CSSProperties
+                    }
+                  />
                 </div>
               ))
             ) : (
