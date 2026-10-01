@@ -223,7 +223,7 @@ it.each([0, 1])(
     await screen.findByRole("link", { name: /Continue with Discord/ });
     expect(fetcher.mock.calls.filter(([url]) => url.endsWith("/logout"))).toHaveLength(1);
     expect(actionCalls(fetcher)).toHaveLength(0);
-    expect(unload()).toBe(false);
+    await waitFor(() => expect(unload()).toBe(false));
   },
 );
 
@@ -235,5 +235,5 @@ it("clears staff data immediately on session expiry even with an unsaved draft",
   await screen.findByRole("link", { name: /Continue with Discord/ });
   expect(screen.queryByRole("textbox", { name: /Server name/ })).not.toBeInTheDocument();
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-  expect(unload()).toBe(false);
+  await waitFor(() => expect(unload()).toBe(false));
 });
