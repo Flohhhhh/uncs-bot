@@ -5,9 +5,9 @@ import { useGameApi } from "../../api/server-client";
 import { useResource } from "../../api/use-resource";
 import type { Overview } from "../../api/types";
 import { useGameAdmin as useAdmin } from "../../app/context";
-import { Badge, Card, Empty, Modal, ReasonField, date } from "../../components/ui";
+import { Badge, Card, Empty, Modal, date } from "../../components/ui";
 import { CopyValue, DataTable } from "../../components/data-table";
-import { errorMessage, singleLine } from "../actions/policy";
+import { errorMessage } from "../actions/policy";
 
 type Event = ReturnType<typeof eventView>;
 type Events = { enabled: boolean; serverId: string; events: Event[] };
@@ -40,16 +40,15 @@ function EventReview({ review, close, finished }: { review: Review; close: () =>
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (busy || submitted.current || !canRestore) return;
-    const form = new FormData(event.currentTarget),
-      reason = String(form.get("reason") ?? "").trim();
-    if (!singleLine(reason, 3) || (confirmation && form.get("confirm") !== confirmation)) {
-      setValidation("Enter a reason and the exact confirmation shown below.");
+    const form = new FormData(event.currentTarget);
+    if (confirmation && form.get("confirm") !== confirmation) {
+      setValidation("Enter the exact confirmation shown below.");
       return;
     }
     submitted.current = true;
     setBusy(true);
     let path = "events",
-      body: Record<string, unknown> = { id, reason };
+      body: Record<string, unknown> = { id, reason: `Staff requested event ${review.kind}.` };
     if (review.kind === "start") {
       const { serverName: _name, originalLock: _lock, ...draft } = review.draft;
       body = { ...body, ...draft, confirm: confirmation };
@@ -147,7 +146,6 @@ function EventReview({ review, close, finished }: { review: Review; close: () =>
         </>
       ) : (
         <form onSubmit={(event) => void submit(event)}>
-          <ReasonField />
           {confirmation && (
             <label>
               Type {confirmation}
