@@ -161,7 +161,7 @@ function CombatView({
   );
   const player = data.player;
   const feedLabel = !data.enabled
-    ? "FEED NOT CONNECTED"
+    ? "TRACKING OFF"
     : data.feedStatus === "receiving"
       ? "FEED RECEIVING"
       : data.feedStatus === "quiet"
@@ -207,154 +207,167 @@ function CombatView({
           </div>
         </dl>
       </div>
-      {playerId ? (
-        <>
-          <div className="combat-player-heading">
-            <div>
-              <p className="eyebrow">PLAYER HISTORY / {periods[period].toUpperCase()}</p>
-              <h2>{player?.name || "Player history"}</h2>
-              <p className="muted">{playerId}</p>
-            </div>
-            <Badge>RECORDED EVENTS</Badge>
-          </div>
-          <div className="metrics">
-            <Metric label="KILLS" value={count(player?.kills)} note="Recorded kills in this period" />
-            <Metric label="DEATHS" value={count(player?.deaths)} note="Recorded deaths in this period" />
-            <Metric
-              label="K / D"
-              value={ratio(player)}
-              note={player?.deaths === 0 ? "No recorded deaths in this period" : "Per recorded death"}
-            />
-            <Metric
-              label="HEADSHOT KILLS"
-              value={count(player?.headshotKills)}
-              note={player ? `${headshotShare(player)} of recorded kills` : "Share of kills, not shooting accuracy"}
-            />
-          </div>
-        </>
+      {!data.connected && !data.trackingStartedAt && !data.totals.events ? (
+        <Empty
+          title={!data.enabled ? "Combat tracking is off" : "Waiting for the first combat events"}
+          detail="No statistics are available yet. The live game and xREALM's own killfeed can still be running."
+        />
       ) : (
-        <div className="metrics">
-          <Metric label="RECORDED KILLS" value={count(data.totals.kills)} note="Player kills, excluding suicides" />
-          <Metric label="RECORDED DEATHS" value={count(data.totals.deaths)} note="Deaths in the captured feed" />
-          <Metric label="PLAYERS RECORDED" value={count(data.totals.players)} note="Distinct players in this period" />
-          <Metric
-            label="HEADSHOT KILLS"
-            value={count(data.totals.headshotKills)}
-            note="Recorded headshot kill events"
-          />
-        </div>
-      )}
-      <Search value={query} onChange={onQuery} placeholder="Search player, SteamID, or weapon" />
-      {!playerId && (
-        <Card
-          title="Server leaderboard"
-          subtitle={`${periods[period]} · up to 100 players · select a player to view their history`}
-          badge={<Badge>RECORDED KILLS</Badge>}
-          className="combat-leaderboard"
-        >
-          {players.length ? (
-            <DataTable
-              label="Server leaderboard"
-              rows={players}
-              columns={[
-                { label: "Player", value: (entry) => entry.name || entry.steamId },
-                { label: "Kills", value: (entry) => entry.kills, firstDirection: "descending" },
-                { label: "Deaths", value: (entry) => entry.deaths, firstDirection: "descending" },
-                { label: "K / D", value: (entry) => entry.kd, firstDirection: "descending" },
-                { label: "Headshot kills", value: (entry) => entry.headshotKills, firstDirection: "descending" },
-              ]}
-              renderRow={(entry) => (
-                <tr key={entry.steamId}>
-                  <td>
-                    <strong>
-                      <PlayerLink id={entry.steamId} name={entry.name} disabled={disabled} onSelect={onSelect} />
-                    </strong>
-                    <small>
-                      <CopyValue value={entry.steamId} />
-                    </small>
-                  </td>
-                  <td>{count(entry.kills)}</td>
-                  <td>{count(entry.deaths)}</td>
-                  <td>{ratio(entry)}</td>
-                  <td>
-                    {count(entry.headshotKills)} <span className="muted">· {headshotShare(entry)}</span>
-                  </td>
-                </tr>
-              )}
-            />
+        <>
+          {playerId ? (
+            <>
+              <div className="combat-player-heading">
+                <div>
+                  <p className="eyebrow">PLAYER HISTORY / {periods[period].toUpperCase()}</p>
+                  <h2>{player?.name || "Player history"}</h2>
+                  <p className="muted">{playerId}</p>
+                </div>
+                <Badge>RECORDED EVENTS</Badge>
+              </div>
+              <div className="metrics">
+                <Metric label="KILLS" value={count(player?.kills)} note="Recorded kills in this period" />
+                <Metric label="DEATHS" value={count(player?.deaths)} note="Recorded deaths in this period" />
+                <Metric
+                  label="K / D"
+                  value={ratio(player)}
+                  note={player?.deaths === 0 ? "No recorded deaths in this period" : "Per recorded death"}
+                />
+                <Metric
+                  label="HEADSHOT KILLS"
+                  value={count(player?.headshotKills)}
+                  note={player ? `${headshotShare(player)} of recorded kills` : "Share of kills, not shooting accuracy"}
+                />
+              </div>
+            </>
           ) : (
-            <Empty
-              title={leaderboard.length ? "No matching players" : "No recorded player stats yet"}
-              detail={
-                leaderboard.length
-                  ? "Try another name or SteamID."
-                  : data.connected
-                    ? "Player history will appear as combat events arrive."
-                    : "Connect the combat feed to begin recording player history. Earlier matches are not reconstructed."
-              }
-            />
+            <div className="metrics">
+              <Metric label="RECORDED KILLS" value={count(data.totals.kills)} note="Player kills, excluding suicides" />
+              <Metric label="RECORDED DEATHS" value={count(data.totals.deaths)} note="Deaths in the captured feed" />
+              <Metric
+                label="PLAYERS RECORDED"
+                value={count(data.totals.players)}
+                note="Distinct players in this period"
+              />
+              <Metric
+                label="HEADSHOT KILLS"
+                value={count(data.totals.headshotKills)}
+                note="Recorded headshot kill events"
+              />
+            </div>
           )}
-          <p className="combat-stat-note">
-            Headshot percentage is a share of recorded kills. K/D is shown as — when no deaths were recorded.
-          </p>
-        </Card>
+          <Search value={query} onChange={onQuery} placeholder="Search player, SteamID, or weapon" />
+          {!playerId && (
+            <Card
+              title="Server leaderboard"
+              subtitle={`${periods[period]} · up to 100 players · select a player to view their history`}
+              badge={<Badge>RECORDED KILLS</Badge>}
+              className="combat-leaderboard"
+            >
+              {players.length ? (
+                <DataTable
+                  label="Server leaderboard"
+                  rows={players}
+                  columns={[
+                    { label: "Player", value: (entry) => entry.name || entry.steamId },
+                    { label: "Kills", value: (entry) => entry.kills, firstDirection: "descending" },
+                    { label: "Deaths", value: (entry) => entry.deaths, firstDirection: "descending" },
+                    { label: "K / D", value: (entry) => entry.kd, firstDirection: "descending" },
+                    { label: "Headshot kills", value: (entry) => entry.headshotKills, firstDirection: "descending" },
+                  ]}
+                  renderRow={(entry) => (
+                    <tr key={entry.steamId}>
+                      <td>
+                        <strong>
+                          <PlayerLink id={entry.steamId} name={entry.name} disabled={disabled} onSelect={onSelect} />
+                        </strong>
+                        <small>
+                          <CopyValue value={entry.steamId} />
+                        </small>
+                      </td>
+                      <td>{count(entry.kills)}</td>
+                      <td>{count(entry.deaths)}</td>
+                      <td>{ratio(entry)}</td>
+                      <td>
+                        {count(entry.headshotKills)} <span className="muted">· {headshotShare(entry)}</span>
+                      </td>
+                    </tr>
+                  )}
+                />
+              ) : (
+                <Empty
+                  title={leaderboard.length ? "No matching players" : "No recorded player stats yet"}
+                  detail={
+                    leaderboard.length
+                      ? "Try another name or SteamID."
+                      : data.connected
+                        ? "Player history will appear as combat events arrive."
+                        : "Connect the combat feed to begin recording player history. Earlier matches are not reconstructed."
+                  }
+                />
+              )}
+              <p className="combat-stat-note">
+                Headshot percentage is a share of recorded kills. K/D is shown as — when no deaths were recorded.
+              </p>
+            </Card>
+          )}
+          <Card
+            title={playerId ? "Player combat events" : "Recent combat events"}
+            subtitle={`${filtered.length} shown from the latest ${events.length} events (up to 100) · timestamps show receipt time`}
+          >
+            <div className="combat-filters">
+              <label>
+                Event type
+                <select
+                  value={eventKind}
+                  disabled={disabled}
+                  onChange={(event) => onEventKind(event.target.value === "headshot" ? "headshot" : "all")}
+                >
+                  <option value="all">All events</option>
+                  <option value="headshot">Headshot kills</option>
+                </select>
+              </label>
+              <label>
+                Weapon / cause
+                <select value={cause} disabled={disabled} onChange={(event) => onCause(event.target.value)}>
+                  <option value="">All reported causes</option>
+                  {cause && !causes.includes(cause) && <option value={cause}>{cause} (not in recent events)</option>}
+                  {causes.map((value) => (
+                    <option key={value} value={value}>
+                      {value}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <p>Filters apply to these recent events. Stats cover the full recorded period.</p>
+              {(query || cause || eventKind !== "all") && (
+                <button
+                  type="button"
+                  className="button secondary"
+                  onClick={() => {
+                    onQuery("");
+                    onCause("");
+                    onEventKind("all");
+                  }}
+                >
+                  Reset filters
+                </button>
+              )}
+            </div>
+            {filtered.length ? (
+              <EventsTable events={filtered} disabled={disabled} onSelect={onSelect} />
+            ) : (
+              <Empty
+                title={events.length ? "No events match these filters" : "No combat events recorded in this period"}
+                detail={
+                  events.length
+                    ? "Change the search, event type, or weapon filter."
+                    : "This is recorded history; an empty feed does not mean nobody played."
+                }
+              />
+            )}
+          </Card>
+        </>
       )}
-      <Card
-        title={playerId ? "Player combat events" : "Recent combat events"}
-        subtitle={`${filtered.length} shown from the latest ${events.length} events (up to 100) · timestamps show receipt time`}
-      >
-        <div className="combat-filters">
-          <label>
-            Event type
-            <select
-              value={eventKind}
-              disabled={disabled}
-              onChange={(event) => onEventKind(event.target.value === "headshot" ? "headshot" : "all")}
-            >
-              <option value="all">All events</option>
-              <option value="headshot">Headshot kills</option>
-            </select>
-          </label>
-          <label>
-            Weapon / cause
-            <select value={cause} disabled={disabled} onChange={(event) => onCause(event.target.value)}>
-              <option value="">All reported causes</option>
-              {cause && !causes.includes(cause) && <option value={cause}>{cause} (not in recent events)</option>}
-              {causes.map((value) => (
-                <option key={value} value={value}>
-                  {value}
-                </option>
-              ))}
-            </select>
-          </label>
-          <p>Filters apply to these recent events. Stats cover the full recorded period.</p>
-          {(query || cause || eventKind !== "all") && (
-            <button
-              type="button"
-              className="button secondary"
-              onClick={() => {
-                onQuery("");
-                onCause("");
-                onEventKind("all");
-              }}
-            >
-              Reset filters
-            </button>
-          )}
-        </div>
-        {filtered.length ? (
-          <EventsTable events={filtered} disabled={disabled} onSelect={onSelect} />
-        ) : (
-          <Empty
-            title={events.length ? "No events match these filters" : "No combat events recorded in this period"}
-            detail={
-              events.length
-                ? "Change the search, event type, or weapon filter."
-                : "This is recorded history; an empty feed does not mean nobody played."
-            }
-          />
-        )}
-      </Card>
     </div>
   );
 }

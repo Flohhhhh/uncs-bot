@@ -7,6 +7,35 @@ import { alice, context } from "./test-fixtures";
 vi.mock("../../api/client", () => ({ api: vi.fn() }));
 
 describe("live player controls", () => {
+  it("does not claim an empty roster while waiting for the first response", () => {
+    render(
+      <AdminContext.Provider value={{ ...context(), overview: null }}>
+        <PlayersPage />
+      </AdminContext.Provider>,
+    );
+    expect(screen.getByText("Waiting for the player list")).toBeInTheDocument();
+    expect(screen.queryByText("0 players shown")).not.toBeInTheDocument();
+    expect(screen.queryByText("No matching players")).not.toBeInTheDocument();
+  });
+  it("sorts reported cash numerically and leaves unknown balances last", () => {
+    const state = context();
+    state.overview!.players[0].cash = 0;
+    state.overview!.players[1].cash = 10000;
+    state.overview!.players[2].cash = undefined;
+    render(
+      <AdminContext.Provider value={state}>
+        <PlayersPage />
+      </AdminContext.Provider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Sort by Cash" }));
+    const rows = within(screen.getByRole("table", { name: "Live players" }))
+      .getAllByRole("row")
+      .slice(1);
+    expect(rows[0]).toHaveTextContent("Bob");
+    expect(rows[0]).toHaveTextContent("10,000");
+    expect(rows[1]).toHaveTextContent("UNC Alice");
+    expect(rows[2]).toHaveTextContent("Cara");
+  });
   it("finds pasted IDs and names with surrounding spaces", () => {
     render(
       <AdminContext.Provider value={context()}>

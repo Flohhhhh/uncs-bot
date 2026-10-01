@@ -672,6 +672,12 @@ export function PermissionsPage() {
             <td>Read</td>
             <td>Read</td>
           </tr>
+          <tr>
+            <td>Game command log</td>
+            <td>—</td>
+            <td>—</td>
+            <td>Read</td>
+          </tr>
           {rows.map(([label, action]) => (
             <tr key={action}>
               <td>{label}</td>

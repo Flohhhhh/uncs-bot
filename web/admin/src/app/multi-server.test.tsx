@@ -41,7 +41,7 @@ it("requires an explicit selection before any game read and hides inaccessible g
   expect(screen.queryByRole("link", { name: /Server settings/ })).not.toBeInTheDocument();
   expect(screen.queryByRole("link", { name: /Applications/ })).not.toBeInTheDocument();
   expect(screen.getByRole("link", { name: /Supporters/ })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Review move" })).toBeDisabled();
+  expect(screen.queryByRole("button", { name: "Review move" })).not.toBeInTheDocument();
 });
 it("cancels a previous server read and ignores its late response after a switch", async () => {
   let complete!: (response: Response) => void;

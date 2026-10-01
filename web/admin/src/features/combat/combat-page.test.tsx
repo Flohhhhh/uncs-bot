@@ -103,6 +103,25 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("CombatPage", () => {
+  it.each([false, true])("does not present zero statistics before the feed connects (enabled=%s)", async (enabled) => {
+    request.mockResolvedValue(
+      server({
+        enabled,
+        connected: false,
+        feedStatus: "waiting",
+        lastReceivedAt: null,
+        trackingStartedAt: null,
+        leaderboard: [],
+        events: [],
+        totals: { events: 0, kills: 0, deaths: 0, headshotKills: 0, players: 0 },
+      }),
+    );
+    render(page());
+    await screen.findByText(enabled ? "Waiting for the first combat events" : "Combat tracking is off");
+    expect(screen.queryByText("RECORDED KILLS", { selector: ".metric-label" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  });
   it("shows loading without inventing an empty history, then renders full-period statistics", async () => {
     const response = deferred<CombatResponse>();
     request.mockReturnValue(response.promise);
@@ -116,6 +135,15 @@ describe("CombatPage", () => {
       screen.getByText("Filters apply to these recent events. Stats cover the full recorded period."),
     ).toBeTruthy();
     expect(screen.getByText("Recorded statistics are for human review, not a cheating verdict.")).toBeTruthy();
+  });
+
+  it("keeps recorded history visible after tracking is turned off", async () => {
+    request.mockResolvedValue(server({ enabled: false, connected: false, feedStatus: "waiting" }));
+    render(page());
+    expect(await screen.findByRole("table", { name: "Server leaderboard" })).toBeInTheDocument();
+    expect(screen.getByText("TRACKING OFF")).toBeInTheDocument();
+    expect(recordedKills()?.textContent).toContain("100");
+    expect(screen.queryByText("No statistics are available yet.")).not.toBeInTheDocument();
   });
 
   it("combines search, cause and headshot filters without recomputing the period totals", async () => {
