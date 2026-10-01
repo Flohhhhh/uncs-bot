@@ -635,27 +635,18 @@ a.breadcrumb:hover {
   height: 7px;
   border: 0;
   background: #343b34;
-  accent-color: var(--orange);
+  accent-color: var(--faction-color, var(--muted));
   border-radius: 1px;
   overflow: hidden;
-}
-.score-row:nth-child(2) progress {
-  accent-color: #beb293;
-}
-.score-row:nth-child(3) progress {
-  accent-color: #859e93;
 }
 .score-row progress::-webkit-progress-bar {
   background: #343b34;
 }
 .score-row progress::-webkit-progress-value {
-  background: var(--orange);
+  background: var(--faction-color, var(--muted));
 }
-.score-row:nth-child(2) progress::-webkit-progress-value {
-  background: #beb293;
-}
-.score-row:nth-child(3) progress::-webkit-progress-value {
-  background: #859e93;
+.score-row progress::-moz-progress-bar {
+  background: var(--faction-color, var(--muted));
 }
 .quick-actions {
   display: grid;
