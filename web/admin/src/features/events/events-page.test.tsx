@@ -190,3 +190,55 @@ it("opens and closes event receipts without reading the game", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });
+
+it("keeps an event draft but blocks starting it when event-history refresh fails, including an open review", async () => {
+  const { state, rerender } = show();
+  await selectTeams();
+  fireEvent.click(screen.getByRole("button", { name: "Review event" }));
+  const fallback = request.getMockImplementation()!;
+  request.mockImplementation(async (path, init) => {
+    if (path === "events") throw new Error("Event history unavailable");
+    return fallback(path, init);
+  });
+  rerender(
+    <AdminContext.Provider value={{ ...state, refreshVersion: 1 }}>
+      <EventsPage />
+    </AdminContext.Provider>,
+  );
+  await screen.findByText("Refresh event history before continuing.");
+  const submit = screen.getByRole("button", { name: "Arm event" });
+  expect(submit).toBeDisabled();
+  fireEvent.change(screen.getByRole("textbox", { name: "Type START 50V50" }), { target: { value: "START 50V50" } });
+  fireEvent.submit(submit.closest("form")!);
+  expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+  fireEvent.click(screen.getByRole("button", { name: "Back" }));
+  expect(screen.getByRole("button", { name: "Review event" })).toBeDisabled();
+  expect(screen.getByRole("combobox", { name: "Team 1" })).toHaveValue("Valkyra");
+  request.mockImplementation(fallback);
+  rerender(
+    <AdminContext.Provider value={{ ...state, refreshVersion: 2 }}>
+      <EventsPage />
+    </AdminContext.Provider>,
+  );
+  await waitFor(() => expect(screen.getByRole("button", { name: "Review event" })).toBeEnabled());
+});
+
+it("labels stale event records while retaining the stop control when history cannot refresh", async () => {
+  events = [event];
+  const { state, rerender } = show();
+  await screen.findByText("Active");
+  const fallback = request.getMockImplementation()!;
+  request.mockImplementation(async (path, init) => {
+    if (path === "events") throw new Error("History unavailable");
+    return fallback(path, init);
+  });
+  rerender(
+    <AdminContext.Provider value={{ ...state, refreshVersion: 1 }}>
+      <EventsPage />
+    </AdminContext.Provider>,
+  );
+  await screen.findByText("Last known: Active");
+  fireEvent.click(screen.getByRole("button", { name: "Stop event" }));
+  expect(screen.getByRole("button", { name: "Confirm stop" })).toBeEnabled();
+  expect(request.mock.calls.some(([path]) => path === "settings" || path === "overview")).toBe(false);
+});

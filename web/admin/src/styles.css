@@ -376,6 +376,16 @@ a.breadcrumb:hover {
 .message-observations {
   margin-top: 24px;
 }
+.server-identity {
+  grid-column: 1 / -1;
+}
+.server-identity dl > div {
+  margin: 12px 0;
+}
+.server-identity dd {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+}
 .message-observations dl > div {
   display: flex;
   flex-wrap: wrap;

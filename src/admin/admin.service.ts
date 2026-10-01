@@ -34,6 +34,7 @@ export class AdminService {
       rotation: () => game().rotation(),
       audit: () => this.store.history(id),
       "game-log": () => game().gameLog(),
+      "server-identity": () => game().identity(),
     };
     if (!Object.hasOwn(readers, resource)) throw new BadRequestException("Unknown dashboard page.");
     const key = `${id}:${resource}`;

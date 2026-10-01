@@ -393,7 +393,7 @@ export function AnnouncementsPage() {
 }
 export function MatchPage() {
   const { overview, me } = useAdmin();
-  const { data: rotation, error } = useResource<Rotation>("rotation");
+  const { data: rotation, error, loading } = useResource<Rotation>("rotation");
   if (!overview) return <Empty title="Waiting for the server" />;
   const { status } = overview;
   return (
@@ -442,7 +442,13 @@ export function MatchPage() {
               {error}
             </p>
           )}
-          {rotation ? (
+          {error ? (
+            <Empty title="Rotation could not be loaded" detail="Refresh to try again." />
+          ) : !rotation ? (
+            <Empty title={loading ? "Loading rotation…" : "Rotation is unavailable"} />
+          ) : !rotation.entries.length ? (
+            <Empty title="No maps in the saved rotation" />
+          ) : (
             <Table headers={["MAP", "LIGHTING", "STATUS"]}>
               {rotation.entries.map((entry) => (
                 <tr key={entry.index}>
@@ -456,8 +462,6 @@ export function MatchPage() {
                 </tr>
               ))}
             </Table>
-          ) : (
-            <Empty title="Rotation is unavailable" detail="The current game build may not expose it." />
           )}
         </Card>
       </div>

@@ -25,7 +25,17 @@ const labels = {
 const stateLabel = (event: Event) =>
   event.stop && !["complete", "needs_review"].includes(event.state) ? "Stop requested" : labels[event.state];
 
-function EventReview({ review, close, finished }: { review: Review; close: () => void; finished: () => void }) {
+function EventReview({
+  review,
+  close,
+  finished,
+  statusUnavailable,
+}: {
+  review: Review;
+  close: () => void;
+  finished: () => void;
+  statusUnavailable: boolean;
+}) {
   const { busy, setBusy } = useAdmin();
   const api = useGameApi();
   const [id] = useState(() => crypto.randomUUID());
@@ -37,9 +47,10 @@ function EventReview({ review, close, finished }: { review: Review; close: () =>
   const lock = settings.data?.fields.find((field) => field.id === "lockOverpopulated");
   const canRestore =
     review.kind !== "restore" || (!settings.loading && !settings.error && typeof lock?.value === "boolean");
+  const blocked = review.kind !== "stop" && statusUnavailable;
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (busy || submitted.current || !canRestore) return;
+    if (busy || submitted.current || !canRestore || blocked) return;
     const form = new FormData(event.currentTarget);
     if (confirmation && form.get("confirm") !== confirmation) {
       setValidation("Enter the exact confirmation shown below.");
@@ -146,6 +157,7 @@ function EventReview({ review, close, finished }: { review: Review; close: () =>
         </>
       ) : (
         <form onSubmit={(event) => void submit(event)}>
+          {blocked && <p role="alert">Refresh event history before continuing.</p>}
           {confirmation && (
             <label>
               Type {confirmation}
@@ -157,7 +169,7 @@ function EventReview({ review, close, finished }: { review: Review; close: () =>
             <button type="button" className="button secondary" disabled={busy} onClick={close}>
               Back
             </button>
-            <button className="button primary" disabled={busy || !canRestore}>
+            <button className="button primary" disabled={busy || !canRestore || blocked}>
               {busy
                 ? "Saving…"
                 : review.kind === "start"
@@ -173,7 +185,7 @@ function EventReview({ review, close, finished }: { review: Review; close: () =>
   );
 }
 
-function EventDraft({ review }: { review: (draft: Draft) => void }) {
+function EventDraft({ review, statusUnavailable }: { review: (draft: Draft) => void; statusUnavailable: boolean }) {
   const admin = useAdmin();
   const settings = useResource<SettingsSnapshot>("settings"),
     roster = useResource<Overview>("overview");
@@ -198,7 +210,8 @@ function EventDraft({ review }: { review: (draft: Draft) => void }) {
   const lock = settings.data?.fields.find((field) => field.id === "lockOverpopulated");
   const teams = roster.data?.status.factionScores ?? [];
   const stale = revision !== null && revision !== settings.data?.revision;
-  const unavailable = settings.loading || roster.loading || !!settings.error || !!roster.error || admin.busy;
+  const unavailable =
+    statusUnavailable || settings.loading || roster.loading || !!settings.error || !!roster.error || admin.busy;
   const ready =
     !unavailable &&
     !stale &&
@@ -394,7 +407,8 @@ export function EventsPage() {
   const [review, setReview] = useState<Review | null>(null);
   const [inspect, setInspect] = useState<Event | null>(null);
   if (admin.me.role !== "admin") return <Empty title="Administrator access required" />;
-  if (!resource.data) return <Empty title={resource.error || "Loading events…"} />;
+  if (!resource.data || (resource.error && !resource.data.enabled))
+    return <Empty title={resource.error || "Loading events…"} />;
   if (!resource.data.enabled)
     return (
       <Empty
@@ -407,10 +421,16 @@ export function EventsPage() {
     <>
       {resource.error && (
         <p className="notice error" role="alert">
-          {resource.error}
+          Event history could not be refreshed. Showing the last received records. Refresh before starting or restoring
+          an event; stopping remains available.
         </p>
       )}
-      {!active && <EventDraft review={(draft) => setReview({ kind: "start", draft })} />}
+      {!active && (
+        <EventDraft
+          statusUnavailable={resource.loading || !!resource.error}
+          review={(draft) => setReview({ kind: "start", draft })}
+        />
+      )}
       <Card
         title="Event history"
         subtitle="Latest 20 events. Refresh to see worker progress; an unresolved event must be reviewed before another starts."
@@ -452,9 +472,15 @@ export function EventsPage() {
                 </td>
                 <td>
                   <Badge
-                    kind={event.state === "needs_review" ? "warn" : event.state === "complete" ? "neutral" : "good"}
+                    kind={
+                      resource.error || event.state === "needs_review"
+                        ? "warn"
+                        : event.state === "complete"
+                          ? "neutral"
+                          : "good"
+                    }
                   >
-                    {stateLabel(event)}
+                    {resource.error ? `Last known: ${stateLabel(event)}` : stateLabel(event)}
                   </Badge>
                 </td>
                 <td>{date(event.endsAt)}</td>
@@ -475,7 +501,7 @@ export function EventsPage() {
                     {event.stop && event.state === "needs_review" && (
                       <button
                         className="button secondary small"
-                        disabled={admin.busy}
+                        disabled={admin.busy || resource.loading || !!resource.error}
                         onClick={() => setReview({ kind: "restore", event })}
                       >
                         Review restoration
@@ -488,7 +514,14 @@ export function EventsPage() {
           />
         )}
       </Card>
-      {review && <EventReview review={review} close={() => setReview(null)} finished={resource.refresh} />}
+      {review && (
+        <EventReview
+          statusUnavailable={resource.loading || !!resource.error}
+          review={review}
+          close={() => setReview(null)}
+          finished={resource.refresh}
+        />
+      )}
       {inspect && <EventOperations event={inspect} close={() => setInspect(null)} />}
     </>
   );
