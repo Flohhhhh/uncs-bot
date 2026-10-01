@@ -1,20 +1,30 @@
-# September 30 dashboard release audit
+# Dashboard release audit
 
 ## October 1 morning review — current handoff
 
-The overnight changes are prepared as draft pull requests with isolated tests. They are **not deployed or certified against the live game**. The current combined local totals are **588 backend, 173 dashboard and 60 website tests**; the multi-server CI also passes **31 native PostgreSQL storage/concurrency checks**. Builds, formatting, touched-file lint, typechecks and handler validation pass. Each PR records its reviewed head and CI results; #16 updates the CI runtime and #17 adds verified host-restart guidance. Older counts below are historical checkpoints.
+Overnight preparation is complete for Floh's review. The changes are in review branches with isolated tests; they are **not deployed or certified against the live game**. The current combined local totals are **588 backend, 173 dashboard and 60 website tests**; CI also passes **31 native PostgreSQL storage/concurrency checks**. Builds, formatting, touched-file lint, typechecks and handler validation pass. Each PR records its reviewed head and CI results; #16 updates the CI runtime and #17 adds verified host-restart guidance. Older counts below are historical checkpoints.
 
-| Area             | Prepared result                                                                                                                    | Remaining acceptance                                                                           |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| Staff dashboard  | Server settings, scoring interval, next map/rotation, permissions, sortable tables, copy/search/filter controls and guarded drafts | Owner login configuration and controlled game verification                                     |
-| Community events | Discord map ballots and optional supervised 50v50 with warnings, receipts, stop and restoration                                    | Combined migration, Discord delivery and designated test-server rehearsal; flags default off   |
-| Welcome journey  | Spaced messages, website application/status, seeding copy and hosted website/QR banner                                             | Publish verified website, apply banner, then change live welcome/request instructions          |
-| Expansion        | Explicit server selection, separate clients/queues/receipts/applications/rankings and optional restricted staff roles              | Permanent IDs, migration, unique feed credentials/status cards and rollout recovery            |
-| Research         | Current 0.1.2 controls, supported event ideas, East/Central/BattleMetrics and Discord friend-group assignment                      | Region needs comparable traffic/latency evidence. Voice/group/Blue assignment is research-only |
+| Area                | Prepared result                                                                                                                    | Remaining acceptance                                                                           |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Staff dashboard     | Server settings, scoring interval, next map/rotation, permissions, sortable tables, copy/search/filter controls and guarded drafts | Owner login configuration and controlled game verification                                     |
+| Community events    | Discord map ballots and optional supervised 50v50 with warnings, receipts, stop and restoration                                    | Combined migration, Discord delivery and designated test-server rehearsal; flags default off   |
+| Other event formats | Advertised infantry/hardcore experiences and lighting through existing map/rotation controls; seeding and map-night plans          | Rehearse the advertised combinations; these are event ideas, not additional automated presets  |
+| Process restarts    | Verified xREALM schedule and restart-after-match instructions in Host controls                                                     | Owner configures the host schedule and verifies timezone, warnings and recovery                |
+| Welcome journey     | Spaced messages, website application/status, seeding copy and hosted website/QR banner                                             | Publish verified website, apply banner, then change live welcome/request instructions          |
+| Expansion           | Explicit server selection, separate clients/queues/receipts/applications/rankings and optional restricted staff roles              | Permanent IDs, migration, unique feed credentials/status cards and rollout recovery            |
+| Research            | Current 0.1.2 controls, supported event ideas, East/Central/BattleMetrics and Discord friend-group assignment                      | Region needs comparable traffic/latency evidence. Voice/group/Blue assignment is research-only |
 
 **Review order:** backend #5 → #6 → #7 → #8 → #9 → #10 → #11 → #12 → #13 → #14 → [#15](https://github.com/Flohhhhh/uncs-bot/pull/15) → [#16](https://github.com/Flohhhhh/uncs-bot/pull/16) → [#17](https://github.com/Flohhhhh/uncs-bot/pull/17); website [#2](https://github.com/DappurD/uncs-website/pull/2) → [#3](https://github.com/DappurD/uncs-website/pull/3). Each later PR uses the previous feature branch as a review base. Do not merge into those bases. Floh should choose a reviewed integration/cutover plan, reconcile descendants if squashing, and inspect each retargeted diff. Main auto-deploys Railway; merging is a deployment decision.
 
-**Owner steps that still matter:** access to the existing Discord application and its two callbacks; correct Railway staff/applicant origins; one human-generated and reviewed migration for the combined schema; Neon backup/restore verification; publishing the complete Cloudflare package; and controlled acceptance of sign-in, applications and game adoption. Patreon campaign/signature delivery and combat-feed delivery are still unverified. No live reads, announcements, team moves, approvals, restart tests, migrations or production publication were performed overnight.
+**Owner acceptance order:**
+
+1. Confirm access to the existing Discord application, its staff/applicant callbacks and the corresponding Railway origins.
+2. Verify database backup/restore, then generate and review one migration for the combined schema. Applications and combat require it even with event flags off; see the [cutover details](#multiple-server-implementation--draft-review-and-isolated-validation).
+3. Choose the reviewed integration plan, coordinate backend/website deployment, and publish the complete validated Cloudflare package. Keep community, voting and event workers disabled through cutover; avoid mixed old/new binaries.
+4. Rehearse sign-in, request/status, staff decision and game adoption with designated test accounts and a suitable test server. Verify Patreon campaign/signature delivery and combat-feed delivery separately; neither is established by mock tests.
+5. After acceptance, apply the banner and welcome/request instructions, configure the host restart schedule, and enable only the rehearsed optional workers. Use one active community worker deployment.
+
+No live game reads, announcements, team moves, approvals, restart tests, migrations or production website publication were performed overnight.
 
 **Likely review concerns:** the stack is substantial, stored applications/combat records now require a migration even when event flags are off, and an old binary cannot safely read new multi-server data. Avoid mixed-version rollout. Welcome delivery still assumes one active community worker deployment. The current game protocol cannot atomically reserve team slots, lock purchases or prove an authoritative round-start event, so 50v50 needs supervised acceptance. xREALM now documents a match-end restart task; its owner setup is in the community guide. No public scheduler API was established, and a match restart is not a server process restart. Unsupported controls were not invented.
 
@@ -24,7 +34,9 @@ The website's current clean package is `.wrangler/releases/multi-server-review-2
 
 The completed multi-server run reported GitHub's deprecated Node 20 action runtime and a forthcoming change behind `ubuntu-latest`. [PR #16](https://github.com/Flohhhhh/uncs-bot/pull/16), stacked after #15, pins Ubuntu 24.04 and verified release commits for [checkout v7.0.1](https://github.com/actions/checkout/releases/tag/v7.0.1) and [setup-node v7.0.0](https://github.com/actions/setup-node/releases/tag/v7.0.0). Their manifests use Node 24; the application still builds/tests on Node 22.23.3. Checkout no longer persists credentials because these checks never push. Job names, triggers, permissions, caches, test commands and the existing human integration migration gate are unchanged. No migration generation is invoked by this stacked PR. [CI run 36858674618](https://github.com/Flohhhhh/uncs-bot/actions/runs/36858674618) passed at `a91d5a5` with build, dashboard and PostgreSQL checks and no annotations on those jobs; use the PR for final-head results.
 
-## October 1 overnight scope — work in progress
+## Overnight scope and delivery checkpoints
+
+The scope and dated checkpoints below preserve the evidence behind the current handoff. Statements about work still outstanding at an earlier checkpoint do not supersede the current status above.
 
 The owner requested a complete current-settings review, bug/refactoring/layout/copy cleanup, and optional event modes. Continue independent work when Floh-only access or merges block a step. Server settings are in draft PR #8 on `codex/server-settings-controls`; table usability follows on `codex/dashboard-table-usability`. Keep later changes separately reviewable and do not expand PR #7 with unrelated work.
 
@@ -39,7 +51,7 @@ The owner requested a complete current-settings review, bug/refactoring/layout/c
 - Research East versus Central discovery and traffic, including BattleMetrics rankings and population history if available. Verify how WARDOGS assigns server region; distinguish overall regional population from comparable community-server traffic, competition, retention and latency. Do not relabel or move the live server during this research.
 - **Research only; do not implement:** automatic round-start team assignment from Discord voice-channel membership. Assess an opt-in Blue team channel and separate friend-group channels assigned together or against other groups. Verify Discord-to-Steam identity, current faction mapping, permissions, capacity/balance, round detection, warnings before purchases, respawn effects and interaction with optional 50v50 balancing. Joining Discord must not silently enroll someone or grant staff permissions.
 
-The active goal and hourly overnight heartbeat track this scope. No production game reads or mutations, protected-branch bypasses, migration generation/edits, or external messages are authorized by this development work.
+No production game reads or mutations, protected-branch bypasses, migration generation/edits, or external messages are authorized by this development work.
 
 This is a source and isolated-preview audit. It does not certify the live game, production sign-in, payment intake or deployed website. The full game server was not used for test actions or read probes.
 
