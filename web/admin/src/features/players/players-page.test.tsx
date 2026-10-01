@@ -7,6 +7,27 @@ import { alice, context } from "./test-fixtures";
 vi.mock("../../api/client", () => ({ api: vi.fn() }));
 
 describe("live player controls", () => {
+  it("sorts without changing selected identities and combines team filters with search", () => {
+    render(
+      <AdminContext.Provider value={context()}>
+        <PlayersPage />
+      </AdminContext.Provider>,
+    );
+    fireEvent.click(screen.getByLabelText("Select Bob"));
+    fireEvent.click(screen.getByRole("button", { name: "Sort by Player" }));
+    const table = screen.getByRole("table", { name: "Live players" });
+    const first = within(table).getAllByRole("row")[1];
+    expect(within(first).getByText("Bob")).toBeInTheDocument();
+    expect(screen.getByLabelText("Select Bob")).toBeChecked();
+    fireEvent.change(screen.getByRole("combobox", { name: "Filter players by team" }), {
+      target: { value: "Lonestar" },
+    });
+    expect(screen.getByText("Cara")).toBeInTheDocument();
+    expect(screen.queryByText("Bob")).not.toBeInTheDocument();
+    expect(screen.getByText("1 selected (includes hidden players)")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Reset filters" }));
+    expect(screen.getByLabelText("Select Bob")).toBeChecked();
+  });
   it("limits the UNC shortcut to player names while keeping hidden selections visible", () => {
     const admin = context();
     admin.overview!.status.factionScores[0].name = "UNC faction";

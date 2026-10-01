@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { ActionName, Player } from "../../api/types";
 import { useAdmin } from "../../app/context";
 import { Badge, Card, Empty, Modal, Search } from "../../components/ui";
+import { DataTable, CopyValue } from "../../components/data-table";
 import { actionDefinitions, allowed } from "../actions/policy";
 import { FactionChip, FactionOptions, liveFactions, playerFaction } from "./factions";
 import { TeamMoveDialog, TeamResults, type TeamMoveResult } from "./team-move";
@@ -10,6 +11,7 @@ export function PlayersPage() {
   const admin = useAdmin();
   const [query, setQuery] = useState("");
   const [nameOnly, setNameOnly] = useState(false);
+  const [teamFilter, setTeamFilter] = useState("");
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [destinations, setDestinations] = useState<Record<string, string>>({});
   const [bulkFaction, setBulkFaction] = useState("");
@@ -19,11 +21,15 @@ export function PlayersPage() {
   const players = admin.overview?.players ?? [];
   const teams = liveFactions(admin.overview);
   const canMove = allowed("team", admin.me, admin.overview, admin.stale, admin.busy);
-  const found = players.filter((player) =>
-    (nameOnly
-      ? [player.name]
-      : [player.name, player.steamId, player.faction, playerFaction(player, teams)?.label]
-    ).some((value) => (value ?? "").toLowerCase().includes(query.toLowerCase())),
+  const found = players.filter(
+    (player) =>
+      (!teamFilter ||
+        playerFaction(player, teams)?.name === teamFilter ||
+        (teamFilter === "unassigned" && !playerFaction(player, teams))) &&
+      (nameOnly
+        ? [player.name]
+        : [player.name, player.steamId, player.faction, playerFaction(player, teams)?.label]
+      ).some((value) => (value ?? "").toLowerCase().includes(query.toLowerCase())),
   );
   const selection = players.filter((player) => selected.has(player.steamId));
   const allShownSelected = found.length > 0 && found.every((player) => selected.has(player.steamId));
@@ -88,6 +94,19 @@ export function PlayersPage() {
         }}
         placeholder="Search name, SteamID, or faction"
       >
+        <select
+          aria-label="Filter players by team"
+          value={teamFilter}
+          onChange={(event) => setTeamFilter(event.target.value)}
+        >
+          <option value="">All teams</option>
+          {teams.map((team) => (
+            <option key={team.name} value={team.name}>
+              {team.label}
+            </option>
+          ))}
+          <option value="unassigned">Unassigned / unrecognized</option>
+        </select>
         <button
           type="button"
           className="button secondary"
@@ -98,6 +117,19 @@ export function PlayersPage() {
         >
           UNC in name
         </button>
+        {teamFilter && (
+          <button
+            type="button"
+            className="button secondary"
+            onClick={() => {
+              setTeamFilter("");
+              setQuery("");
+              setNameOnly(false);
+            }}
+          >
+            Reset filters
+          </button>
+        )}
       </Search>
       <p className="filter-note">“UNC in name” only searches player names. It does not verify community membership.</p>
       <div className="bulk-team-bar">
@@ -168,100 +200,97 @@ export function PlayersPage() {
       )}
       <Card
         title={`${found.length} player${found.length === 1 ? "" : "s"} shown`}
+        subtitle={`${players.length} in the current roster · click a column to sort`}
         badge={<Badge kind={admin.stale ? "warn" : "good"}>{admin.stale ? "LAST ROSTER" : "LIVE ROSTER"}</Badge>}
       >
         {found.length ? (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>
-                    <span className="sr-only">Select player</span>
-                  </th>
-                  <th>PLAYER</th>
-                  <th>TEAM</th>
-                  <th>K / D</th>
-                  <th>PING</th>
-                  <th>TEAM / ACTIONS</th>
-                </tr>
-              </thead>
-              <tbody>
-                {found.map((player) => {
-                  const current = playerFaction(player, teams);
-                  const destination = destinations[player.steamId] ?? "";
-                  const movable = canMove && teams.some((team) => team.name !== current?.name);
-                  return (
-                    <tr key={player.steamId}>
-                      <td className="select-cell">
-                        <input
-                          type="checkbox"
-                          aria-label={`Select ${player.name}`}
-                          checked={selected.has(player.steamId)}
+          <DataTable
+            label="Live players"
+            rows={found}
+            columns={[
+              { label: "Select" },
+              { label: "Player", value: (player) => player.name },
+              { label: "Team", value: (player) => playerFaction(player, teams)?.label ?? player.faction },
+              { label: "Kills", value: (player) => player.kills, firstDirection: "descending" },
+              { label: "Deaths", value: (player) => player.deaths, firstDirection: "descending" },
+              { label: "Ping", value: (player) => player.pingMs },
+              { label: "Team / actions" },
+            ]}
+            renderRow={(player) => {
+              const current = playerFaction(player, teams);
+              const destination = destinations[player.steamId] ?? "";
+              const movable = canMove && teams.some((team) => team.name !== current?.name);
+              return (
+                <tr key={player.steamId}>
+                  <td className="select-cell">
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${player.name}`}
+                      checked={selected.has(player.steamId)}
+                      disabled={!movable}
+                      onChange={(event) => toggle(player.steamId, event.target.checked)}
+                    />
+                  </td>
+                  <td>
+                    <div className="player-name">
+                      <span className="player-icon">{player.name.slice(0, 2).toUpperCase()}</span>
+                      <div>
+                        <strong>{player.name}</strong>
+                        <small>
+                          <CopyValue value={player.steamId} />
+                        </small>
+                      </div>
+                    </div>
+                  </td>
+                  <td>
+                    <FactionChip team={current} fallback={player.faction || "Choosing team"} />
+                  </td>
+                  <td>{player.kills ?? "—"}</td>
+                  <td>{player.deaths ?? "—"}</td>
+                  <td>
+                    {player.pingMs ?? "—"} <span className="muted">ms</span>
+                  </td>
+                  <td>
+                    <div className="row-actions">
+                      <div className="team-row-controls">
+                        <select
+                          aria-label={`Destination team for ${player.name}`}
+                          value={destination}
                           disabled={!movable}
-                          onChange={(event) => toggle(player.steamId, event.target.checked)}
-                        />
-                      </td>
-                      <td>
-                        <div className="player-name">
-                          <span className="player-icon">{player.name.slice(0, 2).toUpperCase()}</span>
-                          <div>
-                            <strong>{player.name}</strong>
-                            <small>{player.steamId}</small>
-                          </div>
-                        </div>
-                      </td>
-                      <td>
-                        <FactionChip team={current} fallback={player.faction || "Choosing team"} />
-                      </td>
-                      <td>
-                        {player.kills ?? "—"} / {player.deaths ?? "—"}
-                      </td>
-                      <td>
-                        {player.pingMs ?? "—"} <span className="muted">ms</span>
-                      </td>
-                      <td>
-                        <div className="row-actions">
-                          <div className="team-row-controls">
-                            <select
-                              aria-label={`Destination team for ${player.name}`}
-                              value={destination}
-                              disabled={!movable}
-                              onChange={(event) =>
-                                setDestinations((previous) => ({ ...previous, [player.steamId]: event.target.value }))
-                              }
-                            >
-                              <FactionOptions teams={teams} excluded={current?.name} />
-                            </select>
-                            <button
-                              type="button"
-                              className="button secondary small"
-                              disabled={
-                                !movable ||
-                                !destination ||
-                                destination === current?.name ||
-                                !teams.some((team) => team.name === destination)
-                              }
-                              onClick={() => openMove([player], destination)}
-                            >
-                              Move
-                            </button>
-                          </div>
-                          <button
-                            type="button"
-                            className="button secondary small"
-                            disabled={!manageAllowed}
-                            onClick={() => setManagedId(player.steamId)}
-                          >
-                            More
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                          onChange={(event) =>
+                            setDestinations((previous) => ({ ...previous, [player.steamId]: event.target.value }))
+                          }
+                        >
+                          <FactionOptions teams={teams} excluded={current?.name} />
+                        </select>
+                        <button
+                          type="button"
+                          className="button secondary small"
+                          disabled={
+                            !movable ||
+                            !destination ||
+                            destination === current?.name ||
+                            !teams.some((team) => team.name === destination)
+                          }
+                          onClick={() => openMove([player], destination)}
+                        >
+                          Move
+                        </button>
+                      </div>
+                      <button
+                        type="button"
+                        className="button secondary small"
+                        disabled={!manageAllowed}
+                        onClick={() => setManagedId(player.steamId)}
+                      >
+                        More
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            }}
+          />
         ) : (
           <Empty title="No matching players" detail="Try a different search or refresh the roster." />
         )}

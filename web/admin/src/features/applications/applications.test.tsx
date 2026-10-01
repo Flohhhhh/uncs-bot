@@ -205,7 +205,11 @@ it("offers only read-only recheck for an uncertain grant and no actions for proc
   expect(postCalls()[0][0]).toBe(`applications/${record.id}/recheck`);
   fireEvent.click(screen.getByRole("button", { name: "Close" }));
   view.rerender(page({ ...context, refreshVersion: 1 }));
-  await waitFor(() => expect(screen.getByText("Processing")).toBeInTheDocument());
+  await waitFor(() =>
+    expect(
+      within(screen.getByRole("table", { name: "Community requests" })).getByText("Processing"),
+    ).toBeInTheDocument(),
+  );
   fireEvent.click(screen.getByRole("button", { name: "View request" }));
   expect(
     within(screen.getByRole("dialog")).queryByRole("button", {

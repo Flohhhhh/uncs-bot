@@ -3,6 +3,7 @@ import { api } from "../../api/client";
 import { useResource } from "../../api/use-resource";
 import { useAdmin } from "../../app/context";
 import { Badge, Card, Empty, Modal, ReasonField, date } from "../../components/ui";
+import { CopyValue, DataTable } from "../../components/data-table";
 import { founderReady, paymentDescription, reviewInput } from "./policy";
 import { ManualMember } from "./manual-member";
 import type { FounderPolicy, Supporter, SupporterDecision, SupporterReviewResponse, SupportersResponse } from "./types";
@@ -413,6 +414,7 @@ function AdminSupporters() {
   const { busy } = useAdmin();
   const [query, setQuery] = useState("");
   const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState("");
   const resource = useResource<SupportersResponse>(
     search ? `supporters?search=${encodeURIComponent(search)}` : "supporters",
   );
@@ -427,6 +429,13 @@ function AdminSupporters() {
       />
     );
   const records = data.supporters;
+  const rows = records.filter(
+    (record) =>
+      !filter ||
+      (filter === "review" && record.reviewState !== "verified") ||
+      (filter === "unlinked" && record.identityState !== "staff_linked") ||
+      (filter === "founder" && record.founder),
+  );
   const policy = data.founderPolicy;
   const windowDate = (value: string | null) =>
     value
@@ -490,7 +499,7 @@ function AdminSupporters() {
         <span>
           <strong>{records.filter((record) => record.founder).length}</strong> founder promises
         </span>
-        <span>Counts are for the records shown</span>
+        <span>Counts refer to loaded records</span>
       </div>
       <form
         onSubmit={(event) => {
@@ -534,6 +543,26 @@ function AdminSupporters() {
           ? `Searching all records for “${search}”. Up to 100 matching records are shown.`
           : "Showing up to 100 recent records. Search all records to find earlier supporters."}
       </p>
+      <div className="toolbar">
+        <select
+          aria-label="Filter supporter records"
+          value={filter}
+          onChange={(event) => setFilter(event.target.value)}
+        >
+          <option value="">All loaded supporters</option>
+          <option value="review">Awaiting review</option>
+          <option value="unlinked">Accounts to match</option>
+          <option value="founder">Founder promises</option>
+        </select>
+        {filter && (
+          <button type="button" className="button secondary" onClick={() => setFilter("")}>
+            Reset filter
+          </button>
+        )}
+        <span className="muted">
+          {rows.length} shown of {records.length} loaded
+        </span>
+      </div>
       <button
         className="button secondary"
         disabled={busy || resource.loading || Boolean(resource.error) || !data.enabled || !data.configured}
@@ -546,60 +575,58 @@ function AdminSupporters() {
         subtitle="Membership status is not proof of a completed payment. Open a record to check evidence."
         badge={<Badge>ADMIN ONLY</Badge>}
       >
-        {records.length ? (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  {["SUPPORTER", "RECURRING STATUS", "ACCOUNT MATCH", "FOUNDER RECORD", ""].map((heading, index) => (
-                    <th key={index}>{heading}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {records.map((record) => (
-                  <tr key={record.id}>
-                    <td>
-                      <strong>{record.displayName || "Patreon member"}</strong>
-                      <small>Member {record.patreonMemberId}</small>
-                      <small>{record.reviewState === "verified" ? "Observation reviewed" : "Needs staff review"}</small>
-                    </td>
-                    <td>
-                      <SupporterBadge record={record} />
-                      <small>Latest charge: {record.lastChargeStatus || "not supplied"}</small>
-                    </td>
-                    <td>
-                      <Badge kind={record.identityState === "staff_linked" ? "neutral" : "warn"}>
-                        {record.identityState === "staff_linked" ? "Staff-linked" : "Not linked"}
-                      </Badge>
-                      <small>{record.steamId || "SteamID not recorded"}</small>
-                    </td>
-                    <td>
-                      <Badge kind={record.founder ? "good" : "neutral"}>
-                        {record.founder ? "Permanent promise" : "Not recorded"}
-                      </Badge>
-                      <small>{record.founder ? "Waiting for game update" : "Requires payment review"}</small>
-                    </td>
-                    <td>
-                      <button
-                        className="button secondary small"
-                        disabled={busy || resource.loading}
-                        onClick={() => setSelected(record)}
-                      >
-                        Review supporter
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+        {rows.length ? (
+          <DataTable
+            label="Patreon supporters"
+            rows={rows}
+            columns={[
+              { label: "Supporter", value: (record) => record.displayName || record.patreonMemberId },
+              { label: "Recurring status", value: (record) => record.patronStatus },
+              { label: "Account match", value: (record) => record.identityState === "staff_linked" },
+              { label: "Founder record", value: (record) => !!record.founder, firstDirection: "descending" },
+              { label: "Actions" },
+            ]}
+            renderRow={(record) => (
+              <tr key={record.id}>
+                <td>
+                  <strong>{record.displayName || "Patreon member"}</strong>
+                  <small>Member {record.patreonMemberId}</small>
+                  <small>{record.reviewState === "verified" ? "Observation reviewed" : "Needs staff review"}</small>
+                </td>
+                <td>
+                  <SupporterBadge record={record} />
+                  <small>Latest charge: {record.lastChargeStatus || "not supplied"}</small>
+                </td>
+                <td>
+                  <Badge kind={record.identityState === "staff_linked" ? "neutral" : "warn"}>
+                    {record.identityState === "staff_linked" ? "Staff-linked" : "Not linked"}
+                  </Badge>
+                  <small>{record.steamId ? <CopyValue value={record.steamId} /> : "SteamID not recorded"}</small>
+                </td>
+                <td>
+                  <Badge kind={record.founder ? "good" : "neutral"}>
+                    {record.founder ? "Permanent promise" : "Not recorded"}
+                  </Badge>
+                  <small>{record.founder ? "Waiting for game update" : "Requires payment review"}</small>
+                </td>
+                <td>
+                  <button
+                    className="button secondary small"
+                    disabled={busy || resource.loading}
+                    onClick={() => setSelected(record)}
+                  >
+                    Review supporter
+                  </button>
+                </td>
+              </tr>
+            )}
+          />
         ) : (
           <Empty
-            title={search ? "No matching supporters" : "No supporter records yet"}
+            title={search || filter ? "No matching supporters" : "No supporter records yet"}
             detail={
-              search
-                ? "Try another name or account ID."
+              search || filter
+                ? "Try another name, account ID or filter."
                 : "Records can be entered after checking the member in Patreon, or arrive through connected webhooks. A payment has not been assumed."
             }
           />

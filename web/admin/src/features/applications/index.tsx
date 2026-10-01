@@ -3,6 +3,7 @@ import { api } from "../../api/client";
 import { useResource } from "../../api/use-resource";
 import { useAdmin } from "../../app/context";
 import { Badge, Card, Empty, Modal, ReasonField, Search, date } from "../../components/ui";
+import { CopyValue, DataTable } from "../../components/data-table";
 import type {
   ApplicationDecision,
   ApplicationReviewResponse,
@@ -346,6 +347,7 @@ function AdminApplications() {
   const { busy } = useAdmin();
   const resource = useResource<ApplicationsResponse>("applications");
   const [query, setQuery] = useState("");
+  const [status, setStatus] = useState("");
   const [selected, setSelected] = useState<WhitelistApplication | null>(null);
   const records = resource.data?.applications;
   if (!records)
@@ -356,10 +358,12 @@ function AdminApplications() {
       />
     );
   const needle = query.toLocaleLowerCase();
-  const rows = records.filter((record) =>
-    [record.discordDisplayName, record.discordUserId, record.steamId].some((value) =>
-      value.toLocaleLowerCase().includes(needle),
-    ),
+  const rows = records.filter(
+    (record) =>
+      (!status || record.status === status) &&
+      [record.discordDisplayName, record.discordUserId, record.steamId].some((value) =>
+        value.toLocaleLowerCase().includes(needle),
+      ),
   );
   return (
     <>
@@ -377,48 +381,69 @@ function AdminApplications() {
         </span>
         <span>Up to 100 requests; awaiting review first</span>
       </div>
-      <Search value={query} onChange={setQuery} placeholder="Search Discord name, Discord ID, or SteamID" />
+      <Search value={query} onChange={setQuery} placeholder="Search Discord name, Discord ID, or SteamID">
+        <select aria-label="Application status" value={status} onChange={(event) => setStatus(event.target.value)}>
+          <option value="">All statuses</option>
+          {Object.entries(statuses).map(([value, label]) => (
+            <option key={value} value={value}>
+              {label}
+            </option>
+          ))}
+        </select>
+        {status && (
+          <button
+            type="button"
+            className="button secondary"
+            onClick={() => {
+              setStatus("");
+              setQuery("");
+            }}
+          >
+            Reset filters
+          </button>
+        )}
+      </Search>
       <Card
         title="Community requests"
-        subtitle="Email addresses are private to administrators and shown inside each request."
+        subtitle={`${rows.length} shown of ${records.length} loaded · private email inside each request`}
         badge={<Badge>ADMIN ONLY</Badge>}
       >
         {rows.length ? (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  {["DISCORD / STEAMID", "COMMUNITY CONNECTION", "SUBMITTED", "STATUS", ""].map((heading, index) => (
-                    <th key={index}>{heading}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((record) => (
-                  <tr key={record.id}>
-                    <td>
-                      <strong>{record.discordDisplayName}</strong>
-                      <small>{record.steamId}</small>
-                    </td>
-                    <td className="application-relationship">{relationships[record.relationship] ?? "Not recorded"}</td>
-                    <td>{new Date(record.submittedAt).toLocaleDateString()}</td>
-                    <td>
-                      <ApplicationBadge record={record} />
-                    </td>
-                    <td>
-                      <button
-                        className="button secondary small"
-                        disabled={busy || resource.loading}
-                        onClick={() => setSelected(record)}
-                      >
-                        View request
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            label="Community requests"
+            rows={rows}
+            columns={[
+              { label: "Discord / SteamID", value: (record) => record.discordDisplayName },
+              { label: "Community connection", value: (record) => relationships[record.relationship] },
+              { label: "Submitted", value: (record) => Date.parse(record.submittedAt), firstDirection: "descending" },
+              { label: "Status", value: (record) => statuses[record.status] },
+              { label: "Actions" },
+            ]}
+            renderRow={(record) => (
+              <tr key={record.id}>
+                <td>
+                  <strong>{record.discordDisplayName}</strong>
+                  <small>
+                    <CopyValue value={record.steamId} />
+                  </small>
+                </td>
+                <td className="application-relationship">{relationships[record.relationship] ?? "Not recorded"}</td>
+                <td>{new Date(record.submittedAt).toLocaleDateString()}</td>
+                <td>
+                  <ApplicationBadge record={record} />
+                </td>
+                <td>
+                  <button
+                    className="button secondary small"
+                    disabled={busy || resource.loading}
+                    onClick={() => setSelected(record)}
+                  >
+                    View request
+                  </button>
+                </td>
+              </tr>
+            )}
+          />
         ) : (
           <Empty
             title="No matching applications"

@@ -4,6 +4,7 @@ import { useAdmin } from "../../app/context";
 import { useResource } from "../../api/use-resource";
 import type { ActionName, Audit, Ban, Rotation, Whitelist } from "../../api/types";
 import { Badge, Card, Empty, Metric, Search, Table, date } from "../../components/ui";
+import { CopyValue, DataTable } from "../../components/data-table";
 import { actionDefinitions, allowed } from "../actions/policy";
 import { FactionChip, liveFactions, playerFaction } from "../players/factions";
 function ActionButton({
@@ -154,9 +155,17 @@ export function OverviewPage() {
 export function WhitelistPage() {
   const { data, error } = useResource<Whitelist>("whitelist");
   const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState("");
   if (!data)
     return <Empty title={error ? "Whitelist could not be loaded" : "Loading whitelist…"} detail={error || ""} />;
-  const rows = data.entries.filter((entry) => entry.steamId.includes(query.trim()));
+  const rows = data.entries.filter(
+    (entry) =>
+      entry.steamId.includes(query.trim()) &&
+      (!filter ||
+        (filter === "active" && entry.active) ||
+        (filter === "pending" && entry.configured !== null && entry.configured !== entry.active) ||
+        (filter === "unknown" && entry.configured === null)),
+  );
   return (
     <>
       {error && (
@@ -180,20 +189,49 @@ export function WhitelistPage() {
         </div>
       )}
       <Search value={query} onChange={setQuery} placeholder="Search SteamID64">
+        <select aria-label="Whitelist status" value={filter} onChange={(event) => setFilter(event.target.value)}>
+          <option value="">All entries</option>
+          <option value="active">Active in game</option>
+          <option value="pending">Pending changes</option>
+          <option value="unknown">Configuration unavailable</option>
+        </select>
+        {filter && (
+          <button
+            type="button"
+            className="button secondary"
+            onClick={() => {
+              setFilter("");
+              setQuery("");
+            }}
+          >
+            Reset filters
+          </button>
+        )}
         <ActionButton action="whitelist-add" kind="primary" disabled={!!error}>
           + Add player
         </ActionButton>
       </Search>
       <Card
         title={`${data.entries.filter((entry) => entry.active).length} active entries`}
+        subtitle={`${rows.length} shown of ${data.entries.length} entries`}
         badge={<Badge>SERVER WHITELIST</Badge>}
       >
         {rows.length ? (
-          <Table headers={["STEAMID64", "RUNNING GAME", "SAVED CONFIGURATION", ""]}>
-            {rows.map((entry) => (
+          <DataTable
+            label="Community whitelist"
+            rows={rows}
+            columns={[
+              { label: "SteamID64", value: (entry) => entry.steamId },
+              { label: "Running game", value: (entry) => entry.active },
+              { label: "Saved configuration", value: (entry) => entry.configured },
+              { label: "Actions" },
+            ]}
+            renderRow={(entry) => (
               <tr key={entry.steamId}>
                 <td>
-                  <strong>{entry.steamId}</strong>
+                  <strong>
+                    <CopyValue value={entry.steamId} />
+                  </strong>
                 </td>
                 <td>
                   <Badge kind={entry.active ? "good" : "warn"}>{entry.active ? "Active" : "Not active"}</Badge>
@@ -222,8 +260,8 @@ export function WhitelistPage() {
                   </ActionButton>
                 </td>
               </tr>
-            ))}
-          </Table>
+            )}
+          />
         ) : (
           <Empty title="No matching entries" />
         )}
@@ -250,18 +288,36 @@ export function BansPage() {
           + Ban player
         </ActionButton>
       </Search>
-      <Card title={`${data.length} server bans`} badge={<Badge>PERMANENT UNTIL REMOVED</Badge>}>
+      <Card
+        title={`${data.length} server bans`}
+        subtitle={`${rows.length} shown`}
+        badge={<Badge>PERMANENT UNTIL REMOVED</Badge>}
+      >
         {rows.length ? (
-          <Table headers={["PLAYER", "REASON", "BANNED BY", ""]}>
-            {rows.map((ban) => (
+          <DataTable
+            label="Server bans"
+            rows={rows}
+            columns={[
+              { label: "SteamID64", value: (ban) => ban.steamId },
+              {
+                label: "Banned",
+                value: (ban) =>
+                  ban.bannedAtUtc && !ban.bannedAtUtc.startsWith("0001") ? Date.parse(ban.bannedAtUtc) : null,
+                firstDirection: "descending",
+              },
+              { label: "Reason", value: (ban) => ban.reason },
+              { label: "Banned by", value: (ban) => ban.bannedBy },
+              { label: "Actions" },
+            ]}
+            renderRow={(ban) => (
               <tr key={ban.steamId}>
                 <td>
-                  <strong>{ban.steamId}</strong>
-                  <small>
-                    {ban.bannedAtUtc && !ban.bannedAtUtc.startsWith("0001")
-                      ? date(ban.bannedAtUtc)
-                      : "Date not provided"}
-                  </small>
+                  <strong>
+                    <CopyValue value={ban.steamId} />
+                  </strong>
+                </td>
+                <td>
+                  {ban.bannedAtUtc && !ban.bannedAtUtc.startsWith("0001") ? date(ban.bannedAtUtc) : "Date not provided"}
                 </td>
                 <td className="audit-detail">{ban.reason || "No reason supplied by the game"}</td>
                 <td>{ban.bannedBy || "—"}</td>
@@ -271,8 +327,8 @@ export function BansPage() {
                   </ActionButton>
                 </td>
               </tr>
-            ))}
-          </Table>
+            )}
+          />
         ) : (
           <Empty title="No matching bans" />
         )}
@@ -429,13 +485,12 @@ export function AuditPage() {
           {rows.length > 0 && " Showing the last successful result."}
         </div>
       )}
-      <Search value={query} onChange={setQuery} placeholder="Search staff, SteamID, reason, or action ID">
-        {lookupId && (
-          <button type="button" className="button secondary" onClick={() => setQuery("")}>
-            Back to recent actions
-          </button>
-        )}
-      </Search>
+      <Search
+        value={query}
+        onChange={setQuery}
+        placeholder="Search staff, SteamID, reason, or action ID"
+        clearLabel={lookupId ? "Back to recent actions" : "Clear search"}
+      />
       <p className="filter-note">
         {lookupId
           ? "Exact action ID lookup across stored history. This only reads the receipt; it does not resend the action or recheck the game."
@@ -448,12 +503,21 @@ export function AuditPage() {
         {loading ? (
           <Empty title={lookupId ? "Looking up action receipt…" : "Loading action history…"} />
         ) : rows.length ? (
-          <Table headers={["WHEN / STAFF", "ACTION / TARGET", "OUTCOME", "DETAILS"]}>
-            {rows.map((entry) => (
+          <DataTable
+            label="Staff action history"
+            rows={rows}
+            columns={[
+              { label: "When", value: (entry) => Date.parse(entry.createdAt), firstDirection: "descending" },
+              { label: "Staff", value: (entry) => entry.actorName },
+              { label: "Action / target", value: (entry) => actionDefinitions[entry.action]?.[0] || entry.action },
+              { label: "Outcome", value: (entry) => entry.state },
+              { label: "Details" },
+            ]}
+            renderRow={(entry) => (
               <tr key={entry.id}>
+                <td>{date(entry.createdAt)}</td>
                 <td>
                   <strong>{entry.actorName}</strong>
-                  <small>{date(entry.createdAt)}</small>
                 </td>
                 <td>
                   {actionDefinitions[entry.action]?.[0] || entry.action}
@@ -468,11 +532,13 @@ export function AuditPage() {
                   <strong>{entry.details.reason}</strong>
                   <br />
                   {entry.message}
-                  <small>{entry.id}</small>
+                  <small>
+                    <CopyValue value={entry.id} label="action ID" />
+                  </small>
                 </td>
               </tr>
-            ))}
-          </Table>
+            )}
+          />
         ) : error ? (
           <Empty
             title={lookupId ? "Action receipt could not be loaded" : "Action history could not be loaded"}

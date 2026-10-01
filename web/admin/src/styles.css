@@ -669,6 +669,16 @@ a.breadcrumb:hover {
   justify-content: space-between;
   gap: 16px;
   margin-bottom: 17px;
+  flex-wrap: wrap;
+}
+.toolbar select {
+  padding: 10px 12px;
+  max-width: 100%;
+  min-height: 42px;
+  background: var(--ink-deep);
+  color: var(--cream);
+  border: 1px solid #495044;
+  border-radius: 3px;
 }
 .search {
   max-width: 340px;
@@ -692,6 +702,60 @@ textarea::placeholder {
 }
 .table-wrap {
   overflow: auto;
+}
+.table-wrap.scrollable {
+  max-height: min(70vh, 720px);
+  scrollbar-gutter: stable;
+}
+.table-wrap:focus-visible {
+  outline: 2px solid var(--orange);
+  outline-offset: -2px;
+}
+.table-wrap.scrollable th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.table-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: uppercase;
+}
+.table-sort:hover,
+th[aria-sort="ascending"],
+th[aria-sort="descending"] {
+  color: var(--orange);
+}
+.copy-value {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.copy-button {
+  display: inline-grid;
+  place-items: center;
+  background: transparent;
+  color: inherit;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 2px;
+}
+.copy-button:hover {
+  color: var(--orange);
+}
+.copy-feedback {
+  font-size: 10px;
+  white-space: normal;
 }
 table {
   width: 100%;
@@ -729,6 +793,7 @@ td strong {
   display: flex;
   gap: 6px;
   justify-content: flex-end;
+  flex-wrap: wrap;
 }
 .player-name {
   display: flex;
@@ -2073,11 +2138,6 @@ dialog textarea {
 .rotation-editor small {
   display: block;
   overflow-wrap: anywhere;
-}
-.row-actions {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
 }
 .change-summary {
   overflow-wrap: anywhere;

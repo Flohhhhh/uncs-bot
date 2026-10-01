@@ -3,6 +3,7 @@ import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 import { useResource } from "../../api/use-resource";
 import { useAdmin } from "../../app/context";
 import { Badge, Card, Empty, Metric, Search, date } from "../../components/ui";
+import { CopyValue, DataTable } from "../../components/data-table";
 import type { CombatEvent, CombatEventKind, CombatPeriod, CombatPlayer, CombatResponse } from "./combat.types";
 
 const periods: Record<CombatPeriod, string> = { day: "Last 24 hours", week: "Last 7 days", month: "Last 30 days" };
@@ -45,65 +46,52 @@ function EventsTable({
   onSelect: (id: string) => void;
 }) {
   return (
-    <div className="table-wrap">
-      <table aria-label="Combat events">
-        <thead>
-          <tr>
-            {["RECEIVED", "KILLER", "VICTIM", "WEAPON / CAUSE", "DISTANCE", "CONTEXT"].map((label) => (
-              <th scope="col" key={label}>
-                {label}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {events.map((event) => (
-            <tr key={`${event.serverInstanceId}:${event.eventId}`}>
-              <td className="combat-time">
-                {date(event.receivedAt)}
-                {event.mapName && <small>{event.mapName}</small>}
-              </td>
-              <td>
-                <strong>
-                  {event.killerSteamId ? (
-                    <PlayerLink
-                      id={event.killerSteamId}
-                      name={event.killerName}
-                      disabled={disabled}
-                      onSelect={onSelect}
-                    />
-                  ) : (
-                    event.killerName || "No killer reported"
-                  )}
-                </strong>
-                <small>{event.killerSteamId}</small>
-              </td>
-              <td>
-                <strong>
-                  <PlayerLink
-                    id={event.victimSteamId}
-                    name={event.victimName}
-                    disabled={disabled}
-                    onSelect={onSelect}
-                  />
-                </strong>
-                <small>{event.victimSteamId}</small>
-              </td>
-              <td className="combat-cause">{event.cause || "Not reported"}</td>
-              <td>
-                {typeof event.distanceMeters === "number" && Number.isFinite(event.distanceMeters)
-                  ? `${event.distanceMeters.toLocaleString(undefined, { maximumFractionDigits: 1 })} m`
-                  : "—"}
-              </td>
-              <td>
-                {event.headshot && <Badge>Headshot</Badge>} {event.suicide && <Badge>Suicide</Badge>}
-                {!event.headshot && !event.suicide && "—"}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <DataTable
+      label="Combat events"
+      rows={events}
+      columns={[
+        { label: "Received", value: (event) => Date.parse(event.receivedAt), firstDirection: "descending" },
+        { label: "Killer", value: (event) => event.killerName || event.killerSteamId },
+        { label: "Victim", value: (event) => event.victimName || event.victimSteamId },
+        { label: "Weapon / cause", value: (event) => event.cause },
+        { label: "Distance", value: (event) => event.distanceMeters, firstDirection: "descending" },
+        { label: "Context", value: (event) => (event.headshot ? "Headshot" : event.suicide ? "Suicide" : null) },
+      ]}
+      renderRow={(event) => (
+        <tr key={`${event.serverInstanceId}:${event.eventId}`}>
+          <td className="combat-time">
+            {date(event.receivedAt)}
+            {event.mapName && <small>{event.mapName}</small>}
+          </td>
+          <td>
+            <strong>
+              {event.killerSteamId ? (
+                <PlayerLink id={event.killerSteamId} name={event.killerName} disabled={disabled} onSelect={onSelect} />
+              ) : (
+                event.killerName || "No killer reported"
+              )}
+            </strong>
+            <small>{event.killerSteamId && <CopyValue value={event.killerSteamId} />}</small>
+          </td>
+          <td>
+            <strong>
+              <PlayerLink id={event.victimSteamId} name={event.victimName} disabled={disabled} onSelect={onSelect} />
+            </strong>
+            <small>{event.victimSteamId && <CopyValue value={event.victimSteamId} />}</small>
+          </td>
+          <td className="combat-cause">{event.cause || "Not reported"}</td>
+          <td>
+            {typeof event.distanceMeters === "number" && Number.isFinite(event.distanceMeters)
+              ? `${event.distanceMeters.toLocaleString(undefined, { maximumFractionDigits: 1 })} m`
+              : "—"}
+          </td>
+          <td>
+            {event.headshot && <Badge>Headshot</Badge>} {event.suicide && <Badge>Suicide</Badge>}
+            {!event.headshot && !event.suicide && "—"}
+          </td>
+        </tr>
+      )}
+    />
   );
 }
 
@@ -265,37 +253,35 @@ function CombatView({
           className="combat-leaderboard"
         >
           {players.length ? (
-            <div className="table-wrap">
-              <table aria-label="Server leaderboard">
-                <thead>
-                  <tr>
-                    {["PLAYER", "KILLS", "DEATHS", "K / D", "HEADSHOT KILLS"].map((label) => (
-                      <th scope="col" key={label}>
-                        {label}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {players.map((entry) => (
-                    <tr key={entry.steamId}>
-                      <td>
-                        <strong>
-                          <PlayerLink id={entry.steamId} name={entry.name} disabled={disabled} onSelect={onSelect} />
-                        </strong>
-                        <small>{entry.steamId}</small>
-                      </td>
-                      <td>{count(entry.kills)}</td>
-                      <td>{count(entry.deaths)}</td>
-                      <td>{ratio(entry)}</td>
-                      <td>
-                        {count(entry.headshotKills)} <span className="muted">· {headshotShare(entry)}</span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <DataTable
+              label="Server leaderboard"
+              rows={players}
+              columns={[
+                { label: "Player", value: (entry) => entry.name || entry.steamId },
+                { label: "Kills", value: (entry) => entry.kills, firstDirection: "descending" },
+                { label: "Deaths", value: (entry) => entry.deaths, firstDirection: "descending" },
+                { label: "K / D", value: (entry) => entry.kd, firstDirection: "descending" },
+                { label: "Headshot kills", value: (entry) => entry.headshotKills, firstDirection: "descending" },
+              ]}
+              renderRow={(entry) => (
+                <tr key={entry.steamId}>
+                  <td>
+                    <strong>
+                      <PlayerLink id={entry.steamId} name={entry.name} disabled={disabled} onSelect={onSelect} />
+                    </strong>
+                    <small>
+                      <CopyValue value={entry.steamId} />
+                    </small>
+                  </td>
+                  <td>{count(entry.kills)}</td>
+                  <td>{count(entry.deaths)}</td>
+                  <td>{ratio(entry)}</td>
+                  <td>
+                    {count(entry.headshotKills)} <span className="muted">· {headshotShare(entry)}</span>
+                  </td>
+                </tr>
+              )}
+            />
           ) : (
             <Empty
               title={leaderboard.length ? "No matching players" : "No recorded player stats yet"}
@@ -342,6 +328,19 @@ function CombatView({
             </select>
           </label>
           <p>Filters apply to these recent events. Stats cover the full recorded period.</p>
+          {(query || cause || eventKind !== "all") && (
+            <button
+              type="button"
+              className="button secondary"
+              onClick={() => {
+                onQuery("");
+                onCause("");
+                onEventKind("all");
+              }}
+            >
+              Reset filters
+            </button>
+          )}
         </div>
         {filtered.length ? (
           <EventsTable events={filtered} disabled={disabled} onSelect={onSelect} />

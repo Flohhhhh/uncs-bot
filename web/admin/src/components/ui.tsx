@@ -64,23 +64,39 @@ export function Search({
   onChange,
   placeholder,
   children,
+  clearLabel = "Clear search",
 }: {
   value: string;
   onChange: (value: string) => void;
   placeholder: string;
   children?: ReactNode;
+  clearLabel?: string;
 }) {
+  const input = useRef<HTMLInputElement>(null);
   return (
     <div className="toolbar">
       <label className="search">
         <input
           type="search"
+          ref={input}
           value={value}
           onChange={(event) => onChange(event.target.value)}
           placeholder={placeholder}
           aria-label={placeholder}
         />
       </label>
+      {value && (
+        <button
+          type="button"
+          className="button secondary"
+          onClick={() => {
+            onChange("");
+            input.current?.focus();
+          }}
+        >
+          {clearLabel}
+        </button>
+      )}
       {children}
     </div>
   );
@@ -153,14 +169,46 @@ export function date(value?: string | null) {
   return value ? new Date(value).toLocaleString() : "Not recorded";
 }
 
-export function Table({ headers, children }: { headers: string[]; children: ReactNode }) {
+export type TableHeader = string | { label: string; sort: "none" | "ascending" | "descending"; onSort: () => void };
+export function Table({
+  headers,
+  children,
+  label,
+  scrollable = false,
+}: {
+  headers: TableHeader[];
+  children: ReactNode;
+  label?: string;
+  scrollable?: boolean;
+}) {
   return (
-    <div className="table-wrap">
-      <table>
+    <div
+      className={`table-wrap${scrollable ? " scrollable" : ""}`}
+      tabIndex={scrollable ? 0 : undefined}
+      role={scrollable ? "region" : undefined}
+      aria-label={scrollable ? `${label} scroll area` : undefined}
+    >
+      <table aria-label={label}>
         <thead>
           <tr>
-            {headers.map((header) => (
-              <th key={header}>{header}</th>
+            {headers.map((header, index) => (
+              <th key={index} scope="col" aria-sort={typeof header === "string" ? undefined : header.sort}>
+                {typeof header === "string" ? (
+                  header || <span className="sr-only">Actions</span>
+                ) : (
+                  <button
+                    type="button"
+                    className="table-sort"
+                    onClick={header.onSort}
+                    aria-label={`Sort by ${header.label}`}
+                  >
+                    {header.label}
+                    <span aria-hidden="true">
+                      {header.sort === "ascending" ? "↑" : header.sort === "descending" ? "↓" : "↕"}
+                    </span>
+                  </button>
+                )}
+              </th>
             ))}
           </tr>
         </thead>
