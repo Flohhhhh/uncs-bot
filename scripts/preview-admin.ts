@@ -33,6 +33,9 @@ import { MapVotesStore } from "../src/map-votes/map-votes.store";
 import { MapVotesDiscord } from "../src/map-votes/map-votes.discord";
 import type { MapVoteRecord } from "../src/map-votes/map-votes.types";
 import { ServerEventsModule } from "../src/server-events/server-events.module";
+import { ServerCommunityController } from "../src/server-community/server-community.controller";
+import { ServerCommunityService } from "../src/server-community/server-community.service";
+import type { CommunityMessagesStatus } from "../src/common/community-messages";
 import { ServerEventsStore } from "../src/server-events/server-events.store";
 import type { EventRecord, EventOperation, EventProgress, EventStop } from "../src/server-events/server-events.types";
 import type {
@@ -149,6 +152,7 @@ function createPreviewGame(name: string) {
     "GET /v1/status",
     "GET /v1/players",
     "GET /v1/bans",
+    "GET /v1/audit",
     "GET /v1/reserved-slots",
     "GET /v1/config",
     "PUT /v1/config",
@@ -186,6 +190,14 @@ function createPreviewGame(name: string) {
           factionScores: factions.map(({ name, colorHex, score }) => ({ name, colorHex, score })),
         };
       if (path === "/v1/players") return { players };
+      if (path === "/v1/audit?limit=100")
+        return {
+          entries: [
+            { timestampUtc: new Date().toISOString(), event: "HTTP", detail: "POST /v1/broadcast -> 200" },
+            { timestampUtc: new Date().toISOString(), event: "HTTP", detail: "GET /v1/players -> 200" },
+            { timestampUtc: new Date().toISOString(), event: "AUTH_OK", detail: null },
+          ],
+        };
       if (path === "/v1/reserved-slots") return { reservedSlots: configuredWhitelist(text) };
       if (path === "/v1/config/validate") return { ok: true };
       if (path === "/v1/config") {
@@ -971,6 +983,32 @@ async function main() {
   const adapterHost = new HttpAdapterHost();
   adapterHost.httpAdapter = adapter;
   const module = await Test.createTestingModule({
+    controllers: [ServerCommunityController],
+    providers: [
+      {
+        provide: ServerCommunityService,
+        useValue: {
+          status: (id: string): CommunityMessagesStatus => ({
+            enabled: id === "primary",
+            workerStarted: id === "primary",
+            lastObservedAt: id === "primary" ? new Date().toISOString() : null,
+            lastMessageAcknowledgedAt: null,
+            lastStatusCardUpdatedAt: null,
+            welcome: {
+              enabled: id === "primary",
+              messages: [
+                "Welcome to The UNCs! Find the crew at theuncsgaming.com.",
+                "Free whitelist details and seeding info are on our website.",
+              ],
+              delaySeconds: 10,
+              spacingSeconds: 20,
+            },
+            round: { enabled: false, message: "GG! Thanks for playing with The UNCs." },
+            discordStatus: { enabled: false, configured: false },
+          }),
+        },
+      },
+    ],
     imports: [
       PreviewApplicationEnvironment,
       AdminModule,

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createMemoryRouter, RouterProvider } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 import { App } from "./app";
@@ -41,7 +41,20 @@ it("requires an explicit selection before any game read and hides inaccessible g
   expect(screen.queryByRole("link", { name: /Server settings/ })).not.toBeInTheDocument();
   expect(screen.queryByRole("link", { name: /Applications/ })).not.toBeInTheDocument();
   expect(screen.getByRole("link", { name: /Supporters/ })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Review move" })).toBeDisabled();
+  const sections = within(screen.getByRole("combobox", { name: "Dashboard section" }));
+  expect(sections.queryByRole("option", { name: "Server settings" })).not.toBeInTheDocument();
+  expect(sections.queryByRole("option", { name: "Applications" })).not.toBeInTheDocument();
+  expect(sections.getByRole("option", { name: "Supporters" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Review move" })).not.toBeInTheDocument();
+});
+it("retains the selected server when using the compact section picker", async () => {
+  const { router } = mount("/players?server=event");
+  fireEvent.change(await screen.findByRole("combobox", { name: "Dashboard section" }), {
+    target: { value: "permissions" },
+  });
+  await waitFor(() => expect(router.state.location.pathname).toBe("/permissions"));
+  expect(router.state.location.search).toBe("?server=event");
+  expect(screen.getByRole("combobox", { name: "Dashboard section" })).toHaveValue("permissions");
 });
 it("cancels a previous server read and ignores its late response after a switch", async () => {
   let complete!: (response: Response) => void;
@@ -73,4 +86,13 @@ it("does not silently fall back when an unavailable server is in a deep link", a
   const { fetcher } = mount("/players?server=missing");
   await screen.findByText("That server is unavailable or outside your staff access.");
   await waitFor(() => expect(fetcher.mock.calls).toHaveLength(2));
+});
+it("preserves the server and opens Rotation from the match shortcut", async () => {
+  const { router } = mount("/match?server=primary", async (url) =>
+    url.endsWith("/rotation") ? json({ mode: "Ordered", enabled: true, entries: [] }) : json(overview("Primary")),
+  );
+  const link = await screen.findByRole("link", { name: "Edit rotation & queue next map →" });
+  expect(link).toHaveAttribute("href", "/settings?server=primary#rotation");
+  // The target is a real fragment, not a percent-encoded pathname.
+  expect(router.state.location.search).toBe("?server=primary");
 });

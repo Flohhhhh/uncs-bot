@@ -11,6 +11,8 @@ import { GameServers } from "./game-servers";
 import { WardogsClient } from "./wardogs.client";
 import { hash } from "./admin.auth";
 import type { AdminAction, Staff } from "./admin.types";
+import { ServerCommunityController } from "../server-community/server-community.controller";
+import { ServerCommunityService } from "../server-community/server-community.service";
 
 describe("two-server HTTP isolation", () => {
   let app: INestApplication;
@@ -53,6 +55,7 @@ describe("two-server HTTP isolation", () => {
       {
         overview: jest.fn(async () => ({ status: { serverName: id }, players: [{ steamId, name: `${id} player` }] })),
         whitelist: jest.fn(async () => ({ entries: [{ steamId, active: id === "east" }] })),
+        gameLog: jest.fn(async () => ({ available: true, entries: [], serverMarker: id })),
         execute: jest.fn(async () => ({ state: "accepted", message: `Accepted by ${id}` })),
       },
     ]),
@@ -113,7 +116,13 @@ describe("two-server HTTP isolation", () => {
     const adapter = new ExpressAdapter(),
       host = new HttpAdapterHost();
     host.httpAdapter = adapter;
-    const module = await Test.createTestingModule({ imports: [AdminModule] })
+    const module = await Test.createTestingModule({
+      imports: [AdminModule],
+      controllers: [ServerCommunityController],
+      providers: [
+        { provide: ServerCommunityService, useValue: { status: (serverId: string) => ({ serverId, enabled: false }) } },
+      ],
+    })
       .overrideProvider(HttpAdapterHost)
       .useValue(host)
       .overrideProvider(AdminSettings)
@@ -131,6 +140,19 @@ describe("two-server HTTP isolation", () => {
   afterEach(async () => {
     await app.close();
     jest.restoreAllMocks();
+  });
+  it("scopes read-only community status to the selected accessible server", async () => {
+    centralAccess = "viewer";
+    expect((await read("servers/central/community-messages").expect(200)).body.serverId).toBe("central");
+    await read("community-messages").expect(400);
+    expect(games.east.overview).not.toHaveBeenCalled();
+    expect(games.central.overview).not.toHaveBeenCalled();
+    expect(games.central.execute).not.toHaveBeenCalled();
+  });
+  it("does not expose community status without a staff session or server access", async () => {
+    centralAccess = "none";
+    await read("servers/central/community-messages").expect(403);
+    await request(app.getHttpServer()).get("/admin/api/servers/east/community-messages").expect(401);
   });
   it("requires selection even with valid staff access and returns only safe permitted labels", async () => {
     centralAccess = "none";
@@ -169,6 +191,24 @@ describe("two-server HTTP isolation", () => {
     expect((await read(`servers/east/audit/${action.id}`)).body.record.details.serverId).toBe("east");
     expect((await read(`servers/central/audit/${action.id}`)).body.record).toBeNull();
     expect((await read("servers/central/audit")).body).toEqual([]);
+  });
+  it("keeps game log reads and caches server scoped and denies viewers", async () => {
+    centralAccess = "admin";
+    expect((await read("servers/east/game-log").expect(200)).body.serverMarker).toBe("east");
+    expect((await read("servers/central/game-log").expect(200)).body.serverMarker).toBe("central");
+    await read("servers/east/game-log").expect(200);
+    expect(games.east.gameLog).toHaveBeenCalledTimes(1);
+    expect(games.central.gameLog).toHaveBeenCalledTimes(1);
+    centralAccess = "viewer";
+    await read("servers/central/game-log").expect(403);
+    expect(games.east.gameLog).toHaveBeenCalledTimes(1);
+    expect(games.central.gameLog).toHaveBeenCalledTimes(1);
+    await read("game-log").expect(400);
+  });
+  it.each(["viewer", "mod"])("denies game log reads to %s before reading the server", async (role) => {
+    roles = [role];
+    await read("servers/east/game-log").expect(403);
+    expect(games.east.gameLog).not.toHaveBeenCalled();
   });
   it("rejects missing, stale and mismatched review targets before recording anything", async () => {
     const body = { id: randomUUID(), action: "broadcast", message: "Test notice", reason: "Reviewed" };

@@ -101,6 +101,10 @@ export class AdminGameController {
   mapOptions(@Req() req: StaffRequest, @Param("map") map: string) {
     return this.service.mapOptions(map, req.staff.serverId);
   }
+  @Get("game-log")
+  gameLog(@Req() req: StaffRequest) {
+    return this.service.gameLog(req.staff);
+  }
   @Post("actions")
   act(@Req() req: StaffRequest, @Body() body: unknown) {
     return this.service.act(req.staff, body);

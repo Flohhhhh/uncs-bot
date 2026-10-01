@@ -35,7 +35,7 @@ const pages = {
   match: ["◇", "Match & maps", "Match & maps", "Control the current round using the options this server supports."],
   votes: ["✓", "Map votes", "Map votes", "Let the community choose the next map in Discord."],
   events: ["⚑", "Events", "Optional events", "Run supervised 50v50 events and review their actions."],
-  audit: ["◷", "Action history", "Action history", "Who changed what, why they did it, and what the game confirmed."],
+  audit: ["◷", "Action history", "Action history", "Dashboard receipts and recent game requests."],
   settings: ["⚙", "Server settings", "Server settings", "Identity, joining, gameplay and map rotation."],
   permissions: ["◈", "Permissions", "Staff permissions", "Which controls each staff role can use."],
 } as const;
@@ -210,6 +210,13 @@ function Dashboard({
   const navigate = useNavigate();
   const key = location.pathname.split("/").filter(Boolean)[0] || "overview";
   const page = Object.hasOwn(pages, key) ? (key as keyof typeof pages) : "overview";
+  const visiblePages = Object.entries(pages).filter(([id]) =>
+    id === "supporters"
+      ? me.role === "admin"
+      : ["applications", "settings", "votes", "events"].includes(id)
+        ? server.role === "admin"
+        : true,
+  );
   const gamePage = ["overview", "players", "whitelist", "bans", "announcements", "match"].includes(key);
   const [overview, setOverview] = useState<Overview | null>(null);
   const [stale, setStale] = useState(true);
@@ -335,28 +342,37 @@ function Dashboard({
             <span className="admin-label">SERVER ADMIN</span>
           </div>
           <p className="nav-label">SERVER OPERATIONS</p>
-          <nav aria-label="Dashboard sections">
-            {Object.entries(pages)
-              .filter(([id]) =>
-                id === "supporters"
-                  ? me.role === "admin"
-                  : ["applications", "settings", "votes", "events"].includes(id)
-                    ? server.role === "admin"
-                    : true,
-              )
-              .map(([id, item]) => (
-                <NavLink
-                  key={id}
-                  to={{ pathname: `/${id}`, search: location.search }}
-                  className={({ isActive }) => (isActive ? "active" : "")}
-                  onClick={(event) => {
-                    if (busy || dialogOpen) event.preventDefault();
-                  }}
-                >
-                  <span>{item[0]}</span>
+          <label className="mobile-navigation">
+            Dashboard section
+            <select
+              value={visiblePages.some(([id]) => id === key) ? key : ""}
+              disabled={busy || dialogOpen}
+              onChange={(event) => navigate({ pathname: `/${event.target.value}`, search: location.search })}
+            >
+              <option value="" disabled>
+                Choose a section
+              </option>
+              {visiblePages.map(([id, item]) => (
+                <option key={id} value={id}>
                   {item[1]}
-                </NavLink>
+                </option>
               ))}
+            </select>
+          </label>
+          <nav aria-label="Dashboard sections">
+            {visiblePages.map(([id, item]) => (
+              <NavLink
+                key={id}
+                to={{ pathname: `/${id}`, search: location.search }}
+                className={({ isActive }) => (isActive ? "active" : "")}
+                onClick={(event) => {
+                  if (busy || dialogOpen) event.preventDefault();
+                }}
+              >
+                <span>{item[0]}</span>
+                {item[1]}
+              </NavLink>
+            ))}
           </nav>
           <div className="sidebar-bottom">
             <a className="community" href="https://theuncsgaming.com/">
@@ -508,7 +524,7 @@ function Dashboard({
             <footer>
               <span>THE UNCs ✳ POWERED BY GRAMPS</span>
               <span>
-                {gamePage ? "Updates every 20 seconds while this page is visible" : "Refresh for the latest records"}
+                {gamePage ? "Server status updates every 20 seconds while visible" : "Refresh for the latest records"}
               </span>
             </footer>
           </div>

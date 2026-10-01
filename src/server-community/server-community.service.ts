@@ -7,6 +7,7 @@ import { RconError, WardogsClient } from "../admin/wardogs.client";
 import { EnvService } from "../env/env.service";
 import { GameServers } from "../admin/game-servers";
 import type { GameServerSummary } from "../common/game-server";
+import type { CommunityMessagesStatus } from "../common/community-messages";
 import { initialCommunityState, observeCommunity, statusCard, type CommunitySnapshot } from "./community-state";
 
 const SYSTEM_ACTOR: Staff = {
@@ -19,23 +20,66 @@ const MAX_QUEUE = 64;
 const MAX_SENDS_PER_TICK = 1;
 const MESSAGE_TTL_MS = 60_000;
 type QueuedMessage = { action: AdminAction; readyAt: number; expiresAt: number; followUps: string[] };
+type StatusCardTarget = { channelId: string; messageId: string } | null | undefined;
+
+function communityOptions(env: EnvService, card: StatusCardTarget) {
+  const enabled = env.get("SERVER_COMMUNITY_ENABLED") === true;
+  const channelId = card === undefined ? env.get("SERVER_COMMUNITY_DISCORD_CHANNEL_ID") : card?.channelId;
+  const messageId = card === undefined ? env.get("SERVER_COMMUNITY_DISCORD_MESSAGE_ID") : card?.messageId;
+  const welcome = enabled && env.get("SERVER_COMMUNITY_WELCOME_ENABLED") === true;
+  const round = enabled && env.get("SERVER_COMMUNITY_ROUND_ENABLED") === true;
+  const status = enabled && env.get("SERVER_COMMUNITY_DISCORD_STATUS_ENABLED") === true && !!channelId && !!messageId;
+  return { welcome, round, status, channelId, messageId, active: welcome || round || status };
+}
 
 @Injectable()
 export class ServerCommunityService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(ServerCommunityService.name);
-  private readonly workers: ServerCommunityWorker[] = [];
+  private readonly workers = new Map<string, ServerCommunityWorker>();
   constructor(
     private readonly servers: GameServers,
     private readonly store: AdminStore,
     private readonly env: EnvService,
     private readonly discord: Client,
   ) {}
+  private cardTarget(serverId: string): StatusCardTarget {
+    const configured = this.env.get("WARDOGS_SERVERS");
+    // Explicit registries must not reuse the legacy shared status message.
+    return configured ? (configured.find((entry) => entry.id === serverId)?.communityStatus ?? null) : undefined;
+  }
+
+  status(id?: string): CommunityMessagesStatus {
+    const serverId = this.servers.resolve(id);
+    const options = communityOptions(this.env, this.cardTarget(serverId));
+    const worker = this.workers.get(serverId);
+    return {
+      enabled: this.env.get("SERVER_COMMUNITY_ENABLED") === true,
+      workerStarted: !!worker && options.active,
+      ...(worker?.observations() ?? {
+        lastObservedAt: null,
+        lastMessageAcknowledgedAt: null,
+        lastStatusCardUpdatedAt: null,
+      }),
+      welcome: {
+        enabled: options.welcome,
+        messages: this.env.get("SERVER_COMMUNITY_WELCOME_MESSAGES") ?? [
+          this.env.get("SERVER_COMMUNITY_WELCOME_MESSAGE"),
+        ],
+        delaySeconds: this.env.get("SERVER_COMMUNITY_WELCOME_DELAY_SECONDS"),
+        spacingSeconds: this.env.get("SERVER_COMMUNITY_WELCOME_SPACING_SECONDS"),
+      },
+      round: { enabled: options.round, message: this.env.get("SERVER_COMMUNITY_ROUND_MESSAGE") },
+      discordStatus: {
+        enabled:
+          this.env.get("SERVER_COMMUNITY_ENABLED") === true &&
+          this.env.get("SERVER_COMMUNITY_DISCORD_STATUS_ENABLED") === true,
+        configured: !!options.channelId && !!options.messageId,
+      },
+    };
+  }
   onApplicationBootstrap() {
     if (!this.env.get("SERVER_COMMUNITY_ENABLED")) return;
     for (const server of this.servers.list()) {
-      const configured = this.env.get("WARDOGS_SERVERS");
-      const card = configured?.find((entry) => entry.id === server.id)?.communityStatus;
-      // A registry never reuses the legacy shared status message for every server.
       try {
         const worker = new ServerCommunityWorker(
           this.servers.get(server.id),
@@ -43,9 +87,9 @@ export class ServerCommunityService implements OnApplicationBootstrap, OnModuleD
           this.env,
           this.discord,
           server,
-          configured ? (card ?? null) : undefined,
+          this.cardTarget(server.id),
         );
-        this.workers.push(worker);
+        this.workers.set(server.id, worker);
         worker.onApplicationBootstrap();
       } catch {
         this.logger.warn(`Community messages for ${server.id} need connection setup. Other servers remain available.`);
@@ -53,8 +97,8 @@ export class ServerCommunityService implements OnApplicationBootstrap, OnModuleD
     }
   }
   onModuleDestroy() {
-    for (const worker of this.workers) worker.onModuleDestroy();
-    this.workers.length = 0;
+    for (const worker of this.workers.values()) worker.onModuleDestroy();
+    this.workers.clear();
   }
 }
 
@@ -70,6 +114,7 @@ export class ServerCommunityWorker implements OnApplicationBootstrap, OnModuleDe
   private cardAttemptAt = 0;
   private cardSavedAt = 0;
   private cardKey = "";
+  private lastMessageAcknowledgedAt: string | null = null;
 
   constructor(
     private readonly game: WardogsClient,
@@ -77,20 +122,19 @@ export class ServerCommunityWorker implements OnApplicationBootstrap, OnModuleDe
     private readonly env: EnvService,
     private readonly discord: Client,
     private readonly server: GameServerSummary = { id: "primary", name: "The UNCs", version: "0".repeat(64) },
-    private readonly card?: { channelId: string; messageId: string } | null,
+    private readonly card?: StatusCardTarget,
   ) {}
 
   private options() {
-    const enabled = this.env.get("SERVER_COMMUNITY_ENABLED") === true;
-    const channelId =
-      this.card === undefined ? this.env.get("SERVER_COMMUNITY_DISCORD_CHANNEL_ID") : this.card?.channelId;
-    const messageId =
-      this.card === undefined ? this.env.get("SERVER_COMMUNITY_DISCORD_MESSAGE_ID") : this.card?.messageId;
-    const welcome = enabled && this.env.get("SERVER_COMMUNITY_WELCOME_ENABLED") === true;
-    const round = enabled && this.env.get("SERVER_COMMUNITY_ROUND_ENABLED") === true;
-    const status =
-      enabled && this.env.get("SERVER_COMMUNITY_DISCORD_STATUS_ENABLED") === true && !!channelId && !!messageId;
-    return { welcome, round, status, channelId, messageId, active: welcome || round || status };
+    return communityOptions(this.env, this.card);
+  }
+
+  observations() {
+    return {
+      lastObservedAt: this.snapshot?.observedAt ?? null,
+      lastMessageAcknowledgedAt: this.lastMessageAcknowledgedAt,
+      lastStatusCardUpdatedAt: this.cardSavedAt ? new Date(this.cardSavedAt).toISOString() : null,
+    };
   }
 
   onApplicationBootstrap() {
@@ -238,7 +282,9 @@ export class ServerCommunityWorker implements OnApplicationBootstrap, OnModuleDe
       );
       return false;
     }
-    return result.state === "accepted" || result.state === "applied";
+    const acknowledged = result.state === "accepted" || result.state === "applied";
+    if (acknowledged) this.lastMessageAcknowledgedAt = new Date().toISOString();
+    return acknowledged;
   }
 
   private async updateCard(online: boolean) {
