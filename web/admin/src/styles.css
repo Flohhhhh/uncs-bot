@@ -42,7 +42,8 @@
   justify-content: flex-end;
   margin-bottom: 20px;
 }
-.server-selection label {
+.server-selection label,
+.login-copy > label {
   display: grid;
   gap: 6px;
   color: var(--muted);
@@ -50,7 +51,8 @@
   min-width: 0;
   width: min(100%, 360px);
 }
-.server-selection select {
+.server-selection select,
+.login-copy > label select {
   width: 100%;
   min-width: 0;
 }
@@ -697,7 +699,9 @@ a.breadcrumb:hover {
   margin-bottom: 17px;
   flex-wrap: wrap;
 }
-.toolbar select {
+.toolbar select,
+.server-selection select,
+.login-copy > label select {
   padding: 10px 12px;
   max-width: 100%;
   min-height: 42px;
@@ -727,6 +731,7 @@ textarea::placeholder {
   opacity: 1;
 }
 .table-wrap {
+  position: relative;
   overflow: auto;
 }
 .table-wrap.scrollable {

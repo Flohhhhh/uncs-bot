@@ -118,7 +118,7 @@ export function OverviewPage() {
         }
       >
         {players.length ? (
-          <Table headers={["PLAYER", "FACTION", "K / D", "PING", ""]}>
+          <Table label="Players on this server" headers={["PLAYER", "FACTION", "K / D", "PING", ""]} scrollable>
             {players.slice(0, 6).map((player) => (
               <tr key={player.steamId}>
                 <td>
