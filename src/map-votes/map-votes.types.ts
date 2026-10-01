@@ -2,7 +2,6 @@ import { z } from "zod";
 import { gameServerId } from "../common/game-server";
 import { mapSelectionSchema } from "../admin/admin.types";
 
-export const MAP_VOTE_SERVER = "primary";
 export const startMapVoteSchema = z
   .object({
     id: z.uuid(),

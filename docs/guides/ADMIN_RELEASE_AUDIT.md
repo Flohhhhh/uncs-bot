@@ -127,6 +127,8 @@ Planning is pure and independent from transport/storage. Durable event operation
 
 Local validation passed **552 backend tests and 167 frontend tests**, both typechecks, global formatting, scoped lint, handler registration, whitespace checks, and the production build. Six new PostgreSQL cases cover simultaneous event starts/claims, structural replay, stop/settlement overlap, interrupted-action review with late receipts, unchanged-lock completion and missing-operation failure; use the draft PR's CI results for their execution status. Browser rehearsal against simulated providers recorded a round warning, waited 30 seconds, confirmed two moves without forced respawns, stopped, and saved the original lock. The phone-width form and action dialog fit without document overflow; tables retain their labeled horizontal scroll region. All integration effects were loopback simulations.
 
+Delivered as draft [PR #14](https://github.com/Flohhhhh/uncs-bot/pull/14), stacked on #13. [CI run 36850902548](https://github.com/Flohhhhh/uncs-bot/actions/runs/36850902548) passed at `fbc2ed6`: 552 backend, 167 dashboard and 28 PostgreSQL storage/concurrency checks, plus production build. The subsequent multi-server work and current totals are recorded above.
+
 ## Reviewed delivery boundaries
 
 - Cleanup PR [#5](https://github.com/Flohhhhh/uncs-bot/pull/5) separates public applicant and staff origins, removes website hosting from Gramps, and tolerates individual malformed reserved-list rows. It does not repair xREALM's own interface.
