@@ -1,5 +1,9 @@
 # Dashboard release audit
 
+## October 1 afternoon — player lookup follow-up
+
+Regression tests reproduced two staff workflow failures: Overview's "View player" opened the entire roster instead of the chosen player's controls, and surrounding spaces in pasted search text hid matching players/bans. Overview and Live players now share one player-actions dialog, resolving the selected SteamID against the latest roster and showing an unavailable message if that player leaves. Player, ban, combat and recent action-history searches trim surrounding spaces; the existing whitelist and exact-receipt lookup already did. No new API, navigation state or live game action was added. All 182 frontend tests, frontend typecheck/build, touched-file lint, global formatting and whitespace checks pass. Release through development and the protected main PR is still required.
+
 ## October 1 afternoon — staff workflow simplification and website publication
 
 Dennis identified unnecessary typing in moderation and team controls. Player actions now use the displayed target's exact SteamID without asking staff to type it again. Bans, kicks, unbans and whitelist removals retain a moderation reason. Team moves, messages, announcements, respawns, whitelist additions, lighting, settings/rotation/next-map saves, ballots and event controls record a neutral action description automatically. Existing actor, server, target, changes and result receipts remain intact. Action buttons name the operation. Whole-match and event-start/restoration confirmation phrases remain; no role, targeting, duplicate-submit or uncertain-result checks were removed. There are no API, database or migration changes.

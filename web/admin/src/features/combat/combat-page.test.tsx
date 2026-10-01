@@ -124,7 +124,7 @@ describe("CombatPage", () => {
     render(page());
     let events = await screen.findByRole("table", { name: "Combat events" });
     expect(within(events).getAllByRole("row")).toHaveLength(4);
-    fireEvent.change(screen.getByLabelText("Search player, SteamID, or weapon"), { target: { value: aliceId } });
+    fireEvent.change(screen.getByLabelText("Search player, SteamID, or weapon"), { target: { value: ` ${aliceId} ` } });
     fireEvent.change(screen.getByLabelText("Weapon / cause"), { target: { value: "Rifle" } });
     fireEvent.change(screen.getByLabelText("Event type"), { target: { value: "headshot" } });
     events = screen.getByRole("table", { name: "Combat events" });

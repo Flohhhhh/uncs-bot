@@ -62,7 +62,7 @@ describe("stored action receipt recovery", () => {
     request.mockResolvedValue(recent);
     mount();
     await screen.findAllByText("Recent staff");
-    search("00000000-0000");
+    search("  00000000-0000  ");
     expect(screen.getAllByText("Recent staff")).toHaveLength(100);
     expect(request).toHaveBeenCalledTimes(1);
     search("../actions");

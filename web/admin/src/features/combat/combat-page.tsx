@@ -147,7 +147,7 @@ function CombatView({
   }
   const leaderboard = data.leaderboard ?? [];
   const events = data.events;
-  const search = query.toLowerCase();
+  const search = query.trim().toLowerCase();
   const matches = (values: (string | null)[]) => values.some((value) => (value ?? "").toLowerCase().includes(search));
   const players = leaderboard.filter((player) => matches([player.name, player.steamId]));
   const causes = [

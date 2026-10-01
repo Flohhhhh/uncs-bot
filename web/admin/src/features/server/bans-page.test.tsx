@@ -31,7 +31,7 @@ it("keeps every ban visible, filters and sorts locally, and disables removal onl
   const validRow = screen.getByText(valid).closest("tr")!;
   expect(within(validRow).getByRole("button", { name: "Remove ban" })).toBeEnabled();
   fireEvent.click(screen.getByRole("button", { name: "Sort by SteamID64" }));
-  fireEvent.change(screen.getByRole("searchbox"), { target: { value: "Existing ban" } });
+  fireEvent.change(screen.getByRole("searchbox"), { target: { value: "  Existing ban  " } });
   expect(screen.queryByText(invalid)).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Remove ban" }));
   expect(admin.openAction).toHaveBeenCalledWith("unban", valid);
