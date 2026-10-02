@@ -50,7 +50,8 @@ export const supporterPayments = pgTable(
     paidAt: timestamp("paid_at", { withTimezone: true }).notNull(),
     amountCents: integer("amount_cents"),
     currency: text("currency"),
-    source: text("source").$type<"signed_status" | "manual_receipt">().notNull(),
+    // Plain text: patreon_api is a TypeScript-only addition and needs no migration.
+    source: text("source").$type<"signed_status" | "manual_receipt" | "patreon_api">().notNull(),
     reference: text("reference").notNull(),
     verificationState: text("verification_state").$type<"verified" | "unverified">().notNull(),
     firstSuccessfulPaymentVerified: boolean("first_successful_payment_verified").notNull().default(false),
