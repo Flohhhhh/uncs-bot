@@ -133,6 +133,23 @@ describe("refused feed delivery record", () => {
     expect(deliveries.status("primary")).toEqual(clean);
     expect(warn).toHaveBeenCalledTimes(2);
   });
+  it("names the targeted server only for requests carrying that server's feed token, recording nothing", () => {
+    const servers = fixtureServers({});
+    servers.feedToken = () => token;
+    const deliveries = new TelemetryDeliveries(servers);
+    for (const url of ["/api/ingest/events", "/API/Ingest/servers/primary/events?retry=1"])
+      expect(deliveries.tokenServer(url, `Bearer ${token}`)).toBe("primary");
+    const refused: [string, string | undefined][] = [
+      ["/api/ingest/events", undefined],
+      ["/api/ingest/events", `Bearer ${token}x`],
+      ["/api/ingest/servers/other/events", `Bearer ${token}`],
+      ["/api/ingest/servers/%FF/events", `Bearer ${token}`],
+      ["/api/ingest/events/extra", `Bearer ${token}`],
+    ];
+    for (const [url, authorization] of refused) expect(deliveries.tokenServer(url, authorization)).toBeNull();
+    expect(deliveries.status("primary")).toEqual(clean);
+    expect(warn).not.toHaveBeenCalled();
+  });
   it("rate-limits warnings per server and kind and reports how many were suppressed", () => {
     const deliveries = multiServer();
     for (let count = 0; count < 5; count++) deliveries.rejected("east", 503, "storage unavailable", true);

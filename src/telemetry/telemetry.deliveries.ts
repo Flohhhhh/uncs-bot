@@ -72,17 +72,19 @@ export class TelemetryDeliveries {
    * Authorization header carries the targeted server's feed token. Returns false for other routes.
    */
   rejectedRequest(url: string, status: number, reason: string, authorization: unknown) {
-    const route = INGEST_ROUTE.exec(url);
-    if (!route) return false;
-    let id: string | undefined;
-    try {
-      id = route[1] === undefined ? undefined : decodeURIComponent(route[1]);
-    } catch {
-      id = UNCONFIGURED;
-    }
-    const serverId = this.configured(id);
+    const serverId = this.target(url);
+    if (serverId === undefined) return false;
     this.record(serverId, status, reason, serverId !== null && this.carriesToken(serverId, authorization));
     return true;
+  }
+
+  /**
+   * The configured server an ingest request targets when its Authorization header carries that
+   * server's feed token, or null. The comparison is constant-time and nothing is kept.
+   */
+  tokenServer(url: string, authorization: unknown): string | null {
+    const serverId = this.target(url);
+    return serverId && this.carriesToken(serverId, authorization) ? serverId : null;
   }
 
   status(serverId: string): FeedDeliveryStatus {
@@ -127,6 +129,19 @@ export class TelemetryDeliveries {
     } catch {
       return false;
     }
+  }
+
+  /** The configured server an ingest route names: null when it names none, undefined for other routes. */
+  private target(url: string) {
+    const route = INGEST_ROUTE.exec(url);
+    if (!route) return undefined;
+    let id: string | undefined;
+    try {
+      id = route[1] === undefined ? undefined : decodeURIComponent(route[1]);
+    } catch {
+      id = UNCONFIGURED;
+    }
+    return this.configured(id);
   }
 
   private configured(id: string | undefined) {
