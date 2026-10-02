@@ -7,6 +7,7 @@ import { SESSION, ROTATION } from "../common/server-settings";
 import { AdminService } from "./admin.service";
 import { AdminStore } from "./admin.store";
 import { fixtureServers } from "./game-server-fixture";
+import { RconError } from "./rcon-protocol";
 
 const original = `[${SESSION}]\r\n; keep identity comment\r\nServerName="The UNCs"\r\nServerPassword="private-join-secret"\r\nServerMinPlayerCash=0\r\nServerMaxPlayerCash=0\r\n+DefaultReservedPlayerIds=76561198000000001\r\n[MatchState.Playing.KOTH]\r\nScorePeriod=24\r\n[${ROTATION}]\r\nbEnabled=True\r\nRotationMode=Ordered\r\n+RotationEntries=(Map="Kavkazi",Experiences="KOTH",Lighting="DayClear")\r\n+RotationEntries=(Map="Europe",Experiences="KOTH",Lighting="DayClear")\r\n[WDServerFeed]\r\nUrl=http://127.0.0.1:32190\r\nToken=private-feed-secret\r\n`;
 function fixture() {
@@ -340,6 +341,136 @@ describe("server configuration boundaries", () => {
       }),
     ).rejects.toThrow("current round changed");
     expect(f.request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+  });
+  // The primary server's reads on October 2: no running entry, next entry 0, and a queued
+  // Infantry Only entry saved without lighting. Unset details are reported as null here.
+  function betweenRotationRounds(nextIndex: number | null = 0) {
+    const f = fixture();
+    f.document.text = original.replace(
+      '+RotationEntries=(Map="Europe"',
+      '+RotationEntries=(Map="Kavkazi",Experiences="KOTH+KOTH_InfantryOnly")\r\n+RotationEntries=(Map="Europe"',
+    );
+    f.status.map = "Bakurani";
+    f.status.rotation = { nowIndex: null, nextIndex } as never;
+    f.capabilities.routes.push("GET /v1/rotation");
+    const running = {
+      enabled: true,
+      mode: "Ordered",
+      entries: parseRotation(f.document.text).map((entry) => ({
+        map: entry.map,
+        experiences: entry.experiences,
+        lighting: entry.lighting ?? null,
+        zoneAlternator: entry.zoneAlternator ?? null,
+        status: null as string | null,
+        denied: null,
+      })),
+    };
+    const fallback = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (...args) => (args[1] === "/v1/rotation" ? running : fallback(...args)));
+    return { ...f, running };
+  }
+  const queueNext = (anchor: { currentIndex: number | null; nextIndex?: number }) => ({
+    id: randomUUID(),
+    action: "map-next" as const,
+    reason: "Next round choice",
+    revision: "r1",
+    ...anchor,
+    currentMap: "Bakurani",
+    entry: { map: "Kavkazi", experiences: ["KOTH", "KOTH_InfantryOnly"] },
+  });
+  it("queues into the game's next entry when no running entry is named and unset details are null", async () => {
+    const f = betweenRotationRounds();
+    expect((await f.game.configuration()).rotation).toMatchObject({
+      currentIndex: null,
+      nextIndex: 0,
+      positionNote: "",
+    });
+    expect(await f.game.execute(queueNext({ currentIndex: null, nextIndex: 0 }))).toMatchObject({
+      state: "pending",
+      message: expect.stringContaining("The game reports rotation entry 1 as next."),
+    });
+    // The matching queued entry moves into the next slot; nothing is duplicated or dropped.
+    expect(parseRotation(f.saved().text)).toEqual([
+      { map: "Kavkazi", experiences: ["KOTH", "KOTH_InfantryOnly"] },
+      { map: "Kavkazi", experiences: ["KOTH"], lighting: "DayClear" },
+      { map: "Europe", experiences: ["KOTH"], lighting: "DayClear" },
+    ]);
+    expect(f.request.mock.calls.filter(([method]) => method === "PUT")).toHaveLength(1);
+    expect(f.request.mock.calls.some(([, path]) => path.startsWith("/v1/match"))).toBe(false);
+  });
+  it.each([
+    ["another entry", { nowIndex: null, nextIndex: 1 }, "now reports rotation entry 2 as next"],
+    ["no entry", { nowIndex: null, nextIndex: null }, "did not confirm its next entry"],
+  ])("does not report success when the game names %s as next after saving", async (_, after, message) => {
+    const f = betweenRotationRounds();
+    const fallback = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (...args) => {
+      const reply = await fallback(...args);
+      if (args[0] === "PUT") f.status.rotation = after as never;
+      return reply;
+    });
+    expect(await f.game.execute(queueNext({ currentIndex: null, nextIndex: 0 }))).toMatchObject({
+      state: "unknown",
+      message: expect.stringContaining(message),
+    });
+    expect(f.request.mock.calls.filter(([method]) => method === "PUT")).toHaveLength(1);
+  });
+  it.each(["no-next", "outside", "conflicting-marker", "unset-differs", "two-current"])(
+    "keeps next-map writes blocked when the next entry is not confirmed: %s",
+    async (kind) => {
+      const f = betweenRotationRounds(kind === "no-next" ? null : kind === "outside" ? 3 : 0);
+      if (kind === "conflicting-marker") f.running.entries[2].status = "next";
+      // A saved value is never matched by an unset running value.
+      if (kind === "unset-differs") f.running.entries[0].lighting = null;
+      if (kind === "two-current") f.running.entries[0].status = f.running.entries[1].status = "now";
+      const view = await f.game.configuration();
+      expect(view.rotation).toMatchObject({ currentIndex: null, nextIndex: null });
+      expect(view.rotation.positionNote).toBeTruthy();
+      await expect(f.game.execute(queueNext({ currentIndex: null, nextIndex: 0 }))).rejects.toThrow();
+      expect(f.request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+    },
+  );
+  it.each(["next-moved", "round-started", "reviewed-running-entry"])(
+    "refuses a next-entry choice reviewed against a different position: %s",
+    async (kind) => {
+      const f = betweenRotationRounds();
+      await f.game.configuration();
+      if (kind === "next-moved") f.status.rotation = { nowIndex: null, nextIndex: 1 } as never;
+      if (kind === "round-started") f.status.rotation = { nowIndex: 1, nextIndex: 2 } as never;
+      const anchor = kind === "reviewed-running-entry" ? { currentIndex: 0 } : { currentIndex: null, nextIndex: 0 };
+      await expect(f.game.execute(queueNext(anchor))).rejects.toThrow("current round changed");
+      expect(f.request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+    },
+  );
+  it.each([
+    [
+      "a requested pause",
+      new RconError("The game requested a short pause. Wait before trying again."),
+      "The running rotation could not be read. The game requested a short pause. Wait before trying again.",
+    ],
+    [
+      "an unexpected reply",
+      { enabled: true, mode: "Ordered", entries: [{ map: 42 }] },
+      "The running rotation could not be read. The game's reply was not in the expected format (entries #1 map: Invalid input: expected string, received number). Refresh to try again.",
+    ],
+  ])("names why the running rotation could not be read: %s", async (_, reply, note) => {
+    const f = betweenRotationRounds();
+    const fallback = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (...args) => {
+      if (args[1] !== "/v1/rotation") return fallback(...args);
+      if (reply instanceof Error) throw reply;
+      return reply;
+    });
+    expect((await f.game.configuration()).rotation).toMatchObject({ currentIndex: null, positionNote: note });
+    await expect(f.game.execute(queueNext({ currentIndex: null, nextIndex: 0 }))).rejects.toThrow(note);
+    expect(f.request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+  });
+  it("requires exactly one reviewed rotation anchor for a next-map request", () => {
+    const valid = (anchor: object) => actionSchema.safeParse({ ...queueNext({ currentIndex: 0 }), ...anchor }).success;
+    expect(valid({ currentIndex: 0 })).toBe(true);
+    expect(valid({ currentIndex: null, nextIndex: 0 })).toBe(true);
+    expect(valid({ currentIndex: null })).toBe(false);
+    expect(valid({ currentIndex: 0, nextIndex: 1 })).toBe(false);
   });
   it("changes only reviewed fields, validates, uses If-Match and confirms the stored values", async () => {
     const { game, saved, request } = fixture();

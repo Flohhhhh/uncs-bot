@@ -36,6 +36,8 @@ describe("admin HTTP boundaries", () => {
   };
   const game = { overview: jest.fn(), execute: jest.fn(), configuration: jest.fn() };
   const votes = {
+    controls: jest.fn().mockResolvedValue({ serverId: "primary", version: 0 }),
+    saveControls: jest.fn().mockResolvedValue({ serverId: "primary", version: 1 }),
     setup: jest.fn().mockResolvedValue({ serverId: "primary", checks: [] }),
     list: jest.fn().mockResolvedValue({ enabled: false, votes: [] }),
     start: jest.fn(),
@@ -211,6 +213,24 @@ describe("admin HTTP boundaries", () => {
       .set("Cookie", `__Host-uncs_admin_session=${token}`)
       .expect(404);
     expect(votes.setup).not.toHaveBeenCalled();
+    expect(game.execute).not.toHaveBeenCalled();
+  });
+  it("protects voting switches with the session, same-origin CSRF and explicit server target", async () => {
+    const path = "/admin/api/servers/primary/map-votes/controls";
+    await request(app.getHttpServer()).get(path).expect(401);
+    await request(app.getHttpServer()).post(path).send({}).expect(401);
+    await request(app.getHttpServer())
+      .post(path)
+      .set("Cookie", `__Host-uncs_admin_session=${token}`)
+      .send({})
+      .expect(403);
+    expect(votes.saveControls).not.toHaveBeenCalled();
+    const result = await request(app.getHttpServer())
+      .get(path)
+      .set("Cookie", `__Host-uncs_admin_session=${token}`)
+      .expect(200);
+    expect(result.headers["cache-control"]).toBe("no-store");
+    expect(votes.controls).toHaveBeenCalledWith(expect.objectContaining({ serverId: "primary", id: session.userId }));
     expect(game.execute).not.toHaveBeenCalled();
   });
   it.each(["/admin/api/events", "/admin/api/events/d0a3cdd7-a1c7-4904-a99e-cf058b432c34/operations"])(

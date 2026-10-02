@@ -5,6 +5,7 @@ import { MapVotesPage } from "./map-votes-page";
 import { api } from "../../api/client";
 import { AdminContext } from "../../app/context";
 import { context, overview } from "../players/test-fixtures";
+import { defaultVotingPolicy } from "../../../../../src/common/voting-policy";
 vi.mock("../../api/client", () => ({ api: vi.fn() }));
 const request = vi.mocked(api);
 const settings = {
@@ -43,6 +44,15 @@ beforeEach(() => {
   request.mockImplementation(async (path, init) => {
     if (init?.method === "POST") return { ...ballot, message: "Voting is open." } as never;
     if (path === "map-votes") return { enabled, serverId: "primary", votes } as never;
+    if (path === "map-votes/controls")
+      return {
+        serverId: "primary",
+        version: 0,
+        available: true,
+        ready: enabled,
+        policy: defaultVotingPolicy,
+        message: "Voting is off.",
+      } as never;
     if (path === "settings") return structuredClone(settings) as never;
     if (path === "overview") {
       const value = overview();
@@ -76,7 +86,7 @@ async function choose(map: string) {
   await waitFor(() => expect(screen.getByRole("button", { name: "Add map option" })).toBeEnabled());
   fireEvent.click(screen.getByRole("button", { name: "Add map option" }));
 }
-it("excludes a running map reported by its in-game name from catalog choices", async () => {
+it("offers the current map by its in-game name so its next-round mode can differ", async () => {
   const fallback = request.getMockImplementation()!;
   request.mockImplementation(async (path, options) => {
     if (path !== "settings") return fallback(path, options);
@@ -84,7 +94,7 @@ it("excludes a running map reported by its in-game name from catalog choices", a
   });
   show();
   const maps = within(await screen.findByRole("combobox", { name: "Map" }));
-  expect(maps.queryByRole("option", { name: "Ozeti" })).not.toBeInTheDocument();
+  expect(maps.getByRole("option", { name: "Ozeti" })).toBeInTheDocument();
   expect(maps.getByRole("option", { name: "Bakurani" })).toBeInTheDocument();
   expect(request.mock.calls.some(([, options]) => options?.method === "POST")).toBe(false);
 });
@@ -236,7 +246,7 @@ it("does not query settings or catalog when disabled", async () => {
   show();
   await screen.findByRole("heading", { name: "Discord map voting is off" });
   expect(screen.getByRole("link", { name: "Open match & maps" })).toHaveAttribute("href", "/match?server=primary");
-  expect(request.mock.calls.map(([path]) => path)).toEqual(["map-votes"]);
+  expect(request.mock.calls.map(([path]) => path)).toEqual(["map-votes", "map-votes/controls"]);
 });
 it("recovers an initial voting-status failure with a read-only local retry", async () => {
   enabled = false;
@@ -248,13 +258,19 @@ it("recovers an initial voting-status failure with a read-only local retry", asy
   fireEvent.click(screen.getByRole("button", { name: "Refresh ballot history" }));
   await screen.findByRole("heading", { name: "Discord map voting is off" });
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-  expect(request.mock.calls.every(([path, init]) => path === "map-votes" && !init?.method)).toBe(true);
+  expect(
+    request.mock.calls.every(([path, init]) => ["map-votes", "map-votes/controls"].includes(path) && !init?.method),
+  ).toBe(true);
 });
 it("does not present retained disabled voting as current after a failed or pending retry", async () => {
   enabled = false;
   const { state, rerender } = show();
   await screen.findByRole("heading", { name: "Discord map voting is off" });
-  request.mockRejectedValueOnce(new Error("Voting status read failed"));
+  const fallback = request.getMockImplementation()!;
+  request.mockImplementation(async (path, init) => {
+    if (path === "map-votes") throw new Error("Voting status read failed");
+    return fallback(path, init);
+  });
   rerender(
     <AdminContext.Provider value={{ ...state, refreshVersion: 1 }}>
       <MapVotesPage />
@@ -264,11 +280,12 @@ it("does not present retained disabled voting as current after a failed or pendi
   expect(screen.queryByRole("heading", { name: "Discord map voting is off" })).not.toBeInTheDocument();
   expect(screen.getByRole("heading", { name: "Voting status unavailable" })).toBeInTheDocument();
   let finish!: (value: unknown) => void;
-  request.mockImplementationOnce(
-    () =>
-      new Promise((resolve) => {
-        finish = resolve;
-      }),
+  request.mockImplementation((path, init) =>
+    path === "map-votes"
+      ? new Promise((resolve) => {
+          finish = resolve;
+        })
+      : fallback(path, init),
   );
   fireEvent.click(screen.getByRole("button", { name: "Refresh ballot history" }));
   expect(screen.getByRole("button", { name: "Refresh ballot history" })).toBeDisabled();
@@ -277,7 +294,9 @@ it("does not present retained disabled voting as current after a failed or pendi
   await act(async () => finish({ enabled: false, serverId: "primary", votes: [] }));
   expect(screen.getByRole("heading", { name: "Discord map voting is off" })).toBeInTheDocument();
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-  expect(request.mock.calls.every(([path, init]) => path === "map-votes" && !init?.method)).toBe(true);
+  expect(
+    request.mock.calls.every(([path, init]) => ["map-votes", "map-votes/controls"].includes(path) && !init?.method),
+  ).toBe(true);
 });
 it("checks voting setup only on request, clears stale results on retry, and never sends a mutation", async () => {
   enabled = false;
@@ -293,7 +312,7 @@ it("checks voting setup only on request, clears stale results on retry, and neve
   show();
   await screen.findByRole("heading", { name: "Discord map voting is off" });
   fireEvent.click(screen.getByText("How to enable voting"));
-  expect(request.mock.calls.map(([path]) => path)).toEqual(["map-votes"]);
+  expect(request.mock.calls.map(([path]) => path)).toEqual(["map-votes", "map-votes/controls"]);
   fireEvent.click(screen.getByRole("button", { name: "Check voting setup" }));
   expect(screen.getByRole("button", { name: "Checking setup…" })).toBeDisabled();
   resolveSetup({
@@ -312,15 +331,40 @@ it("checks voting setup only on request, clears stale results on retry, and neve
   expect(request.mock.calls.some(([, options]) => options?.method === "POST")).toBe(false);
   expect(request.mock.calls.filter(([path]) => path === "map-votes/setup")).toHaveLength(2);
 });
-it("excludes the current map and duplicate choices, and requires two options", async () => {
+it("blocks exact duplicate combinations and requires two options", async () => {
   show();
   const picker = await screen.findByRole("combobox", { name: "Map" });
-  expect(within(picker).queryByRole("option", { name: "Kavkazi" })).not.toBeInTheDocument();
+  expect(within(picker).getByRole("option", { name: "Bakurani" })).toBeInTheDocument();
   await choose("Europe");
   expect(screen.getByRole("button", { name: "Review ballot" })).toBeDisabled();
-  expect(within(picker).queryByRole("option", { name: "Europe" })).not.toBeInTheDocument();
+  fireEvent.change(picker, { target: { value: "Europe" } });
+  expect(screen.getByRole("button", { name: "Add map option" })).toBeDisabled();
   await choose("Islands");
   expect(screen.getByRole("button", { name: "Review ballot" })).toBeEnabled();
+});
+it("reviews two modes on the same map with distinct labels and removes only the selected combination", async () => {
+  const fallback = request.getMockImplementation()!;
+  request.mockImplementation(async (path, options) =>
+    path === "catalog/maps/Europe"
+      ? ({ experiences: [{ id: "KOTH" }, { id: "KOTH_InfantryOnly" }], zones: null } as never)
+      : fallback(path, options),
+  );
+  show();
+  fireEvent.change(await screen.findByRole("combobox", { name: "Map" }), { target: { value: "Europe" } });
+  await screen.findByRole("checkbox", { name: "Infantry only" });
+  fireEvent.change(screen.getByRole("combobox", { name: "Game mode" }), { target: { value: "KOTH" } });
+  fireEvent.click(screen.getByRole("button", { name: "Add map option" }));
+  fireEvent.change(screen.getByRole("combobox", { name: "Map" }), { target: { value: "Europe" } });
+  fireEvent.click(await screen.findByRole("checkbox", { name: "Infantry only" }));
+  fireEvent.click(screen.getByRole("button", { name: "Add map option" }));
+  expect(screen.getByRole("button", { name: "Review ballot" })).toBeEnabled();
+  const list = screen.getByRole("list", { name: "Ballot choices" });
+  expect(within(list).getAllByRole("listitem")).toHaveLength(2);
+  fireEvent.click(within(list).getByRole("button", { name: "Remove Ozeti · King of the Hill · Infantry only" }));
+  expect(within(list).getAllByRole("listitem")).toHaveLength(1);
+  expect(list).toHaveTextContent("Ozeti · King of the Hill");
+  expect(list).not.toHaveTextContent("Infantry only");
+  expect(request.mock.calls.some(([, options]) => options?.method === "POST")).toBe(false);
 });
 it("reviews a frozen ballot without extra typing and sends exactly one request", async () => {
   show();
@@ -388,7 +432,7 @@ it("shows saved results and closes an active ballot with a separate recorded req
   votes = [ballot];
   show();
   await screen.findByText(/An active ballot/);
-  expect(request.mock.calls.map(([path]) => path)).toEqual(["map-votes"]);
+  expect(request.mock.calls.map(([path]) => path)).toEqual(["map-votes", "map-votes/controls"]);
   expect(screen.queryByRole("button", { name: "Review ballot" })).not.toBeInTheDocument();
   expect(screen.getByRole("link", { name: /View in Discord/ })).toHaveAttribute("href", ballot.messageUrl);
   fireEvent.click(screen.getByRole("button", { name: "Close ballot" }));

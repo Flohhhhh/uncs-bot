@@ -35,7 +35,7 @@ const pages = {
   supporters: ["✳", "Supporters", "Community supporters", "Patreon records and founder promises."],
   bans: ["⊘", "Bans", "Server bans", "Review restrictions and keep moderation decisions accountable."],
   announcements: ["↗", "Announcements", "Announcements", "Send a message to the server."],
-  votes: ["✓", "Map votes", "Map votes", "Let the community choose the next map in Discord."],
+  votes: ["✓", "Map & mode votes", "Map & mode votes", "Let the community choose the next round in Discord."],
   events: ["⚑", "Events", "Optional events", "Run supervised 50v50 events and review their actions."],
   audit: ["◷", "Action history", "Action history", "Dashboard receipts and recent game requests."],
   settings: ["⚙", "Server settings", "Server settings", "Identity, joining, gameplay and map rotation."],

@@ -13,14 +13,15 @@ import type {
   SupporterMutation,
   SupporterView,
 } from "../src/supporters/supporters.types";
-import { AdminStore } from "../src/admin/admin.store";
-import type { Staff } from "../src/admin/admin.types";
+import { AdminStore, COMMUNITY_MESSAGES_ACTOR_ID } from "../src/admin/admin.store";
+import type { ActionResult, AdminAction, Staff } from "../src/admin/admin.types";
 import { MapVotesStore } from "../src/map-votes/map-votes.store";
 import { ServerEventsStore } from "../src/server-events/server-events.store";
 import { eventFixture, eventStaff } from "../src/server-events/event-fixtures";
 import { operation } from "../src/server-events/event-planner";
 import { TelemetryStore } from "../src/telemetry/telemetry.store";
 import { parseFeed } from "../src/telemetry/telemetry.types";
+import { defaultVotingPolicy } from "../src/common/voting-policy";
 
 // Only the port is configurable. Never load the application's configuration or
 // DATABASE_URL: this suite requires an empty, disposable loopback test database.
@@ -66,7 +67,13 @@ describe("launch storage on isolated PostgreSQL", () => {
   }
 
   async function overlap<T>(
-    table: "supporter_members" | "supporter_payments" | "whitelist_applications" | "map_votes" | "server_events",
+    table:
+      | "supporter_members"
+      | "supporter_payments"
+      | "whitelist_applications"
+      | "map_votes"
+      | "map_vote_policies"
+      | "server_events",
     first: (stores: ReturnType<typeof worker>) => Promise<T>,
     second: (stores: ReturnType<typeof worker>) => Promise<T>,
   ) {
@@ -202,7 +209,7 @@ describe("launch storage on isolated PostgreSQL", () => {
   beforeEach(async () => {
     if (!initialized) return;
     await client.query(
-      "TRUNCATE combat_events, combat_tracking, server_event_operations, server_events, map_vote_ballots, map_votes, supporter_actions, supporter_founders, supporter_payments, supporter_observations, supporter_members, whitelist_application_reviews, whitelist_applications, admin_actions, admin_sessions CASCADE",
+      "TRUNCATE combat_events, combat_tracking, server_event_operations, server_events, map_vote_ballots, map_votes, map_vote_policies, supporter_actions, supporter_founders, supporter_payments, supporter_observations, supporter_members, whitelist_application_reviews, whitelist_applications, admin_actions, admin_sessions CASCADE",
     );
   });
   afterAll(async () => {
@@ -302,6 +309,59 @@ describe("launch storage on isolated PostgreSQL", () => {
     expect(await admin.receipt(eastId, "central")).toBeNull();
     expect(await admin.receipt(oldId, "east")).toBeNull();
     expect((await admin.receipt(oldId, "primary"))?.state).toBe("accepted");
+  });
+
+  it("keeps acknowledged automatic messages from crowding notable receipts out of the activity feed", async () => {
+    const community: Staff = {
+      id: COMMUNITY_MESSAGES_ACTOR_ID,
+      name: "Gramps community messages",
+      role: "admin",
+      csrf: "",
+    };
+    const voting: Staff = { ...staff, name: "Gramps automatic voting" };
+    const steamId = "76561198000000001";
+    const record = async (actor: Staff, action: AdminAction, state?: ActionResult["state"]) => {
+      await admin.begin(actor, action, action.id);
+      if (state) await admin.finish(action.id, { state, message: `Recorded ${state}` });
+      return action.id;
+    };
+    const welcome = (): AdminAction => ({
+      id: randomUUID(),
+      action: "message",
+      steamId,
+      message: "Welcome",
+      reason: "Automatic observed-join welcome.",
+    });
+    const roundMessage = (): AdminAction => ({
+      id: randomUUID(),
+      action: "broadcast",
+      message: "GG",
+      reason: "Automatic observed round-transition message.",
+    });
+    const notable = [
+      await record(staff, { id: randomUUID(), action: "kick", steamId, reason: "Reviewed report" }, "applied"),
+      await record(staff, { id: randomUUID(), action: "message", steamId, message: "Hi", reason: "Rules" }, "accepted"),
+      await record(community, welcome(), "failed"),
+      await record(community, welcome(), "unknown"),
+      await record(community, welcome()),
+      await record(community, roundMessage(), "pending"),
+    ];
+    for (let i = 0; i < 101; i++)
+      await record(community, i % 2 ? welcome() : roundMessage(), i % 3 ? "accepted" : "applied");
+    const vote = {
+      id: randomUUID(),
+      action: "broadcast",
+      message: "Totals",
+      reason: "Map vote midpoint totals",
+    } as const;
+    notable.push(await record(voting, vote, "accepted"));
+
+    const recent = await admin.history("primary");
+    expect(recent).toHaveLength(100);
+    expect(recent.filter((r) => notable.includes(r.id)).map((r) => r.id)).toEqual([vote.id]);
+    expect((await admin.history("primary", { notable: true })).map((r) => r.id)).toEqual([...notable].reverse());
+    expect(await admin.history("east", { notable: true })).toEqual([]);
+    expect((await admin.receipt(notable[0], "primary"))?.state).toBe("applied");
   });
 
   it("deduplicates and aggregates the same game event independently on two configured servers", async () => {
@@ -471,6 +531,71 @@ describe("launch storage on isolated PostgreSQL", () => {
     await votes.published(input.id, messageId);
     return input;
   }
+  async function scoreBallot() {
+    const input = ballotInput();
+    const policy = {
+      ...defaultVotingPolicy,
+      enabled: true,
+      modeChoices: true,
+      midpointReminder: true,
+      finalReminder: true,
+    };
+    await votes.savePolicy(input.serverId, 0, policy, staff, input.connectionHash);
+    await votes.create({ ...input, automation: { policy, highestScore: 50, reminders: {} } });
+    await votes.published(input.id, messageId);
+    return { input, policy };
+  }
+  it("keeps voting policy writes scoped and rejects simultaneous stale versions", async () => {
+    const results = await overlap(
+      "map_vote_policies",
+      ({ votes }) => votes.savePolicy("primary", 0, defaultVotingPolicy, staff, "connection"),
+      ({ votes }) => votes.savePolicy("primary", 0, { ...defaultVotingPolicy, modeChoices: true }, staff, "connection"),
+    );
+    expect(results.filter((item) => item.status === "fulfilled")).toHaveLength(1);
+    expect(await votes.policy("primary")).toMatchObject({ version: 1, actorId: staff.id });
+    expect(await votes.policy("event")).toBeNull();
+  });
+  it("claims each reminder once across workers and preserves that claim after reopening storage", async () => {
+    const { input } = await scoreBallot();
+    const results = await overlap(
+      "map_votes",
+      ({ votes }) => votes.claimReminder(input.id, "midpoint", randomUUID()),
+      ({ votes }) => votes.claimReminder(input.id, "midpoint", randomUUID()),
+    );
+    expect(results.filter((item) => item.status === "fulfilled" && item.value)).toHaveLength(1);
+    expect(await workers[1].votes.claimReminder(input.id, "midpoint", randomUUID())).toBeNull();
+    await votes.finishReminder(input.id, "midpoint", "unknown", "Lost response");
+    expect((await votes.get(input.id))?.automation?.reminders.midpoint).toMatchObject({ state: "unknown" });
+    expect(await votes.claimReminder(input.id, "midpoint", randomUUID())).toBeNull();
+  });
+  it("atomically stops automatic ballots when voting is disabled, while preserving manual ballots elsewhere", async () => {
+    const { input, policy } = await scoreBallot();
+    const other = { ...ballotInput(), serverId: "event" };
+    await votes.create(other);
+    await votes.published(other.id, messageId);
+    const result = await votes.savePolicy("primary", 1, { ...policy, enabled: false }, staff, input.connectionHash);
+    expect(result.closed.map((vote) => vote.id)).toEqual([input.id]);
+    expect(await votes.claimReminder(input.id, "final", randomUUID())).toBeNull();
+    expect(await votes.claimClose(input.id, true)).toBeNull();
+    expect(await votes.get(other.id)).toMatchObject({ state: "open" });
+  });
+  it("retains the highest observed score and refuses a later reset", async () => {
+    const { input } = await scoreBallot();
+    expect(await votes.observeScore(input.id, 85)).toBe(true);
+    expect(await votes.observeScore(input.id, 0)).toBe(false);
+    expect((await votes.get(input.id))?.automation?.highestScore).toBe(85);
+  });
+  it("refuses an automatic publication using controls superseded before its creation", async () => {
+    const input = ballotInput();
+    await votes.savePolicy("primary", 0, defaultVotingPolicy, staff, input.connectionHash);
+    await expect(
+      votes.create({
+        ...input,
+        automation: { policy: { ...defaultVotingPolicy, enabled: true }, highestScore: 10, reminders: {} },
+      }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(await votes.history("primary")).toEqual([]);
+  });
   it("allows one active ballot per server across simultaneous workers and replays only the exact request", async () => {
     const a = ballotInput(),
       b = ballotInput();

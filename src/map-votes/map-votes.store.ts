@@ -1,13 +1,124 @@
 import { ConflictException, Inject, Injectable } from "@nestjs/common";
 import { and, desc, eq, inArray, lte, sql } from "drizzle-orm";
+import { isDeepStrictEqual } from "node:util";
 import { DATABASE, type Database } from "../database/database.types";
-import { mapVoteBallots, mapVotes } from "../database/schema";
+import { mapVoteBallots, mapVotes, mapVotePolicies } from "../database/schema";
+import { votingMilestones, type VoteReminder, type VotingPolicy } from "../common/voting-policy";
 import { ballotWinner, type MapVoteRecord } from "./map-votes.types";
 import type { Staff } from "../admin/admin.types";
 
 @Injectable()
 export class MapVotesStore {
   constructor(@Inject(DATABASE) private readonly db: Database) {}
+
+  async policy(serverId: string) {
+    const [policy] = await this.db.select().from(mapVotePolicies).where(eq(mapVotePolicies.serverId, serverId));
+    return policy ?? null;
+  }
+  policies() {
+    return this.db.select().from(mapVotePolicies);
+  }
+  async savePolicy(serverId: string, version: number, policy: VotingPolicy, staff: Staff, connectionHash: string) {
+    return this.db.transaction(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${"map-vote:" + serverId}))`);
+      const [previous] = await tx.select().from(mapVotePolicies).where(eq(mapVotePolicies.serverId, serverId));
+      if ((previous?.version ?? 0) !== version)
+        throw new ConflictException("Voting controls changed. Refresh before saving.");
+      const values = {
+        serverId,
+        policy,
+        version: version + 1,
+        actorId: staff.id,
+        actorName: staff.name,
+        connectionHash,
+        updatedAt: new Date(),
+      };
+      const [saved] = await tx
+        .insert(mapVotePolicies)
+        .values(values)
+        .onConflictDoUpdate({ target: mapVotePolicies.serverId, set: values })
+        .returning();
+      // Turning off closes idle automatic ballots atomically; it never queues a winner.
+      const closed = !policy.enabled
+        ? await tx
+            .update(mapVotes)
+            .set({
+              state: "cancelled",
+              updatedAt: new Date(),
+              message: "Automatic voting was switched off. The rotation was left unchanged.",
+            })
+            .where(
+              and(eq(mapVotes.serverId, serverId), eq(mapVotes.state, "open"), sql`${mapVotes.automation} is not null`),
+            )
+            .returning()
+        : [];
+      return { saved, closed };
+    });
+  }
+  automaticOpen() {
+    return this.db
+      .select()
+      .from(mapVotes)
+      .where(and(eq(mapVotes.state, "open"), sql`${mapVotes.automation} is not null`));
+  }
+  async observeScore(id: string, score: number) {
+    return this.db.transaction(async (tx) => {
+      const [vote] = await tx.select().from(mapVotes).where(eq(mapVotes.id, id)).for("update");
+      if (!vote || vote.state !== "open" || !vote.automation || score < vote.automation.highestScore) return false;
+      if (score === vote.automation.highestScore) return true;
+      await tx
+        .update(mapVotes)
+        .set({ automation: { ...vote.automation, highestScore: score } })
+        .where(eq(mapVotes.id, id));
+      return true;
+    });
+  }
+  async claimReminder(id: string, stage: VoteReminder, receiptId: string) {
+    return this.db.transaction(async (tx) => {
+      const [vote] = await tx.select().from(mapVotes).where(eq(mapVotes.id, id)).for("update");
+      if (
+        !vote ||
+        vote.state !== "open" ||
+        !vote.automation ||
+        vote.closesAt.getTime() <= Date.now() ||
+        vote.automation.reminders[stage]
+      )
+        return null;
+      const [policy] = await tx.select().from(mapVotePolicies).where(eq(mapVotePolicies.serverId, vote.serverId));
+      const field = stage === "midpoint" ? "midpointReminder" : "finalReminder";
+      if (!policy?.policy.enabled || !policy.policy[field] || !vote.automation.policy[field]) return null;
+      const automation = {
+        ...vote.automation,
+        reminders: {
+          ...vote.automation.reminders,
+          [stage]: {
+            id: receiptId,
+            state: "started",
+            message: "Recorded before sending. An interrupted message is not repeated.",
+            at: new Date().toISOString(),
+          },
+        },
+      };
+      await tx.update(mapVotes).set({ automation }).where(eq(mapVotes.id, id));
+      return { ...vote, automation };
+    });
+  }
+  async finishReminder(id: string, stage: VoteReminder, state: string, message: string) {
+    await this.db.transaction(async (tx) => {
+      const [vote] = await tx.select().from(mapVotes).where(eq(mapVotes.id, id)).for("update");
+      const reminder = vote?.automation?.reminders[stage];
+      if (!vote?.automation || !reminder) return;
+      await tx
+        .update(mapVotes)
+        .set({
+          automation: {
+            ...vote.automation,
+            reminders: { ...vote.automation.reminders, [stage]: { ...reminder, state, message } },
+          },
+        })
+        .where(eq(mapVotes.id, id));
+    });
+  }
 
   async checkSetup(serverId: string) {
     // Resolve every expected column without reading member choices or changing any records.
@@ -49,6 +160,16 @@ export class MapVotesStore {
     const [created] = await this.db.transaction(async (tx) => {
       // Staff and automatic ballots share the lock, including ballots closed by another worker.
       await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${"map-vote:" + input.serverId}))`);
+      if (input.automation) {
+        const [policy] = await tx.select().from(mapVotePolicies).where(eq(mapVotePolicies.serverId, input.serverId));
+        if (
+          !policy?.policy.enabled ||
+          policy.actorId !== input.actorId ||
+          policy.connectionHash !== input.connectionHash ||
+          !isDeepStrictEqual(policy.policy, input.automation.policy)
+        )
+          throw new ConflictException("Voting controls changed before the ballot opened.");
+      }
       if (expectedLatestId !== undefined) {
         const [latest] = await tx
           .select({ id: mapVotes.id })
@@ -111,10 +232,15 @@ export class MapVotesStore {
       .where(and(eq(mapVotes.state, "open"), lte(mapVotes.closesAt, now)))
       .limit(10);
   }
-  async claimClose(id: string) {
+  async claimClose(id: string, scoreReached = false) {
     return this.db.transaction(async (tx) => {
       const [vote] = await tx.select().from(mapVotes).where(eq(mapVotes.id, id)).for("update");
-      if (!vote || vote.state !== "open" || vote.closesAt.getTime() > Date.now()) return null;
+      if (!vote || vote.state !== "open" || (!scoreReached && vote.closesAt.getTime() > Date.now())) return null;
+      if (scoreReached) {
+        const [policy] = await tx.select().from(mapVotePolicies).where(eq(mapVotePolicies.serverId, vote.serverId));
+        if (!vote.automation || vote.automation.highestScore < votingMilestones.close || !policy?.policy.enabled)
+          return null;
+      }
       const totals = await tx
         .select({ choice: mapVoteBallots.choice, total: sql<number>`count(*)::int` })
         .from(mapVoteBallots)
@@ -143,7 +269,7 @@ export class MapVotesStore {
       .returning();
     return vote ?? null;
   }
-  async cancel(id: string, requestId: string, actor: Staff, reason: string) {
+  async cancel(id: string, requestId: string, actor: Staff, reason: string, publicMessage?: string) {
     return this.db.transaction(async (tx) => {
       const [vote] = await tx.select().from(mapVotes).where(eq(mapVotes.id, id)).for("update");
       if (
@@ -161,7 +287,7 @@ export class MapVotesStore {
         .update(mapVotes)
         .set({
           state: "cancelled",
-          message: "Staff closed this ballot. No game changes were reversed.",
+          message: publicMessage ?? "Staff closed this ballot. No game changes were reversed.",
           cancellation: {
             id: requestId,
             actorId: actor.id,

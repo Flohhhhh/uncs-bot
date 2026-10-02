@@ -8,7 +8,8 @@ import { AdminAuth } from "../admin/admin.auth";
 import { EnvService } from "../env/env.service";
 import type { Staff } from "../admin/admin.types";
 import { ballotWinner, mapVoteView, type MapVoteRecord, type StartMapVote } from "./map-votes.types";
-import { automaticMapVotes } from "../common/map-vote-automation";
+import { defaultVotingPolicy, type VotingPolicy, type VoteReminder } from "../common/voting-policy";
+import { actionSchema } from "../admin/admin.types";
 
 const staff: Staff = { id: "123456789012345678", name: "Test admin", role: "admin", csrf: "test" };
 const guild = "234567890123456789",
@@ -50,6 +51,13 @@ function fixture(enabled = true, serverId = "primary") {
     cancellation: null,
   };
   const store = {
+    policy: jest.fn().mockResolvedValue(null),
+    policies: jest.fn().mockResolvedValue([]),
+    savePolicy: jest.fn().mockResolvedValue({ closed: [] }),
+    automaticOpen: jest.fn().mockResolvedValue([]),
+    observeScore: jest.fn().mockResolvedValue(true),
+    claimReminder: jest.fn().mockResolvedValue(null),
+    finishReminder: jest.fn().mockResolvedValue(undefined),
     checkSetup: jest.fn().mockResolvedValue({ unfinished: false }),
     get: jest.fn().mockResolvedValue(null),
     history: jest.fn().mockResolvedValue([record]),
@@ -112,6 +120,7 @@ function fixture(enabled = true, serverId = "primary") {
     check: jest.fn().mockResolvedValue({ name: "map-voting" }),
     publish: jest.fn().mockResolvedValue(messageId),
     update: jest.fn(),
+    remind: jest.fn().mockResolvedValue(undefined),
   };
   const environment: Record<string, unknown> = {
     MAP_VOTES_ENABLED: enabled,
@@ -230,7 +239,12 @@ describe("durable Discord map voting", () => {
   });
   it("checks disabled voting setup for the selected server without enabling or sending effects", async () => {
     const f = fixture(false, "event");
-    f.environment.MAP_VOTES_AUTOMATIC = automaticMapVotes.parse([{ serverId: "event", actorId: staff.id }]);
+    f.store.policy.mockResolvedValue({
+      serverId: "event",
+      actorId: staff.id,
+      policy: defaultVotingPolicy,
+      connectionHash: f.record.connectionHash,
+    });
     const result = await f.service.setup({ ...staff, serverId: "event" });
     expect(result.serverId).toBe("event");
     expect(result.checks.map((item) => item.status)).toEqual(["ok", "ok", "ok", "ok"]);
@@ -248,7 +262,12 @@ describe("durable Discord map voting", () => {
   it("reports setup failures independently without exposing provider details", async () => {
     const f = fixture(false);
     const privateError = new Error("private connection and credential details");
-    f.environment.MAP_VOTES_AUTOMATIC = automaticMapVotes.parse([{ serverId: "primary", actorId: staff.id }]);
+    f.store.policy.mockResolvedValue({
+      serverId: "primary",
+      actorId: staff.id,
+      policy: defaultVotingPolicy,
+      connectionHash: f.record.connectionHash,
+    });
     f.store.checkSetup.mockRejectedValue(privateError);
     f.discord.check.mockRejectedValue(privateError);
     f.auth.serverStaff.mockRejectedValue(privateError);
@@ -278,7 +297,7 @@ describe("durable Discord map voting", () => {
     {
       choices: [
         { map: "Europe", experiences: [] },
-        { map: "Europe", experiences: ["Hardcore"] },
+        { map: "Europe", experiences: [] },
       ],
     },
     { extra: true },
@@ -288,15 +307,15 @@ describe("durable Discord map voting", () => {
     expect(store.create).not.toHaveBeenCalled();
     expect(game.configuration).not.toHaveBeenCalled();
   });
-  it("excludes the running map when status uses its in-game name and the ballot uses its catalog ID", async () => {
+  it("allows the current map as a next-round choice while keeping its exact catalog ID", async () => {
     const { service, input, game, store, discord } = fixture();
     const settings = await game.configuration();
     game.configuration.mockResolvedValue({ ...settings, rotation: { ...settings.rotation, currentMap: "Ozeti" } });
     const overview = await game.overview();
     game.overview.mockResolvedValue({ ...overview, status: { ...overview.status, map: "Ozeti" } });
-    await expect(service.start(staff, input)).rejects.toThrow("Leave the current map out");
-    expect(store.create).not.toHaveBeenCalled();
-    expect(discord.publish).not.toHaveBeenCalled();
+    await expect(service.start(staff, input)).resolves.toMatchObject({ state: "open" });
+    expect(store.create.mock.calls[0][0].choices[0].map).toBe("Europe");
+    expect(discord.publish).toHaveBeenCalledTimes(1);
   });
   it("validates maps and the round, saves intent before publishing and never changes the game when starting", async () => {
     const { service, input, store, discord, admin } = fixture();
@@ -543,19 +562,35 @@ describe("durable Discord map voting", () => {
 
   function automatic(serverId = "primary") {
     const f = fixture(true, serverId);
-    f.environment.MAP_VOTES_AUTOMATIC = automaticMapVotes.parse([{ serverId, actorId: staff.id }]);
+    const saved = {
+      serverId,
+      actorId: staff.id,
+      version: 1,
+      connectionHash: f.record.connectionHash,
+      policy: { ...defaultVotingPolicy, enabled: true },
+    };
+    f.store.policy.mockResolvedValue(saved);
+    f.store.policies.mockResolvedValue([saved]);
     f.store.due.mockResolvedValue([]);
     f.store.history.mockResolvedValue([]);
     f.game.overview.mockImplementation(async () => ({
       observedAt: new Date().toISOString(),
-      status: { serverName: "Test", map: "Kavkazi", matchSeconds: undefined },
+      status: {
+        serverName: "Test",
+        map: "Kavkazi",
+        matchSeconds: undefined,
+        factionScores: [
+          { name: "A", score: 10 },
+          { name: "B", score: 5 },
+        ],
+      },
     }));
     f.store.published.mockImplementation(async (id, messageId) => {
       const record = { ...f.record, ...f.store.create.mock.calls.at(-1)![0], id, messageId, state: "open" as const };
       f.store.history.mockResolvedValue([record]);
       return record;
     });
-    return f;
+    return { ...f, saved };
   }
   async function observeForWindow(f: ReturnType<typeof automatic>) {
     await f.service.tick();
@@ -566,9 +601,11 @@ describe("durable Discord map voting", () => {
   }
   it("keeps automatic observation valid across known configuration/status map names", async () => {
     const f = automatic();
+    const overview = await f.game.overview();
     f.game.overview.mockImplementation(async () => ({
+      ...overview,
       observedAt: new Date().toISOString(),
-      status: { serverName: "Test", map: "Bakurani", matchSeconds: undefined },
+      status: { ...overview.status, map: "Bakurani" },
     }));
     await observeForWindow(f);
     expect(f.discord.publish).toHaveBeenCalledTimes(1);
@@ -591,8 +628,54 @@ describe("durable Discord map voting", () => {
     await f.service.tick();
     expect(f.discord.publish).toHaveBeenCalledTimes(1);
     const status = await f.service.list({ ...staff, serverId: "event" });
-    expect(status.automatic).toMatchObject({ enabled: true, minutes: 5 });
+    expect(status.automatic).toMatchObject({ enabled: true, closesAtScore: 95 });
     expect(JSON.stringify(status.automatic)).not.toContain(staff.id);
+  });
+  it("opens mode-only automatic choices on the current map from validated rotation combinations", async () => {
+    const f = automatic();
+    const policy = { ...defaultVotingPolicy, enabled: true, mapChoices: false, modeChoices: true };
+    const saved = {
+      serverId: "primary",
+      actorId: staff.id,
+      policy,
+      connectionHash: f.record.connectionHash,
+      version: 1,
+    };
+    f.store.policy.mockResolvedValue(saved);
+    f.store.policies.mockResolvedValue([saved]);
+    const settings = await f.game.configuration();
+    const normal = { map: "Kavkazi", experiences: ["KOTH"] };
+    const infantry = { map: "Kavkazi", experiences: ["KOTH", "KOTH_InfantryOnly"] };
+    f.game.configuration.mockResolvedValue({
+      ...settings,
+      rotation: {
+        ...settings.rotation,
+        entries: [normal, { map: "Europe", experiences: ["KOTH"] }, infantry, { ...infantry, lighting: "DayClear" }],
+      },
+    });
+    f.game.catalog.mockResolvedValue({
+      maps: [{ id: "Kavkazi" }, { id: "Europe" }],
+      experiences: [{ id: "KOTH" }, { id: "KOTH_InfantryOnly" }],
+      lightings: [{ id: "DayClear" }],
+    });
+    f.game.overview.mockImplementation(async () => ({
+      observedAt: new Date().toISOString(),
+      status: {
+        serverName: "Test",
+        map: "Kavkazi",
+        matchSeconds: undefined,
+        factionScores: [
+          { name: "A", score: 10 },
+          { name: "B", score: 5 },
+        ],
+      },
+    }));
+    await observeForWindow(f);
+    expect(f.store.create.mock.calls[0][0]).toMatchObject({
+      choices: [infantry, normal],
+      automation: { policy, highestScore: 10, reminders: {} },
+    });
+    expect(f.admin.act).not.toHaveBeenCalled();
   });
   it.each(["queued", "cancelled", "tied", "no_votes"] as const)(
     "does not reopen after %s at the same position, including after a bot restart",
@@ -658,7 +741,15 @@ describe("durable Discord map voting", () => {
     });
     f.game.overview.mockImplementation(async () => ({
       observedAt: new Date().toISOString(),
-      status: { serverName: "Test", map: "Europe", matchSeconds: undefined },
+      status: {
+        serverName: "Test",
+        map: "Europe",
+        matchSeconds: undefined,
+        factionScores: [
+          { name: "A", score: 10 },
+          { name: "B", score: 5 },
+        ],
+      },
     }));
     f.game.catalog.mockResolvedValue({
       maps: [{ id: "Kavkazi" }, { id: "Europe" }, { id: "Islands" }],
@@ -684,7 +775,15 @@ describe("durable Discord map voting", () => {
     let startedAt = Date.now() - 600_000;
     f.game.overview.mockImplementation(async () => ({
       observedAt: new Date().toISOString(),
-      status: { serverName: "Test", map: "Kavkazi", matchSeconds: (Date.now() - startedAt) / 1000 },
+      status: {
+        serverName: "Test",
+        map: "Kavkazi",
+        matchSeconds: (Date.now() - startedAt) / 1000,
+        factionScores: [
+          { name: "A", score: 10 },
+          { name: "B", score: 5 },
+        ],
+      },
     }));
     f.store.history.mockResolvedValue([{ ...f.record, state: "queued" }]);
     await observeForWindow(f);
@@ -698,16 +797,14 @@ describe("durable Discord map voting", () => {
   });
   it("continues another configured server when one policy targets an unavailable server", async () => {
     const f = automatic();
-    f.environment.MAP_VOTES_AUTOMATIC = automaticMapVotes.parse([
-      { serverId: "missing", actorId: staff.id },
-      { serverId: "primary", actorId: staff.id },
-    ]);
+    f.store.policies.mockResolvedValue([{ ...f.saved, serverId: "missing" }, f.saved]);
     await observeForWindow(f);
     expect(f.discord.publish).toHaveBeenCalledTimes(1);
     expect(f.store.create.mock.calls[0][0].serverId).toBe("primary");
   });
   it("skips known unavailable saved options but preserves a later validated mode and zone", async () => {
     const f = automatic();
+    f.saved.policy.modeChoices = true;
     const settings = await f.game.configuration();
     const valid = { map: "Europe", experiences: ["Infantry"], zoneAlternator: "Zone.Farmland" };
     f.game.configuration.mockResolvedValue({
@@ -723,7 +820,7 @@ describe("durable Discord map voting", () => {
       },
     });
     f.game.catalog.mockResolvedValue({
-      maps: [{ id: "Europe" }, { id: "Islands" }],
+      maps: [{ id: "Europe" }, { id: "Islands" }, { id: "Kavkazi" }],
       experiences: [{ id: "Infantry" }],
       lightings: [],
     });
@@ -736,10 +833,288 @@ describe("durable Discord map voting", () => {
     await observeForWindow(f);
     expect(f.store.create.mock.calls[0][0].choices[0]).toEqual(valid);
   });
-  it("rejects duplicate server policies and unsafe automatic durations", () => {
-    const recipe = { serverId: "primary", actorId: staff.id };
-    expect(automaticMapVotes.safeParse([recipe, recipe]).success).toBe(false);
-    expect(automaticMapVotes.safeParse([{ ...recipe, delaySeconds: 0 }]).success).toBe(false);
-    expect(automaticMapVotes.safeParse([{ ...recipe, minutes: 0 }]).success).toBe(false);
+  it("does not let an obsolete environment recipe bypass absent or disabled dashboard controls", async () => {
+    const f = automatic();
+    f.environment.MAP_VOTES_AUTOMATIC = [{ serverId: "primary", actorId: staff.id }];
+    f.store.policy.mockResolvedValue(null);
+    f.store.policies.mockResolvedValue([]);
+    await observeForWindow(f);
+    expect(f.discord.publish).not.toHaveBeenCalled();
+    expect((await f.service.list(staff)).automatic).toBeNull();
   });
+});
+
+describe("score-based voting controls and reminders", () => {
+  beforeEach(() => jest.useFakeTimers().setSystemTime(now));
+  afterEach(() => jest.useRealTimers());
+  function scored(policy: Partial<VotingPolicy> = {}) {
+    const f = fixture();
+    f.record.state = "open";
+    f.record.closesAt = new Date(now.getTime() + 180 * 60_000);
+    f.record.automation = {
+      policy: {
+        ...defaultVotingPolicy,
+        enabled: true,
+        modeChoices: true,
+        midpointReminder: true,
+        finalReminder: true,
+        ...policy,
+      },
+      highestScore: 20,
+      reminders: {},
+    };
+    const saved = {
+      serverId: "primary",
+      version: 1,
+      actorId: staff.id,
+      actorName: staff.name,
+      connectionHash: f.record.connectionHash,
+      policy: f.record.automation.policy,
+    };
+    f.store.policy.mockResolvedValue(saved);
+    f.store.policies.mockResolvedValue([saved]);
+    f.store.due.mockResolvedValue([]);
+    f.store.automaticOpen.mockResolvedValue([f.record]);
+    f.store.get.mockResolvedValue(f.record);
+    f.store.liveCounts.mockResolvedValue([
+      { voteId: f.record.id, choice: 0, total: 3 },
+      { voteId: f.record.id, choice: 1, total: 2 },
+    ]);
+    f.store.claimReminder.mockImplementation(async (_id: string, stage: VoteReminder, receiptId: string) => {
+      if (
+        f.record.automation!.reminders[stage] ||
+        !saved.policy[stage === "midpoint" ? "midpointReminder" : "finalReminder"]
+      )
+        return null;
+      f.record.automation!.reminders[stage] = {
+        id: receiptId,
+        state: "started",
+        message: "Claimed",
+        at: now.toISOString(),
+      };
+      return f.record;
+    });
+    let leading = 50;
+    f.game.overview.mockImplementation(async () => ({
+      observedAt: new Date().toISOString(),
+      status: {
+        serverName: "The UNCs",
+        map: "Kavkazi",
+        matchSeconds: 600,
+        factionScores: [
+          { name: "Lonestar", score: leading },
+          { name: "Manticore", score: 20 },
+          { name: "Valkyra", score: 10 },
+        ],
+      },
+    }));
+    return {
+      ...f,
+      saved,
+      score: (value: number) => {
+        leading = value;
+      },
+    };
+  }
+  it("prepares independent switches while the live gate stays off, without any Discord or game writes", async () => {
+    const f = fixture(false);
+    const controls = await f.service.controls(staff);
+    expect(controls).toMatchObject({ version: 0, policy: defaultVotingPolicy, available: true, ready: false });
+    await f.service.saveControls(staff, {
+      serverId: "primary",
+      version: 0,
+      policy: { ...defaultVotingPolicy, modeChoices: true, finalReminder: true },
+    });
+    expect(f.store.savePolicy).toHaveBeenCalledWith(
+      "primary",
+      0,
+      expect.objectContaining({ enabled: false, finalReminder: true, midpointReminder: false }),
+      staff,
+      f.record.connectionHash,
+    );
+    expect(f.discord.publish).not.toHaveBeenCalled();
+    expect(f.admin.act).not.toHaveBeenCalled();
+    await expect(
+      f.service.saveControls(staff, {
+        serverId: "primary",
+        version: 0,
+        policy: { ...defaultVotingPolicy, enabled: true },
+      }),
+    ).rejects.toMatchObject({ status: 503 });
+  });
+  it("requires an explicit off/save step before moving an enabled policy to a changed game connection", async () => {
+    const f = scored();
+    f.environment.WARDOGS_RCON_URL = "https://changed.example.test";
+    expect(await f.service.controls(staff)).toMatchObject({
+      ready: false,
+      message: expect.stringContaining("connection changed"),
+    });
+    expect((await f.service.list(staff)).automatic).toMatchObject({
+      enabled: false,
+      message: expect.stringContaining("connection changed"),
+    });
+    await expect(
+      f.service.saveControls(staff, { serverId: "primary", version: 1, policy: f.saved.policy }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(f.store.savePolicy).not.toHaveBeenCalled();
+    expect(f.admin.act).not.toHaveBeenCalled();
+  });
+  it("refuses unauthorized and cross-server control writes, and reports missing storage honestly", async () => {
+    const f = fixture(false);
+    await expect(f.service.controls({ ...staff, role: "moderator" })).rejects.toMatchObject({ status: 403 });
+    await expect(f.service.saveControls({ ...staff, role: "viewer" }, {})).rejects.toMatchObject({ status: 403 });
+    await expect(
+      f.service.saveControls(staff, { serverId: "other", version: 0, policy: defaultVotingPolicy }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(f.store.savePolicy).not.toHaveBeenCalled();
+    f.store.policy.mockRejectedValue(new Error("private DB URL"));
+    const controls = await f.service.controls(staff);
+    expect(controls.available).toBe(false);
+    expect(JSON.stringify(controls)).not.toContain("private DB URL");
+  });
+  it("offers two validated modes on the same map and preserves the exact winner selection", async () => {
+    const f = fixture();
+    f.game.catalog.mockResolvedValue({
+      maps: [{ id: "Europe" }],
+      experiences: [{ id: "KOTH" }, { id: "KOTH_InfantryOnly" }],
+      lightings: [],
+    });
+    f.input.choices = [
+      { map: "Europe", experiences: ["KOTH"] },
+      { map: "Europe", experiences: ["KOTH", "KOTH_InfantryOnly"] },
+    ];
+    await f.service.start(staff, f.input);
+    expect(f.store.create.mock.calls[0][0].choices).toEqual(f.input.choices);
+    f.record.choices = f.input.choices;
+    f.closing();
+    await f.service.tick();
+    expect(f.admin.act).toHaveBeenCalledWith(
+      expect.objectContaining({ serverId: "primary" }),
+      expect.objectContaining({ action: "map-next", entry: f.input.choices[1] }),
+    );
+  });
+  it("sends current totals at 50 and 85 once, using the actual channel and a valid short broadcast", async () => {
+    const f = scored();
+    for (let index = 0; index < 3; index++) await f.service.tick();
+    expect(f.discord.remind).toHaveBeenCalledTimes(1);
+    expect(f.discord.remind).toHaveBeenCalledWith(expect.objectContaining({ counts: [3, 2] }), "midpoint");
+    f.score(85);
+    await f.service.tick();
+    await f.service.tick();
+    expect(f.discord.remind).toHaveBeenCalledTimes(2);
+    expect(f.admin.act).toHaveBeenCalledTimes(2);
+    for (const [, action] of f.admin.act.mock.calls as unknown as [unknown, { message: string }][]) {
+      expect(actionSchema.safeParse(action).success).toBe(true);
+      expect(action.message).toContain("3/5");
+      expect(action.message).toContain("#map-voting");
+    }
+    expect(f.store.claimClose).not.toHaveBeenCalled();
+  });
+  it("skips the earlier reminder when scores jump to the final milestone", async () => {
+    const f = scored();
+    f.score(90);
+    await f.service.tick();
+    expect(f.discord.remind).toHaveBeenCalledTimes(1);
+    expect(f.discord.remind.mock.calls[0][1]).toBe("final");
+  });
+  it("respects each reminder switch and the global off switch", async () => {
+    const f = scored({ midpointReminder: false, finalReminder: false });
+    await f.service.tick();
+    f.score(85);
+    await f.service.tick();
+    expect(f.discord.remind).not.toHaveBeenCalled();
+    expect(f.admin.act).not.toHaveBeenCalled();
+    f.environment.MAP_VOTES_ENABLED = false;
+    f.score(95);
+    await f.service.tick();
+    expect(f.store.claimClose).not.toHaveBeenCalled();
+  });
+  it("does not repeat an uncertain announcement", async () => {
+    const f = scored();
+    f.discord.remind.mockRejectedValue(new Error("Lost Discord response"));
+    await f.service.tick();
+    await f.service.tick();
+    expect(f.discord.remind).toHaveBeenCalledTimes(1);
+    expect(f.admin.act).not.toHaveBeenCalled();
+    expect(f.store.finishReminder).toHaveBeenCalledWith(f.record.id, "midpoint", "unknown", expect.any(String));
+  });
+  it("honors switching off while the Discord reminder is in flight", async () => {
+    const f = scored();
+    f.discord.remind.mockImplementation(async () => {
+      f.saved.policy.enabled = false;
+    });
+    await f.service.tick();
+    expect(f.discord.remind).toHaveBeenCalledTimes(1);
+    expect(f.admin.act).not.toHaveBeenCalled();
+  });
+  it("queues only at the score cutoff, keeping the match running", async () => {
+    const f = scored();
+    f.score(95);
+    f.store.claimClose.mockImplementation(async () => {
+      f.record.state = "closing";
+      return f.record;
+    });
+    await f.service.tick();
+    expect(f.store.claimClose).toHaveBeenCalledWith(f.record.id, true);
+    expect(f.admin.act).toHaveBeenCalledTimes(1);
+    expect(f.admin.act).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "map-next" }));
+    expect(f.discord.remind).not.toHaveBeenCalled();
+  });
+  it("honors switching off while the winner's final game read is in flight", async () => {
+    const f = scored();
+    f.score(95);
+    const overview = await f.game.overview();
+    let finishRead!: (value: typeof overview) => void;
+    const pendingRead = new Promise<typeof overview>((resolve) => {
+      finishRead = resolve;
+    });
+    let readStarted!: () => void;
+    const reading = new Promise<void>((resolve) => {
+      readStarted = resolve;
+    });
+    f.game.overview.mockResolvedValueOnce(overview).mockImplementationOnce(() => {
+      readStarted();
+      return pendingRead;
+    });
+    f.store.claimClose.mockImplementation(async () => {
+      f.record.state = "closing";
+      return f.record;
+    });
+
+    const closing = f.service.tick();
+    await reading;
+    expect(f.record.state).toBe("closing");
+    f.saved.policy.enabled = false;
+    finishRead(overview);
+    await closing;
+
+    expect(f.admin.act).not.toHaveBeenCalled();
+    expect(f.store.finish).toHaveBeenCalledWith(f.record.id, "cancelled", expect.any(String));
+    expect(f.discord.remind).not.toHaveBeenCalled();
+  });
+  it.each(["ended", "reset", "staff-override", "disabled", "stale", "missing-scores", "permission"])(
+    "does not send messages or queue a winner after %s",
+    async (failure) => {
+      const f = scored();
+      if (failure === "ended") f.score(100);
+      if (failure === "reset") f.score(0);
+      if (failure === "disabled") f.saved.policy.enabled = false;
+      if (failure === "permission") f.auth.role.mockResolvedValue("viewer");
+      if (failure === "staff-override") {
+        const config = await f.game.configuration();
+        f.game.configuration.mockResolvedValue({ ...config, revision: "staff-change" });
+      }
+      if (failure === "stale" || failure === "missing-scores") {
+        const value = await f.game.overview();
+        f.game.overview.mockResolvedValue(
+          failure === "stale"
+            ? { ...value, observedAt: new Date(now.getTime() - 90_000).toISOString() }
+            : { ...value, status: { serverName: "The UNCs", map: "Kavkazi", matchSeconds: 600 } },
+        );
+      }
+      await f.service.tick();
+      expect(f.admin.act).not.toHaveBeenCalled();
+      expect(f.discord.remind).not.toHaveBeenCalled();
+    },
+  );
 });

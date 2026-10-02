@@ -32,7 +32,7 @@ const categories: Record<Category, string> = {
 export function ActivityFeed() {
   const observed = useResource<ServerActivityView>("activity");
   const combat = useResource<CombatResponse>("combat?period=day");
-  const actions = useResource<Audit[]>("audit");
+  const actions = useResource<Audit[]>("audit-notable");
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState("");
   const [paused, setPaused] = useState<Entry[] | null>(null);
@@ -176,8 +176,9 @@ export function ActivityFeed() {
         </p>
         <p>
           Action receipts include moderation, announcements, map/settings changes and automation, with their actual
-          outcome. Accepted or pending does not mean applied. Kills and deaths appear when the native game feed delivers
-          them. Game chat and events the server does not expose are not recorded.
+          outcome. Accepted or pending does not mean applied. Automatic welcome and round messages the game acknowledged
+          are listed only in Action history; failed or unconfirmed ones appear here. Kills and deaths appear when the
+          native game feed delivers them. Game chat and events the server does not expose are not recorded.
         </p>
       </details>
     </>
