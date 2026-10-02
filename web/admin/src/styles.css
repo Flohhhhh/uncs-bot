@@ -29,6 +29,35 @@
   --line: #373a39;
   --panel: #1d2122;
   --danger: #ffaaa0;
+  /* Shared tokens for the dashboard refresh; values follow the current colors until refined. */
+  --surface-2: #242a28;
+  --accent: var(--orange);
+  --good: #b4d6a5;
+  --good-bg: #28382b;
+  --good-line: #425a38;
+  --warn: #efcf89;
+  --warn-bg: #3c321f;
+  --warn-line: #6b552b;
+  --bad: #ffada0;
+  --bad-bg: #402826;
+  --bad-line: #70423b;
+  --info: #b9c3ac;
+  --info-bg: #242b27;
+  --info-line: #47513f;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 28px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --radius-sm: 4px;
+  --radius-md: 8px;
   --display: "Barlow Condensed", "Arial Narrow", Impact, sans-serif;
   --body: "DM Sans", "Segoe UI", Arial, sans-serif;
   font-family: var(--body);
@@ -1605,6 +1634,9 @@ dialog .supporter-check input {
   font-size: 16px;
   margin-bottom: 7px;
 }
+.empty-action {
+  margin-top: var(--space-4);
+}
 .notice {
   padding: 15px 17px;
   border: 1px solid #4a633b;
@@ -1817,6 +1849,39 @@ dialog textarea {
   margin-top: 8px;
   color: #b5c59f;
   font: 11px monospace;
+}
+dialog.sheet {
+  margin: 0 0 0 auto;
+  width: min(440px, 100vw);
+  max-width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  max-height: none;
+  border-width: 0 0 0 3px;
+  border-left-color: var(--orange);
+  border-radius: 0;
+}
+.sheet-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+.sheet-top h2 {
+  margin: 0;
+  text-transform: none;
+}
+@media (max-width: 740px) {
+  dialog.sheet {
+    margin: auto 0 0;
+    width: 100vw;
+    height: fit-content;
+    max-height: 85vh;
+    max-height: 85dvh;
+    border-width: 3px 0 0;
+    border-top-color: var(--orange);
+    border-radius: var(--radius-md) var(--radius-md) 0 0;
+  }
 }
 .login-screen {
   min-height: 100vh;
@@ -2209,7 +2274,8 @@ dialog textarea {
   outline: 2px solid var(--orange);
   outline-offset: 2px;
 }
-.settings-tabs [aria-pressed="true"] {
+.settings-tabs [aria-pressed="true"],
+.settings-tabs [role="tab"][aria-selected="true"] {
   border-color: var(--orange);
   color: var(--orange);
 }
@@ -2419,3 +2485,7 @@ dialog fieldset {
   margin: 0;
   min-width: 0;
 }
+
+/* == A: match & settings == */
+
+/* == B: operations == */

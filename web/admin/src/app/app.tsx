@@ -3,16 +3,10 @@ import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "reac
 import { api, configureSession, isReadPending } from "../api/client";
 import { validateOverview, validateStaff, validateServers } from "../api/validation";
 import type { ActionName, Overview, Staff } from "../api/types";
-import { AdminContext, type SelectedServer } from "./context";
+import { AdminContext, type ActionOptions, type SelectedServer } from "./context";
 import { Badge, Empty } from "../components/ui";
-import {
-  OverviewPage,
-  WhitelistPage,
-  BansPage,
-  AnnouncementsPage,
-  MatchPage,
-  AuditPage,
-} from "../features/server/pages";
+import { OverviewPage, WhitelistPage, BansPage, AnnouncementsPage, AuditPage } from "../features/server/pages";
+import { MatchPage } from "../features/server/match-page";
 import { PlayersPage } from "../features/players/players-page";
 import { ActionsDialog } from "../features/actions/actions-dialog";
 import { ApplicationsPage } from "../features/applications";
@@ -236,7 +230,12 @@ function Dashboard({
   const [logoutRequested, setLogoutRequested] = useState(false);
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [logoutError, setLogoutError] = useState("");
-  const [action, setAction] = useState<{ action: ActionName; steamId?: string; key: string } | null>(null);
+  const [action, setAction] = useState<{
+    action: ActionName;
+    steamId?: string;
+    initialMessage?: string;
+    key: string;
+  } | null>(null);
   const pause = useRef(false);
   const freshness = useRef(0);
   const heading = useRef<HTMLHeadingElement>(null);
@@ -247,7 +246,8 @@ function Dashboard({
     setStale(true);
   }, []);
   const openAction = useCallback(
-    (action: ActionName, steamId?: string) => setAction({ action, steamId, key: crypto.randomUUID() }),
+    (action: ActionName, steamId?: string, options?: ActionOptions) =>
+      setAction({ action, steamId, initialMessage: options?.initialMessage, key: crypto.randomUUID() }),
     [],
   );
   useEffect(() => {
@@ -531,6 +531,7 @@ function Dashboard({
           key={action.key}
           action={action.action}
           steamId={action.steamId}
+          initialMessage={action.initialMessage}
           onClose={() => setAction(null)}
         />
       )}

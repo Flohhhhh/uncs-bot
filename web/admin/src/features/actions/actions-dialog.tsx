@@ -25,10 +25,13 @@ import {
 export function ActionsDialog({
   action,
   steamId,
+  initialMessage,
   onClose,
 }: {
   action: ActionName;
   steamId?: string;
+  /** Prefills the message of a broadcast or player message; staff still review and send it. */
+  initialMessage?: string;
   onClose: () => void;
 }) {
   const admin = useAdmin();
@@ -42,10 +45,20 @@ export function ActionsDialog({
       </Modal>
     );
   }
-  return <ActionForm action={action} steamId={steamId} onClose={onClose} />;
+  return <ActionForm action={action} steamId={steamId} initialMessage={initialMessage} onClose={onClose} />;
 }
 
-function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?: string; onClose: () => void }) {
+function ActionForm({
+  action,
+  steamId,
+  initialMessage,
+  onClose,
+}: {
+  action: ActionName;
+  steamId?: string;
+  initialMessage?: string;
+  onClose: () => void;
+}) {
   const api = useGameApi();
   const admin = useAdmin();
   const [id, setId] = useState(() => crypto.randomUUID());
@@ -255,7 +268,14 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
               {(action === "message" || action === "broadcast") && (
                 <label>
                   In-game message <span className="muted">(up to 200 characters)</span>
-                  <textarea name="message" maxLength={200} required rows={4} placeholder="Write your message…" />
+                  <textarea
+                    name="message"
+                    maxLength={200}
+                    required
+                    rows={4}
+                    placeholder="Write your message…"
+                    defaultValue={initialMessage}
+                  />
                 </label>
               )}
               {needsCatalog && !catalogReady && (

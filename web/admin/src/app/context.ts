@@ -1,6 +1,8 @@
 import { createContext, useContext } from "react";
 import type { ActionName, Overview, Staff } from "../api/types";
 export type SelectedServer = { id: string; name: string; version: string; role: Staff["role"] };
+/** Optional details for an action review, such as a broadcast message drafted on the page. */
+export type ActionOptions = { initialMessage?: string };
 export type AdminContextValue = {
   me: Staff;
   server?: SelectedServer;
@@ -14,7 +16,7 @@ export type AdminContextValue = {
   refreshVersion: number;
   refresh: () => void;
   invalidateOverview: () => void;
-  openAction: (action: ActionName, steamId?: string) => void;
+  openAction: (action: ActionName, steamId?: string, options?: ActionOptions) => void;
 };
 export const AdminContext = createContext<AdminContextValue | null>(null);
 export function useAdmin() {

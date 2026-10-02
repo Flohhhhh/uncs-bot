@@ -339,6 +339,23 @@ describe("server action review", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("single-line message");
     expect(request).not.toHaveBeenCalled();
   });
+  it("prefills a drafted announcement but sends it only from the review", async () => {
+    request.mockResolvedValue({ state: "applied", message: "Announcement sent." });
+    render(
+      <AdminContext.Provider value={context()}>
+        <ActionsDialog action="broadcast" initialMessage="GG, thanks for playing." onClose={vi.fn()} />
+      </AdminContext.Provider>,
+    );
+    expect(screen.getByRole("textbox", { name: /In-game message/ })).toHaveValue("GG, thanks for playing.");
+    expect(request).not.toHaveBeenCalled();
+    fireEvent.submit(screen.getByRole("button", { name: "Send announcement" }).closest("form")!);
+    await screen.findByText("Announcement sent.");
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(request.mock.calls[0][1]?.body))).toMatchObject({
+      action: "broadcast",
+      message: "GG, thanks for playing.",
+    });
+  });
   it("does not send a map change before its modes and layouts have loaded successfully", async () => {
     let reject!: (error: Error) => void;
     request.mockImplementation(async (path) => {

@@ -4,7 +4,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { api } from "../../api/client";
 import { AdminContext } from "../../app/context";
 import { context } from "../players/test-fixtures";
-import { MatchPage } from "./pages";
+import { MatchPage } from "./match-page";
 
 vi.mock("../../api/client", () => ({ api: vi.fn() }));
 const request = vi.mocked(api);
