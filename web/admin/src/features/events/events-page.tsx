@@ -41,7 +41,6 @@ function EventReview({
   const [id] = useState(() => crypto.randomUUID());
   const submitted = useRef(false);
   const [result, setResult] = useState<string | null>(null);
-  const [validation, setValidation] = useState("");
   const settings = useResource<SettingsSnapshot>(review.kind === "restore" ? "settings" : null);
   const confirmation = review.kind === "start" ? "START 50V50" : review.kind === "restore" ? "RESTORE TEAM LOCK" : null;
   const lock = settings.data?.fields.find((field) => field.id === "lockOverpopulated");
@@ -51,11 +50,6 @@ function EventReview({
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (busy || submitted.current || !canRestore || blocked) return;
-    const form = new FormData(event.currentTarget);
-    if (confirmation && form.get("confirm") !== confirmation) {
-      setValidation("Enter the exact confirmation shown below.");
-      return;
-    }
     submitted.current = true;
     setBusy(true);
     let path = "events",
@@ -158,13 +152,6 @@ function EventReview({
       ) : (
         <form onSubmit={(event) => void submit(event)}>
           {blocked && <p role="alert">Refresh event history before continuing.</p>}
-          {confirmation && (
-            <label>
-              Type {confirmation}
-              <input name="confirm" required autoComplete="off" />
-            </label>
-          )}
-          {validation && <p role="alert">{validation}</p>}
           <div className="dialog-actions">
             <button type="button" className="button secondary" disabled={busy} onClick={close}>
               Back
