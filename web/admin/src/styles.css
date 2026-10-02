@@ -1699,6 +1699,17 @@ dialog .supporter-check input {
   color: #b3bea5;
   overflow-wrap: anywhere;
 }
+.action-receipt {
+  margin-block: 12px;
+  overflow-wrap: anywhere;
+}
+.action-receipt-tools {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-block: 10px;
+}
 .demo-banner {
   background: #32271e;
   border-bottom: 1px solid #664225;
