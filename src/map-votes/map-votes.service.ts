@@ -8,13 +8,16 @@ import {
   type OnApplicationBootstrap,
   type OnModuleDestroy,
 } from "@nestjs/common";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { AdminAuth } from "../admin/admin.auth";
 import { AdminService } from "../admin/admin.service";
 import { GameServers } from "../admin/game-servers";
 import { validateMapSelection } from "../admin/server-configuration";
 import { sameMap } from "../common/map-labels";
+import { roundStamp, sameRound, type RoundStamp } from "../common/game-round";
+import type { AutomaticMapVote, AutomaticVoteStatus } from "../common/map-vote-automation";
+import type { MapSelection } from "../common/server-settings";
 import type { Staff } from "../admin/admin.types";
 import { EnvService } from "../env/env.service";
 import { MapVotesStore } from "./map-votes.store";
@@ -27,6 +30,11 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
   private timer?: ReturnType<typeof setTimeout>;
   private stopped = false;
   private running = false;
+  private readonly automaticPositions = new Map<
+    string,
+    { map: string; index: number; since: number; lastSeen: number; connection: string; round: RoundStamp | null }
+  >();
+  private readonly automaticMessages = new Map<string, { message: string; checkedAt: string }>();
   constructor(
     private readonly store: MapVotesStore,
     private readonly servers: GameServers,
@@ -42,6 +50,19 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
   }
   private requireStaff(staff: Staff) {
     if (staff.role !== "admin") throw new ForbiddenException("Only administrators can manage map votes.");
+  }
+  private automaticStatus(serverId: string): AutomaticVoteStatus | null {
+    const recipe = this.env.get("MAP_VOTES_AUTOMATIC")?.find((item) => item.serverId === serverId);
+    if (!recipe) return null;
+    return {
+      enabled: this.options().enabled,
+      delaySeconds: recipe.delaySeconds,
+      minutes: recipe.minutes,
+      choices: recipe.choices,
+      message: this.options().enabled ? "Waiting for the first rotation check." : "Voting is switched off.",
+      checkedAt: null,
+      ...this.automaticMessages.get(serverId),
+    };
   }
   private enabled() {
     const options = this.options();
@@ -63,6 +84,7 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
       enabled,
       serverId,
       observedAt,
+      automatic: this.automaticStatus(serverId),
       votes: history.map((vote) => ({
         ...mapVoteView(vote),
         ...(vote.state === "open"
@@ -76,7 +98,7 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
       })),
     };
   }
-  async start(staff: Staff, input: unknown) {
+  async start(staff: Staff, input: unknown, automatic?: { previousId: string | null; map: string; index: number }) {
     this.requireStaff(staff);
     const configured = this.enabled();
     const parsed = startMapVoteSchema.safeParse(input);
@@ -103,47 +125,47 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
       settings.rotation.currentIndex === null
     )
       throw new ConflictException("Refresh settings. Map votes need the current editable, ordered rotation.");
+    if (
+      automatic &&
+      (automatic.index !== settings.rotation.currentIndex || !sameMap(automatic.map, settings.rotation.currentMap))
+    )
+      throw new ConflictException("The observed rotation position changed before the vote opened.");
     if (action.choices.some((choice) => sameMap(choice.map, settings.rotation.currentMap)))
       throw new BadRequestException("Leave the current map out of this ballot.");
     const capabilities = await game.capabilities(),
       catalog = await game.catalog();
     for (const choice of action.choices) await validateMapSelection(game, choice, capabilities, catalog);
     const overview = await game.overview();
-    const seconds = overview.status.matchSeconds;
     const observedAt = Date.parse(overview.observedAt);
-    if (
-      typeof seconds !== "number" ||
-      !Number.isFinite(seconds) ||
-      seconds < 0 ||
-      !Number.isFinite(observedAt) ||
-      overview.status.map !== settings.rotation.currentMap
-    )
-      throw new ConflictException(
-        "The current round and its clock could not be confirmed. Refresh before starting a vote.",
-      );
+    if (!Number.isFinite(observedAt) || overview.status.map !== settings.rotation.currentMap)
+      throw new ConflictException("The current map could not be confirmed. Refresh before starting a vote.");
+    const round = roundStamp(overview.status, observedAt);
     await this.discord.check(configured.guildId, configured.channelId);
     if (this.stopped) throw new ServiceUnavailableException("Gramps is stopping. No ballot was created.");
     const now = new Date();
-    const started = await this.store.create({
-      id: action.id,
-      serverId,
-      serverName: overview.status.serverName,
-      connectionHash,
-      ...configured,
-      actorId: staff.id,
-      actorName: staff.name,
-      reason: action.reason,
-      requestHash,
-      choices: action.choices,
-      revision: action.revision,
-      currentMap: settings.rotation.currentMap,
-      currentIndex: settings.rotation.currentIndex,
-      roundStartedAt: new Date(observedAt - seconds * 1000),
-      closesAt: new Date(now.getTime() + action.minutes * 60_000),
-      counts: action.choices.map(() => 0),
-      createdAt: now,
-      updatedAt: now,
-    });
+    const started = await this.store.create(
+      {
+        id: action.id,
+        serverId,
+        serverName: overview.status.serverName,
+        connectionHash,
+        ...configured,
+        actorId: staff.id,
+        actorName: staff.name,
+        reason: action.reason,
+        requestHash,
+        choices: action.choices,
+        revision: action.revision,
+        currentMap: settings.rotation.currentMap,
+        currentIndex: settings.rotation.currentIndex,
+        roundStartedAt: round ? new Date(round.startedAt) : null,
+        closesAt: new Date(now.getTime() + action.minutes * 60_000),
+        counts: action.choices.map(() => 0),
+        createdAt: now,
+        updatedAt: now,
+      },
+      ...(automatic ? [automatic.previousId] : []),
+    );
     if (!started.created) return mapVoteView(started.record);
     let record = started.record;
     try {
@@ -217,6 +239,19 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
         if (!vote) continue;
         await this.close(vote);
       }
+      for (const recipe of this.env.get("MAP_VOTES_AUTOMATIC") ?? []) {
+        if (this.stopped) break;
+        try {
+          await this.openAutomatic(recipe);
+        } catch {
+          this.automaticPositions.delete(recipe.serverId);
+          this.automaticMessages.set(recipe.serverId, {
+            message:
+              "Automatic voting is waiting for valid rotation options, storage and staff access. No new ballot was confirmed.",
+            checkedAt: new Date().toISOString(),
+          });
+        }
+      }
     } catch {
       this.logger.warn(
         "Map voting could not complete its observation. Recorded work is retained; uncertain actions are not replayed.",
@@ -225,13 +260,124 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
       this.running = false;
     }
   }
+  private async openAutomatic(recipe: AutomaticMapVote) {
+    const serverId = this.servers.resolve(recipe.serverId);
+    const note = (message: string) =>
+      this.automaticMessages.set(serverId, { message, checkedAt: new Date().toISOString() });
+    const history = await this.store.history(serverId);
+    const active = history.find((vote) => ["publishing", "open", "closing", "needs_review"].includes(vote.state));
+    if (active) {
+      note(
+        active.state === "needs_review"
+          ? "Resolve the previous ballot before automatic voting resumes."
+          : active.state === "open"
+            ? "Community voting is open."
+            : "Finishing the current ballot.",
+      );
+      return;
+    }
+    const game = this.servers.get(serverId);
+    const settings = await game.configuration();
+    const rotation = settings.rotation;
+    const now = Date.now();
+    if (!rotation.editable || !rotation.enabled || rotation.mode !== "Ordered" || rotation.currentIndex === null) {
+      this.automaticPositions.delete(serverId);
+      note("Waiting for an editable ordered rotation and a confirmed current position.");
+      return;
+    }
+    const overview = await game.overview();
+    if (overview.status.map !== rotation.currentMap || !Number.isFinite(Date.parse(overview.observedAt)))
+      throw new Error("Rotation observation changed.");
+    const round = roundStamp(overview.status, Date.parse(overview.observedAt));
+    const connection = this.servers.connectionHash(serverId);
+    let position = this.automaticPositions.get(serverId);
+    if (
+      !position ||
+      position.connection !== connection ||
+      position.index !== rotation.currentIndex ||
+      !sameMap(position.map, rotation.currentMap) ||
+      (round && position.round && !sameRound(round, position.round)) ||
+      now - position.lastSeen > 60_000
+    ) {
+      position = {
+        map: rotation.currentMap,
+        index: rotation.currentIndex,
+        since: now,
+        lastSeen: now,
+        connection,
+        round,
+      };
+      this.automaticPositions.set(serverId, position);
+    }
+    position.lastSeen = now;
+    if (round) position.round = round;
+    const latest = history[0];
+    if (
+      latest &&
+      latest.connectionHash === connection &&
+      latest.currentIndex === rotation.currentIndex &&
+      sameMap(latest.currentMap, rotation.currentMap) &&
+      (!round ||
+        !latest.roundStartedAt ||
+        sameRound(round, { map: latest.currentMap, startedAt: latest.roundStartedAt.getTime() }))
+    ) {
+      note("This rotation position already had a ballot. Waiting for the next position.");
+      return;
+    }
+    if (now - position.since < recipe.delaySeconds * 1000) {
+      note(`The rotation position must stay confirmed for ${recipe.delaySeconds} seconds before voting opens.`);
+      return;
+    }
+    const checked = await game.checkRotation();
+    if (checked.revision !== settings.revision || checked.issues.some((issue) => !issue.unavailable))
+      throw new Error("Rotation options could not be checked.");
+    const choices: MapSelection[] = [];
+    for (let offset = 1; offset < rotation.entries.length && choices.length < recipe.choices; offset++) {
+      const index = (rotation.currentIndex + offset) % rotation.entries.length;
+      const entry = rotation.entries[index];
+      if (
+        checked.issues.some((issue) => issue.index === index) ||
+        sameMap(entry.map, rotation.currentMap) ||
+        choices.some((choice) => sameMap(choice.map, entry.map))
+      )
+        continue;
+      choices.push(entry);
+    }
+    if (choices.length < 2) {
+      note("Add at least two different available maps to the rotation for automatic voting.");
+      return;
+    }
+    const actor = await this.auth.serverStaff(
+      { id: recipe.actorId, name: "Gramps automatic voting", role: "admin", csrf: "" },
+      serverId,
+      true,
+    );
+    if (this.stopped) return;
+    const result = await this.start(
+      actor,
+      {
+        id: randomUUID(),
+        serverId,
+        revision: settings.revision,
+        choices,
+        minutes: recipe.minutes,
+        reason: "Automatic community map vote.",
+      },
+      { previousId: latest?.id ?? null, map: rotation.currentMap, index: rotation.currentIndex },
+    );
+    note(result.state === "open" ? "Automatic community voting is open." : result.message);
+  }
   private async close(vote: MapVoteRecord) {
-    let state: "queued" | "no_votes" | "needs_review" = "needs_review";
+    let state: "queued" | "no_votes" | "tied" | "cancelled" | "needs_review" = "needs_review";
+    let actionStarted = false;
     let message = "The next map was not confirmed. Check the ballot's action receipt before changing the rotation.";
     try {
       if (vote.winner === null) {
-        state = "no_votes";
-        message = "No votes were cast. The rotation was left unchanged.";
+        const tied = vote.counts.some((count) => count > 0);
+        state = tied ? "tied" : "no_votes";
+        message = tied
+          ? "The vote tied. The saved rotation was left unchanged."
+          : "No votes were cast. The rotation was left unchanged.";
       } else {
         const configured = this.enabled();
         if (
@@ -246,23 +392,32 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
           true,
         );
         if (actor.role !== "admin") throw new Error("Creator no longer authorized.");
-        const current = await this.servers.get(vote.serverId).overview();
+        const game = this.servers.get(vote.serverId);
+        const settings = await game.configuration();
+        if (
+          settings.revision !== vote.revision ||
+          settings.rotation.currentIndex !== vote.currentIndex ||
+          !sameMap(settings.rotation.currentMap, vote.currentMap)
+        )
+          throw new Error("Rotation changed.");
+        const current = await game.overview();
         const seconds = current.status.matchSeconds;
         const roundStart =
           typeof seconds === "number" && Number.isFinite(seconds) && seconds >= 0
             ? Date.parse(current.observedAt) - seconds * 1000
             : null;
         if (
-          roundStart === null ||
-          !Number.isFinite(roundStart) ||
-          vote.roundStartedAt === null ||
-          Math.abs(roundStart - vote.roundStartedAt.getTime()) > 30_000 ||
+          !Number.isFinite(Date.parse(current.observedAt)) ||
+          (vote.roundStartedAt !== null &&
+            (roundStart === null ||
+              !Number.isFinite(roundStart) ||
+              Math.abs(roundStart - vote.roundStartedAt.getTime()) > 30_000)) ||
           current.status.map !== vote.currentMap ||
           this.stopped
         )
           throw new Error("Round cannot be confirmed.");
-        if ((await this.store.get(vote.id))?.state !== "closing" || this.stopped)
-          throw new Error("Ballot no longer closing.");
+        if ((await this.store.get(vote.id))?.state !== "closing" || this.stopped) return;
+        actionStarted = true;
         const result = await this.admin.act(actor, {
           id: vote.id,
           action: "map-next",
@@ -278,8 +433,10 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
         } else message = result.message;
       }
     } catch {
-      message =
-        "The round, settings, connection or staff access changed. No confirmed queue change; review the winner and action receipt.";
+      state = actionStarted ? "needs_review" : "cancelled";
+      message = actionStarted
+        ? "The queue result is unconfirmed. Review the winner and action receipt."
+        : "The position, settings, connection or staff access changed or could not be read. The ballot closed without sending a queue change.";
     }
     const finished = await this.store.finish(vote.id, state, message);
     if (finished) await this.updateMessage(finished);

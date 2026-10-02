@@ -496,6 +496,24 @@ describe("launch storage on isolated PostgreSQL", () => {
       });
     expect((await client.query("SELECT choice FROM map_vote_ballots")).rows).toEqual([{ choice: 1 }]);
   });
+  it.each(["automatic", "staff"] as const)(
+    "serializes automatic opening against %s ballots and refuses stale decisions after closure",
+    async (kind) => {
+      const a = ballotInput(),
+        b = ballotInput();
+      const results = await overlap(
+        "map_votes",
+        ({ votes }) => votes.create(a, null),
+        ({ votes }) => votes.create(b, kind === "automatic" ? null : undefined),
+      );
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      const [created] = await votes.history("primary");
+      await votes.finish(created.id, "no_votes", "No votes; rotation unchanged.");
+      await expect(votes.create({ ...ballotInput(), id: randomUUID() }, null)).rejects.toMatchObject({ status: 409 });
+      expect((await votes.create(ballotInput(), created.id)).created).toBe(true);
+      expect((await votes.create({ ...ballotInput(), serverId: "event" }, null)).created).toBe(true);
+    },
+  );
   it("claims a due ballot once across workers and counts the final choices with the published tie rule", async () => {
     const vote = await openBallot();
     await votes.cast(vote.id, staff.id, 0, vote.guildId, vote.channelId, messageId);
@@ -507,7 +525,7 @@ describe("launch storage on isolated PostgreSQL", () => {
       ({ votes }) => votes.claimClose(vote.id),
     );
     expect(results.filter((result) => result.status === "fulfilled" && result.value)).toHaveLength(1);
-    expect(await votes.get(vote.id)).toMatchObject({ state: "closing", winner: 0, counts: [1, 1] });
+    expect(await votes.get(vote.id)).toMatchObject({ state: "closing", winner: null, counts: [1, 1] });
     await expect(votes.cast(vote.id, staff.id, 1, vote.guildId, vote.channelId, messageId)).rejects.toMatchObject({
       status: 409,
     });

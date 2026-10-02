@@ -780,6 +780,13 @@ const supporterStore = {
 };
 const previewEnvironment: Record<string, unknown> = {
   MAP_VOTES_ENABLED: true,
+  ...(process.env.PREVIEW_AUTOMATIC_VOTES === "true"
+    ? {
+        MAP_VOTES_AUTOMATIC: [
+          { serverId: "primary", actorId: "123456789012345678", delaySeconds: 60, minutes: 2, choices: 3 },
+        ],
+      }
+    : {}),
   SERVER_EVENTS_ENABLED: true,
   WARDOGS_RCON_URL: "https://game.example.test",
   ADMIN_GUILD_ID: "111111111111111111",
