@@ -138,6 +138,14 @@ export const Env = z.object({
     .enum(["true", "false"])
     .default("true")
     .transform((value) => value === "true"),
+  /**
+   * Refuse (409) approving a SteamID already on the running whitelist until the request carries
+   * existingAccessConfirmed. Off by default: the dashboard must send that confirmation first.
+   */
+  WHITELIST_APPLICATION_EXISTING_CONFIRMATION_REQUIRED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
 
   /** A Discord server (guild) ID to use for development */
   DISCORD_DEVELOPMENT_GUILD_ID: nonEmptyString

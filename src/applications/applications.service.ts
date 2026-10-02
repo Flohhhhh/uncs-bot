@@ -182,20 +182,23 @@ export class ApplicationsService implements OnModuleInit, OnModuleDestroy {
     const actor = { ...staff, serverId };
     if (kind === "recheck") return this.recheck(actor, applicationId, request);
     if (kind === "revoke") return this.revoke(actor, applicationId, request);
-    // Approving a SteamID that is already live records the registration instead of sending a grant,
-    // and only after staff confirm this Discord member owns it. Nothing is ever approved automatically.
+    // Approving a SteamID that is already live records the registration instead of sending a grant once
+    // staff confirm this Discord member owns it. Requiring that confirmation is a setting, off by default,
+    // so a dashboard that cannot send it keeps the normal grant. Nothing is ever approved automatically.
+    let alreadyLive = false;
     let existing = false;
     if (kind === "approve") {
       const current = await this.store.get(applicationId, serverId);
       if (current?.status === "pending") {
         try {
           const list = await this.servers.get(serverId).whitelist();
-          existing = list.entries.some((entry) => entry.steamId === current.steamId && entry.active);
+          alreadyLive = list.entries.some((entry) => entry.steamId === current.steamId && entry.active);
         } catch {
           // An unreadable whitelist falls back to the normal grant, which confirms its own result.
-          existing = false;
+          alreadyLive = false;
         }
-        if (existing && !request.existingAccessConfirmed)
+        existing = alreadyLive && request.existingAccessConfirmed === true;
+        if (alreadyLive && !existing && this.env.get("WHITELIST_APPLICATION_EXISTING_CONFIRMATION_REQUIRED") === true)
           throw new ConflictException(
             "This SteamID is already on the running whitelist. Confirm this Discord member owns it, then approve again to record the registration. No whitelist change will be sent.",
           );
@@ -253,7 +256,13 @@ export class ApplicationsService implements OnModuleInit, OnModuleDestroy {
       };
     }
     try {
-      const application = await this.store.finishApproval(applicationId, request.id, outcome, "granted");
+      // A grant for an entry that was already live changed nothing, so it is not recorded as a grant.
+      const application = await this.store.finishApproval(
+        applicationId,
+        request.id,
+        outcome,
+        alreadyLive ? null : "granted",
+      );
       this.notifyRoles(application);
       return { application, outcome: { id: request.id, ...outcome } };
     } catch {
@@ -380,6 +389,7 @@ export class ApplicationsService implements OnModuleInit, OnModuleDestroy {
           "The revocation could not be confirmed. Check the running whitelist and use Recheck live whitelist. No automatic retry will be sent.",
       };
     }
+    if (outcome.state === "failed") outcome = await this.refusedRevoke(serverId, steamId, outcome);
     try {
       const application = await this.store.finishRevoke(applicationId, request.id, outcome);
       this.notifyRoles(application);
@@ -397,12 +407,36 @@ export class ApplicationsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /**
+   * A refusal only leaves access unchanged while the SteamID is still live. A removal refused because the
+   * entry is already gone (404 reserved_not_found) has taken effect, so it is recorded as a revocation; an
+   * unreadable whitelist leaves the revocation for review. Reads only; nothing is sent to the game.
+   */
+  private async refusedRevoke(serverId: string, steamId: string, refused: ActionResult): Promise<ActionResult> {
+    try {
+      const list = await this.servers.get(serverId).whitelist();
+      if (list.entries.some((entry) => entry.steamId === steamId && entry.active)) return refused;
+      return {
+        state: "applied",
+        message:
+          "The SteamID is no longer on the running whitelist, so the revocation is recorded. No further game change was sent.",
+      };
+    } catch {
+      return {
+        state: "unknown",
+        message:
+          "The game refused the revocation and the running whitelist could not be checked. Use Recheck live whitelist before any further change.",
+      };
+    }
+  }
+
   private async externalRevoke(removal: WhitelistRemoval) {
     try {
       for (const application of await this.store.recordExternalRevoke(removal)) this.notifyRoles(application);
-    } catch (error) {
+    } catch {
+      // Database error text carries SQL parameters (SteamID, staff identity, reasons): log fixed text only.
       this.logger.warn(
-        `A Whitelist page removal (action ${removal.actionId}) could not be recorded on its application: ${error instanceof Error ? error.message : String(error)}`,
+        `A Whitelist page removal (action ${removal.actionId}) could not be recorded on its application. Revoke that application on the Applications page to record it.`,
       );
     }
   }

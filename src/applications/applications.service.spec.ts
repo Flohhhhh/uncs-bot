@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { ConflictException } from "@nestjs/common";
+import { ConflictException, Logger } from "@nestjs/common";
 import { Subject } from "rxjs";
 import { ApplicationsService } from "./applications.service";
 import type { ApplicationsStore } from "./applications.store";
@@ -63,6 +63,8 @@ function fixture(
     result?: ActionResult;
     /** SteamIDs active on the running whitelist. A pending request is not live unless a test says so. */
     live?: string[];
+    /** WHITELIST_APPLICATION_EXISTING_CONFIRMATION_REQUIRED */
+    confirmExisting?: boolean;
   } = {},
 ) {
   let current = options.initial === undefined ? record() : options.initial;
@@ -174,7 +176,11 @@ function fixture(
   const roles = { applicationChanged: jest.fn() };
   const env = {
     get: jest.fn((key: string) =>
-      key === "WHITELIST_APPLICATIONS_ENABLED" ? options.enabled !== false : options.emailRequired !== false,
+      key === "WHITELIST_APPLICATIONS_ENABLED"
+        ? options.enabled !== false
+        : key === "WHITELIST_APPLICATION_EXISTING_CONFIRMATION_REQUIRED"
+          ? options.confirmExisting === true
+          : options.emailRequired !== false,
     ),
   };
   const game = {
@@ -528,8 +534,26 @@ describe("durable application decisions", () => {
 });
 
 describe("existing whitelist members", () => {
+  it("approves an already whitelisted SteamID with the normal grant when confirmation is not required", async () => {
+    // The current dashboard sends only {id, reason}; approval must not be stuck behind a 409 it cannot answer.
+    const { service, admin, roles } = fixture({ live: [input.steamId] });
+    const result = await service.review(staff, applicationId, "approve", { id: randomUUID(), reason: "Approve" });
+    expect(result.application).toMatchObject({ status: "approved", whitelistGrant: null });
+    expect(admin.act).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "whitelist-add" }));
+    expect(roles.applicationChanged).toHaveBeenCalledWith(applicant.userId);
+  });
+  it("registers a confirmed existing entry without a grant whether or not confirmation is required", async () => {
+    const { service, admin } = fixture({ live: [input.steamId] });
+    const result = await service.review(staff, applicationId, "approve", {
+      id: randomUUID(),
+      reason: "Registering existing member",
+      existingAccessConfirmed: true,
+    });
+    expect(result.application).toMatchObject({ status: "approved", whitelistGrant: "existing" });
+    expect(admin.act).not.toHaveBeenCalled();
+  });
   it("refuses to approve an already whitelisted SteamID until staff confirm ownership, and sends no grant", async () => {
-    const { service, store, admin, roles } = fixture({ live: [input.steamId] });
+    const { service, store, admin, roles } = fixture({ live: [input.steamId], confirmExisting: true });
     const review = { id: randomUUID(), reason: "Registering existing member" };
     await expect(service.review(staff, applicationId, "approve", review)).rejects.toMatchObject({
       status: 409,
@@ -654,6 +678,74 @@ describe("revoking whitelist access", () => {
     const result = await service.review(staff, applicationId, "revoke", { id: randomUUID(), reason: "Retry" });
     expect(result.application.status).toBe("revoked");
     expect(admin.act).toHaveBeenCalledTimes(1);
+  });
+  it.each([
+    ["an approved application", () => approved()],
+    [
+      "a revocation left uncertain",
+      () => record({ status: "needs_review", accessIntent: "revoke", reviewId: randomUUID() }),
+    ],
+  ])(
+    "records a refused removal of %s as revoked when the SteamID is already gone from the running whitelist",
+    async (_label, initial) => {
+      // DELETE /v1/reserved-slots/{id} refuses an absent ID with 404 reserved_not_found, which arrives as "failed".
+      const { service, admin, game, roles } = fixture({
+        initial: initial(),
+        live: [],
+        result: { state: "failed", message: "That SteamID is not in the running whitelist. Refresh the list." },
+      });
+      const result = await service.review(staff, applicationId, "revoke", { id: randomUUID(), reason: "Left" });
+      expect(result.application).toMatchObject({ status: "revoked", accessIntent: "revoke" });
+      expect(result.outcome).toMatchObject({
+        state: "applied",
+        message: expect.stringContaining("no longer on the running whitelist"),
+      });
+      expect(game.whitelist).toHaveBeenCalledTimes(1);
+      expect(admin.act).toHaveBeenCalledTimes(1);
+      expect(roles.applicationChanged).toHaveBeenCalledWith(applicant.userId);
+    },
+  );
+  it("keeps a refused revocation for review when the running whitelist cannot be read afterwards", async () => {
+    const { service, admin, game } = fixture({
+      initial: approved(),
+      result: { state: "failed", message: "That SteamID is not in the running whitelist. Refresh the list." },
+    });
+    game.whitelist.mockRejectedValueOnce(new Error("offline"));
+    const result = await service.review(staff, applicationId, "revoke", { id: randomUUID(), reason: "Left" });
+    expect(result.application).toMatchObject({ status: "needs_review", accessIntent: "revoke" });
+    expect(result.outcome.state).toBe("unknown");
+    expect(admin.act).toHaveBeenCalledTimes(1);
+  });
+  it("logs a fixed warning without the database error text when a Whitelist page removal cannot be recorded", async () => {
+    const warn = jest.spyOn(Logger.prototype, "warn").mockImplementation(() => undefined);
+    try {
+      const { service, admin, store } = fixture({ initial: approved() });
+      service.onModuleInit();
+      store.recordExternalRevoke.mockRejectedValueOnce(
+        new Error(
+          `Failed query: update "whitelist_applications" set "reviewed_by" = $1\nparams: ${staff.id},${staff.name},${input.steamId}`,
+        ),
+      );
+      const actionId = randomUUID();
+      admin.whitelistRemovals.next({
+        serverId: "primary",
+        steamId: input.steamId,
+        actionId,
+        actorId: staff.id,
+        actorName: staff.name,
+        state: "applied",
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(warn).toHaveBeenCalledTimes(1);
+      const [message] = warn.mock.calls[0] as [string];
+      expect(message).toContain(actionId);
+      expect(message).not.toContain(input.steamId);
+      expect(message).not.toContain(staff.id);
+      expect(message).not.toContain("Failed query");
+      service.onModuleDestroy();
+    } finally {
+      warn.mockRestore();
+    }
   });
   it("revokes the matching approved application when staff remove its SteamID on the Whitelist page", async () => {
     const { service, admin, store, roles } = fixture({ initial: approved() });
