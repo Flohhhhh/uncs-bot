@@ -209,6 +209,8 @@ export function settingValue(field: SettingField, value: unknown, stored = false
   }
   if (
     typeof value !== "string" ||
+    // The readers' multiline patterns also break lines at U+2028 and U+2029, so they could forge a redacted line.
+    /[\u2028\u2029]/.test(value) ||
     [...value].some(
       (character) =>
         character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127 || character === '"' || character === "\\",

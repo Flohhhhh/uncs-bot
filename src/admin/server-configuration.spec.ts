@@ -514,6 +514,20 @@ describe("server configuration boundaries", () => {
     expect(snapshot.fields.find((field) => field.id === "serverPassword")?.note).toContain("redacted");
     expect(snapshot.rotation.editable).toBe(false);
   });
+  it.each(["***\u2028", "***;\u2029x", "x\u2028a=***", "Name\u2029k=redacted"])(
+    "refuses %j, whose Unicode line separator would read back as a redacted configuration",
+    async (value) => {
+      const f = fixture();
+      for (const changes of [{ serverPassword: value }, { serverName: value }])
+        await expect(f.game.execute(save(changes))).rejects.toThrow("Enter a valid value for");
+      expect(f.request.mock.calls.some(([method]) => method === "PUT")).toBe(false);
+      // The readers' multiline patterns treat U+2028 and U+2029 as line breaks, so a saved value would lock edits.
+      f.document.text = original.replace("private-join-secret", value);
+      const snapshot = await f.game.configuration();
+      expect(snapshot.fields.every((field) => !field.editable)).toBe(true);
+      expect(snapshot.rotation.editable).toBe(false);
+    },
+  );
   it.each(["**", "***x", " ***", "*** ", "[redacted", "redacted!", "Not redacted"])(
     "saves the near miss %j and keeps the configuration editable",
     async (value) => {
