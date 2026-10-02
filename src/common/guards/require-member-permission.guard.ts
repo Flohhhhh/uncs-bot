@@ -9,7 +9,8 @@ import {
 import { Reflector } from "@nestjs/core";
 import { BaseInteraction, PermissionResolvable } from "discord.js";
 import { NecordExecutionContext } from "necord";
-import { formatPermissions, replyPermissionError } from "../utils/permission.utils";
+import { InteractionError } from "../errors/interaction-error";
+import { formatPermissions } from "../utils/permission.utils";
 
 const REQUIRED_MEMBER_PERMISSIONS_KEY = "required_member_permissions";
 
@@ -38,11 +39,10 @@ export class RequireMemberPermissionGuard implements CanActivate {
     const permissions = interaction.memberPermissions;
     if (!permissions || !permissions.has(requiredPermissions)) {
       const missing = permissions?.missing(requiredPermissions) ?? requiredPermissions;
-      await replyPermissionError(
-        interaction,
+      // Thrown, not replied, so the global exception filter shows it to the user instead of a generic error.
+      throw new InteractionError(
         `❌ You need the following permission(s) to use this command: **${formatPermissions(missing)}**.`,
       );
-      return false;
     }
 
     return true;

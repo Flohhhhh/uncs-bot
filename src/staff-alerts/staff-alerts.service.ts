@@ -244,6 +244,21 @@ export class StaffAlerts {
     const guild = this.env.get("ADMIN_GUILD_ID");
     return !guild || role === guild ? "invalid" : "ok";
   }
+  /**
+   * Whether a ping in this staff channel would notify anyone. Discord delivers a role mention only
+   * when the role allows anyone to mention it or the sender has Mention @everyone, @here, and All
+   * Roles; allowed mentions cannot grant that. Gramps never changes the role or its own permissions.
+   */
+  private pingReady(channel: TextChannel): StaffAlertsPingState {
+    const state = this.pingState();
+    const role = this.env.get("STAFF_ALERTS_PING_ROLE_ID");
+    if (state !== "ok" || !role) return state;
+    const found = channel.guild.roles.cache.get(role);
+    if (!found) return "invalid";
+    const me = channel.guild.members.me;
+    if (found.mentionable || (me && channel.permissionsFor(me)?.has(PermissionFlagsBits.MentionEveryone))) return "ok";
+    return "not-mentionable";
+  }
 
   /** Checks the staff channel without posting: guild, type, bot permissions and @everyone visibility. */
   async channelCheck(): Promise<ChannelCheck> {
@@ -269,10 +284,11 @@ export class StaffAlerts {
     }
   }
   async channelStatus() {
+    const check = await this.channelCheck();
     return {
       configured: !!this.env.get("STAFF_ALERTS_CHANNEL_ID"),
-      state: (await this.channelCheck()).state,
-      ping: this.pingState(),
+      state: check.state,
+      ping: check.channel ? this.pingReady(check.channel) : this.pingState(),
     };
   }
 
@@ -313,10 +329,12 @@ export class StaffAlerts {
     const ping =
       record.severity === "high" &&
       record.category !== "performance" &&
-      this.pingState() === "ok" &&
       !!role &&
-      check.channel.guild.roles.cache.has(role) &&
+      this.pingReady(check.channel) === "ok" &&
       now - this.lastPingAt >= PING_INTERVAL_MS;
+    // Reserve the ping before the send, so an alert from another server meanwhile does not ping too.
+    const previousPingAt = this.lastPingAt;
+    if (ping) this.lastPingAt = now;
     const embed = this.embed(record);
     // No "Open in dashboard" button until the dashboard's Staff alerts tab can show the alert.
     const options: MessageCreateOptions = {
@@ -329,12 +347,10 @@ export class StaffAlerts {
     try {
       const message = await check.channel.send(options);
       record.message = { channelId: check.channel.id, messageId: message.id, embed };
-      if (ping) {
-        this.lastPingAt = now;
-        record.pinged = true;
-      }
+      if (ping) record.pinged = true;
       return { state: "posted", reason: null };
     } catch {
+      if (ping && this.lastPingAt === now) this.lastPingAt = previousPingAt;
       return { state: "failed", reason: "discord error" };
     }
   }

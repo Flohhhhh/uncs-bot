@@ -9,7 +9,8 @@ import {
 import { Reflector } from "@nestjs/core";
 import { BaseInteraction, PermissionResolvable } from "discord.js";
 import { NecordExecutionContext } from "necord";
-import { formatPermissions, replyPermissionError } from "../utils/permission.utils";
+import { InteractionError } from "../errors/interaction-error";
+import { formatPermissions } from "../utils/permission.utils";
 
 const REQUIRED_BOT_PERMISSIONS_KEY = "required_bot_permissions";
 
@@ -37,11 +38,10 @@ export class RequireBotPermissionGuard implements CanActivate {
     const permissions = interaction.appPermissions;
     if (!permissions.has(requiredPermissions)) {
       const missing = permissions.missing(requiredPermissions);
-      await replyPermissionError(
-        interaction,
+      // Thrown, not replied, so the global exception filter shows it to the user instead of a generic error.
+      throw new InteractionError(
         `❌ I need the following permission(s) in this channel: **${formatPermissions(missing)}**.`,
       );
-      return false;
     }
 
     return true;

@@ -684,12 +684,16 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
         this.stopped
       )
         throw new Error("Voting stopped before the in-game reminder.");
-      const result = await this.admin.act(actor, {
-        id,
-        action: "broadcast",
-        reason: `Map vote ${stage} totals`,
-        message,
-      });
+      // AdminService.act throws only before anything reaches the game.
+      const result = await this.admin
+        .act(
+          { ...actor, id: `system:map-vote:${vote.id}` },
+          { id, action: "broadcast", reason: `Map vote ${stage} totals`, message },
+        )
+        .catch(() => ({
+          state: "failed",
+          message: "Posted in Discord. The in-game reminder was not sent and will not be repeated.",
+        }));
       await this.store.finishReminder(vote.id, stage, result.state, result.message);
     } catch {
       await this.store.finishReminder(
@@ -762,16 +766,21 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
         if (vote.automation && !(await this.store.policy(vote.serverId))?.policy.enabled)
           throw new Error("Voting switched off.");
         if ((await this.store.get(vote.id))?.state !== "closing" || this.stopped) return;
+        // A per-ballot audit actor keeps the creator's own dashboard actions from throttling this close.
+        const result = await this.admin.act(
+          { ...actor, id: `system:map-vote:${vote.id}` },
+          {
+            id: vote.id,
+            action: "map-next",
+            reason: `Discord map vote ${vote.id}`,
+            revision: vote.revision,
+            currentIndex: vote.currentIndex,
+            currentMap: vote.currentMap,
+            entry: vote.choices[vote.winner],
+          },
+        );
+        // AdminService.act throws only before anything reaches the game, so a refusal is not a sent action.
         actionStarted = true;
-        const result = await this.admin.act(actor, {
-          id: vote.id,
-          action: "map-next",
-          reason: `Discord map vote ${vote.id}`,
-          revision: vote.revision,
-          currentIndex: vote.currentIndex,
-          currentMap: vote.currentMap,
-          entry: vote.choices[vote.winner],
-        });
         if (result.state === "applied" || result.state === "pending") {
           state = "queued";
           message = "The winning map was saved in the next rotation position. The current match continues.";
