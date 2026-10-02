@@ -92,7 +92,7 @@ No built-in per-clan preferred-team or team-slot reservation setting was found i
 
 The optional admin-only [Patreon supporter ledger](PATREON_SUPPORTERS.md) records signed membership observations, checked payment receipts, linked Discord/Steam accounts and permanent founder promises. Its approved campaign runs September 30 through October 14, 2026, Eastern time, for a $5/month supporter tier. Provider events never directly grant or remove game access. Its production schema is applied; the feature remains off and the creator webhook is not connected.
 
-Recorded player statistics, the public server leaderboard and staff combat history are described in [Combat history](COMBAT_HISTORY.md). They use an independently authenticated game-event feed; production feed settings have not been changed.
+Recorded player statistics, the public server leaderboard and staff combat history are described in [Combat history](COMBAT_HISTORY.md). The independently authenticated game-event feed is configured in production, but its first native batch is still unverified. Configuration alone does not make the history live.
 
 The optional [Gramps community worker](SERVER_COMMUNITY.md) adds game welcome messages, generic round-transition broadcasts and updates to one existing Discord status message. All switches default off. It uses observed roster/round changes because authoritative join/end events are not documented; it does not announce a verified winner or promise results-screen timing. Configure the literal messages and existing Discord message in deployment settings, then disable overlapping third-party announcements before activation. No production cutover has been performed.
 
