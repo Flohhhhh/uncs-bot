@@ -35,6 +35,7 @@ export class AdminService {
       audit: () => this.store.history(id),
       "game-log": () => game().gameLog(),
       "server-identity": () => game().identity(),
+      "rotation-check": () => game().checkRotation(),
     };
     if (!Object.hasOwn(readers, resource)) throw new BadRequestException("Unknown dashboard page.");
     const key = `${id}:${resource}`;
@@ -71,6 +72,10 @@ export class AdminService {
   gameLog(staff: Staff) {
     if (staff.role !== "admin") throw new ForbiddenException("Only administrators can read the game command log.");
     return this.read("game-log", staff.serverId);
+  }
+  rotationCheck(staff: Staff) {
+    if (staff.role !== "admin") throw new ForbiddenException("Only administrators can check saved server settings.");
+    return this.read("rotation-check", staff.serverId);
   }
   async mapOptions(map: string, serverId?: string) {
     if (!/^[\w./-]{1,150}$/.test(map)) throw new BadRequestException("Choose a valid map.");

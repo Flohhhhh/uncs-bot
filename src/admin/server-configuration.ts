@@ -11,6 +11,7 @@ import {
 import { assertEditable, arrayValue, editConfigKey, scalarValue } from "./config-document";
 import type { WardogsClient } from "./wardogs.client";
 import { RconError } from "./rcon-protocol";
+import { mapLabel, zoneLabel } from "../common/map-labels";
 import { serves } from "../common/admin-policy";
 import {
   statusSchema,
@@ -66,35 +67,71 @@ export function parseRotation(text: string): MapSelection[] {
 export function formatRotation(entry: MapSelection) {
   return `(${[`Map="${entry.map}"`, `Experiences="${entry.experiences.join("+")}"`, ...(entry.lighting ? [`Lighting="${entry.lighting}"`] : []), ...(entry.zoneAlternator && entry.zoneAlternator !== "None" ? [`ZoneAlternator="${entry.zoneAlternator}"`] : [])].join(",")})`;
 }
+class UnavailableSelection extends RconError {}
+
 export async function validateMapSelection(
   game: WardogsClient,
   selection: MapSelection,
   capabilities: Capabilities,
   catalog?: Awaited<ReturnType<WardogsClient["catalog"]>>,
+  reads = new Map<string, Promise<unknown>>(),
 ) {
+  const read = (path: string) => {
+    if (!reads.has(path)) reads.set(path, game.request("GET", path));
+    return reads.get(path)!;
+  };
   const available = catalog ?? (await game.catalog());
   if (
     !available.maps.some((entry) => entry.id === selection.map) ||
     (selection.lighting && !available.lightings.some((entry) => entry.id === selection.lighting)) ||
     selection.experiences.some((id) => !available.experiences.some((entry) => entry.id === id))
   )
-    throw new RconError("Choose maps, modes and lighting from the current server catalog.");
+    throw new UnavailableSelection("Choose maps, modes and lighting from the current server catalog.");
   if (selection.experiences.length && serves(capabilities, "GET", "/v1/catalog/maps/{map}/experiences")) {
     const result = z
       .object({ experiences: z.array(z.string()) })
-      .parse(await game.request("GET", `/v1/catalog/maps/${encodeURIComponent(selection.map)}/experiences`));
+      .parse(await read(`/v1/catalog/maps/${encodeURIComponent(selection.map)}/experiences`));
     if (selection.experiences.some((id) => !result.experiences.includes(id)))
-      throw new RconError("The selected mode is not available for this map.");
+      throw new UnavailableSelection("The selected mode is not available for this map.");
   }
   if (selection.zoneAlternator && selection.zoneAlternator !== "None") {
     if (!serves(capabilities, "GET", "/v1/catalog/maps/{map}/alternators"))
       throw new RconError("This server cannot verify the zone layout. Leave it unset.");
     const result = z
       .object({ alternators: z.array(z.object({ tag: z.string() })) })
-      .parse(await game.request("GET", `/v1/catalog/maps/${encodeURIComponent(selection.map)}/alternators`));
+      .parse(await read(`/v1/catalog/maps/${encodeURIComponent(selection.map)}/alternators`));
     if (!result.alternators.some((entry) => entry.tag === selection.zoneAlternator))
-      throw new RconError("The zone layout is not available for this map.");
+      throw new UnavailableSelection(
+        `The zone layout is not available for this map: ${zoneLabel(selection.zoneAlternator)}.`,
+      );
   }
+}
+export async function checkSavedRotation(game: WardogsClient) {
+  const doc = await game.document();
+  const entries = parseRotation(doc.text);
+  if (entries.length > 100)
+    throw new RconError("This rotation is too large to check here. Review it in the host panel.");
+  const capabilities = await game.capabilities();
+  if (!["maps", "lightings", "experiences"].every((kind) => serves(capabilities, "GET", `/v1/catalog/${kind}`)))
+    throw new RconError("This build does not expose the catalogs needed to check the saved rotation.");
+  const catalog = await game.catalog();
+  const reads = new Map<string, Promise<unknown>>();
+  const issues: { index: number; message: string; unavailable: boolean }[] = [];
+  for (const [index, entry] of entries.entries()) {
+    try {
+      await validateMapSelection(game, entry, capabilities, catalog, reads);
+    } catch (error) {
+      const unavailable = error instanceof UnavailableSelection;
+      issues.push({
+        index,
+        unavailable,
+        message: unavailable
+          ? `${mapLabel(entry.map)}: ${error.message}`
+          : `${mapLabel(entry.map)}: Options could not be verified. Try checking again.`,
+      });
+    }
+  }
+  return { revision: doc.revision, total: entries.length, issues };
 }
 export async function readServerConfiguration(game: WardogsClient): Promise<SettingsSnapshot> {
   const capabilities = await game.capabilities();
@@ -227,7 +264,16 @@ export async function changeServerConfiguration(
       } else entries = action.entries;
       if (entries.length > 100) throw new RconError("Keep the rotation to 100 entries or fewer.");
       const catalog = await game.catalog();
-      for (const entry of entries) await validateMapSelection(game, entry, capabilities, catalog);
+      const reads = new Map<string, Promise<unknown>>();
+      for (const [index, entry] of entries.entries()) {
+        try {
+          await validateMapSelection(game, entry, capabilities, catalog, reads);
+        } catch (error) {
+          if (error instanceof RconError)
+            throw new RconError(`Entry ${index + 1} (${mapLabel(entry.map)}): ${error.message}`);
+          throw error;
+        }
+      }
       text = editConfigKey(doc, ROTATION, "RotationEntries", entries.map(formatRotation));
     }
   } catch (error) {

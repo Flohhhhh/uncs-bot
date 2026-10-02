@@ -1,3 +1,4 @@
+import { lightingLabel } from "../../../../../src/common/map-labels";
 import { useRef, useState, type FormEvent } from "react";
 import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 import type { MapSelection } from "../../../../../src/common/server-settings";
@@ -220,7 +221,7 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
                   <select name="lighting" required={action === "lighting"}>
                     {catalog.data.lightings.map((entry) => (
                       <option key={entry.id} value={entry.id}>
-                        {entry.displayName || entry.id}
+                        {lightingLabel(entry.id, entry.displayName)}
                       </option>
                     ))}
                   </select>

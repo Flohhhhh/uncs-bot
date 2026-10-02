@@ -101,6 +101,10 @@ export class AdminGameController {
   mapOptions(@Req() req: StaffRequest, @Param("map") map: string) {
     return this.service.mapOptions(map, req.staff.serverId);
   }
+  @Get("settings/rotation-check")
+  rotationCheck(@Req() req: StaffRequest) {
+    return this.service.rotationCheck(req.staff);
+  }
   @Get("game-log")
   gameLog(@Req() req: StaffRequest) {
     return this.service.gameLog(req.staff);

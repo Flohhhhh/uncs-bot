@@ -49,7 +49,9 @@ function fixture() {
 }
 it("shows choices and voting rules without private staff evidence or pinging members", () => {
   const payload = ballotMessage(record);
-  expect(payload.content).toContain("InfantryOnly, Dusk");
+  expect(payload.content).toContain("Ozeti");
+  expect(payload.content).toContain("InfantryOnly Dusk");
+  expect(payload.components[0].toJSON().components[0]).toMatchObject({ label: "1. Ozeti" });
   expect(payload.content).toContain("Ties use the first listed option");
   expect(payload.allowedMentions).toEqual({ parse: [], users: [], roles: [], repliedUser: false });
   expect(JSON.stringify(payload)).not.toContain("Private");

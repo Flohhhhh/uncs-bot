@@ -153,7 +153,7 @@ it.each(["pending", "unknown", "invalid-state", "timeout"])(
 
 it("preserves reordered maps after a rejected rotation save", async () => {
   show("admin", "/settings#rotation");
-  fireEvent.click(await screen.findByRole("button", { name: "Move Europe up" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Move Ozeti up" }));
   fireEvent.click(screen.getByRole("button", { name: "Review rotation" }));
   const fallback = request.getMockImplementation()!;
   request.mockImplementation(async (path, options) =>
@@ -165,7 +165,7 @@ it("preserves reordered maps after a rejected rotation save", async () => {
   expect(screen.getByRole("button", { name: "Review rotation" })).toBeEnabled();
   fireEvent.click(screen.getByRole("button", { name: "Review rotation" }));
   const changes = within(screen.getByRole("dialog")).getAllByRole("listitem");
-  expect(changes[0]).toHaveTextContent("Europe");
+  expect(changes[0]).toHaveTextContent("Ozeti");
 });
 it("shows the running scoring interval and server range", async () => {
   show();
@@ -190,7 +190,8 @@ it("queues a map independently of ending the current match", async () => {
   await screen.findByRole("button", { name: "Rotation" });
   fireEvent.click(screen.getByRole("button", { name: "Rotation" }));
   fireEvent.change(await screen.findByRole("combobox", { name: "Map" }), { target: { value: "Europe" } });
-  await screen.findByRole("checkbox", { name: "KOTH_InfantryOnly" });
+  await screen.findByRole("checkbox", { name: "Infantry only" });
+  await waitFor(() => expect(screen.getByRole("button", { name: "Queue next map" })).toBeEnabled());
   fireEvent.click(screen.getByRole("button", { name: "Queue next map" }));
   const dialog = screen.getByRole("dialog");
   expect(screen.queryByRole("textbox", { name: "Reason" })).not.toBeInTheDocument();
@@ -217,16 +218,17 @@ it("preserves a rotation draft across setting groups and edits the original posi
   fireEvent.click(await screen.findByRole("button", { name: "Rotation" }));
   await screen.findByRole("combobox", { name: "Map" });
   fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
-  expect(screen.getByRole("button", { name: "Remove Europe" })).toBeDisabled();
-  expect(screen.getByRole("button", { name: "Move Europe up" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Remove Ozeti" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Move Ozeti up" })).toBeDisabled();
   fireEvent.change(screen.getByRole("combobox", { name: "Lighting" }), { target: { value: "DayClear" } });
+  await waitFor(() => expect(screen.getByRole("button", { name: "Update entry" })).toBeEnabled());
   fireEvent.click(screen.getByRole("button", { name: "Update entry" }));
   fireEvent.click(screen.getByRole("button", { name: "Identity" }));
   fireEvent.click(screen.getByRole("button", { name: "Rotation" }));
   fireEvent.click(screen.getByRole("button", { name: "Review rotation" }));
   const dialog = screen.getByRole("dialog");
-  expect(within(dialog).getByText("1. Kavkazi · DayClear")).toBeInTheDocument();
-  expect(within(dialog).getByText("2. Europe · KOTH_InfantryOnly")).toBeInTheDocument();
+  expect(within(dialog).getByText("1. Bakurani · Day · clear")).toBeInTheDocument();
+  expect(within(dialog).getByText("2. Ozeti · Infantry only")).toBeInTheDocument();
   expect(request.mock.calls.some(([path]) => path === "actions")).toBe(false);
 });
 it("retains an unknown receipt without resending after a lost settings response", async () => {
@@ -296,8 +298,8 @@ it("opens the rotation shortcut and does not save a cancelled or reversed edit",
   expect(screen.getByRole("button", { name: "Queue next map" })).toBeDisabled();
   fireEvent.click(screen.getByRole("button", { name: "Cancel entry edit" }));
   expect(screen.queryByRole("button", { name: "Review rotation" })).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Move Europe up" }));
+  fireEvent.click(screen.getByRole("button", { name: "Move Ozeti up" }));
   expect(screen.getByRole("button", { name: "Review rotation" })).toBeEnabled();
-  fireEvent.click(screen.getByRole("button", { name: "Move Europe down" }));
+  fireEvent.click(screen.getByRole("button", { name: "Move Ozeti down" }));
   expect(screen.queryByRole("button", { name: "Review rotation" })).not.toBeInTheDocument();
 });

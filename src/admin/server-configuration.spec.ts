@@ -60,6 +60,94 @@ const save = (changes: Record<string, string | number | boolean>, revision = "r1
     changes,
   });
 describe("server configuration boundaries", () => {
+  it("checks repeated saved selections once per catalog path, reports unavailable zones, and never writes", async () => {
+    const f = fixture();
+    f.capabilities.routes.push("GET /v1/catalog/maps/{map}/experiences", "GET /v1/catalog/maps/{map}/alternators");
+    f.document.text = `[${ROTATION}]\n${Array.from({ length: 73 }, (_, i) => `.RotationEntries=(Map="Kavkazi",Experiences="KOTH",Lighting="DayClear",ZoneAlternator="${i % 12 === 10 ? "Zone.River" : "Zone.Default"}")`).join("\n")}`;
+    const fallback = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (method, path, body, revision) => {
+      if (path.endsWith("/experiences") && path.includes("/maps/")) return { experiences: ["KOTH"] };
+      if (path.endsWith("/alternators")) return { alternators: [{ tag: "Zone.Default" }] };
+      return fallback(method, path, body, revision);
+    });
+    const result = await f.game.checkRotation();
+    expect(result).toMatchObject({ revision: "r1", total: 73 });
+    expect(result.issues).toHaveLength(6);
+    expect(result.issues.every((issue) => issue.unavailable && issue.message.includes("Zone.River"))).toBe(true);
+    expect(f.request.mock.calls.filter(([, path]) => path.includes("/catalog/maps/Kavkazi/"))).toHaveLength(2);
+    expect(f.request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+    f.request.mockClear();
+    await f.game.checkRotation();
+    expect(f.request.mock.calls.filter(([, path]) => path.includes("/catalog/maps/Kavkazi/"))).toHaveLength(2);
+  });
+  it("distinguishes an unreadable map catalog from a confirmed unavailable option", async () => {
+    const f = fixture();
+    f.capabilities.routes.push("GET /v1/catalog/maps/{map}/experiences");
+    const result = await f.game.checkRotation();
+    expect(result.issues).toHaveLength(2);
+    expect(result.issues.every((issue) => !issue.unavailable && issue.message.includes("could not be verified"))).toBe(
+      true,
+    );
+    expect(JSON.stringify(result)).not.toContain("Unexpected test route");
+  });
+  it("reuses map validation reads during a rotation save while still checking every entry", async () => {
+    const f = fixture();
+    f.capabilities.routes.push("GET /v1/catalog/maps/{map}/experiences", "GET /v1/catalog/maps/{map}/alternators");
+    const fallback = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (method, path, body, revision) => {
+      if (path.endsWith("/experiences") && path.includes("/maps/")) return { experiences: ["KOTH"] };
+      if (path.endsWith("/alternators")) return { alternators: [{ tag: "Zone.Default" }] };
+      return fallback(method, path, body, revision);
+    });
+    await f.game.execute({
+      id: randomUUID(),
+      action: "rotation-save",
+      reason: "Review rotation",
+      revision: "r1",
+      entries: Array.from({ length: 73 }, () => ({
+        map: "Kavkazi",
+        experiences: ["KOTH"],
+        zoneAlternator: "Zone.Default",
+      })),
+    });
+    expect(f.request.mock.calls.filter(([, path]) => path.includes("/catalog/maps/Kavkazi/"))).toHaveLength(2);
+    expect(f.request.mock.calls.filter(([method]) => method === "PUT")).toHaveLength(1);
+    expect(parseRotation(f.saved().text)).toHaveLength(73);
+  });
+  it.each(["wrong-map-mode", "missing-zone", "catalog-outage", "stale-revision", "game-rejection"])(
+    "does not write an unsafe rotation: %s",
+    async (kind) => {
+      const f = fixture();
+      f.capabilities.routes.push("GET /v1/catalog/maps/{map}/experiences", "GET /v1/catalog/maps/{map}/alternators");
+      const fallback = f.request.getMockImplementation()!;
+      f.request.mockImplementation(async (method, path, body, revision) => {
+        if (path.includes("/maps/") && path.endsWith("/experiences")) {
+          if (kind === "catalog-outage") throw new Error("Read failed");
+          return { experiences: kind === "wrong-map-mode" ? [] : ["KOTH"] };
+        }
+        if (path.endsWith("/alternators")) return { alternators: [{ tag: "Zone.Default" }] };
+        if (path === "/v1/config/validate" && kind === "game-rejection") return { ok: false };
+        return fallback(method, path, body, revision);
+      });
+      await expect(
+        f.game.execute({
+          id: randomUUID(),
+          action: "rotation-save",
+          reason: "Review rotation",
+          revision: kind === "stale-revision" ? "old" : "r1",
+          entries: [
+            {
+              map: "Kavkazi",
+              experiences: ["KOTH"],
+              zoneAlternator: kind === "missing-zone" ? "Zone.River" : "Zone.Default",
+            },
+          ],
+        }),
+      ).rejects.toThrow();
+      expect(f.request.mock.calls.some(([method]) => method === "PUT")).toBe(false);
+      expect(f.saved().text).toBe(original);
+    },
+  );
   it("shows documented values and timings without disclosing passwords, raw INI or feed credentials", async () => {
     const { game } = fixture();
     const view = await game.configuration();
@@ -149,6 +237,7 @@ describe("server configuration boundaries", () => {
     const service = new AdminService(fixtureServers(f.game), {} as AdminStore);
     const staff = { id: "staff", name: "Staff", role, csrf: "csrf" };
     await expect(service.configuration(staff)).rejects.toThrow("administrators");
+    expect(() => service.rotationCheck(staff)).toThrow("administrators");
     await expect(service.act(staff, save({ scorePeriod: 25 }))).rejects.toThrow("staff role");
     expect(f.request).not.toHaveBeenCalled();
   });

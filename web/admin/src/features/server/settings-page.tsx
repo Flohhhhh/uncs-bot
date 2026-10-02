@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import {
   settingFields,
@@ -17,6 +17,10 @@ import { CopyValue } from "../../components/data-table";
 import { errorMessage, rejectionState } from "../actions/policy";
 import { MapPicker } from "../actions/map-picker";
 import { ServerIdentityReadout } from "./server-identity";
+import { SavedRotationCheck } from "./rotation-check";
+import type { RotationRow } from "./rotation-queue";
+import { selectionLabel } from "../../../../../src/common/map-labels";
+const RotationQueue = lazy(() => import("./rotation-queue").then((module) => ({ default: module.RotationQueue })));
 
 const timing: Record<string, string> = {
   live: "Now",
@@ -130,189 +134,173 @@ function RotationEditor({
   active: boolean;
   onUnsavedChange: (value: boolean) => void;
 }) {
-  const { data: catalog, error } = useResource<Catalog>(active ? "catalog" : null);
-  const [draft, setDraft] = useState<{ revision: string; entries: MapSelection[] } | null>(null);
+  const { data: catalog, error, loading } = useResource<Catalog>(active ? "catalog" : null);
+  const savedRows = useMemo(
+    () => snapshot.rotation.entries.map((entry, index) => ({ id: snapshot.revision + ":" + index, entry })),
+    [snapshot],
+  );
+  const [draft, setDraft] = useState<{ revision: string; rows: RotationRow[] } | null>(null);
   const [selection, setSelection] = useState<MapSelection>({ map: "", experiences: [] });
+  const [ready, setReady] = useState(false);
   const [editIndex, setEditIndex] = useState<number | null>(null);
   const [review, setReview] = useState<{ action: DraftAction; summary: string[] } | null>(null);
-  const entries = draft?.entries ?? snapshot.rotation.entries;
-  const locked = disabled || !snapshot.rotation.editable;
-  const changedElsewhere = draft && draft.revision !== snapshot.revision;
+  const rows = draft?.rows ?? savedRows;
+  const entries = rows.map((row) => row.entry);
+  const changedElsewhere = !!draft && draft.revision !== snapshot.revision;
+  const locked = disabled || !snapshot.rotation.editable || changedElsewhere || !!review;
   const selectionChanged = editIndex !== null && JSON.stringify(selection) !== JSON.stringify(entries[editIndex]);
   useEffect(() => onUnsavedChange(!!draft || selectionChanged), [draft, selectionChanged, onUnsavedChange]);
-  function update(next: MapSelection[]) {
+  function update(next: RotationRow[]) {
+    if (locked) return;
     setDraft(
-      JSON.stringify(next) === JSON.stringify(snapshot.rotation.entries)
+      JSON.stringify(next.map((row) => row.entry)) === JSON.stringify(snapshot.rotation.entries)
         ? null
-        : { revision: draft?.revision ?? snapshot.revision, entries: next },
+        : { revision: draft?.revision ?? snapshot.revision, rows: next },
     );
   }
-  const summarize = (entry: MapSelection) =>
-    [entry.map, ...entry.experiences, entry.lighting, entry.zoneAlternator].filter(Boolean).join(" · ");
+  const canAdd = !locked && !loading && !error && ready && editIndex === null && rows.length < 100;
+  function add(index: number) {
+    if (!canAdd) return;
+    const next = [...rows];
+    next.splice(index, 0, { id: crypto.randomUUID(), entry: structuredClone(selection) });
+    update(next);
+  }
   return (
     <Card
       title="Map rotation"
-      subtitle="Queue the next round or edit the saved rotation."
+      subtitle="Prepare rounds, arrange the queue, then review and save."
       badge={<Badge>{snapshot.rotation.mode || "Unknown"}</Badge>}
     >
       <div className="card-body">
         {snapshot.rotation.note && <p className="notice warning">{snapshot.rotation.note}</p>}
+        {active && <SavedRotationCheck revision={snapshot.revision} />}
         {changedElsewhere && (
           <p className="notice warning">Server settings changed. Discard this draft and reload before saving.</p>
         )}
-        <ol className="rotation-editor">
-          {entries.map((entry, index) => (
-            <li key={index}>
-              <div>
-                <strong>{entry.map}</strong>
-                <small>
-                  {[...entry.experiences, entry.lighting, entry.zoneAlternator].filter(Boolean).join(" · ") ||
-                    "Map defaults"}
+        {error && <p className="notice warning">{error}</p>}
+        <Suspense fallback={<p>Loading rotation editor…</p>}>
+          <RotationQueue
+            rows={rows}
+            change={update}
+            disabled={locked || editIndex !== null}
+            selection={selection}
+            canAdd={canAdd}
+            add={add}
+            edit={(index) => {
+              setSelection(entries[index]);
+              setEditIndex(index);
+            }}
+          >
+            {catalog && (
+              <>
+                <MapPicker
+                  value={selection}
+                  change={setSelection}
+                  catalog={catalog}
+                  disabled={locked || loading || !!error}
+                  onReadyChange={setReady}
+                />
+                <div className="toolbar">
+                  <button
+                    type="button"
+                    className="button secondary"
+                    disabled={editIndex === null ? !canAdd : locked || !ready || loading || !!error}
+                    onClick={() => {
+                      if (editIndex === null) add(rows.length);
+                      else if (!locked && ready) {
+                        update(
+                          rows.map((row, index) =>
+                            index === editIndex ? { ...row, entry: structuredClone(selection) } : row,
+                          ),
+                        );
+                        setEditIndex(null);
+                      }
+                    }}
+                  >
+                    {editIndex === null ? "Add to rotation" : "Update entry"}
+                  </button>
+                  {editIndex !== null && (
+                    <button
+                      type="button"
+                      className="button secondary"
+                      disabled={disabled}
+                      onClick={() => {
+                        setEditIndex(null);
+                        setSelection({ map: "", experiences: [] });
+                      }}
+                    >
+                      Cancel entry edit
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="button primary"
+                    disabled={
+                      locked ||
+                      !ready ||
+                      loading ||
+                      !!error ||
+                      !!draft ||
+                      editIndex !== null ||
+                      !snapshot.rotation.enabled ||
+                      snapshot.rotation.mode !== "Ordered" ||
+                      snapshot.rotation.currentIndex === null
+                    }
+                    onClick={() =>
+                      setReview({
+                        action: {
+                          action: "map-next",
+                          revision: snapshot.revision,
+                          currentIndex: snapshot.rotation.currentIndex!,
+                          currentMap: snapshot.rotation.currentMap,
+                          entry: structuredClone(selection),
+                        },
+                        summary: [
+                          "Next round: " + selectionLabel(selection),
+                          "Updates the saved ordered rotation. The current match continues.",
+                        ],
+                      })
+                    }
+                  >
+                    Queue next map
+                  </button>
+                </div>
+                <small className="muted">
+                  Queuing next requires an enabled, ordered rotation and no unsaved rotation edits.
                 </small>
-              </div>
-              <div className="row-actions">
-                <button
-                  type="button"
-                  disabled={locked || editIndex !== null || index === 0}
-                  aria-label={`Move ${entry.map} up`}
-                  onClick={() => {
-                    const next = [...entries];
-                    [next[index - 1], next[index]] = [next[index], next[index - 1]];
-                    update(next);
-                  }}
-                  className="button secondary"
-                >
-                  ↑
-                </button>
-                <button
-                  type="button"
-                  disabled={locked || editIndex !== null || index === entries.length - 1}
-                  aria-label={`Move ${entry.map} down`}
-                  onClick={() => {
-                    const next = [...entries];
-                    [next[index + 1], next[index]] = [next[index], next[index + 1]];
-                    update(next);
-                  }}
-                  className="button secondary"
-                >
-                  ↓
-                </button>
-                <button
-                  type="button"
-                  disabled={locked || editIndex !== null}
-                  onClick={() => {
-                    setSelection(entry);
-                    setEditIndex(index);
-                  }}
-                  className="button secondary"
-                >
-                  Edit
-                </button>
-                <button
-                  type="button"
-                  disabled={locked || editIndex !== null}
-                  aria-label={`Remove ${entry.map}`}
-                  onClick={() => update(entries.filter((_, i) => i !== index))}
-                  className="button secondary"
-                >
-                  Remove
-                </button>
-              </div>
-            </li>
-          ))}
-        </ol>
+              </>
+            )}
+          </RotationQueue>
+        </Suspense>
         {draft && (
-          <div className="toolbar">
+          <div className="settings-savebar">
+            <strong>Unsaved rotation · {rows.length} rounds</strong>
             <button
-              className="button primary"
-              disabled={locked || !!changedElsewhere || entries.length === 0 || editIndex !== null}
-              onClick={() =>
-                setReview({
-                  action: { action: "rotation-save", ...draft },
-                  summary: entries.map((entry, index) => `${index + 1}. ${summarize(entry)}`),
-                })
-              }
-            >
-              Review rotation
-            </button>
-            <button
+              type="button"
+              className="button secondary"
               disabled={disabled}
               onClick={() => {
                 setDraft(null);
                 setEditIndex(null);
                 reload();
               }}
-              className="button secondary"
             >
               Discard draft
             </button>
+            <button
+              type="button"
+              className="button primary"
+              disabled={locked || entries.length === 0 || editIndex !== null}
+              onClick={() =>
+                setReview({
+                  action: { action: "rotation-save", revision: draft.revision, entries: structuredClone(entries) },
+                  summary: entries.map((entry, index) => index + 1 + ". " + selectionLabel(entry)),
+                })
+              }
+            >
+              Review rotation
+            </button>
           </div>
-        )}
-        {error && <p className="notice warning">{error}</p>}
-        {catalog && (
-          <>
-            <MapPicker value={selection} change={setSelection} catalog={catalog} disabled={locked} />
-            <div className="toolbar">
-              <button
-                disabled={locked || !selection.map || (editIndex === null && entries.length >= 100)}
-                onClick={() => {
-                  update(
-                    editIndex === null
-                      ? [...entries, selection]
-                      : entries.map((entry, index) => (index === editIndex ? selection : entry)),
-                  );
-                  setEditIndex(null);
-                }}
-                className="button secondary"
-              >
-                {editIndex === null ? "Add to rotation" : "Update entry"}
-              </button>
-              <button
-                className="button primary"
-                disabled={
-                  locked ||
-                  !!draft ||
-                  editIndex !== null ||
-                  !selection.map ||
-                  !snapshot.rotation.enabled ||
-                  snapshot.rotation.mode !== "Ordered" ||
-                  snapshot.rotation.currentIndex === null
-                }
-                onClick={() =>
-                  setReview({
-                    action: {
-                      action: "map-next",
-                      revision: snapshot.revision,
-                      currentIndex: snapshot.rotation.currentIndex!,
-                      currentMap: snapshot.rotation.currentMap,
-                      entry: selection,
-                    },
-                    summary: [
-                      `Next round: ${summarize(selection)}`,
-                      "Updates the saved ordered rotation. The current match continues.",
-                    ],
-                  })
-                }
-              >
-                Queue next map
-              </button>
-            </div>
-            {editIndex !== null && (
-              <button
-                className="button secondary"
-                type="button"
-                onClick={() => {
-                  setEditIndex(null);
-                  setSelection({ map: "", experiences: [] });
-                }}
-              >
-                Cancel entry edit
-              </button>
-            )}
-            <small className="muted">
-              Queuing requires an enabled, ordered rotation and no unsaved rotation edits.
-            </small>
-          </>
         )}
       </div>
       {review && (

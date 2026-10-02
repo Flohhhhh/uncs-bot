@@ -166,7 +166,7 @@ it("guards browser Back and keeps editing when Escape dismisses the warning", as
 it("retains hidden rotation drafts and does not clear their warning when a settings draft is discarded", async () => {
   const { router } = mount();
   fireEvent.click(await screen.findByRole("button", { name: "Rotation" }));
-  fireEvent.click(screen.getByRole("button", { name: "Move Europe up" }));
+  fireEvent.click(screen.getByRole("button", { name: "Move Ozeti up" }));
   fireEvent.click(screen.getByRole("button", { name: "Identity" }));
   await editName();
   fireEvent.click(screen.getByRole("button", { name: "Discard" }));
@@ -174,7 +174,7 @@ it("retains hidden rotation drafts and does not clear their warning when a setti
   expect(await screen.findByRole("dialog", { name: "Discard unsaved changes?" })).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
   fireEvent.click(screen.getByRole("button", { name: "Rotation" }));
-  expect(screen.getAllByRole("listitem")[0]).toHaveTextContent("Europe");
+  expect(screen.getAllByRole("listitem")[0]).toHaveTextContent("Ozeti");
   fireEvent.click(screen.getByRole("button", { name: "Discard draft" }));
   expect(unload()).toBe(false);
   fireEvent.click(screen.getByRole("link", { name: /Action history/ }));
