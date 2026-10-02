@@ -2,6 +2,7 @@ import { nonEmptyString } from "../common/schemas/non-empty-string.schema";
 import { z } from "zod";
 import { jsonSetting } from "./json-setting";
 import { gameServerConnections, gameServerJoinId } from "../common/game-server";
+import { DST_HOURS, SLOT_TIME, WEEKDAYS } from "../weekly-leaderboard/weekly-schedule";
 
 const discordId = z.string().regex(/^\d{17,20}$/, "Use a Discord numeric ID.");
 const communityMessage = z
@@ -79,6 +80,23 @@ export const Env = z.object({
     .default("false")
     .transform((value) => value === "true"),
   WARDOGS_FEED_TOKEN: z.string().min(32).max(512).regex(/^\S+$/).optional(),
+
+  /** Weekly Discord leaderboard post; off by default. Also gates the staff post-now; preview still works. */
+  WEEKLY_LEADERBOARD_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  /** Text or announcement channel in ADMIN_GUILD_ID. */
+  WEEKLY_LEADERBOARD_CHANNEL_ID: discordId.optional(),
+  /** Day and time of the weekly slot in America/New_York (fixed time zone). */
+  WEEKLY_LEADERBOARD_DAY: z.enum(WEEKDAYS).default("sunday"),
+  WEEKLY_LEADERBOARD_TIME: z
+    .string()
+    .regex(SLOT_TIME, "Use HH:MM in 24-hour time.")
+    .refine((value) => !DST_HOURS.test(value), "Choose a time outside 01:00–02:59 (DST changes).")
+    .default("20:00"),
+  WEEKLY_LEADERBOARD_MIN_KILLS: z.coerce.number().int().min(1).max(100_000).default(100),
+  WEEKLY_LEADERBOARD_MIN_PLAYERS: z.coerce.number().int().min(5).max(1_000).default(10),
 
   /** One optional community worker; leave off until the old announcer is disabled. */
   SERVER_COMMUNITY_ENABLED: z

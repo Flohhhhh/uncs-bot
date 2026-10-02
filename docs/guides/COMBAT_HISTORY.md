@@ -34,6 +34,8 @@ Routes:
 - `GET /admin/api/combat?period=...`: authenticated staff history.
 - `GET /admin/api/combat/players/:steamId?period=...`: authenticated staff player history.
 
+A weekly Discord post of the same names-only data, with data-backed shout-outs, is described in [Weekly Discord leaderboard post](WEEKLY_LEADERBOARD.md). It is off by default and stays silent without enough data.
+
 The public website uses same-origin `/community/api` rewrites to Gramps. The game ingest endpoint should target Gramps directly, or a separately verified host forwarding service, with its feed-only authorization.
 
 ### Release order for names-only public rows
