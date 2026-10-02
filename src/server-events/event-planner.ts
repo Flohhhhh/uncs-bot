@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { assignedFaction } from "../common/faction-colors";
-import { roundElapsed, roundSettled, type RoundTrack } from "../common/round-tracker";
+import { roundElapsed, roundSettled, roundUnderway, type RoundTrack } from "../common/round-tracker";
 import { plainLabel } from "../server-community/community-state";
 import type { AdminAction } from "../admin/admin.types";
 import {
@@ -185,8 +185,10 @@ export function planEvent(event: EventRecord, snapshot: EventSnapshot, now: numb
   const connected = new Set(roster.players.map((player) => player.steamId));
   progress.warned = Object.fromEntries(Object.entries(progress.warned).filter(([id]) => connected.has(id)));
   if (!current) {
-    if (!roundSettled(track, now))
-      return stay("A new round started. Waiting for it to settle before the team warning.");
+    // A round counts only once someone has scored in it: a boundary on the old match's final screen, or a
+    // score reset before map travel, is not where the 50v50 round begins.
+    if (!roundSettled(track, now) || !roundUnderway(track) || track.ended)
+      return stay("A new round started. Waiting for its first points before the team warning.");
     progress = nextRoundProgress(progress, track, now);
     const respawn = options.forceRespawn
       ? "Moves include a respawn; gear may be lost."

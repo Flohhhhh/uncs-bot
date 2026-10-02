@@ -82,12 +82,18 @@ export type RoundTrack = {
    * restart or read gap). A matching stored round may still be adopted; see GameRounds.
    */
   unseeded?: boolean;
+  /**
+   * Set while the scoreboard still shows the previous match's final scores after this round's boundary
+   * (the leading score then, out of 100). Those scores count for neither `highest` nor `ended`.
+   */
+  stale?: number;
 };
 /** A round known from stored work, such as an open ballot, used after a restart or read gap. */
 export type RoundSeed = { round: TrackedRound; highest: number };
 export type RoundUpdate = { track: RoundTrack; boundary: boolean; reason: string | null };
 
 export const ROUND_GAP_MS = 60_000;
+/** Boundary signals this close together merge into one round while nobody has scored in it. */
 export const ROUND_MERGE_MS = 180_000;
 export const ROUND_SETTLE_MS = 30_000;
 const CLOCK_JITTER_MS = 30_000;
@@ -154,6 +160,7 @@ export function trackRound(previous: RoundTrack | null, observation: RoundObserv
     let highest = leading;
     let boundary = false;
     let unseeded = false;
+    let stale: number | undefined;
     if (known && (valid || !previous)) {
       const samePlace =
         sameMap(known.round.map, observation.map) &&
@@ -164,6 +171,10 @@ export function trackRound(previous: RoundTrack | null, observation: RoundObserv
           ? Math.abs(clockStart - known.round.startedAt) <= CLOCK_JITTER_MS
           : clockStart <= known.round.startedAt + CLOCK_JITTER_MS);
       if (samePlace && sameClock && (!valid || leading >= known.highest - SCORE_DROP)) {
+        stale =
+          previous?.stale !== undefined && previous.round.id === known.round.id && valid && leading === previous.stale
+            ? previous.stale
+            : undefined;
         round =
           clockStart === null
             ? { ...known.round, index: index ?? known.round.index, exact: false }
@@ -174,7 +185,7 @@ export function trackRound(previous: RoundTrack | null, observation: RoundObserv
                 source: "clock",
                 exact: true,
               };
-        highest = Math.max(known.highest, leading);
+        highest = stale === undefined ? Math.max(known.highest, leading) : known.highest;
       } else {
         round =
           clockStart === null
@@ -201,13 +212,14 @@ export function trackRound(previous: RoundTrack | null, observation: RoundObserv
         firstSeenAt: at,
         playingSince: null,
         highest,
-        ended: valid && leading >= DEFAULT_CAP,
+        ended: valid && stale === undefined && leading >= DEFAULT_CAP,
         lastSignalAt: boundary ? at : null,
         waitingSince: phase === "waiting" ? at : null,
         // An unreadable read keeps the last valid one, so the next valid read is still compared, as a
         // gap, with the known round's map and rotation entry.
         last: valid ? last : (previous?.last ?? { ...last, names: [], scores: [], leading: highest }),
         ...(unseeded ? { unseeded: true } : {}),
+        ...(stale === undefined ? {} : { stale }),
       },
       boundary,
       reason: boundary ? "gap" : null,
@@ -219,6 +231,7 @@ export function trackRound(previous: RoundTrack | null, observation: RoundObserv
 
   const before = previous.last;
   const comparable = before.names.length > 0 && before.names.join("\n") === last.names.join("\n");
+  const unchanged = comparable && last.scores.every((score, position) => score === before.scores[position]);
   const fullReset = comparable && before.scores.some((score) => score > 0) && allZero;
   const reason = !sameMap(before.map, observation.map)
     ? "map"
@@ -235,15 +248,23 @@ export function trackRound(previous: RoundTrack | null, observation: RoundObserv
             : null;
 
   let round = previous.round;
-  let highest = Math.max(previous.highest, leading);
-  let ended = previous.ended || leading >= DEFAULT_CAP;
+  // The previous match's final scores, still on screen, are not this round's points.
+  let stale = previous.stale !== undefined && comparable && leading === previous.stale ? previous.stale : undefined;
+  let highest = Math.max(previous.highest, stale === undefined ? leading : 0);
+  let ended = previous.ended || (stale === undefined && leading >= DEFAULT_CAP);
   let firstSeenAt = previous.firstSeenAt;
   let playingSince = previous.playingSince;
   let lastSignalAt = previous.lastSignalAt;
   let boundary = false;
   if (reason) {
     lastSignalAt = at;
-    // A score reset followed by map travel (or the reverse) is one round while nobody has scored.
+    // Map travel, a new rotation entry or a clock restart while the last read's scores are still shown
+    // is the old match's final screen: the new round has no points yet.
+    if (unchanged && leading > 0) stale = leading;
+    highest = stale === undefined ? leading : 0;
+    ended = stale === undefined && leading >= DEFAULT_CAP;
+    // Transition signals (a score reset, then map travel, or the reverse) are one round while nobody has
+    // scored in it. An observed round then counts from its latest signal, the closest to its real start.
     const merge =
       previous.round.source !== "baseline" && previous.highest === 0 && at - previous.round.startedAt <= ROUND_MERGE_MS;
     if (merge)
@@ -251,15 +272,17 @@ export function trackRound(previous: RoundTrack | null, observation: RoundObserv
         ...previous.round,
         map: observation.map,
         index: index ?? previous.round.index,
-        ...(clockStart === null ? {} : { startedAt: clockStart, source: "clock" as const, exact: true }),
+        ...(clockStart !== null
+          ? { startedAt: clockStart, source: "clock" as const, exact: true }
+          : previous.round.source === "observed"
+            ? { startedAt: at }
+            : {}),
       };
     else {
       round =
         clockStart === null
           ? newRound(observation.map, index, at, "observed", true)
           : newRound(observation.map, index, clockStart, "clock", true);
-      highest = leading;
-      ended = leading >= DEFAULT_CAP;
       firstSeenAt = at;
       playingSince = null;
       boundary = true;
@@ -290,6 +313,7 @@ export function trackRound(previous: RoundTrack | null, observation: RoundObserv
       waitingSince,
       last,
       ...(unseeded ? { unseeded: true } : {}),
+      ...(stale === undefined ? {} : { stale }),
     },
     boundary,
     reason: boundary ? reason : null,
@@ -304,6 +328,14 @@ export function roundElapsed(track: RoundTrack, at: number) {
 /** Seconds since this process first saw the round (or play resumed); used when the start is unknown. */
 export function observedElapsed(track: RoundTrack, at: number) {
   return Math.max(0, (at - Math.max(track.firstSeenAt, track.playingSince ?? track.firstSeenAt)) / 1000);
+}
+/**
+ * Someone has scored in this live round. After a score reset, or a boundary seen on the old match's
+ * final scoreboard, a round has no points until play starts, so work that belongs at a round's start
+ * (an automatic ballot, a 50v50 round) waits for this rather than acting on a post-match screen.
+ */
+export function roundUnderway(track: RoundTrack) {
+  return track.phase === "live" && track.highest > 0;
 }
 /** Live, and at least 30 seconds since the round's last boundary signal. */
 export function roundSettled(track: RoundTrack, at: number) {

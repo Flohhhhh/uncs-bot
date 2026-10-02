@@ -18,7 +18,7 @@ import { GameRounds } from "../admin/game-rounds";
 import { planMapNext, UnavailableSelection, validateMapSelection } from "../admin/server-configuration";
 import { serves } from "../common/admin-policy";
 import { isModeModifier, mapLabel, modeLabel, sameMap, selectionLabel } from "../common/map-labels";
-import { observedElapsed, roundElapsed, type RoundTrack } from "../common/round-tracker";
+import { observedElapsed, roundElapsed, roundUnderway, type RoundTrack } from "../common/round-tracker";
 import {
   automationSettings,
   closeReached,
@@ -1152,6 +1152,11 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
           `Waiting for ${required} players before a ballot opens (${players}/${overview.status.players?.max ?? 0}).`,
         )
       )
+        return result;
+    // A score reset, or a boundary seen on the old match's final scoreboard, can come well before map
+    // travel. Nobody scores on a post-match screen, so the first points show the next match has begun.
+    if (track && !roundUnderway(track))
+      if (block("waiting_delay", "A new round is starting. Waiting for its first points before a ballot opens."))
         return result;
     const latest = history[0];
     if (latest && track && positioned && this.ballotedThisRound(latest, track, connection, config, overview))

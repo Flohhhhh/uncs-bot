@@ -138,6 +138,57 @@ describe("round tracking without requiring the match clock", () => {
     expect(updates[0].track.ended).toBe(true);
     expect(updates[3].track.ended).toBe(false);
   });
+  it.each([
+    ["map travel", { map: "Europe", nowIndex: 1 }, "map"],
+    ["a rotation index change", { nowIndex: 1 }, "index"],
+    ["a clock restart", { matchSeconds: 5 }, "clock"],
+  ] as const)(
+    "starts a round without points when %s shows the old final scoreboard, then merges the reset",
+    (_, patch, reason) => {
+      const clock = "matchSeconds" in patch ? { matchSeconds: 900 } : {};
+      const updates = run([
+        observation(t0, { ...clock, scores: scores(100, 40, 20) }),
+        // The boundary arrives while the final scores are still shown, for 45 seconds.
+        ...[15_000, 30_000, 45_000, 60_000].map((at) =>
+          observation(t0 + at, {
+            ...patch,
+            ...("matchSeconds" in patch ? { matchSeconds: 5 + (at - 15_000) / 1000 } : {}),
+            scores: scores(100, 40, 20),
+          }),
+        ),
+        observation(t0 + 75_000, {
+          ...patch,
+          ...("matchSeconds" in patch ? { matchSeconds: 65 } : {}),
+          scores: scores(0, 0, 0),
+        }),
+        observation(t0 + 120_000, {
+          ...patch,
+          ...("matchSeconds" in patch ? { matchSeconds: 110 } : {}),
+          scores: scores(3, 0, 0),
+        }),
+      ]);
+      expect(boundaries(updates)).toEqual([reason]);
+      const shown = updates[4].track;
+      expect(shown).toMatchObject({ highest: 0, ended: false });
+      expect(shown.round.id).not.toBe(updates[0].track.round.id);
+      // The reset is the same transition: one round, which starts its count again from the reset.
+      expect(updates[5].track.round.id).toBe(shown.round.id);
+      if (reason !== "clock") expect(updates[5].track.round.startedAt).toBe(t0 + 75_000);
+      expect(updates[5].track.lastSignalAt).toBe(t0 + 75_000);
+      expect(updates[6].track).toMatchObject({ highest: 3, ended: false });
+    },
+  );
+  it("counts the first new points after an old final scoreboard without a separate reset", () => {
+    const updates = run([
+      observation(t0, { scores: scores(100, 40, 20) }),
+      observation(t0 + 15_000, { map: "Europe", nowIndex: 1, scores: scores(100, 40, 20) }),
+      // A poll missed the reset: the new match already has points.
+      observation(t0 + 60_000, { map: "Europe", nowIndex: 1, scores: scores(4, 2, 0) }),
+    ]);
+    expect(boundaries(updates)).toEqual(["map"]);
+    expect(updates[2].track).toMatchObject({ highest: 4, ended: false });
+    expect(updates[2].track.round.id).toBe(updates[1].track.round.id);
+  });
   it("starts a new round for a signal more than 180 seconds after the start or once someone has scored", () => {
     const late = run([
       observation(t0, { scores: scores(90, 0, 0) }),

@@ -895,18 +895,21 @@ describe("durable Discord map voting", () => {
   it("waits again after a reported clock reset at the same rotation position", async () => {
     const f = automatic();
     let startedAt = Date.now() - 600_000;
+    let factionScores = baseStatus().factionScores;
     f.game.overview.mockImplementation(async () => ({
       observedAt: new Date().toISOString(),
-      status: { ...baseStatus(), matchSeconds: (Date.now() - startedAt) / 1000 },
+      status: { ...baseStatus(), factionScores, matchSeconds: (Date.now() - startedAt) / 1000 },
     }));
     f.store.history.mockResolvedValue([{ ...f.record, state: "queued" }]);
     await observeForWindow(f);
     expect(f.discord.publish).not.toHaveBeenCalled();
-    // Each status read has its own observation time.
+    // Each status read has its own observation time. The new match starts at 0 and scores again.
     jest.setSystemTime(Date.now() + 1_000);
     startedAt = Date.now();
+    factionScores = leadingScores(0);
     await f.service.tick();
     expect(f.discord.publish).not.toHaveBeenCalled();
+    factionScores = leadingScores(4);
     await observeForWindow(f);
     expect(f.discord.publish).toHaveBeenCalledTimes(1);
     expect(f.store.create.mock.calls[0][0].roundStartedAt).toEqual(new Date(startedAt));
@@ -1393,6 +1396,45 @@ describe("automatic ballots that follow the round, not the clock", () => {
     const second = f.store.create.mock.calls[1][0].automation;
     expect(second.round).toMatchObject({ source: "observed", exact: true });
     expect(second.round.id).not.toBe(first.automation!.round!.id);
+  });
+  it("opens no ballot between the score reset and map travel, and counts the delay on the new map", async () => {
+    const f = automatic("primary", { openDelaySeconds: 60 });
+    f.game.catalog.mockResolvedValue({
+      maps: [{ id: "Kavkazi" }, { id: "Europe" }, { id: "Islands" }],
+      experiences: [],
+      lightings: [],
+    });
+    f.status({ factionScores: leadingScores(100) });
+    await f.service.tick();
+    // Round N ends: the scores reset on Kavkazi and the server travels to Europe 90 seconds later.
+    f.status({ factionScores: leadingScores(0) });
+    for (let i = 0; i < 7; i++) {
+      later();
+      await f.service.tick();
+    }
+    expect(f.discord.publish).not.toHaveBeenCalled();
+    expect((await f.service.list(staff)).automatic?.message).toBe(
+      "A new round is starting. Waiting for its first points before a ballot opens.",
+    );
+    const settings = await f.game.configuration();
+    f.game.configuration.mockResolvedValue({
+      ...settings,
+      rotation: { ...settings.rotation, currentIndex: 1, currentMap: "Europe" },
+    });
+    f.status({ map: "Europe", rotation: { nowIndex: 1, nextIndex: 2 } });
+    later();
+    await f.service.tick();
+    later(45_000);
+    f.status({ factionScores: leadingScores(3) });
+    await f.service.tick();
+    // Points 45 seconds after travel: the 60-second delay counts from the new map, not the reset.
+    expect(f.discord.publish).not.toHaveBeenCalled();
+    later();
+    await f.service.tick();
+    expect(f.discord.publish).toHaveBeenCalledTimes(1);
+    const created = f.store.create.mock.calls[0][0];
+    expect(created).toMatchObject({ currentMap: "Europe", currentIndex: 1 });
+    expect(created.automation.round).toMatchObject({ map: "Europe", index: 1 });
   });
   it("opens no ballot once the leading team passes the opening ceiling", async () => {
     const f = automatic();

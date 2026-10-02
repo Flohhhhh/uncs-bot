@@ -28,9 +28,15 @@ function plan(event: EventRecord, snapshots: EventSnapshot | EventSnapshot[], th
   const track = trackOf(reads, threshold, event.progress.tracker ?? null);
   return planEvent(event, last, Date.parse(last.observedAt), track);
 }
-/** The clock restarts 15 seconds after the fixture's read: a new round, read again `after` ms later. */
+/**
+ * The clock restarts with the scores reset 15 seconds after the fixture's read: a new round, read again
+ * `after` ms later once someone has scored.
+ */
 function clockRestart(after = 35_000, teams?: Array<string | null>) {
-  return [snapshotAt(eventNow + 15_000, 0, teams), snapshotAt(eventNow + 15_000 + after, after / 1000, teams)];
+  return [
+    snapshotAt(eventNow + 15_000, 0, teams, [0, 0, 0]),
+    snapshotAt(eventNow + 15_000 + after, after / 1000, teams, [1, 0, 0]),
+  ];
 }
 /** Without a clock: a full score reset 15 seconds after the fixture's read, read again `after` ms later. */
 function scoreReset(after = 35_000, teams: Array<string | null> = ["RED", "BLU", "GRN"]) {
@@ -97,6 +103,25 @@ describe("optional game-roster 50v50 planning", () => {
     const warned = plan(event, scoreReset(), 0);
     expect(warned.operation?.kind).toBe("round_warning");
     expect(warned.operation?.round).toEqual({ map: "Kavkazi", startedAt: eventNow + 15_000 });
+  });
+  it("waits for the first points of a round whose clock restarted on the old final scores", () => {
+    const event = eventFixture();
+    const held = [snapshotAt(eventNow + 15_000, 0), snapshotAt(eventNow + 60_000, 45)];
+    expect(plan(event, held).operation).toBeNull();
+    const played = [...held, snapshotAt(eventNow + 65_000, 50, undefined, [0, 0, 0])];
+    expect(plan(event, [...played, snapshotAt(eventNow + 90_000, 75, undefined, [1, 0, 0])]).operation).toBeNull();
+    const warned = plan(event, [...played, snapshotAt(eventNow + 100_000, 85, undefined, [1, 0, 0])]);
+    expect(warned.operation?.kind).toBe("round_warning");
+  });
+  it("does not start the next round's sorting in a round first seen already finished", () => {
+    const event = eventFixture();
+    // After a read gap, the next map is first seen at 100 points.
+    const finished = [
+      clocklessSnapshotAt(eventNow + 120_000, undefined, [100, 40, 20]),
+      clocklessSnapshotAt(eventNow + 180_000, undefined, [100, 40, 20]),
+    ];
+    for (const read of finished) read.status.map = "Europe";
+    expect(plan(event, finished).operation).toBeNull();
   });
   it.each([
     ["the pre-round wait", [preRoundSnapshot(eventNow + 5_000)]],
@@ -382,6 +407,131 @@ describe("a 50v50 started by a community vote", () => {
     ]);
     event.progress.warned = Object.fromEntries(packed.players.map((player) => [player.steamId, eventNow - 60_000]));
     expect(plan(event, packed).operation?.action).toMatchObject({ faction: "Lonestar", expectedFaction: "Manticore" });
+  });
+  /** A full-server read on a rotation entry; `players` below 100 simulates players loading the next map. */
+  function fullRead(at: number, scores: [number, number, number], map = "Kavkazi", index = 0, players = 100) {
+    const snapshot = fullServerSnapshot(at, scores);
+    snapshot.status = {
+      ...snapshot.status,
+      map,
+      rotation: { nowIndex: index, nextIndex: index + 1 },
+      players: { ...snapshot.status.players, current: players },
+    };
+    snapshot.players = snapshot.players.slice(0, players);
+    return snapshot;
+  }
+  /**
+   * Plans every five seconds over a timeline, completing each operation at once and applying moves to
+   * the roster, as the service and game would. Returns the round warnings and stops, with their map.
+   */
+  function simulate(event: EventRecord, timeline: (elapsed: number) => EventSnapshot, seconds: number) {
+    let track = event.progress.tracker!;
+    const teams = new Map<string, string>();
+    const log: string[] = [];
+    for (let elapsed = 5_000; elapsed <= seconds * 1000; elapsed += 5_000) {
+      const at = eventNow + elapsed;
+      const snapshot = timeline(elapsed);
+      snapshot.players = snapshot.players.map((player) => ({
+        ...player,
+        faction: teams.get(player.steamId) ?? player.faction,
+      }));
+      track = trackOf([snapshot], 20, track);
+      const planned = planEvent(event, snapshot, at, track);
+      event.progress = planned.progress;
+      const where = `${elapsed / 1000}s on ${snapshot.status.map}`;
+      if (planned.stop || planned.halt) {
+        log.push(`stop ${planned.stop ?? planned.halt} ${where}`);
+        break;
+      }
+      const op = planned.operation;
+      if (!op) {
+        event.state = planned.state;
+        continue;
+      }
+      if (op.kind === "round_warning") log.push(`round_warning ${where}`);
+      if (op.kind === "move") teams.set(op.steamId!, op.faction!);
+      event.progress = completeEventOperation(event, op, at);
+      event.state = op.kind === "round_warning" ? "warming" : "active";
+    }
+    return log;
+  }
+  /** Armed during round N on Kavkazi, at 90 points on a full server. */
+  function armedFull() {
+    const event = armed();
+    event.progress.tracker = trackOf([fullRead(eventNow, [90, 40, 20])]);
+    event.progress.roundId = event.progress.tracker.round.id;
+    return event;
+  }
+  /** Points for the new round from `start` on: one every 20 seconds. */
+  const points = (elapsed: number, start: number): [number, number, number] => [
+    1 + Math.floor((elapsed - start) / 20_000),
+    0,
+    0,
+  ];
+  it.each([
+    ["map travel", "Zestafona", 1],
+    ["a rotation index change", "Kavkazi", 1],
+  ] as const)("does not start the 50v50 on the old final scoreboard after %s", (_, map, index) => {
+    const event = armedFull();
+    const log = simulate(
+      event,
+      (elapsed) => {
+        if (elapsed < 10_000) return fullRead(eventNow + elapsed, [100, 40, 20]);
+        // The next entry is reported while the final scores stay on screen for 45 seconds.
+        if (elapsed < 55_000) return fullRead(eventNow + elapsed, [100, 40, 20], map, index);
+        if (elapsed < 85_000) return fullRead(eventNow + elapsed, [0, 0, 0], map, index);
+        return fullRead(eventNow + elapsed, points(elapsed, 85_000), map, index);
+      },
+      600,
+    );
+    expect(log).toEqual([`round_warning 85s on ${map}`]);
+    expect(event.progress).toMatchObject({ roundsStarted: 1, readyAnnounced: true });
+  });
+  it("waits for the new map's first points when map travel follows the score reset by over three minutes", () => {
+    const event = armedFull();
+    const log = simulate(
+      event,
+      (elapsed) => {
+        if (elapsed < 20_000) return fullRead(eventNow + elapsed, [100, 40, 20]);
+        if (elapsed < 220_000) return fullRead(eventNow + elapsed, [0, 0, 0]);
+        if (elapsed < 250_000) return fullRead(eventNow + elapsed, [0, 0, 0], "Zestafona", 1);
+        return fullRead(eventNow + elapsed, points(elapsed, 250_000), "Zestafona", 1);
+      },
+      700,
+    );
+    expect(log).toEqual(["round_warning 250s on Zestafona"]);
+    expect(event.progress).toMatchObject({ roundsStarted: 1, readyAnnounced: true });
+  });
+  it("waits through a map load below the start threshold after the reset, then starts on the new map", () => {
+    const event = armedFull();
+    const log = simulate(
+      event,
+      (elapsed) => {
+        if (elapsed < 20_000) return fullRead(eventNow + elapsed, [100, 40, 20]);
+        if (elapsed < 65_000) return fullRead(eventNow + elapsed, [0, 0, 0]);
+        // Players load Zestafona for 70 seconds, below the 20 needed to start.
+        if (elapsed < 135_000) return fullRead(eventNow + elapsed, [0, 0, 0], "Zestafona", 1, 12);
+        if (elapsed < 150_000) return fullRead(eventNow + elapsed, [0, 0, 0], "Zestafona", 1);
+        return fullRead(eventNow + elapsed, points(elapsed, 150_000), "Zestafona", 1);
+      },
+      600,
+    );
+    expect(log).toEqual(["round_warning 150s on Zestafona"]);
+    expect(event.progress).toMatchObject({ roundsStarted: 1, readyAnnounced: true });
+  });
+  it("ends after the voted round's own final score, not at the transition before it", () => {
+    const event = armedFull();
+    const log = simulate(
+      event,
+      (elapsed) => {
+        if (elapsed < 20_000) return fullRead(eventNow + elapsed, [100, 40, 20]);
+        if (elapsed < 50_000) return fullRead(eventNow + elapsed, [0, 0, 0], "Zestafona", 1);
+        if (elapsed < 600_000) return fullRead(eventNow + elapsed, points(elapsed, 50_000), "Zestafona", 1);
+        return fullRead(eventNow + elapsed, [100, 50, 30], "Zestafona", 1);
+      },
+      700,
+    );
+    expect(log).toEqual(["round_warning 50s on Zestafona", "stop rounds 600s on Zestafona"]);
   });
   it("sorts a full server to 50 against 50 in 33 moves without a capacity problem", () => {
     const event = armed();
