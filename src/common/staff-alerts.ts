@@ -112,7 +112,8 @@ export type StaffAlertsChannelState =
   | "missing-permissions"
   | "community-channel"
   | "discord-offline";
-export type StaffAlertsPingState = "off" | "ok" | "invalid";
+/** `not-mentionable`: Discord would deliver the mention to nobody (see pingReady in the service). */
+export type StaffAlertsPingState = "off" | "ok" | "invalid" | "not-mentionable";
 export type PerformanceMode = "off" | "observe" | "on";
 export type RoundPeakView = {
   roundKey: string;

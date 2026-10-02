@@ -170,8 +170,10 @@ export function observeHealth(previous: HealthState, reading: HealthReading, now
       ? `connection lost ${formatDuration(now - outage.since)}`
       : `no reads for ${formatDuration(now - last.at)}`;
     // One failed read inside the normal read gap can be a hitch during map travel. A new map, clock
-    // or round then proves nothing, and an empty roster may be the next map loading.
-    const hitch = !!outage && outage.failures < 2 && !gap;
+    // or round then proves nothing, and an empty roster may be the next map loading. The gap is
+    // measured on each side of the failed read, so its timeout and the slower retry do not count.
+    const hitch =
+      !!outage && outage.failures < 2 && outage.since - last.at <= ROUND_GAP_MS && now - outage.since <= ROUND_GAP_MS;
     if (!hitch || rebuilt) {
       if (signals.length) {
         restartLike = true;
@@ -260,16 +262,21 @@ function restartAlert(
 ): HealthAlert[] {
   state.lastRestartAt = restartAt;
   state.watch = { at: restartAt, kind: "restart" };
-  if (state.lastRestartAlertAt !== null && now - state.lastRestartAlertAt < RESTART_ALERT_MS) return [];
-  state.lastRestartAlertAt = now;
   const scheduled = scheduledMatch(restartAt, options.scheduledRestarts, options.timeZone) !== null;
   const withPlayers = playersBefore >= options.restartPlayers;
+  // A scheduled restart below the threshold is recorded only, so it uses up no restart limit. A
+  // restart the limit holds back is recorded too. Each gets its own key, so neither repeats a post.
+  // Keys name the restart time, not its half hour: the limit already spaces posts, and a later
+  // restart that starts in the same half hour must not look like a repeat of the earlier one.
+  const recordOnly = scheduled && !withPlayers;
+  const held = !recordOnly && state.lastRestartAlertAt !== null && now - state.lastRestartAlertAt < RESTART_ALERT_MS;
+  if (!recordOnly && !held) state.lastRestartAlertAt = now;
   const text = signals.join(", ");
   return [
     {
       kind: "game-restart",
       severity: withPlayers ? "warning" : "info",
-      key: `restart:${Math.floor(restartAt / RESTART_ALERT_MS)}`,
+      key: `${recordOnly ? "restart-scheduled" : held ? "restart-held" : "restart"}:${restartAt}`,
       title: withPlayers ? "Likely restart with players on" : "Likely restart",
       lines: [
         `${text.charAt(0).toUpperCase()}${text.slice(1)} (${scheduled ? "scheduled" : "unscheduled"}).`,
@@ -281,7 +288,11 @@ function restartAlert(
         playersBefore,
         scheduled: scheduled ? "yes" : "no",
       },
-      ...(scheduled && !withPlayers ? { suppressed: "scheduled restart, recorded only" } : {}),
+      ...(recordOnly
+        ? { suppressed: "scheduled restart, recorded only" }
+        : held
+          ? { suppressed: "restart limit" }
+          : {}),
     },
   ];
 }

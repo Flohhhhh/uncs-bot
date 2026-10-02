@@ -15,7 +15,7 @@ import type { GameServerSummary } from "../common/game-server";
 import { mapLabel } from "../common/map-labels";
 import type { FeedContextView, RoundPeakView, StaffAlertsStatus, StaffAlertsWorkerView } from "../common/staff-alerts";
 import { EnvService } from "../env/env.service";
-import { LEAVE_GRACE_MS, MAX_ROSTER } from "../server-community/community-state";
+import { LEAVE_GRACE_MS, MAX_ROSTER, ROUND_HOLD_MS } from "../server-community/community-state";
 import { FEED_CONTEXT, type FeedContextSource } from "./feed-context";
 import { initialHealthState, observeHealth, type HealthAlert } from "./health-state";
 import { formatLocal } from "./local-time";
@@ -37,6 +37,8 @@ export const FAILED_DELAY_MS = 30_000;
 const WHITELIST_CACHE_MS = 10 * 60_000;
 /** Bounds the watch-list roster memory: current players plus recent leavers. */
 const WATCH_SEEN_MAX = 2 * MAX_ROSTER;
+/** A player not listed by any good read for this long counts as gone, even across failed reads. */
+const WATCH_STALE_MS = 30 * 60_000;
 /** Performance alerts whose extra notes are kept for a later amend. */
 const NOTES_MAX = 100;
 const ONLINE_AT_START = "online when Gramps started, recorded only";
@@ -129,6 +131,8 @@ export class StaffAlertsWorker {
   /** SteamIDs already offered to the network-ban sources, with when a good read last listed each. */
   private readonly watchSeen = new Map<string, number>();
   private bootChecked = false;
+  /** The first good read: when its roster is empty, the start window stays open until ROUND_HOLD_MS after it. */
+  private bootAt: number | null = null;
   private lastObservedAt: string | null = null;
   private lastReadAt: string | null = null;
   private reachable: boolean | null = null;
@@ -375,21 +379,25 @@ export class StaffAlertsWorker {
   }
 
   /**
-   * Players to look up: everyone listed now who was not online in recent reads. Only a populated
-   * roster shows who left, after the 60-second leave grace. A failed read, a read gap or an empty
-   * map-loading roster shows nothing, so players still online are not looked up again and players
-   * who joined meanwhile are. This is separate from the community welcome rules, which skip joins
-   * around baselines and round transitions on purpose.
+   * Players to look up: everyone listed now who was not online in recent reads. A populated roster
+   * shows who left after the 60-second leave grace, and an empty one only once it stays empty past
+   * a map load. A failed read or a read gap shows nothing, so players still online are not looked
+   * up again and players who joined meanwhile are, until WATCH_STALE_MS without a good read listing
+   * them. This is separate from the community welcome rules, which skip joins around baselines and
+   * round transitions on purpose.
    */
   private watchJoins(overview: Overview, now: number) {
     const ids = [...new Set(overview.players.map((player) => player.steamId))].slice(0, MAX_ROSTER);
-    const fresh = ids.filter((id) => !this.watchSeen.has(id));
+    const fresh = ids.filter((id) => {
+      const seenAt = this.watchSeen.get(id);
+      return seenAt === undefined || now - seenAt > WATCH_STALE_MS;
+    });
     for (const id of ids) {
       this.watchSeen.delete(id);
       this.watchSeen.set(id, now);
     }
-    if (ids.length)
-      for (const [id, seenAt] of this.watchSeen) if (now - seenAt > LEAVE_GRACE_MS) this.watchSeen.delete(id);
+    const grace = ids.length ? LEAVE_GRACE_MS : ROUND_HOLD_MS;
+    for (const [id, seenAt] of this.watchSeen) if (now - seenAt > grace) this.watchSeen.delete(id);
     for (const id of this.watchSeen.keys()) {
       if (this.watchSeen.size <= WATCH_SEEN_MAX) break;
       this.watchSeen.delete(id);
@@ -400,9 +408,13 @@ export class StaffAlertsWorker {
   private async checkWatchlist(overview: Overview, options: StaffAlertsOptions, now: number) {
     const ids = this.watchJoins(overview, now);
     // Players online at the first read may have been reported before a redeploy: record them for
-    // the staff API without posting or pinging. Joins seen after that alert as usual.
-    const presentAtStart = !this.bootChecked;
-    this.bootChecked = true;
+    // the staff API without posting or pinging. Joins seen after that alert as usual. A start during
+    // a map load reads an empty roster first, and the roster then refills over several reads, so
+    // after an empty first read the window stays open until a map load's time has passed.
+    const first = this.bootAt === null;
+    this.bootAt ??= now;
+    const presentAtStart = !this.bootChecked && now - this.bootAt < ROUND_HOLD_MS;
+    if (!presentAtStart || (first && overview.players.length)) this.bootChecked = true;
     if (!ids.length) return;
     const knownGood = options.performance.knownGood;
     for (const source of this.sources) {
