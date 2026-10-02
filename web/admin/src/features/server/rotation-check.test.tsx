@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { api } from "../../api/client";
 import { AdminContext } from "../../app/context";
@@ -55,4 +55,23 @@ it("shows nothing for a clean rotation and checks a newer saved rotation once", 
   expect(request.mock.calls.every(([path, options]) => path === "settings/rotation-check" && !options?.method)).toBe(
     true,
   );
+});
+it("stays quiet while a newer saved rotation is checked again", async () => {
+  request.mockResolvedValue({ revision: "r1", total: 3, issues: [] });
+  const view = render(page());
+  await waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+  await act(async () => {});
+  let finish!: (value: unknown) => void;
+  request.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }) as never,
+  );
+  view.rerender(page("r2"));
+  await waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+  // The earlier answer stays loaded during the re-check, which must not read as a changed rotation.
+  expect(view.container).toBeEmptyDOMElement();
+  await act(async () => finish({ revision: "r2", total: 3, issues: [] }));
+  expect(view.container).toBeEmptyDOMElement();
 });

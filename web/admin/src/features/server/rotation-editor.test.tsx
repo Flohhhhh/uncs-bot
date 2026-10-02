@@ -134,6 +134,32 @@ it("adds a map at the end of the rotation from + Add map", async () => {
   expect(within(screen.getByRole("dialog")).getAllByRole("listitem")[2]).toHaveTextContent("3. Ozeti · Map defaults");
   expect(sent()).toHaveLength(0);
 });
+it("keeps the rotation map picker usable while a background refresh is pending", async () => {
+  const state = context();
+  const page = render(hub("rotation", state));
+  fireEvent.click(await screen.findByRole("button", { name: "+ Add map" }));
+  fireEvent.change(await screen.findByRole("combobox", { name: "Map" }), { target: { value: "Europe" } });
+  await waitFor(() => expect(screen.getByRole("button", { name: "Add to rotation" })).toBeEnabled());
+  const fallback = request.getMockImplementation()!;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  request.mockImplementation(async (path, options) => {
+    await held;
+    return fallback(path, options);
+  });
+  page.rerender(hub("rotation", state, 1));
+  await waitFor(() =>
+    expect(request.mock.calls.filter(([path]) => ["catalog", "catalog/maps/Europe"].includes(path))).toHaveLength(4),
+  );
+  expect(screen.getByRole("combobox", { name: "Map" })).toBeEnabled();
+  expect(screen.getByRole("checkbox", { name: "Infantry only" })).toBeEnabled();
+  const add = screen.getByRole("button", { name: "Add to rotation" });
+  expect(add).toBeEnabled();
+  fireEvent.click(add);
+  expect(queueRows()).toHaveLength(3);
+  await act(async () => release());
+  expect(sent()).toHaveLength(0);
+});
 it("preserves reordered maps after a rejected rotation save", async () => {
   render(hub("rotation"));
   fireEvent.click(await screen.findByRole("button", { name: "Move Ozeti up" }));

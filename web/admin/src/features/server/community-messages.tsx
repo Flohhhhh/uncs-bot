@@ -9,7 +9,7 @@ function State({ on, label }: { on: boolean; label?: string }) {
 }
 
 export function CommunityMessages() {
-  const { data, error, loading, refresh } = useResource<CommunityMessagesStatus>("community-messages");
+  const { data, error, loading, refreshing, refresh } = useResource<CommunityMessagesStatus>("community-messages");
   const location = useLocation();
   const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
   return (
@@ -23,14 +23,19 @@ export function CommunityMessages() {
           : undefined
       }
     >
-      <div className="card-body" aria-busy={loading}>
+      <div className="card-body" aria-busy={loading || refreshing}>
         {error ? (
           // A failed read never shows the last known on or off states as current.
           <Empty
             title="Message status could not be loaded"
             detail="No activation state has been assumed."
             action={
-              <button type="button" className="button secondary small" disabled={loading} onClick={() => refresh()}>
+              <button
+                type="button"
+                className="button secondary small"
+                disabled={loading || refreshing}
+                onClick={() => refresh()}
+              >
                 Retry
               </button>
             }

@@ -192,7 +192,11 @@ export type SettingsSnapshot = {
     mode: string;
   };
 };
-export function settingValue(field: SettingField, value: unknown): SettingValue {
+// The config readers (assertEditable, editWhitelist) treat any whole value like this as host redaction
+// and then lock every edit, so the dashboard must never write one.
+const reservedValue = /^(?:\*{3,}|<redacted>|\[redacted\]|redacted)(?:\s*(?:[;#]|\/\/).*)?$/i;
+/** `stored` skips the write-only reserved-value check so a value the host already saved still displays. */
+export function settingValue(field: SettingField, value: unknown, stored = false): SettingValue {
   if (field.type === "boolean") {
     if (typeof value !== "boolean") throw new Error(`Choose on or off for ${field.label}.`);
     return value;
@@ -205,6 +209,8 @@ export function settingValue(field: SettingField, value: unknown): SettingValue 
   }
   if (
     typeof value !== "string" ||
+    // The readers' multiline patterns also break lines at U+2028 and U+2029, so they could forge a redacted line.
+    /[\u2028\u2029]/.test(value) ||
     [...value].some(
       (character) =>
         character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127 || character === '"' || character === "\\",
@@ -225,5 +231,7 @@ export function settingValue(field: SettingField, value: unknown): SettingValue 
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password)
       throw new Error("Use an HTTP or HTTPS banner URL without credentials.");
   }
+  if (!stored && reservedValue.test(value))
+    throw new Error(`That ${field.label.toLowerCase()} is reserved; choose another.`);
   return value;
 }

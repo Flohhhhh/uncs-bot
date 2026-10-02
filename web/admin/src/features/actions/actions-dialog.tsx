@@ -105,7 +105,8 @@ function ActionForm({
   const catalog = useResource<Catalog>(
     needsCatalog && allowed(action, admin.me, admin.overview, admin.stale, false) ? "catalog" : null,
   );
-  const catalogReady = !needsCatalog || Boolean(catalog.data && !catalog.loading && !catalog.error);
+  const catalogReady =
+    !needsCatalog || Boolean(catalog.data && !catalog.loading && !catalog.refreshing && !catalog.error);
   // Only an ended match follows the rotation; reading it never blocks the review.
   const settings = useResource<SettingsSnapshot>(
     action === "match-end" && allowed(action, admin.me, admin.overview, false, false) ? "settings" : null,

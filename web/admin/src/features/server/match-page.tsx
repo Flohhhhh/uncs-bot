@@ -103,7 +103,7 @@ function MatchMapControls({
   onEditingChange: (editing: boolean) => void;
 }) {
   const admin = useAdmin();
-  const { data, error, loading, refresh } = settings;
+  const { data, error, loading, refreshing, refresh } = settings;
   return (
     <section aria-label="Map controls">
       {error && (
@@ -111,7 +111,12 @@ function MatchMapControls({
           <p>
             {error} {data && "Showing values from the last successful check. Refresh to continue editing."}
           </p>
-          <button type="button" className="button secondary small" disabled={admin.busy || loading} onClick={refresh}>
+          <button
+            type="button"
+            className="button secondary small"
+            disabled={admin.busy || loading || refreshing}
+            onClick={refresh}
+          >
             Retry map controls
           </button>
         </div>

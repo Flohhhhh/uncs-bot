@@ -6,7 +6,7 @@ import { DataTable } from "../../components/data-table";
 import { When } from "./activity-entries";
 
 export function GameLogView() {
-  const { data, error, loading, refresh } = useResource<GameLog>("game-log");
+  const { data, error, loading, refreshing, refresh } = useResource<GameLog>("game-log");
   const [all, setAll] = useState(false);
   const entries =
     data?.entries
@@ -34,7 +34,7 @@ export function GameLogView() {
               <When at={data.observedAt} />
             </span>
           )}
-          <button type="button" className="button secondary small" disabled={loading} onClick={refresh}>
+          <button type="button" className="button secondary small" disabled={loading || refreshing} onClick={refresh}>
             Refresh game log
           </button>
         </div>

@@ -35,7 +35,13 @@ export function RotationEditor({
   /** Reports an entry edit in progress, which keeps the next-round view closed. */
   onEditingChange?: (editing: boolean) => void;
 }) {
-  const { data: catalog, error, loading, refresh: refreshCatalog } = useResource<Catalog>(active ? "catalog" : null);
+  const {
+    data: catalog,
+    error,
+    loading,
+    refreshing,
+    refresh: refreshCatalog,
+  } = useResource<Catalog>(active ? "catalog" : null);
   const savedRows = useMemo(
     () => snapshot.rotation.entries.map((entry, index) => ({ id: snapshot.revision + ":" + index, entry })),
     [snapshot],
@@ -170,7 +176,7 @@ export function RotationEditor({
               <button
                 type="button"
                 className="button secondary small"
-                disabled={disabled || loading}
+                disabled={disabled || loading || refreshing}
                 onClick={refreshCatalog}
               >
                 Retry map choices
