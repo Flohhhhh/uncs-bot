@@ -8,11 +8,6 @@ import { CommunityRotation, type RandomSource } from "./community-rotation";
 import type { CommunitySnapshot } from "./community-state";
 import { ServerCommunityWorker as ServerCommunityService } from "./server-community.service";
 
-// Recommended owner copy from docs/guides/SERVER_COMMUNITY.md, exactly as it is pasted into Railway.
-const recommendedWelcomeVariants =
-  '[["Welcome to The UNCs. Good games, older knees.","Long queue? Get queue priority at theuncsgaming.com/whitelist"],["Aged a little while you waited? Welcome to The UNCs.","Less queue next time: theuncsgaming.com/whitelist"],["You made it. The UNCs salute your patience and your lower back.","Tired of queues? theuncsgaming.com/whitelist"],["Welcome to The UNCs. Grab a squad, take the hill, mind your knees.","Discord and whitelist: theuncsgaming.com"],["Reading glasses on, soldier. The hill will not hold itself.","Welcome to The UNCs: theuncsgaming.com"],["Welcome in. Fast trigger fingers, earned naps.","Less queue, more crew: theuncsgaming.com/whitelist"],["Long queue? We noticed. Welcome to The UNCs.","Get queue priority at theuncsgaming.com/whitelist"],["Welcome to The UNCs. Hydrate, squad up, use comms.","Find the crew at theuncsgaming.com"]]';
-const recommendedRoundMessages =
-  '["GG! Get whitelisted at theuncsgaming.com/whitelist. Thanks for playing on The UNCs.","GG, all. Stretch, hydrate, run it back. theuncsgaming.com","GG! Good games, older knees. Join the crew: theuncsgaming.com","GG! Less queue, more crew: theuncsgaming.com/whitelist","GG. Thanks for playing on The UNCs. Discord and whitelist: theuncsgaming.com"]';
 const firstId = "76561198000000001";
 const secondId = "76561198000000002";
 const time = new Date("2026-09-30T12:00:00Z");
@@ -465,7 +460,7 @@ describe("welcome deployment settings", () => {
     expect(Env.shape.SERVER_COMMUNITY_WELCOME_MESSAGES.safeParse(value).success).toBe(false);
   });
 
-  it("validates welcome variants and round messages, and accepts the documented UNCs copy", () => {
+  it("validates welcome variants and round messages", () => {
     expect(Env.shape.SERVER_COMMUNITY_WELCOME_VARIANTS.parse(undefined)).toBeUndefined();
     expect(Env.shape.SERVER_COMMUNITY_ROUND_MESSAGES.parse(undefined)).toBeUndefined();
     expect(Env.shape.SERVER_COMMUNITY_WELCOME_VARIANTS.parse('[["Hi", "  Link  "], ["Hello"]]')).toEqual([
@@ -473,8 +468,6 @@ describe("welcome deployment settings", () => {
       ["Hello"],
     ]);
     expect(Env.shape.SERVER_COMMUNITY_ROUND_MESSAGES.parse('["GG", "  GG all  "]')).toEqual(["GG", "GG all"]);
-    expect(Env.shape.SERVER_COMMUNITY_WELCOME_VARIANTS.parse(recommendedWelcomeVariants)).toHaveLength(8);
-    expect(Env.shape.SERVER_COMMUNITY_ROUND_MESSAGES.parse(recommendedRoundMessages)).toHaveLength(5);
   });
 
   it("fits twenty full-length welcome variants and twenty full-length round messages", () => {

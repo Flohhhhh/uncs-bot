@@ -60,42 +60,71 @@ The staff status endpoint keeps `welcome.messages` (the first variant) and `roun
 
 ### Recommended rotating UNCs copy
 
-Dennis supplied this copy on October 2 as the recommended values. It is not live until both variables are set in the deployment; until then production keeps the sequence and round message described under [Newcomer wording and launch state](#newcomer-wording-and-launch-state). Every line is single-line and under 200 characters.
+Dennis supplied rotating copy on October 2. Neither set below is live until both variables are set in the deployment; until then production keeps the sequence and round message described under [Newcomer wording and launch state](#newcomer-wording-and-launch-state). Every line is single-line and under 200 characters.
+
+Five of its welcome variants and one round message tie the whitelist to a shorter queue ("Get queue priority", "Less queue next time", "Tired of queues?", "Less queue, more crew"). Gramps does not provide queue priority. Approving a whitelist entry only adds the player to the game's reserved-slot list (see [Live whitelist behavior](ADMIN_DASHBOARD.md#live-whitelist-behavior)), seeding and queue benefits are not implemented (see the [release audit](ADMIN_RELEASE_AUDIT.md#launch-work-still-requiring-verified-configuration)), and the newcomer guidance below says not to promise queue tiers. The copy therefore comes in two sets that differ only in those lines:
+
+- **Ready-now set.** Neutral whitelist or website lines replace the queue lines. Use this set unless both checks below have passed for that server. The neutral lines were written for this guide, not by Dennis; review them like any other copy.
+- **Queue-priority set.** Dennis's original wording, unchanged. Use it on a server only after both checks pass, and switch back to the ready-now set if either stops being true, for example after a reserved-slot change or a game update:
+  1. In the dashboard, **Server settings → Joining → Reserved-slot capacity** for that server is greater than 0 and large enough for the whitelisted players expected online at once. At 0 the whitelist reserves no slots.
+  2. A whitelisted player has been seen joining that server while it was full with a queue, and getting in ahead of the queue.
 
 Welcome variants (each is a two-message sequence, sent with the usual delay and spacing):
 
-1. `Welcome to The UNCs. Good games, older knees.` then `Long queue? Get queue priority at theuncsgaming.com/whitelist`
-2. `Aged a little while you waited? Welcome to The UNCs.` then `Less queue next time: theuncsgaming.com/whitelist`
-3. `You made it. The UNCs salute your patience and your lower back.` then `Tired of queues? theuncsgaming.com/whitelist`
-4. `Welcome to The UNCs. Grab a squad, take the hill, mind your knees.` then `Discord and whitelist: theuncsgaming.com`
-5. `Reading glasses on, soldier. The hill will not hold itself.` then `Welcome to The UNCs: theuncsgaming.com`
-6. `Welcome in. Fast trigger fingers, earned naps.` then `Less queue, more crew: theuncsgaming.com/whitelist`
-7. `Long queue? We noticed. Welcome to The UNCs.` then `Get queue priority at theuncsgaming.com/whitelist`
-8. `Welcome to The UNCs. Hydrate, squad up, use comms.` then `Find the crew at theuncsgaming.com`
+| #   | First message                                                        | Second message, ready-now set                                 | Second message, queue-priority set                              |
+| --- | -------------------------------------------------------------------- | ------------------------------------------------------------- | --------------------------------------------------------------- |
+| 1   | `Welcome to The UNCs. Good games, older knees.`                      | `Get whitelisted: theuncsgaming.com/whitelist`                | `Long queue? Get queue priority at theuncsgaming.com/whitelist` |
+| 2   | `Aged a little while you waited? Welcome to The UNCs.`               | `Apply for the whitelist: theuncsgaming.com/whitelist`        | `Less queue next time: theuncsgaming.com/whitelist`             |
+| 3   | `You made it. The UNCs salute your patience and your lower back.`    | `Sign in with Discord and apply: theuncsgaming.com/whitelist` | `Tired of queues? theuncsgaming.com/whitelist`                  |
+| 4   | `Welcome to The UNCs. Grab a squad, take the hill, mind your knees.` | `Discord and whitelist: theuncsgaming.com`                    | Same                                                            |
+| 5   | `Reading glasses on, soldier. The hill will not hold itself.`        | `Welcome to The UNCs: theuncsgaming.com`                      | Same                                                            |
+| 6   | `Welcome in. Fast trigger fingers, earned naps.`                     | `Join the crew: theuncsgaming.com/whitelist`                  | `Less queue, more crew: theuncsgaming.com/whitelist`            |
+| 7   | `Long queue? We noticed. Welcome to The UNCs.`                       | `Thanks for your patience. Website: theuncsgaming.com`        | `Get queue priority at theuncsgaming.com/whitelist`             |
+| 8   | `Welcome to The UNCs. Hydrate, squad up, use comms.`                 | `Find the crew at theuncsgaming.com`                          | Same                                                            |
 
 Round messages:
 
-1. `GG! Get whitelisted at theuncsgaming.com/whitelist. Thanks for playing on The UNCs.`
-2. `GG, all. Stretch, hydrate, run it back. theuncsgaming.com`
-3. `GG! Good games, older knees. Join the crew: theuncsgaming.com`
-4. `GG! Less queue, more crew: theuncsgaming.com/whitelist`
-5. `GG. Thanks for playing on The UNCs. Discord and whitelist: theuncsgaming.com`
+| #   | Ready-now set                                                                         | Queue-priority set                                       |
+| --- | ------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| 1   | `GG! Get whitelisted at theuncsgaming.com/whitelist. Thanks for playing on The UNCs.` | Same                                                     |
+| 2   | `GG, all. Stretch, hydrate, run it back. theuncsgaming.com`                           | Same                                                     |
+| 3   | `GG! Good games, older knees. Join the crew: theuncsgaming.com`                       | Same                                                     |
+| 4   | `GG! More games, more crew: theuncsgaming.com/whitelist`                              | `GG! Less queue, more crew: theuncsgaming.com/whitelist` |
+| 5   | `GG. Thanks for playing on The UNCs. Discord and whitelist: theuncsgaming.com`        | Same                                                     |
 
-Paste these exact single-line values into the deployment (Railway takes the raw value, without surrounding quotes):
+Paste the chosen set's exact single-line values into the deployment (Railway takes the raw value, without surrounding quotes). The blocks are plain text so formatters leave each value on one line. The existing `SERVER_COMMUNITY_WELCOME_MESSAGES` and `SERVER_COMMUNITY_ROUND_MESSAGE` values can stay as they are; they are ignored while the new variables are set and take over again if those are removed. Keep the rest of the newcomer guidance (no points, automatic rewards or XP/cash bonuses) for any new copy.
+
+`src/server-community/recommended-copy.spec.ts` checks that these tables, both sets' paste values and the ready-now values in `.env.example` agree, stay on one line and pass startup validation, and that the ready-now set makes no queue promise. Change all three places together.
+
+#### Ready-now set
 
 `SERVER_COMMUNITY_WELCOME_VARIANTS`
 
-```json
+```text
+[["Welcome to The UNCs. Good games, older knees.","Get whitelisted: theuncsgaming.com/whitelist"],["Aged a little while you waited? Welcome to The UNCs.","Apply for the whitelist: theuncsgaming.com/whitelist"],["You made it. The UNCs salute your patience and your lower back.","Sign in with Discord and apply: theuncsgaming.com/whitelist"],["Welcome to The UNCs. Grab a squad, take the hill, mind your knees.","Discord and whitelist: theuncsgaming.com"],["Reading glasses on, soldier. The hill will not hold itself.","Welcome to The UNCs: theuncsgaming.com"],["Welcome in. Fast trigger fingers, earned naps.","Join the crew: theuncsgaming.com/whitelist"],["Long queue? We noticed. Welcome to The UNCs.","Thanks for your patience. Website: theuncsgaming.com"],["Welcome to The UNCs. Hydrate, squad up, use comms.","Find the crew at theuncsgaming.com"]]
+```
+
+`SERVER_COMMUNITY_ROUND_MESSAGES`
+
+```text
+["GG! Get whitelisted at theuncsgaming.com/whitelist. Thanks for playing on The UNCs.","GG, all. Stretch, hydrate, run it back. theuncsgaming.com","GG! Good games, older knees. Join the crew: theuncsgaming.com","GG! More games, more crew: theuncsgaming.com/whitelist","GG. Thanks for playing on The UNCs. Discord and whitelist: theuncsgaming.com"]
+```
+
+#### Queue-priority set
+
+Only for a server where both reserved-slot checks above have passed.
+
+`SERVER_COMMUNITY_WELCOME_VARIANTS`
+
+```text
 [["Welcome to The UNCs. Good games, older knees.","Long queue? Get queue priority at theuncsgaming.com/whitelist"],["Aged a little while you waited? Welcome to The UNCs.","Less queue next time: theuncsgaming.com/whitelist"],["You made it. The UNCs salute your patience and your lower back.","Tired of queues? theuncsgaming.com/whitelist"],["Welcome to The UNCs. Grab a squad, take the hill, mind your knees.","Discord and whitelist: theuncsgaming.com"],["Reading glasses on, soldier. The hill will not hold itself.","Welcome to The UNCs: theuncsgaming.com"],["Welcome in. Fast trigger fingers, earned naps.","Less queue, more crew: theuncsgaming.com/whitelist"],["Long queue? We noticed. Welcome to The UNCs.","Get queue priority at theuncsgaming.com/whitelist"],["Welcome to The UNCs. Hydrate, squad up, use comms.","Find the crew at theuncsgaming.com"]]
 ```
 
 `SERVER_COMMUNITY_ROUND_MESSAGES`
 
-```json
+```text
 ["GG! Get whitelisted at theuncsgaming.com/whitelist. Thanks for playing on The UNCs.","GG, all. Stretch, hydrate, run it back. theuncsgaming.com","GG! Good games, older knees. Join the crew: theuncsgaming.com","GG! Less queue, more crew: theuncsgaming.com/whitelist","GG. Thanks for playing on The UNCs. Discord and whitelist: theuncsgaming.com"]
 ```
-
-The existing `SERVER_COMMUNITY_WELCOME_MESSAGES` and `SERVER_COMMUNITY_ROUND_MESSAGE` values can stay as they are; they are ignored while the new variables are set and take over again if those are removed. Several lines tie the whitelist to a shorter queue ("Get queue priority", "Less queue next time"), while the older newcomer guidance below says not to promise queue tiers. Dennis chose this wording deliberately; it is accurate only while approved whitelist entries actually get priority in the server queue, which has not yet been observed from a player's side. Confirm that before deploying it, and keep the rest of that guidance (no points, automatic rewards or XP/cash bonuses) for any new copy.
 
 ### Newcomer wording and launch state
 
