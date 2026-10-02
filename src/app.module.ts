@@ -18,6 +18,7 @@ import { SupportersModule } from "./supporters/supporters.module";
 import { ServerCommunityModule } from "./server-community/server-community.module";
 import { ServerEventsModule } from "./server-events/server-events.module";
 import { DiscordRolesModule } from "./discord-roles/discord-roles.module";
+import { WeeklyLeaderboardModule } from "./weekly-leaderboard/weekly-leaderboard.module";
 
 @Module({
   imports: [
@@ -36,6 +37,7 @@ import { DiscordRolesModule } from "./discord-roles/discord-roles.module";
     ServerCommunityModule,
     ServerEventsModule,
     DiscordRolesModule,
+    WeeklyLeaderboardModule,
   ],
   providers: [AppService, { provide: APP_FILTER, useClass: AppExceptionFilter }],
   controllers: [AppController],
