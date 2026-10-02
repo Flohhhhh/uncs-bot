@@ -779,7 +779,7 @@ const supporterStore = {
   },
 };
 const previewEnvironment: Record<string, unknown> = {
-  MAP_VOTES_ENABLED: true,
+  MAP_VOTES_ENABLED: process.env.PREVIEW_MAP_VOTES_ENABLED !== "false",
   ...(process.env.PREVIEW_AUTOMATIC_VOTES === "true"
     ? {
         MAP_VOTES_AUTOMATIC: [
@@ -944,6 +944,13 @@ const eventStore = {
   },
 };
 const voteStore = {
+  async checkSetup(serverId: string) {
+    return {
+      unfinished: [...demoVotes.values()].some(
+        (vote) => vote.serverId === serverId && ["publishing", "open", "closing", "needs_review"].includes(vote.state),
+      ),
+    };
+  },
   async liveCounts(ids: string[]) {
     return ids.flatMap((voteId) =>
       (demoVotes.get(voteId)?.counts ?? []).map((total, choice) => ({ voteId, choice, total })),
@@ -1088,7 +1095,7 @@ async function main() {
     .useValue(eventStore)
     .overrideProvider(MapVotesDiscord)
     .useValue({
-      check: async () => undefined,
+      check: async () => ({ name: "simulated-voting" }),
       publish: async () => "333333333333333333",
       update: async () => undefined,
     })

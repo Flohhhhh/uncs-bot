@@ -59,7 +59,8 @@ export class MapVotesDiscord {
     return channel;
   }
   async check(guildId: string, channelId: string) {
-    await this.channel({ guildId, channelId });
+    const channel = await this.channel({ guildId, channelId });
+    return { name: channel.name };
   }
   async publish(vote: MapVoteRecord) {
     const channel = await this.channel(vote);

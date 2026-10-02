@@ -1,6 +1,7 @@
 import { mapLabel, selectionLabel, sameMap } from "../../../../../src/common/map-labels";
 import { useEffect, useRef, useState } from "react";
 import type { MapSelection, SettingsSnapshot } from "../../../../../src/common/server-settings";
+import type { MapVoteSetup } from "../../../../../src/common/map-vote-automation";
 import { VoteResults, voteStateLabels as stateLabels, type Vote, type VoteList } from "./vote-status";
 import { useGameApi } from "../../api/server-client";
 import { useResource } from "../../api/use-resource";
@@ -139,6 +140,57 @@ function VoteReview({
   );
 }
 
+function VotingSetupCheck() {
+  const api = useGameApi();
+  const [result, setResult] = useState<MapVoteSetup | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  async function check() {
+    if (loading) return;
+    setLoading(true);
+    setResult(null);
+    setError("");
+    try {
+      setResult(await api<MapVoteSetup>("map-votes/setup"));
+    } catch (error) {
+      setError(errorMessage(error));
+    } finally {
+      setLoading(false);
+    }
+  }
+  return (
+    <>
+      <p>
+        <button className="button secondary" disabled={loading} onClick={() => void check()}>
+          {loading ? "Checking setup…" : "Check voting setup"}
+        </button>
+      </p>
+      <p className="muted">Read-only check. It does not enable voting or post a message.</p>
+      {error && (
+        <p className="notice error" role="alert">
+          {error}
+        </p>
+      )}
+      {result && (
+        <div role="status">
+          <ul>
+            {result.checks.map((item) => (
+              <li key={item.label}>
+                <strong>{item.label}</strong> ·{" "}
+                {item.status === "ok" ? "Checked" : item.status === "review" ? "Review needed" : "Needs setup"}
+                <p>{item.message}</p>
+              </li>
+            ))}
+          </ul>
+          <small className="muted">
+            Checked {date(result.checkedAt)}. Stored ballots can resume when voting is enabled.
+          </small>
+        </div>
+      )}
+    </>
+  );
+}
+
 export function MapVotesPage() {
   const admin = useAdmin();
   const resource = useResource<VoteList>(admin.me.role === "admin" ? "map-votes" : null);
@@ -160,6 +212,7 @@ export function MapVotesPage() {
               available in the dashboard yet. Automatic voting also needs an explicit server policy and a confirmed
               rotation position.
             </p>
+            <VotingSetupCheck />
           </details>
         </div>
       </Card>

@@ -11,6 +11,9 @@ export class MapVotesController {
   @Get() list(@Req() request: StaffRequest) {
     return this.service.list(request.staff);
   }
+  @Get("setup") setup(@Req() request: StaffRequest) {
+    return this.service.setup(request.staff);
+  }
   @Post() start(@Req() request: StaffRequest, @Body() body: unknown) {
     return this.service.start(request.staff, body);
   }

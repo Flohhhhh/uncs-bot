@@ -34,6 +34,7 @@ const record: MapVoteRecord = {
 function fixture() {
   const message = { id: record.messageId, author: { id: "bot" }, edit: jest.fn() };
   const channel = {
+    name: "map-voting",
     type: ChannelType.GuildText,
     guildId: record.guildId,
     permissionsFor: jest.fn().mockReturnValue({ has: () => true }),
@@ -85,6 +86,12 @@ it("uses a stable nonce for Discord's duplicate-send protection", async () => {
   expect(first.enforceNonce).toBe(true);
   expect(first.nonce).toBe(second.nonce);
   expect(first.nonce.length).toBeLessThanOrEqual(25);
+});
+it("checks channel permissions without posting or editing a message", async () => {
+  const { service, channel } = fixture();
+  expect(await service.check(record.guildId, record.channelId)).toEqual({ name: "map-voting" });
+  expect(channel.send).not.toHaveBeenCalled();
+  expect(channel.messages.fetch).not.toHaveBeenCalled();
 });
 it.each(["guild", "channel_type", "permission", "missing", "not_ready"])(
   "refuses publication for %s",
