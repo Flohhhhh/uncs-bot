@@ -38,7 +38,21 @@ The public website uses same-origin `/community/api` rewrites to Gramps. The gam
 
 Ingestion purges event rows older than 90 days at most once per day. If ingestion stops, deletion waits for the next accepted batch; this is not a guarantee of deletion at exactly 90 days during inactivity. Administrative cleanup is required for a permanently retired feed. Queries remain bounded to the selected rolling period. First/last receipt metadata remains for coverage reporting.
 
-As of October 2, the UNCs host's saved feed base URL is `https://admin.theuncsgaming.com`, replacing the previous local xREALM receiver under Dennis's authorization. Preserving that receiver is no longer a requirement. The existing feed-only token is configured in Gramps and ingestion is enabled, but the dashboard still reports **Awaiting first combat batch**. Configuration is not proof of delivery. The observed game appends `/api/ingest/events` to the base URL and reads feed settings at startup; no game restart was issued. Check receipt metadata after a normal start before claiming the integration works.
+As of October 2, the UNCs host's saved feed base URL is `https://admin.theuncsgaming.com`, replacing the previous local xREALM receiver under Dennis's authorization. Preserving that receiver is no longer a requirement. The existing feed-only token is configured in Gramps and ingestion is enabled, but the dashboard still reports **Awaiting first combat batch**. Configuration is not proof of delivery. The observed game appends `/api/ingest/events` to the base URL and reads feed settings at startup; no game restart was issued.
+
+At 09:35–09:41 EDT on October 2, read-only checks found:
+
+- The saved `ServerSettings.ini` still contained the Gramps base URL, and xREALM's Killfeed page recognized an external feed destination. Neither establishes what the running game loaded or whether outbound delivery works.
+- Railway's current deployment HTTP logs showed no requests matching `@path:/api/ingest/events`. This covers only that deployment, which started around 09:26, not the entire game uptime or earlier deployments.
+- Public receipt metadata remained `waiting`, with no first or last received batch. The game then showed 0/100 players and all faction scores at zero. No natural combat event was available to verify delivery during this check.
+
+For the next acceptance check, observe a genuine combat event during ordinary play and then inspect receipt metadata and the matching deployment's HTTP logs:
+
+1. **No request:** investigate the destination actually loaded by the game and host outbound DNS/TLS/connectivity. A saved URL alone cannot identify which failed; do not guess a parser or token fix.
+2. **Request rejected:** use its HTTP status and safe error category to locate authentication, payload or storage failure. Do not publish request headers, tokens or raw player payloads.
+3. **Request accepted:** verify that receipt metadata advances and the corresponding real event appears. Only then record native delivery as observed.
+
+Do not manufacture kills, send test ingest requests or restart the live game to obtain this evidence.
 
 The database schema is provided in `src/database/telemetry.schema.ts` and exported by the main schema. The combined launch migration was applied to the identified production database on September 30 under the owner's explicit authorization, and schema checks passed; see [Database prerequisite](ADMIN_DASHBOARD.md#database-prerequisite--launch-migration-applied). Production uses Node 22.23.3. Consult the [current release audit](ADMIN_RELEASE_AUDIT.md) for dated configuration and delivery evidence. Never probe production ingest with invented kills or print feed credentials.
 
