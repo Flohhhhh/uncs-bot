@@ -41,7 +41,35 @@ interface CombatBase {
   events: CombatEvent[];
 }
 
-export interface CombatServerResponse extends CombatBase {
+export interface CombatFeedRejection {
+  at: string;
+  status: number;
+  reason: string;
+}
+
+export interface CombatFeedBatch {
+  at: string;
+  /** Valid killed events, repeats included. */
+  accepted: number;
+  /** Other event types plus invalid entries. */
+  skipped: number;
+  invalid: number;
+  /** Schema location of the first invalid entry, never its value. */
+  firstInvalid: string | null;
+}
+
+/** In-memory delivery record since Gramps last started; the server combat view only. */
+export interface CombatFeedDeliveries {
+  lastBatch: CombatFeedBatch | null;
+  /** Refused deliveries that carried the server's feed token: the game's own. */
+  lastRejected: CombatFeedRejection | null;
+  rejectedCount: number;
+  /** Refused requests without the feed token, which anyone can send. */
+  lastRejectedWithoutToken: CombatFeedRejection | null;
+  rejectedWithoutTokenCount: number;
+}
+
+export interface CombatServerResponse extends CombatBase, CombatFeedDeliveries {
   leaderboard: CombatPlayer[];
   steamId?: never;
   player?: never;

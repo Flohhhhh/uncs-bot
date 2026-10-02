@@ -390,6 +390,35 @@ describe("launch storage on isolated PostgreSQL", () => {
     expect(await telemetry.tracking("primary")).toBeNull();
     expect((await telemetry.tracking("east"))?.lastReceivedAt).toEqual(now);
   });
+
+  it("stores game GUIDs that are not RFC 4122 UUIDs and deduplicates them across letter case", async () => {
+    const telemetry = new TelemetryStore(drizzle({ client, schema }));
+    const now = new Date(),
+      since = new Date(now.getTime() - 60_000);
+    // Version 0 / variant 0 values: valid hexadecimal GUIDs that zod's uuid() rejects.
+    const serverId = "ABCDEF01-2345-0789-0BCD-EF0123456789",
+      eventId = "00000000-0000-0000-0000-00000000000A",
+      matchId = "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF";
+    const feed = (id: string) =>
+      parseFeed({
+        serverId,
+        serverName: "Game label",
+        events: [{ eventId: id, type: "killed", eventTime: 1, matchId }],
+      });
+    expect(await telemetry.ingest(feed(eventId), now, "east")).toEqual({ inserted: 1, duplicates: 0, skipped: 0 });
+    expect(await telemetry.ingest(feed(eventId.toLowerCase()), now, "east")).toEqual({
+      inserted: 0,
+      duplicates: 1,
+      skipped: 0,
+    });
+    expect(await telemetry.events(since, now, undefined, "east")).toEqual([
+      expect.objectContaining({
+        eventId: eventId.toLowerCase(),
+        serverInstanceId: serverId.toLowerCase(),
+        matchId: matchId.toLowerCase(),
+      }),
+    ]);
+  });
   function eventInput() {
     const { operation: _operation, ...record } = eventFixture();
     return record;
