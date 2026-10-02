@@ -183,7 +183,10 @@ export function WhitelistPage() {
   const [filter, setFilter] = useState("");
   if (!data)
     return <Empty title={error ? "Whitelist could not be loaded" : "Loading whitelist…"} detail={error || ""} />;
-  const savedIdsInvalid = (data.configuredInvalidEntryCount ?? 0) > 0;
+  const invalidIds = [
+    data.invalidEntryCount > 0 ? `${data.invalidEntryCount} in the running game` : "",
+    (data.configuredInvalidEntryCount ?? 0) > 0 ? `${data.configuredInvalidEntryCount} in saved configuration` : "",
+  ].filter(Boolean);
   const rows = data.entries.filter(
     (entry) =>
       entry.steamId.includes(query.trim()) &&
@@ -199,20 +202,10 @@ export function WhitelistPage() {
           {error} Showing the last successful list.
         </div>
       )}
-      <div className="notice info">
-        <strong>Current community access stays in place.</strong> Existing whitelist entries have no new expiry.
-        Membership billing, seeding rewards, and future queue tiers are not changing this list.
-      </div>
-      {data.invalidEntryCount > 0 && (
-        <div className="notice warning">
-          <strong>{data.invalidEntryCount} malformed reserved-slot entries.</strong> Valid SteamIDs are shown below.
-          Review malformed entries in the server configuration; this view does not change the server list.
-        </div>
-      )}
-      {savedIdsInvalid && (
+      {invalidIds.length > 0 && (
         <div className="notice warning" role="status">
-          {data.configuredInvalidEntryCount} saved whitelist entries have invalid SteamIDs. Saved status is shown for
-          valid entries. Edits preserve those entries. Correct them separately in the host panel.
+          <strong>Invalid SteamIDs: {invalidIds.join("; ")}.</strong> Valid entries are shown. Fix invalid IDs in the
+          host panel; edits here preserve them.
         </div>
       )}
       {!data.configurationAvailable && (
@@ -390,7 +383,7 @@ export function AnnouncementsPage() {
             thank-you.
           </p>
           <div className="copy-example">
-            GG! Thanks for playing on The UNCs. Find the crew, whitelist details and seeding info at theuncsgaming.com.
+            GG! Get whitelisted at theuncsgaming.com/whitelist. Thanks for playing on The UNCs.
           </div>
           <ActionButton action="broadcast" kind="primary">
             Write announcement ↗
