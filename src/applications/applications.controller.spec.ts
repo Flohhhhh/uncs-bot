@@ -113,6 +113,29 @@ describe("application HTTP routing and privacy", () => {
     expect(api.headers.location).toBeUndefined();
     expect(api.body.message).toBeDefined();
   });
+  it("retains a valid login target when applications are disabled, but never adopts callback targets", async () => {
+    enabled = false;
+    const login = await request(app.getHttpServer()).get("/apply/auth/login?server=event").expect(303);
+    expect(login.headers.location).toBe("/whitelist?auth=unavailable&server=event");
+    const callback = await request(app.getHttpServer())
+      .get("/apply/auth/callback?server=event&code=private-code")
+      .expect(303);
+    expect(callback.headers.location).toBe("/whitelist?auth=unavailable");
+    const unsafe = await request(app.getHttpServer()).get("/apply/auth/login?server=%2F%2Fevil.example").expect(303);
+    expect(unsafe.headers.location).toBe("/whitelist?auth=unavailable");
+  });
+
+  it("keeps a verified OAuth server on the error redirect without copying callback input", async () => {
+    applicantAuth.callback.mockImplementationOnce(async (_req, res) => {
+      res.locals.applicantServer = "event";
+      throw new ForbiddenException("Membership screening pending");
+    });
+    const response = await request(app.getHttpServer())
+      .get("/apply/auth/callback?server=primary&code=private&redirect=https://evil.example")
+      .expect(303);
+    expect(response.headers.location).toBe("/whitelist?auth=discord_access&server=event");
+    expect(response.text).not.toMatch(/private|evil|primary/);
+  });
 
   it("routes the administrator applications list separately from existing resources", async () => {
     const response = await request(app.getHttpServer()).get("/admin/api/applications").expect(200);

@@ -21,6 +21,7 @@ import type { Request, Response } from "express";
 import { AdminGuard, AdminServerGuard, type StaffRequest } from "../admin/admin.auth";
 import { ApplicantAuth, type ApplicantRequest } from "./applicant.auth";
 import { ApplicationsService } from "./applications.service";
+import { gameServerId } from "../common/game-server";
 
 @Catch()
 @Injectable()
@@ -33,9 +34,17 @@ export class ApplicationsExceptionFilter implements ExceptionFilter {
       // Return to the application with a fixed public code, never an OAuth code,
       // state value, upstream error body or caller-supplied redirect.
       const code = status === 401 ? "sign_in" : status === 403 ? "discord_access" : "unavailable";
+      const query = new URLSearchParams({ auth: code });
+      // Disabled login can fail before OAuth begins. Retain its bounded server
+      // selection locally; a callback may use only the verified signed target.
+      const target = gameServerId.safeParse(
+        response.locals.applicantServer ??
+          (/^\/apply\/auth\/login\/?$/.test(request.path) ? request.query.server : undefined),
+      );
+      if (target.success) query.set("server", target.data);
       response.setHeader("Cache-Control", "no-store");
       response.setHeader("Referrer-Policy", "no-referrer");
-      response.redirect(303, `/whitelist?auth=${code}`);
+      response.redirect(303, `/whitelist?${query}`);
       return;
     }
     response.status(status).json({
