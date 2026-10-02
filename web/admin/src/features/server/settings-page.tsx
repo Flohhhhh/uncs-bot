@@ -231,6 +231,17 @@ export function RotationEditor({
           </div>
         </div>
         {snapshot.rotation.note && <p className="notice warning">{snapshot.rotation.note}</p>}
+        {ordered && !currentMatches && (
+          <div className="notice warning">
+            <p>
+              {snapshot.rotation.positionNote ||
+                "The current place in the rotation is unavailable. Refresh to try again."}
+            </p>
+            <button type="button" className="button secondary" disabled={disabled || !!review} onClick={reload}>
+              Refresh map position
+            </button>
+          </div>
+        )}
         {active && view === "rotation" && <SavedRotationCheck revision={snapshot.revision} />}
         {changedElsewhere && (
           <p className="notice warning">

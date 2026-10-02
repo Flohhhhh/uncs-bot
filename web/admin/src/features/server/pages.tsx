@@ -1,4 +1,4 @@
-import { mapLabel, modeLabel, lightingLabel } from "../../../../../src/common/map-labels";
+import { mapLabel, modeLabel, lightingLabel, zoneLabel } from "../../../../../src/common/map-labels";
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import type { SettingsSnapshot } from "../../../../../src/common/server-settings";
 import { ServerLink as Link } from "../../app/server-link";
@@ -445,6 +445,10 @@ export function MatchPage() {
             <div className="info-row">
               <span>Mode &amp; rules</span>
               <strong>{status.experiences?.map((id) => modeLabel(id)).join(", ") || "Not supplied"}</strong>
+            </div>
+            <div className="info-row">
+              <span>Zone layout</span>
+              <strong>{status.alternator ? zoneLabel(status.alternator) : "Not supplied"}</strong>
             </div>
             <div className="action-list">
               <ActionButton action="lighting">Set lighting</ActionButton>

@@ -184,6 +184,7 @@ export type SettingsSnapshot = {
     editable: boolean;
     note: string;
     currentIndex: number | null;
+    positionNote?: string;
     currentMap: string;
     enabled: boolean;
     mode: string;
