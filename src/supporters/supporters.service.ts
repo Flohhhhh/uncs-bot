@@ -8,6 +8,7 @@ import {
 import { z } from "zod";
 import { EnvService } from "../env/env.service";
 import type { Staff } from "../admin/admin.types";
+import { PatreonSyncService } from "./patreon-sync.service";
 import { SupportersStore } from "./supporters.store";
 import {
   founderSchema,
@@ -26,6 +27,7 @@ export class SupportersService {
   constructor(
     private readonly store: SupportersStore,
     private readonly env: EnvService,
+    private readonly patreonSync: PatreonSyncService,
   ) {}
   private configured() {
     return Boolean(this.env.get("PATREON_ENABLED") && this.env.get("PATREON_CAMPAIGN_ID"));
@@ -89,8 +91,18 @@ export class SupportersService {
         : [],
       search: parsedSearch.data,
       limit: 100,
+      sync: this.patreonSync.status(),
       note: "Private Patreon records. Membership changes need review; a tier or active membership is not proof of a completed payment. Founder records are permanent promises for future standard whitelist access. No game or Discord access is changed here.",
     };
+  }
+  /** Staff-triggered Patreon import; concurrent requests join the running sync. */
+  async syncNow(staff: Staff) {
+    this.admin(staff);
+    if (!this.patreonSync.configured())
+      throw new ServiceUnavailableException(
+        "Patreon sync is not configured. Set PATREON_ENABLED, PATREON_CAMPAIGN_ID and PATREON_CREATOR_ACCESS_TOKEN.",
+      );
+    return { ok: true, ...(await this.patreonSync.staffSync()) };
   }
   async register(staff: Staff, body: unknown) {
     this.admin(staff);

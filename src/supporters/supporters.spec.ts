@@ -3,6 +3,7 @@ import type { Staff } from "../admin/admin.types";
 import type { EnvService } from "../env/env.service";
 import { SupportersService } from "./supporters.service";
 import type { SupportersStore } from "./supporters.store";
+import type { PatreonSyncService } from "./patreon-sync.service";
 import { linkSchema, parsePatreon } from "./supporters.types";
 
 const secret = "dedicated-patreon-webhook-secret";
@@ -50,11 +51,18 @@ function fixture(overrides: Record<string, unknown> = {}) {
     mutate: jest.fn().mockResolvedValue({ ok: true }),
     register: jest.fn().mockResolvedValue({ ok: true }),
   };
+  const sync = {
+    configured: jest.fn().mockReturnValue(true),
+    status: jest.fn().mockReturnValue({ configured: true, running: false, members: 2 }),
+    staffSync: jest.fn().mockResolvedValue({ joined: false, sync: { configured: true, members: 2 } }),
+  };
   return {
     store,
+    sync,
     service: new SupportersService(
       store as unknown as SupportersStore,
       { get: (key: string) => values[key] } as EnvService,
+      sync as unknown as PatreonSyncService,
     ),
   };
 }
@@ -143,6 +151,35 @@ describe("supporter reviews", () => {
     for (const query of ["x".repeat(101), ["one", "two"], {}, null])
       await expect(service.list(admin, query)).rejects.toMatchObject({ status: 400 });
     expect(store.list).not.toHaveBeenCalled();
+  });
+  it("adds the Patreon sync status to the private list without changing existing fields", async () => {
+    const { service } = fixture();
+    const result = await service.list(admin);
+    expect(Object.keys(result)).toEqual([
+      "enabled",
+      "configured",
+      "webhookConfigured",
+      "founderPolicy",
+      "supporters",
+      "search",
+      "limit",
+      "sync",
+      "note",
+    ]);
+    expect(result.sync).toEqual({ configured: true, running: false, members: 2 });
+  });
+  it("lets only administrators start a configured Patreon sync", async () => {
+    const { service, sync } = fixture();
+    await expect(service.syncNow(admin)).resolves.toEqual({
+      ok: true,
+      joined: false,
+      sync: { configured: true, members: 2 },
+    });
+    for (const role of ["viewer", "moderator"] as const)
+      await expect(service.syncNow({ ...admin, role })).rejects.toMatchObject({ status: 403 });
+    sync.configured.mockReturnValue(false);
+    await expect(service.syncNow(admin)).rejects.toMatchObject({ status: 503 });
+    expect(sync.staffSync).toHaveBeenCalledTimes(1);
   });
   it("allows audited manual tracking before webhook setup without enabling webhook ingestion", async () => {
     const { service, store } = fixture({ PATREON_WEBHOOK_SECRET: undefined });

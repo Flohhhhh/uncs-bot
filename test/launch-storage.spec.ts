@@ -13,6 +13,7 @@ import type {
   SupporterMutation,
   SupporterView,
 } from "../src/supporters/supporters.types";
+import type { PatreonMemberSnapshot } from "../src/supporters/patreon.client";
 import { AdminStore, COMMUNITY_MESSAGES_ACTOR_ID } from "../src/admin/admin.store";
 import type { ActionResult, AdminAction, Staff } from "../src/admin/admin.types";
 import { MapVotesStore } from "../src/map-votes/map-votes.store";
@@ -829,6 +830,101 @@ describe("launch storage on isolated PostgreSQL", () => {
       reviewState: "pending",
       version: record.version + 1,
     });
+  });
+
+  it("imports Patreon API members idempotently and qualifies a first payment despite an earlier webhook row", async () => {
+    // A webhook status row for the same charge, recorded a minute earlier, must not block the API payment.
+    await supporters.ingest({
+      hash: "d".repeat(64),
+      campaignId: campaign,
+      patreonMemberId: "api-member",
+      displayName: "API supporter",
+      patronStatus: "active_patron",
+      lastChargeStatus: "Paid",
+      lastChargeAt: new Date("2026-09-30T11:59:00.000Z"),
+      receivedAt: new Date("2026-09-30T12:00:05.000Z"),
+      trigger: "members:pledge:create",
+    });
+    const snapshot: PatreonMemberSnapshot = {
+      patreonMemberId: "api-member",
+      displayName: "API supporter",
+      patronStatus: "active_patron",
+      lastChargeStatus: "Paid",
+      lastChargeAt: new Date("2026-09-30T12:00:00.000Z"),
+      discordId: staff.id,
+      events: [
+        {
+          id: "pledge_start:1001",
+          date: new Date("2026-09-30T12:00:00.000Z"),
+          amountCents: 500,
+          currency: "USD",
+          paymentStatus: "Paid",
+          type: "pledge_start",
+        },
+      ],
+      historyComplete: true,
+    };
+    expect(await supporters.importApiMember(campaign, snapshot, new Date())).toMatchObject({
+      created: false,
+      updated: true,
+      payments: 1,
+      discordLinked: true,
+    });
+    expect(await supporters.importApiMember(campaign, snapshot, new Date())).toMatchObject({
+      updated: false,
+      payments: 0,
+      discordLinked: false,
+    });
+    let [record] = await supporters.list(campaign, policy, undefined, "api-member");
+    expect(record).toMatchObject({
+      discordId: staff.id,
+      steamId: null,
+      identityState: "unlinked",
+      reviewState: "pending",
+      founderEligiblePayment: {
+        source: "patreon_api",
+        reference: "pledge_start:1001",
+        verificationState: "verified",
+        firstSuccessfulPaymentVerified: true,
+        amountCents: 500,
+      },
+    });
+    expect(
+      (await client.query("SELECT count(*)::int AS count FROM supporter_payments WHERE member_id = $1", [record.id]))
+        .rows,
+    ).toEqual([{ count: 2 }]);
+    record = (
+      await supporters.mutate(
+        record.id,
+        { ...review(record), kind: "link", discordId: staff.id, steamId: "76561198000000002" },
+        staff,
+        campaign,
+        policy,
+      )
+    ).supporter!;
+    record = (
+      await supporters.mutate(
+        record.id,
+        { ...review(record), kind: "founder", paymentId: record.founderEligiblePayment!.id },
+        staff,
+        campaign,
+        policy,
+      )
+    ).supporter!;
+    expect(record.founder).not.toBeNull();
+    const refunded = { ...snapshot, events: [{ ...snapshot.events[0], paymentStatus: "Refunded" }] };
+    expect(await supporters.importApiMember(campaign, refunded, new Date())).toMatchObject({ revoked: 1 });
+    expect(await supporters.get(record.id, campaign, policy)).toMatchObject({
+      founder: record.founder,
+      founderEligiblePayment: null,
+    });
+    expect(await supporters.founderReviews(campaign)).toEqual([
+      expect.objectContaining({ supporterId: record.id, paymentSource: "patreon_api", reference: "pledge_start:1001" }),
+    ]);
+    const kinds = (
+      await client.query<{ kind: string }>("SELECT kind FROM supporter_actions WHERE member_id = $1", [record.id])
+    ).rows.map((row) => row.kind);
+    expect(kinds.sort()).toEqual(["founder", "link", "patreon-discord-link", "patreon-payment-status"]);
   });
 
   it.each(["2026-09-30T03:59:59.999Z", "2026-10-15T04:00:00.000Z"])(

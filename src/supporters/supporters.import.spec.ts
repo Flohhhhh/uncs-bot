@@ -1,0 +1,350 @@
+import { randomUUID } from "node:crypto";
+import { getTableColumns } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/node-postgres";
+import type { PgTable } from "drizzle-orm/pg-core";
+import type { Client } from "pg";
+import type { Database } from "../database/database.types";
+import { supporterMembers, supporterPayments } from "../database/supporters.schema";
+import type { Staff } from "../admin/admin.types";
+import type { PatreonMemberSnapshot, PatreonPledgeEvent } from "./patreon.client";
+import { apiSnapshotHash, PATREON_SYNC_ACTOR, SupportersStore } from "./supporters.store";
+import type { FounderPolicy } from "./supporters.types";
+
+const campaign = "16880209";
+const memberId = randomUUID();
+const staff: Staff = { id: "123456789012345678", name: "Admin", role: "admin", csrf: "csrf" };
+const policy: FounderPolicy = {
+  configured: true,
+  amountCents: 500,
+  currency: "USD",
+  startsAt: "2026-09-30T04:00:00.000Z",
+  endsAt: "2026-10-15T04:00:00.000Z",
+};
+const paid = (id: string, date: string, overrides: Partial<PatreonPledgeEvent> = {}): PatreonPledgeEvent => ({
+  id,
+  date: new Date(date),
+  amountCents: 500,
+  currency: "USD",
+  paymentStatus: "Paid",
+  type: "subscription",
+  ...overrides,
+});
+const snapshot = (overrides: Partial<PatreonMemberSnapshot> = {}): PatreonMemberSnapshot => ({
+  patreonMemberId: "member-1",
+  displayName: "Patron",
+  patronStatus: "active_patron",
+  lastChargeStatus: "Paid",
+  lastChargeAt: new Date("2026-10-01T12:00:00Z"),
+  discordId: null,
+  events: [paid("pledge_start:1", "2026-10-01T12:00:00Z", { type: "pledge_start" })],
+  historyComplete: true,
+  ...overrides,
+});
+function row(table: PgTable, value: Record<string, unknown>) {
+  return Object.keys(getTableColumns(table)).map((key) =>
+    value[key] instanceof Date ? (value[key] as Date).toISOString() : (value[key] ?? null),
+  );
+}
+function payment(overrides: Record<string, unknown> = {}) {
+  return {
+    id: randomUUID(),
+    memberId,
+    campaignId: campaign,
+    paidAt: new Date("2026-10-01T12:00:00Z"),
+    amountCents: 500,
+    currency: "USD",
+    source: "patreon_api",
+    reference: "pledge_start:1",
+    verificationState: "verified",
+    firstSuccessfulPaymentVerified: true,
+    verifiedBy: PATREON_SYNC_ACTOR.id,
+    recordedAt: new Date(),
+    ...overrides,
+  };
+}
+function fixture() {
+  const state = {
+    created: false,
+    observed: true,
+    otherDiscord: false,
+    earlier: false,
+    member: {
+      id: memberId,
+      campaignId: campaign,
+      patreonMemberId: "member-1",
+      displayName: "Patron",
+      patronStatus: "active_patron",
+      lastChargeStatus: "Paid",
+      lastChargeAt: new Date("2026-10-01T12:00:00Z"),
+      observedAt: new Date(),
+      reviewState: "verified",
+      discordId: null as string | null,
+      steamId: null as string | null,
+      version: 4,
+    },
+    payments: [] as Record<string, unknown>[],
+  };
+  const query = jest.fn(async (config: { text: string }, params: unknown[]) => {
+    const text = config.text;
+    if (text.startsWith('insert into "supporter_members"')) return { rows: state.created ? [[memberId]] : [] };
+    if (text.includes('from "supporter_members"') && text.endsWith("for update"))
+      return { rows: [row(supporterMembers, state.member)] };
+    if (text.startsWith('select "id" from "supporter_members"'))
+      return { rows: state.otherDiscord ? [[randomUUID()]] : [] };
+    if (text.startsWith('insert into "supporter_observations"')) return { rows: state.observed ? [[params[0]]] : [] };
+    if (text.startsWith('select "id" from "supporter_payments"'))
+      return { rows: state.earlier ? [[randomUUID()]] : [] };
+    if (text.startsWith("select") && text.includes('from "supporter_payments"'))
+      return { rows: state.payments.map((value) => row(supporterPayments, value)) };
+    if (text.startsWith('insert into "supporter_payments"')) return { rows: [[randomUUID()]] };
+    return { rows: [] };
+  });
+  const store = new SupportersStore(drizzle({ query } as unknown as Client) as Database);
+  const calls = (prefix: string) => query.mock.calls.filter(([config]) => config.text.startsWith(prefix));
+  return { store, query, state, calls };
+}
+const at = new Date("2026-10-02T12:00:00Z");
+
+describe("Patreon API import persistence", () => {
+  it("hashes a canonical snapshot that ignores event order and the connected Discord account", () => {
+    const events = [paid("subscription:2", "2026-11-01T00:00:00Z"), ...snapshot().events];
+    const base = apiSnapshotHash(campaign, snapshot({ events }));
+    expect(apiSnapshotHash(campaign, snapshot({ events: [...events].reverse(), discordId: staff.id }))).toBe(base);
+    expect(apiSnapshotHash(campaign, snapshot({ events, patronStatus: "former_patron" }))).not.toBe(base);
+    expect(apiSnapshotHash("other", snapshot({ events }))).not.toBe(base);
+    expect(apiSnapshotHash(campaign, snapshot({ events, patreonMemberId: "member-2" }))).not.toBe(base);
+  });
+  it("imports a new member with an api:sync observation and one verified first payment per Paid event", async () => {
+    const { store, state, calls, query } = fixture();
+    state.created = true;
+    const result = await store.importApiMember(
+      campaign,
+      snapshot({
+        events: [
+          paid("pledge_start:1", "2026-10-01T12:00:00Z", { type: "pledge_start" }),
+          paid("subscription:2", "2026-11-01T12:00:00Z"),
+          paid("subscription:3", "2026-12-01T12:00:00Z", { paymentStatus: "Declined" }),
+        ],
+      }),
+      at,
+    );
+    expect(result).toMatchObject({ created: true, updated: false, payments: 2, revoked: 0, conflict: null });
+    const [observation] = calls('insert into "supporter_observations"');
+    expect(observation[0].text).toContain("on conflict do nothing");
+    expect(observation[1]).toEqual(expect.arrayContaining(["api:sync", "active_patron", "Paid"]));
+    const inserts = calls('insert into "supporter_payments"');
+    expect(inserts).toHaveLength(2);
+    for (const [statement] of inserts) expect(statement.text).toContain("on conflict do nothing");
+    const [first, second] = inserts.map(([, values]) => values);
+    expect(first).toEqual(
+      expect.arrayContaining(["patreon_api", "pledge_start:1", "verified", true, 500, "USD", PATREON_SYNC_ACTOR.id]),
+    );
+    expect(second).toEqual(expect.arrayContaining(["patreon_api", "subscription:2", "verified", false]));
+    expect(JSON.stringify(inserts)).not.toContain("subscription:3");
+    const [update] = calls('update "supporter_members"');
+    expect(update[1]).toEqual(expect.arrayContaining(["pending", 5]));
+    expect(query.mock.calls.map(([config]) => config.text).join("\n")).not.toMatch(/supporter_founders/);
+    expect(query.mock.calls.at(-1)![0].text).toBe("commit");
+  });
+  it("leaves the first-payment flag unset when the returned history may be truncated", async () => {
+    const { store, state, calls } = fixture();
+    state.created = true;
+    await store.importApiMember(campaign, snapshot({ historyComplete: false }), at);
+    const [[, values]] = calls('insert into "supporter_payments"');
+    expect(values).toEqual(expect.arrayContaining(["pledge_start:1", "verified", false]));
+    expect(values).not.toContain(true);
+  });
+  it("re-syncs an unchanged member without an observation, review reset, payment write or version bump", async () => {
+    const { store, state, calls } = fixture();
+    state.observed = false;
+    state.payments = [payment()];
+    expect(await store.importApiMember(campaign, snapshot(), at)).toMatchObject({
+      created: false,
+      updated: false,
+      payments: 0,
+      revoked: 0,
+      discordLinked: false,
+    });
+    expect(calls("update")).toHaveLength(0);
+    expect(calls('insert into "supporter_payments"')).toHaveLength(0);
+    expect(calls('insert into "supporter_actions"')).toHaveLength(0);
+  });
+  it("adds only new charges for a changed member and keeps an existing first payment answer on truncation", async () => {
+    const { store, state, calls } = fixture();
+    state.payments = [payment()];
+    const result = await store.importApiMember(
+      campaign,
+      snapshot({
+        historyComplete: false,
+        events: [...snapshot().events, paid("subscription:2", "2026-11-01T12:00:00Z")],
+      }),
+      at,
+    );
+    expect(result).toMatchObject({ updated: true, payments: 1 });
+    const inserts = calls('insert into "supporter_payments"');
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0][1]).toContain("subscription:2");
+    expect(calls('update "supporter_payments"')).toHaveLength(0);
+  });
+  it.each(["Refunded", "Declined", "Fraud", "Partially Refunded"])(
+    "marks a payment later reported %s unverified with a system audit and never touches founder records",
+    async (status) => {
+      const { store, state, calls, query } = fixture();
+      state.payments = [payment()];
+      const result = await store.importApiMember(
+        campaign,
+        snapshot({
+          events: [paid("pledge_start:1", "2026-10-01T12:00:00Z", { type: "pledge_start", paymentStatus: status })],
+        }),
+        at,
+      );
+      expect(result).toMatchObject({ revoked: 1, payments: 0 });
+      const [update] = calls('update "supporter_payments"');
+      expect(update[1]).toEqual(expect.arrayContaining(["unverified", false]));
+      const [[, audit]] = calls('insert into "supporter_actions"');
+      expect(audit).toEqual(
+        expect.arrayContaining([PATREON_SYNC_ACTOR.id, PATREON_SYNC_ACTOR.name, "patreon-payment-status"]),
+      );
+      expect(JSON.stringify(audit)).toContain(status);
+      expect(query.mock.calls.map(([config]) => config.text).join("\n")).not.toMatch(/supporter_founders|delete from/);
+    },
+  );
+  it("re-verifies a payment Patreon reports Paid again", async () => {
+    const { store, state, calls } = fixture();
+    state.payments = [payment({ verificationState: "unverified", firstSuccessfulPaymentVerified: false })];
+    expect(await store.importApiMember(campaign, snapshot(), at)).toMatchObject({ revoked: 0 });
+    const [update] = calls('update "supporter_payments"');
+    expect(update[1]).toEqual(expect.arrayContaining(["verified", true]));
+    expect(calls('insert into "supporter_actions"')).toHaveLength(1);
+  });
+  it("fills an empty Discord link from Patreon with a system audit row", async () => {
+    const { store, state, calls } = fixture();
+    state.observed = false;
+    state.payments = [payment()];
+    const result = await store.importApiMember(campaign, snapshot({ discordId: staff.id }), at);
+    expect(result).toMatchObject({ discordLinked: true, conflict: null });
+    const [lookup] = calls('select "id" from "supporter_members"');
+    expect(lookup[0].text).toContain('"discord_id" =');
+    expect(lookup[0].text).toContain('"id" <>');
+    const [update] = calls('update "supporter_members"');
+    expect(update[0].text).toContain('"discord_id" =');
+    expect(update[0].text).not.toContain('"steam_id"');
+    expect(update[0].text).not.toContain('"review_state"');
+    expect(update[1]).toEqual(expect.arrayContaining([staff.id, 5]));
+    const [[, audit]] = calls('insert into "supporter_actions"');
+    expect(audit).toEqual(
+      expect.arrayContaining(["system:patreon-sync", "Patreon sync", "patreon-discord-link", memberId]),
+    );
+  });
+  it("never overwrites an existing link and reports a Discord ID used by another record", async () => {
+    const differs = fixture();
+    differs.state.observed = false;
+    differs.state.payments = [payment()];
+    differs.state.member.discordId = "999999999999999999";
+    expect(await differs.store.importApiMember(campaign, snapshot({ discordId: staff.id }), at)).toMatchObject({
+      discordLinked: false,
+      conflict: "discord-differs",
+    });
+    expect(differs.calls("update")).toHaveLength(0);
+    expect(differs.calls('insert into "supporter_actions"')).toHaveLength(0);
+    const same = fixture();
+    same.state.observed = false;
+    same.state.member.discordId = staff.id;
+    expect(await same.store.importApiMember(campaign, snapshot({ discordId: staff.id }), at)).toMatchObject({
+      conflict: null,
+      discordLinked: false,
+    });
+    const used = fixture();
+    used.state.observed = false;
+    used.state.payments = [payment()];
+    used.state.otherDiscord = true;
+    expect(await used.store.importApiMember(campaign, snapshot({ discordId: staff.id }), at)).toMatchObject({
+      discordLinked: false,
+      conflict: "discord-in-use",
+    });
+    expect(used.calls("update")).toHaveLength(0);
+  });
+  it("keeps webhook ordering rules: an older API charge does not replace newer webhook state", async () => {
+    const { store, state, calls } = fixture();
+    state.member.lastChargeAt = new Date("2026-11-01T12:00:00Z");
+    await store.importApiMember(campaign, snapshot(), at);
+    const [update] = calls('update "supporter_members"');
+    expect(update[0].text).not.toContain('"last_charge_at" =');
+    expect(update[0].text).not.toContain('"patron_status" =');
+    expect(update[1]).toContain("pending");
+  });
+  it("lists founder promises whose payment is no longer verified, scoped to the campaign", async () => {
+    const { store, query } = fixture();
+    await store.founderReviews(campaign);
+    const [statement, values] = query.mock.calls[0];
+    expect(statement.text).toContain('from "supporter_founders"');
+    expect(statement.text).toContain('"supporter_payments"."verification_state" <>');
+    expect(values).toEqual(expect.arrayContaining([campaign, "verified"]));
+  });
+});
+
+describe("founder eligibility for authenticated Patreon payments", () => {
+  it("lists a verified first patreon_api payment like a manual receipt, ignoring only earlier webhook status rows", async () => {
+    const { store, query } = fixture();
+    await store.list(campaign, policy);
+    const text = query.mock.calls[0][0].text;
+    expect(text).toContain("p.source IN ('manual_receipt', 'patreon_api') AND p.verification_state = 'verified'");
+    expect(text).toContain("AND p.first_successful_payment_verified AND NOT EXISTS");
+    expect(text).toContain("AND (p.source = 'manual_receipt' OR earlier.source <> 'signed_status')");
+  });
+  const founder = (paymentId: string) => ({
+    kind: "founder" as const,
+    id: randomUUID(),
+    version: 4,
+    confirm: "member-1",
+    reason: "Checked the Patreon payment history",
+    paymentId,
+  });
+  function linked(source: string, overrides: Record<string, unknown> = {}) {
+    const context = fixture();
+    context.state.member.discordId = staff.id;
+    context.state.member.steamId = "76561198000000001";
+    context.state.payments = [payment({ source, ...overrides })];
+    return context;
+  }
+  it("accepts a verified first patreon_api payment and checks earlier non-webhook payments", async () => {
+    const { store, state, calls } = linked("patreon_api");
+    await expect(
+      store.mutate(memberId, founder(state.payments[0].id as string), staff, campaign, policy),
+    ).resolves.toMatchObject({ ok: true, replayed: false });
+    const [[earlier, values]] = calls('select "id" from "supporter_payments"');
+    expect(earlier.text).toContain('"supporter_payments"."source" <>');
+    expect(values).toContain("signed_status");
+    expect(calls('insert into "supporter_founders"')).toHaveLength(1);
+  });
+  it("still lets any earlier payment, including a webhook status row, block a manual receipt", async () => {
+    const { store, state, calls } = linked("manual_receipt");
+    await store.mutate(memberId, founder(state.payments[0].id as string), staff, campaign, policy);
+    const [[earlier, values]] = calls('select "id" from "supporter_payments"');
+    expect(earlier.text).not.toContain('"source"');
+    expect(values).not.toContain("signed_status");
+  });
+  it.each([
+    ["an earlier verified payment", {}, true],
+    ["an unverified (refunded) payment", { verificationState: "unverified" }, false],
+    ["a payment not derived as the first", { firstSuccessfulPaymentVerified: false }, false],
+    ["a non-USD payment", { currency: "EUR" }, false],
+    ["an amount under $5", { amountCents: 499 }, false],
+    ["a payment after the window", { paidAt: new Date(policy.endsAt!) }, false],
+  ])("rejects a patreon_api founder award for %s", async (_name, overrides, earlier) => {
+    const { store, state, calls, query } = linked("patreon_api", overrides);
+    state.earlier = earlier;
+    await expect(
+      store.mutate(memberId, founder(state.payments[0].id as string), staff, campaign, policy),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(calls('insert into "supporter_founders"')).toHaveLength(0);
+    expect(query.mock.calls.at(-1)![0].text).toBe("rollback");
+  });
+  it("keeps today's identity requirement: a Patreon-filled Discord ID alone is not enough", async () => {
+    const { store, state } = linked("patreon_api");
+    state.member.steamId = null;
+    await expect(
+      store.mutate(memberId, founder(state.payments[0].id as string), staff, campaign, policy),
+    ).rejects.toMatchObject({ status: 409 });
+  });
+});

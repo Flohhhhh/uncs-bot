@@ -1,5 +1,5 @@
 import { ConflictException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { and, eq, lt, sql } from "drizzle-orm";
+import { and, eq, lt, ne, sql } from "drizzle-orm";
 import { createHash, randomUUID } from "node:crypto";
 import { DATABASE, type Database } from "../database/database.types";
 import {
@@ -18,6 +18,60 @@ import type {
   SupporterMutation,
   SupporterView,
 } from "./supporters.types";
+import { firstPaidEventId, type PatreonMemberSnapshot } from "./patreon.client";
+
+export const PATREON_SYNC_ACTOR = { id: "system:patreon-sync", name: "Patreon sync" } as const;
+export type ApiImportResult = {
+  memberId: string;
+  patreonMemberId: string;
+  created: boolean;
+  updated: boolean;
+  payments: number;
+  revoked: number;
+  discordLinked: boolean;
+  conflict: "discord-in-use" | "discord-differs" | null;
+};
+type MemberRow = typeof supporterMembers.$inferSelect;
+type ObservedFields = Pick<PatreonObservation, "displayName" | "patronStatus" | "lastChargeStatus" | "lastChargeAt">;
+
+// last_charge_date orders charge observations, not membership changes. An older charge never replaces
+// newer state, and an undated observation preserves the last known charge.
+function observedPatch(member: MemberRow, observation: ObservedFields) {
+  const olderCharge = member.lastChargeAt && observation.lastChargeAt && observation.lastChargeAt < member.lastChargeAt;
+  return !olderCharge
+    ? {
+        displayName: observation.displayName,
+        patronStatus: observation.patronStatus,
+        ...(observation.lastChargeAt || !member.lastChargeAt
+          ? { lastChargeStatus: observation.lastChargeStatus, lastChargeAt: observation.lastChargeAt }
+          : {}),
+      }
+    : {};
+}
+const sha256 = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+/** Canonical member snapshot: an unchanged Patreon record hashes the same and adds no observation. */
+export function apiSnapshotHash(campaignId: string, snapshot: PatreonMemberSnapshot) {
+  return sha256({
+    source: "patreon-api:v1",
+    campaignId,
+    patreonMemberId: snapshot.patreonMemberId,
+    displayName: snapshot.displayName,
+    patronStatus: snapshot.patronStatus,
+    lastChargeStatus: snapshot.lastChargeStatus,
+    lastChargeAt: snapshot.lastChargeAt?.toISOString() ?? null,
+    historyComplete: snapshot.historyComplete,
+    events: [...snapshot.events]
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .map((event) => [
+        event.id,
+        event.date.toISOString(),
+        event.amountCents,
+        event.currency,
+        event.paymentStatus,
+        event.type,
+      ]),
+  });
+}
 
 @Injectable()
 export class SupportersStore {
@@ -111,25 +165,11 @@ export class SupportersStore {
         .onConflictDoNothing()
         .returning({ hash: supporterObservations.hash });
       if (!inserted) return { duplicate: true };
-      // last_charge_date orders charge observations, not membership changes. An
-      // undated/equal-date update is always pending review, never an entitlement.
-      const olderCharge =
-        member.lastChargeAt && observation.lastChargeAt && observation.lastChargeAt < member.lastChargeAt;
+      // An undated/equal-date update is always pending review, never an entitlement.
       await tx
         .update(supporterMembers)
         .set({
-          ...(!olderCharge
-            ? {
-                displayName: observation.displayName,
-                patronStatus: observation.patronStatus,
-                ...(observation.lastChargeAt || !member.lastChargeAt
-                  ? {
-                      lastChargeStatus: observation.lastChargeStatus,
-                      lastChargeAt: observation.lastChargeAt,
-                    }
-                  : {}),
-              }
-            : {}),
+          ...observedPatch(member, observation),
           observedAt: observation.receivedAt,
           reviewState: "pending",
           version: member.version + 1,
@@ -156,6 +196,186 @@ export class SupportersStore {
     });
   }
 
+  /**
+   * Imports one authenticated Patreon API member. Each Paid pledge event becomes one verified
+   * patreon_api payment keyed by its event ID; a later non-Paid status marks that payment unverified.
+   * Founder records are never touched here.
+   */
+  async importApiMember(campaignId: string, snapshot: PatreonMemberSnapshot, receivedAt: Date) {
+    const hash = apiSnapshotHash(campaignId, snapshot);
+    const firstId = firstPaidEventId(snapshot.events, snapshot.historyComplete);
+    return this.db.transaction(async (tx): Promise<ApiImportResult> => {
+      const [created] = await tx
+        .insert(supporterMembers)
+        .values({ id: randomUUID(), campaignId, patreonMemberId: snapshot.patreonMemberId, observedAt: receivedAt })
+        .onConflictDoNothing()
+        .returning({ id: supporterMembers.id });
+      const [member] = await tx
+        .select()
+        .from(supporterMembers)
+        .where(
+          and(
+            eq(supporterMembers.campaignId, campaignId),
+            eq(supporterMembers.patreonMemberId, snapshot.patreonMemberId),
+          ),
+        )
+        .for("update");
+      const [observed] = await tx
+        .insert(supporterObservations)
+        .values({
+          hash,
+          memberId: member.id,
+          receivedAt,
+          trigger: "api:sync",
+          patronStatus: snapshot.patronStatus,
+          lastChargeStatus: snapshot.lastChargeStatus,
+          lastChargeAt: snapshot.lastChargeAt,
+        })
+        .onConflictDoNothing()
+        .returning({ hash: supporterObservations.hash });
+      const result: ApiImportResult = {
+        memberId: member.id,
+        patreonMemberId: member.patreonMemberId,
+        created: !!created,
+        updated: !!observed && !created,
+        payments: 0,
+        revoked: 0,
+        discordLinked: false,
+        conflict: null,
+      };
+      // An unchanged snapshot keeps the member's review state; a changed one needs review like a webhook.
+      const patch: Partial<typeof supporterMembers.$inferInsert> = observed
+        ? { ...observedPatch(member, snapshot), observedAt: receivedAt, reviewState: "pending" }
+        : {};
+      const actions: (typeof supporterActions.$inferInsert)[] = [];
+      let paymentsChanged = false;
+      const existing = new Map(
+        (
+          await tx
+            .select()
+            .from(supporterPayments)
+            .where(and(eq(supporterPayments.memberId, member.id), eq(supporterPayments.source, "patreon_api")))
+        ).map((row) => [row.reference, row]),
+      );
+      for (const event of [...snapshot.events].sort((a, b) => a.date.getTime() - b.date.getTime())) {
+        const row = existing.get(event.id);
+        const paid = event.paymentStatus === "Paid";
+        if (paid && !row) {
+          const [inserted] = await tx
+            .insert(supporterPayments)
+            .values({
+              id: randomUUID(),
+              memberId: member.id,
+              campaignId,
+              paidAt: event.date,
+              amountCents: event.amountCents,
+              currency: event.currency,
+              source: "patreon_api",
+              reference: event.id,
+              verificationState: "verified",
+              firstSuccessfulPaymentVerified: event.id === firstId,
+              verifiedBy: PATREON_SYNC_ACTOR.id,
+              recordedAt: receivedAt,
+            })
+            .onConflictDoNothing()
+            .returning({ id: supporterPayments.id });
+          if (inserted) result.payments++;
+          continue;
+        }
+        if (!row) continue;
+        // A truncated history cannot prove or disprove the first payment, so it keeps the earlier answer.
+        const first = paid && (snapshot.historyComplete ? event.id === firstId : row.firstSuccessfulPaymentVerified);
+        const state = paid ? "verified" : "unverified";
+        if (row.verificationState === state && row.firstSuccessfulPaymentVerified === first) continue;
+        await tx
+          .update(supporterPayments)
+          .set({ verificationState: state, firstSuccessfulPaymentVerified: first })
+          .where(eq(supporterPayments.id, row.id));
+        paymentsChanged = true;
+        if (row.verificationState === state) continue;
+        if (!paid) result.revoked++;
+        actions.push({
+          id: randomUUID(),
+          memberId: member.id,
+          actorId: PATREON_SYNC_ACTOR.id,
+          actorName: PATREON_SYNC_ACTOR.name,
+          kind: "patreon-payment-status",
+          reason: `Patreon reported this payment as ${event.paymentStatus ?? "unknown"}.`,
+          fingerprint: sha256({ kind: "patreon-payment-status", paymentId: row.id, state, hash }),
+          details: {
+            paymentId: row.id,
+            reference: row.reference,
+            previousVerificationState: row.verificationState,
+            verificationState: state,
+            paymentStatus: event.paymentStatus,
+          },
+          createdAt: receivedAt,
+        });
+      }
+      if (snapshot.discordId && member.discordId !== snapshot.discordId) {
+        if (member.discordId) result.conflict = "discord-differs";
+        else {
+          const [other] = await tx
+            .select({ id: supporterMembers.id })
+            .from(supporterMembers)
+            .where(
+              and(
+                eq(supporterMembers.campaignId, campaignId),
+                eq(supporterMembers.discordId, snapshot.discordId),
+                ne(supporterMembers.id, member.id),
+              ),
+            )
+            .limit(1);
+          if (other) result.conflict = "discord-in-use";
+          else {
+            patch.discordId = snapshot.discordId;
+            result.discordLinked = true;
+            actions.push({
+              id: randomUUID(),
+              memberId: member.id,
+              actorId: PATREON_SYNC_ACTOR.id,
+              actorName: PATREON_SYNC_ACTOR.name,
+              kind: "patreon-discord-link",
+              reason: "Patreon reported the Discord account this patron connected.",
+              fingerprint: sha256({ kind: "patreon-discord-link", memberId: member.id, discordId: snapshot.discordId }),
+              details: {
+                discordId: snapshot.discordId,
+                previousDiscordId: null,
+                patreonMemberId: member.patreonMemberId,
+              },
+              createdAt: receivedAt,
+            });
+          }
+        }
+      }
+      if (observed || result.payments || paymentsChanged || result.discordLinked)
+        await tx
+          .update(supporterMembers)
+          .set({ ...patch, version: member.version + 1 })
+          .where(eq(supporterMembers.id, member.id));
+      for (const action of actions) await tx.insert(supporterActions).values(action);
+      return result;
+    });
+  }
+
+  /** Permanent founder promises whose qualifying payment is no longer verified, for staff review. */
+  async founderReviews(campaignId: string) {
+    return this.db
+      .select({
+        supporterId: supporterFounders.memberId,
+        patreonMemberId: supporterMembers.patreonMemberId,
+        paymentId: supporterFounders.paymentId,
+        paymentSource: supporterPayments.source,
+        reference: supporterPayments.reference,
+      })
+      .from(supporterFounders)
+      .innerJoin(supporterMembers, eq(supporterMembers.id, supporterFounders.memberId))
+      .innerJoin(supporterPayments, eq(supporterPayments.id, supporterFounders.paymentId))
+      .where(and(eq(supporterMembers.campaignId, campaignId), ne(supporterPayments.verificationState, "verified")))
+      .orderBy(supporterFounders.awardedAt)
+      .limit(50);
+  }
+
   async list(campaignId: string, policy: FounderPolicy, memberId?: string, search = ""): Promise<SupporterView[]> {
     const payment = (alias: string) =>
       sql.raw(
@@ -168,10 +388,13 @@ export class SupportersStore {
         'identityState', CASE WHEN m.discord_id IS NOT NULL AND m.steam_id IS NOT NULL THEN 'staff_linked' ELSE 'unlinked' END,
         'version', m.version,
         'latestPayment', (SELECT ${payment("p")} FROM supporter_payments p WHERE p.member_id = m.id
-          ORDER BY (p.source = 'manual_receipt') DESC, p.paid_at DESC, p.recorded_at DESC LIMIT 1),
+          ORDER BY (p.verification_state = 'verified') DESC, p.paid_at DESC, (p.source = 'manual_receipt') DESC,
+            p.recorded_at DESC LIMIT 1),
         'founderEligiblePayment', (SELECT ${payment("p")} FROM supporter_payments p WHERE p.member_id = m.id
-          AND ${policy.configured} AND p.source = 'manual_receipt' AND p.verification_state = 'verified'
-          AND p.first_successful_payment_verified AND NOT EXISTS (SELECT 1 FROM supporter_payments earlier WHERE earlier.member_id = m.id AND earlier.paid_at < p.paid_at)
+          AND ${policy.configured} AND p.source IN ('manual_receipt', 'patreon_api') AND p.verification_state = 'verified'
+          AND p.first_successful_payment_verified AND NOT EXISTS (SELECT 1 FROM supporter_payments earlier
+            WHERE earlier.member_id = m.id AND earlier.paid_at < p.paid_at
+            AND (p.source = 'manual_receipt' OR earlier.source <> 'signed_status'))
           AND p.amount_cents >= ${policy.amountCents} AND p.currency = ${policy.currency}
           AND p.paid_at >= ${policy.startsAt}::timestamptz AND p.paid_at < ${policy.endsAt}::timestamptz
           ORDER BY p.paid_at DESC, p.recorded_at DESC LIMIT 1),
@@ -261,7 +484,7 @@ export class SupportersStore {
           !member.discordId ||
           !isPublicIndividualSteamId(member.steamId) ||
           !payment ||
-          payment.source !== "manual_receipt" ||
+          (payment.source !== "manual_receipt" && payment.source !== "patreon_api") ||
           payment.verificationState !== "verified" ||
           !payment.firstSuccessfulPaymentVerified ||
           payment.currency !== policy.currency ||
@@ -276,7 +499,15 @@ export class SupportersStore {
         const [earlier] = await tx
           .select({ id: supporterPayments.id })
           .from(supporterPayments)
-          .where(and(eq(supporterPayments.memberId, memberId), lt(supporterPayments.paidAt, payment.paidAt)))
+          .where(
+            and(
+              eq(supporterPayments.memberId, memberId),
+              lt(supporterPayments.paidAt, payment.paidAt),
+              // Webhook status rows carry no amount and repeat charges the authenticated history already
+              // covers, so they cannot block a verified first payment imported from the Patreon API.
+              payment.source === "patreon_api" ? ne(supporterPayments.source, "signed_status") : undefined,
+            ),
+          )
           .limit(1);
         if (earlier)
           throw new ConflictException(
