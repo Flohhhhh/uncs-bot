@@ -244,7 +244,7 @@ describe("CombatPage", () => {
     );
   });
 
-  it("keeps failed-refresh history explicitly stale and stops claiming a receiving feed", async () => {
+  it("keeps failed-refresh history stale through a pending retry until recovery is confirmed", async () => {
     request.mockResolvedValueOnce(server()).mockRejectedValueOnce(new Error("Unavailable"));
     const view = render(page());
     await screen.findByText("FEED RECEIVING");
@@ -253,6 +253,17 @@ describe("CombatPage", () => {
     expect(screen.getByText("FEED STATUS UNAVAILABLE")).toBeTruthy();
     expect(screen.queryByText("FEED RECEIVING")).toBeNull();
     expect(screen.getByRole("table", { name: "Server leaderboard" })).toBeTruthy();
+    const retry = deferred<CombatResponse>();
+    request.mockImplementationOnce(() => retry.promise as never);
+    view.rerender(page({ ...context, refreshVersion: 2 }));
+    await waitFor(() => expect(request).toHaveBeenCalledTimes(3));
+    expect(screen.getByRole("alert")).toHaveTextContent("Showing the last received snapshot");
+    expect(screen.queryByText("FEED RECEIVING")).toBeNull();
+    expect(screen.getByRole("button", { name: "Retry combat history" })).toBeDisabled();
+    await act(async () => retry.resolve(server({ feedStatus: "quiet" })));
+    expect(await screen.findByText("NO RECENT BATCH")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(request.mock.calls.every(([, options]) => !options?.method)).toBe(true);
   });
 
   it("distinguishes an inactive feed from server availability and renders names as text", async () => {
