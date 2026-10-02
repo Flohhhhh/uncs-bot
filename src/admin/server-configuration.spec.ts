@@ -518,7 +518,8 @@ describe("server configuration boundaries", () => {
     "refuses %j, whose Unicode line separator would read back as a redacted configuration",
     async (value) => {
       const f = fixture();
-      for (const changes of [{ serverPassword: value }, { serverName: value }])
+      const attempts: Record<string, string>[] = [{ serverPassword: value }, { serverName: value }];
+      for (const changes of attempts)
         await expect(f.game.execute(save(changes))).rejects.toThrow("Enter a valid value for");
       expect(f.request.mock.calls.some(([method]) => method === "PUT")).toBe(false);
       // The readers' multiline patterns treat U+2028 and U+2029 as line breaks, so a saved value would lock edits.
