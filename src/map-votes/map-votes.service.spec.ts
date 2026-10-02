@@ -1595,6 +1595,34 @@ describe("automatic ballots that follow the round, not the clock", () => {
     expect(broadcasts(f.admin)).toHaveLength(game);
     expect(f.store.finishReminder).toHaveBeenCalledWith(f.record.id, "midpoint", "applied", message);
   });
+  it("sends the update reminder when only it is on, even at or above the switched-off last-chance score", async () => {
+    // The last-chance score stays at its default 85; saving accepts it because that reminder is off.
+    const f = await openBallot({
+      settings: { reminders: { midpoint: { score: 88 } } },
+      policy: { midpointReminder: true, finalReminder: false },
+    });
+    f.score(89);
+    await f.service.tick();
+    later();
+    f.score(90);
+    await f.service.tick();
+    expect(f.store.claimReminder.mock.calls.map(([, stage]) => stage)).toEqual(["midpoint", "midpoint"]);
+    expect(f.discord.remind).toHaveBeenCalledTimes(1);
+    expect(f.discord.remind).toHaveBeenCalledWith(expect.anything(), "midpoint");
+  });
+  it("sends only the reminder the ballot opened with, not one switched on later", async () => {
+    const f = await openBallot({ policy: { midpointReminder: false, finalReminder: true } });
+    // Staff switch the update reminder on after the ballot opened; the ballot keeps its own switches.
+    f.saved.policy = { ...f.saved.policy, midpointReminder: true };
+    f.score(60);
+    await f.service.tick();
+    expect(f.store.claimReminder).not.toHaveBeenCalled();
+    later(25_000);
+    f.score(86);
+    await f.service.tick();
+    expect(f.discord.remind).toHaveBeenCalledTimes(1);
+    expect(f.discord.remind).toHaveBeenCalledWith(expect.anything(), "final");
+  });
   it("announces an automatic ballot in game once, as the voting system", async () => {
     const f = automatic("primary", { announce: { openInGame: true } });
     await observeForWindow(f);

@@ -1368,18 +1368,20 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
       return;
     }
     if (track?.phase === "waiting") return;
-    // If observations jump past both milestones, only send the late reminder.
-    const stage: VoteReminder | null =
-      progress >= settings.reminders.final.score
-        ? "final"
-        : progress >= settings.reminders.midpoint.score
-          ? "midpoint"
-          : null;
+    // The reminder reached is the highest-scoring one switched on, both now and when the ballot opened.
+    // If observations jump past both milestones, only the later one is sent.
+    const field = (stage: VoteReminder) => (stage === "midpoint" ? "midpointReminder" : "finalReminder");
+    const stage =
+      (["midpoint", "final"] as const)
+        .filter(
+          (slot) =>
+            saved.policy[field(slot)] && automation.policy[field(slot)] && progress >= settings.reminders[slot].score,
+        )
+        .sort((a, b) => settings.reminders[b].score - settings.reminders[a].score)[0] ?? null;
     if (!stage) return;
     const slot = settings.reminders[stage];
-    const field = stage === "midpoint" ? "midpointReminder" : "finalReminder";
     // A reminder whose score had already passed when the ballot opened is skipped.
-    if (!saved.policy[field] || (automation.openedAtScore ?? -1) >= slot.score) return;
+    if ((automation.openedAtScore ?? -1) >= slot.score) return;
     const actor = await this.auth.serverStaff(
       { id: vote.actorId, name: vote.actorName, role: "admin", csrf: "" },
       vote.serverId,
@@ -1408,7 +1410,7 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
         const current = await this.store.policy(vote.serverId);
         return (
           !!current?.policy.enabled &&
-          !!current.policy[field] &&
+          !!current.policy[field(stage)] &&
           (await this.store.get(vote.id))?.state === "open" &&
           !this.stopped
         );
