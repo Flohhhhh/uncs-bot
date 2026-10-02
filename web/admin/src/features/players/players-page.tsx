@@ -7,6 +7,7 @@ import { allowed } from "../actions/policy";
 import { PlayerActions } from "./player-actions";
 import { FactionChip, FactionOptions, liveFactions, playerFaction } from "./factions";
 import { TeamMoveDialog, TeamResults, type TeamMoveResult } from "./team-move";
+import { EmptyRoster } from "./empty-roster";
 
 export function PlayersPage() {
   const admin = useAdmin();
@@ -306,8 +307,10 @@ export function PlayersPage() {
               );
             }}
           />
+        ) : players.length ? (
+          <Empty title="No matching players" detail="Change or clear the filters to see more players." />
         ) : (
-          <Empty title="No matching players" detail="Try a different search or refresh the roster." />
+          <EmptyRoster overview={admin.overview} stale={admin.stale} />
         )}
       </Card>
       {managedId && <PlayerActions steamId={managedId} onClose={() => setManagedId(null)} />}

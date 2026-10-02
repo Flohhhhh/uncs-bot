@@ -119,6 +119,7 @@ it("does not fetch private records for a non-admin; contact details appear only 
   expect(screen.queryByText(record.email!)).not.toBeInTheDocument();
   expect(screen.getByText(record.discordDisplayName)).toBeInTheDocument();
   expect(document.querySelector("img")).toBeNull();
+  fireEvent.change(screen.getByRole("searchbox"), { target: { value: `  ${record.steamId}  ` } });
   fireEvent.click(screen.getByRole("button", { name: "View request" }));
   const dialog = screen.getByRole("dialog");
   expect(within(dialog).getByText(record.email!)).toBeInTheDocument();

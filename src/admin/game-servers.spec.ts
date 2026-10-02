@@ -85,7 +85,7 @@ describe("explicit game-server registry", () => {
     const east = registry.get("east");
     config[0].rconUrl = "https://wrong.example.test";
     config[0].password = "wrong-secret";
-    expect(() => registry.get("east")).toThrow("Restart this instance");
+    expect(() => registry.get("east")).toThrow("Restart Gramps");
     const transport = jest.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}"));
     await east.request("GET", "/v1/status");
     expect(transport).toHaveBeenCalledWith(
