@@ -594,6 +594,45 @@ describe("durable optional event service", () => {
     await old.service.tick();
     expect(on.alerts.send).not.toHaveBeenCalled();
     expect(old.alerts.send).not.toHaveBeenCalled();
+    // A lock that was already off before the event is not Gramps' to report.
+    const wasOff = fixture();
+    wasOff.set({ ...wasOff.record, state: "complete", originalLock: false, updatedAt: new Date(eventNow - 60_000) });
+    await wasOff.service.tick();
+    expect(wasOff.game.configuration).not.toHaveBeenCalled();
+    expect(wasOff.alerts.send).not.toHaveBeenCalled();
+  });
+  it("drops a claimed move without sending it when the server is waiting for players before it is sent", async () => {
+    const f = fixture();
+    // A live round still at 0 points with 25 players; the excluded player is warned and due a move.
+    const crowd = [...Array<string>(24).fill("RED"), "GRN"];
+    const live = clocklessSnapshotAt(eventNow, crowd, [0, 0, 0]);
+    f.set({
+      ...f.record,
+      progress: {
+        ...f.record.progress,
+        tracker: undefined,
+        roundId: undefined,
+        warned: Object.fromEntries(live.players.map((player) => [player.steamId, eventNow - 60_000])),
+      },
+    });
+    // Players leave before the move's own check: the same round, now waiting for players.
+    const waiting = clocklessSnapshotAt(eventNow + 1_000, ["RED"], [0, 0, 0]);
+    f.game.overview.mockResolvedValueOnce(live).mockResolvedValueOnce(waiting);
+    await f.service.tick();
+    expect(f.store.claim).toHaveBeenCalledWith(
+      f.record.id,
+      expect.any(Number),
+      expect.objectContaining({ kind: "move" }),
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(f.admin.act).not.toHaveBeenCalled();
+    expect(f.store.settle).toHaveBeenCalledWith(
+      f.record.id,
+      expect.any(String),
+      expect.objectContaining({ state: "failed", message: expect.stringContaining("No event action was sent") }),
+      expect.anything(),
+    );
   });
 });
 
@@ -769,6 +808,25 @@ describe("a 50v50 started by a community vote", () => {
     const rounds = new GameRounds(fixtureServers(f.game));
     const track = rounds.observe("primary", overview).track;
     expect(await f.service.voteEventReadiness("primary", fifty, config, overview, track)).toEqual({ ok: true });
+    const waiting = new GameRounds(fixtureServers(f.game)).observe("primary", preRoundSnapshot()).track;
+    expect(await f.service.voteEventReadiness("primary", fifty, config, overview, waiting)).toEqual({
+      ok: false,
+      reason: "the server is waiting for players",
+    });
+    const unsaved = {
+      ...overview,
+      capabilities: {
+        ...overview.capabilities,
+        routes: overview.capabilities.routes.filter((route) => route !== "PUT /v1/config"),
+      },
+    };
+    expect(await f.service.voteEventReadiness("primary", fifty, config, unsaved, track)).toEqual({
+      ok: false,
+      reason: "the game build does not advertise settings saves",
+    });
+    // With the lock already off, nothing needs saving.
+    const off = { revision: "r1", fields: [lockField(false) as never] };
+    expect(await f.service.voteEventReadiness("primary", fifty, off, unsaved, track)).toEqual({ ok: true });
     const fewer = fullServerSnapshot();
     fewer.players = fewer.players.slice(0, 64);
     fewer.status.players.current = 64;
@@ -898,6 +956,51 @@ describe("a 50v50 started by a community vote", () => {
     await f.service.tick();
     expect(actions(f)).toEqual([expect.objectContaining({ changes: { lockOverpopulated: true } })]);
     expect(f.current()?.state).toBe("complete");
+  });
+  it("stops itself and restores the lock after three refused moves in a row", async () => {
+    const f = fixture("primary", voteEventFixture);
+    f.admin.act.mockImplementation(async (_staff, action) =>
+      (action as { action: string }).action === "team"
+        ? { state: "failed", changed: false, message: "Refused", revision: undefined! }
+        : { state: "applied", changed: true, message: "Confirmed", revision: "r3" },
+    );
+    for (let pass = 0; pass < 2; pass++) {
+      jest.setSystemTime(eventNow + pass * 5_000);
+      await f.service.tick();
+      expect(f.current()).toMatchObject({ state: "active", stop: null, progress: { failures: pass + 1 } });
+    }
+    jest.setSystemTime(eventNow + 10_000);
+    await f.service.tick();
+    expect(f.current()).toMatchObject({ state: "stopping", stop: { actorId: "system:event-halt" } });
+    expect(f.current()?.stop?.reason).toBe("Team moves were refused (3 attempts).");
+    jest.setSystemTime(eventNow + 15_000);
+    await f.service.tick();
+    expect(actions(f).filter((action) => action.action === "team")).toHaveLength(3);
+    expect(actions(f).at(-1)).toMatchObject({ action: "settings-save", changes: { lockOverpopulated: true } });
+    expect(f.current()?.state).toBe("complete");
+  });
+  it("ends when staff switch the lock back on after Gramps confirmed it off, without switching it off again", async () => {
+    const f = fixture("primary", voteEventFixture);
+    // Gramps confirmed the lock off, then staff switched it on before the round was armed.
+    f.set({ ...f.record, state: "preparing" });
+    f.game.configuration.mockResolvedValue({ revision: "r4", fields: [lockField(true)] });
+    await f.service.tick();
+    expect(f.current()?.stop?.actorId).toBe("system:lock-changed");
+    await f.service.tick();
+    expect(f.admin.act).not.toHaveBeenCalled();
+    expect(f.current()).toMatchObject({ state: "complete" });
+  });
+  it("stops itself when the team lock cannot be read for five minutes during the 50v50", async () => {
+    const f = fixture("primary", voteEventFixture);
+    f.game.configuration.mockResolvedValue({ revision: "r4", fields: [lockField(null)] });
+    await f.service.tick();
+    jest.setSystemTime(eventNow + 5 * 60_000 - 5_000);
+    await f.service.tick();
+    expect(f.current()).toMatchObject({ state: "active", stop: null });
+    jest.setSystemTime(eventNow + 5 * 60_000);
+    await f.service.tick();
+    expect(f.current()).toMatchObject({ state: "stopping", stop: { actorId: "system:event-halt" } });
+    expect(f.admin.act).not.toHaveBeenCalled();
   });
   it("ends without a write when staff switch the team lock back on", async () => {
     const f = fixture("primary", voteEventFixture);

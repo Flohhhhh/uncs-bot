@@ -367,7 +367,11 @@ describe("a 50v50 started by a community vote", () => {
     const first = plan(event, preRoundSnapshot(eventNow + 5_000));
     expect(first.stop).toBeUndefined();
     event.progress = first.progress;
-    expect(plan(event, preRoundSnapshot(eventNow + 5_000 + POPULATION_WAIT_MS - 1))).toMatchObject({ operation: null });
+    // Five seconds short of the documented five minutes.
+    const before = plan(event, preRoundSnapshot(eventNow + 5_000 + 295_000));
+    expect(before).toMatchObject({ operation: null, state: "waiting_round" });
+    expect(before.stop).toBeUndefined();
+    expect(before.halt).toBeUndefined();
     expect(plan(event, preRoundSnapshot(eventNow + 5_000 + POPULATION_WAIT_MS))).toMatchObject({ stop: "population" });
   });
   it("gives a pending move two minutes to show, then stops instead of waiting for staff", () => {
@@ -377,10 +381,11 @@ describe("a 50v50 started by a community vote", () => {
     expect(move.kind).toBe("move");
     event.progress = completeEventOperation(event, move, eventNow, false);
     expect(event.progress.movedAt).toEqual({ [move.steamId!]: eventNow });
-    expect(plan(event, snapshotAt(eventNow + MOVE_GRACE_MS - 5_000, 235))).toMatchObject({
-      operation: null,
-      state: "active",
-    });
+    // Five seconds short of the documented two minutes.
+    const before = plan(event, snapshotAt(eventNow + 115_000, 235));
+    expect(before).toMatchObject({ operation: null, state: "active" });
+    expect(before.halt).toBeUndefined();
+    expect(before.stop).toBeUndefined();
     expect(plan(event, snapshotAt(eventNow + MOVE_GRACE_MS, 240)).halt).toContain("still on the closed team");
   });
   it("stops after two minutes of an unsafe roster instead of waiting for staff with the lock off", () => {
@@ -391,6 +396,13 @@ describe("a 50v50 started by a community vote", () => {
     expect(first).toMatchObject({ operation: null, state: "active" });
     expect(first.halt).toBeUndefined();
     event.progress = first.progress;
+    // Five seconds short of the documented two minutes.
+    const before = snapshotAt(eventNow + 115_000, 235);
+    before.unlinkedPlayerCount = 1;
+    const waited = plan(event, before);
+    expect(waited).toMatchObject({ operation: null, state: "active" });
+    expect(waited.halt).toBeUndefined();
+    expect(waited.stop).toBeUndefined();
     const later = snapshotAt(eventNow + ROSTER_GRACE_MS, 240);
     later.unlinkedPlayerCount = 1;
     expect(plan(event, later).halt).toContain("unlinked or duplicate");
