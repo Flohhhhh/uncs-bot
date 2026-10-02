@@ -14,7 +14,12 @@ import {
   type ConfigDocument,
 } from "./admin.types";
 import { editWhitelist, inspectConfiguredWhitelist } from "./whitelist-document";
-import { readServerConfiguration, changeServerConfiguration, validateMapSelection } from "./server-configuration";
+import {
+  readServerConfiguration,
+  changeServerConfiguration,
+  validateMapSelection,
+  checkSavedRotation,
+} from "./server-configuration";
 import { serves } from "../common/admin-policy";
 import { assignedFaction } from "../common/faction-colors";
 import { roundStamp, sameRound, type RoundStamp } from "../common/game-round";
@@ -307,6 +312,10 @@ export class WardogsClient {
         ),
       })
       .parse(await this.request("GET", "/v1/rotation"));
+  }
+
+  checkRotation() {
+    return checkSavedRotation(this);
   }
 
   private async whitelistAction(

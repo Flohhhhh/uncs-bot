@@ -138,7 +138,7 @@ function createPreviewGame(name: string) {
           values.push(...players.slice(0, 3).map((player) => `+DefaultReservedPlayerIds=${player.steamId}`));
         if (section === ROTATION)
           values.push(
-            ...["Lonestar", "Kavkazi", "Europe"].map(
+            ...["Kavkazi", "Europe", "NorthAmerica"].map(
               (map) => `+RotationEntries=(Map="${map}",Experiences="",Lighting="DayClear")`,
             ),
           );
@@ -146,7 +146,7 @@ function createPreviewGame(name: string) {
       })
       .join("\n") + "[WDServerFeed]\nUrl=http://127.0.0.1:32190\n";
   let revision = 1,
-    currentMap = "Lonestar",
+    currentMap = "Kavkazi",
     lighting = "DayClear";
   const routes = [
     "GET /v1/status",
@@ -173,6 +173,8 @@ function createPreviewGame(name: string) {
     "GET /v1/catalog/maps",
     "GET /v1/catalog/lightings",
     "GET /v1/catalog/experiences",
+    "GET /v1/catalog/maps/{map}/experiences",
+    "GET /v1/catalog/maps/{map}/alternators",
     "GET /v1/rotation",
   ];
   class PreviewGame extends WardogsClient {
@@ -185,7 +187,7 @@ function createPreviewGame(name: string) {
           map: currentMap,
           matchSeconds: (Date.now() - previewRoundStart) / 1000,
           lighting,
-          experiences: ["King of the Hill"],
+          experiences: ["KOTH"],
           scoreTick: { current: 24, min: 18, max: 30 },
           rotation: { nowIndex: 0, nextIndex: 1 },
           players: { current: players.length, max: 100 },
@@ -238,11 +240,35 @@ function createPreviewGame(name: string) {
         return { ok: true };
       }
       if (path === "/v1/catalog/maps")
-        return { maps: ["Lonestar", "Kavkazi", "Europe", "NorthAmerica"].map((id) => ({ id, displayName: id })) };
+        return { maps: ["Kavkazi", "Europe", "NorthAmerica"].map((id) => ({ id, displayName: id })) };
       if (path === "/v1/catalog/lightings")
         return { lightings: ["DayClear", "DayEarlyFog", "DayLateClear"].map((id) => ({ id })) };
       if (path === "/v1/catalog/experiences")
-        return { experiences: ["KOTH_InfantryOnly", "KOTH_Hardcore"].map((id) => ({ id })) };
+        return {
+          experiences: [
+            "Bakurani_KOTH_01",
+            "Madrid_KOTH_01",
+            "Detroit_KOTH_01",
+            "KOTH_InfantryOnly",
+            "KOTH_Hardcore",
+          ].map((id) => ({ id })),
+        };
+      const mapOptions = /^\/v1\/catalog\/maps\/(Kavkazi|Europe|NorthAmerica)\/(experiences|alternators)$/.exec(path);
+      if (mapOptions) {
+        const maps: Record<string, { base: string; town: string; zones: string[] }> = {
+          Kavkazi: { base: "Bakurani", town: "Bakurani", zones: ["Default", "Farmland", "Lumberyard"] },
+          Europe: { base: "Madrid", town: "Ozeti", zones: ["Default", "Farmland", "Church", "River"] },
+          NorthAmerica: {
+            base: "Detroit",
+            town: "Zestafona",
+            zones: ["Default", "SmallFactory", "WaterTreatment", "Houses"],
+          },
+        };
+        const map = maps[mapOptions[1]];
+        return mapOptions[2] === "experiences"
+          ? { experiences: [map.base + "_KOTH_01", "KOTH_InfantryOnly", "KOTH_Hardcore"] }
+          : { alternators: map.zones.map((zone) => ({ tag: `ZoneAlternator.${map.town}.${zone}.Circle` })) };
+      }
       if (path === "/v1/rotation")
         return {
           enabled: true,

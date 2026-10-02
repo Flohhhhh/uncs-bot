@@ -3,16 +3,17 @@ import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, Client, Perm
 import { plainLabel } from "../server-community/community-state";
 import { createHash } from "node:crypto";
 import { hasVoteCounts, type MapVoteRecord } from "./map-votes.types";
+import { mapLabel, selectionDetails } from "../common/map-labels";
 
 export function ballotMessage(vote: MapVoteRecord) {
   const open = vote.state === "open";
   const counted = hasVoteCounts(vote);
   const choices = vote.choices.map(
     (choice, index) =>
-      `${index + 1}. ${plainLabel(choice.map, 80)}${counted ? ` — ${vote.counts[index] ?? 0} votes` : ""}\n   ${plainLabel([...choice.experiences, choice.lighting, choice.zoneAlternator].filter(Boolean).join(", ") || "Map defaults", 150)}`,
+      `${index + 1}. ${plainLabel(mapLabel(choice.map), 80)}${counted ? ` — ${vote.counts[index] ?? 0} votes` : ""}\n   ${plainLabel(selectionDetails(choice), 150)}`,
   );
   const winner =
-    vote.winner === null ? "" : `\nWinner: ${plainLabel(vote.choices[vote.winner]?.map ?? "Unknown", 80)}.`;
+    vote.winner === null ? "" : `\nWinner: ${plainLabel(mapLabel(vote.choices[vote.winner]?.map ?? "Unknown"), 80)}.`;
   return {
     content: `**Next map · ${plainLabel(vote.serverName)}**\n${choices.join("\n")}\n\n${
       open
@@ -24,7 +25,7 @@ export function ballotMessage(vote: MapVoteRecord) {
         vote.choices.map((choice, index) =>
           new ButtonBuilder()
             .setCustomId(`uncs-map-vote/${vote.id}/${index}`)
-            .setLabel(`${index + 1}. ${choice.map}`.slice(0, 80))
+            .setLabel(`${index + 1}. ${mapLabel(choice.map)}`.slice(0, 80))
             .setStyle(ButtonStyle.Secondary)
             .setDisabled(!open),
         ),

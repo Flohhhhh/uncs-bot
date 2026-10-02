@@ -1,20 +1,42 @@
 import type { MapSelection } from "../../../../../src/common/server-settings";
+import { mapLabel, modeLabel, lightingLabel, zoneLabel } from "../../../../../src/common/map-labels";
 import type { Catalog } from "../../api/types";
 import { useResource } from "../../api/use-resource";
+import { useEffect } from "react";
 export function MapPicker({
   value,
   change,
   catalog,
   disabled = false,
+  onReadyChange,
 }: {
   value: MapSelection;
   change: (value: MapSelection) => void;
   catalog: Catalog;
   disabled?: boolean;
+  onReadyChange?: (ready: boolean) => void;
 }) {
   const options = useResource<{ experiences: Catalog["experiences"]; zones: string[] | null }>(
     value.map ? `catalog/maps/${encodeURIComponent(value.map)}` : null,
   );
+  const unavailableModes =
+    options.data && !options.loading && !options.error
+      ? value.experiences.filter((id) => !options.data!.experiences.some((entry) => entry.id === id))
+      : [];
+  const savedZoneMissing =
+    value.zoneAlternator && value.zoneAlternator !== "None" && !options.data?.zones?.includes(value.zoneAlternator);
+  const ready =
+    !!value.map &&
+    catalog.maps.some((entry) => entry.id === value.map) &&
+    !options.loading &&
+    !options.error &&
+    !!options.data &&
+    !unavailableModes.length &&
+    !savedZoneMissing &&
+    (!value.lighting || catalog.lightings.some((entry) => entry.id === value.lighting));
+  useEffect(() => {
+    onReadyChange?.(ready);
+  }, [ready, onReadyChange]);
   return (
     <div className="settings-grid">
       <label>
@@ -27,9 +49,12 @@ export function MapPicker({
           }
         >
           <option value="">Choose a map</option>
+          {value.map && !catalog.maps.some((entry) => entry.id === value.map) && (
+            <option value={value.map}>Unavailable: {mapLabel(value.map)}</option>
+          )}
           {catalog.maps.map((entry) => (
             <option key={entry.id} value={entry.id}>
-              {entry.displayName || entry.id}
+              {mapLabel(entry.id, entry.displayName)}
             </option>
           ))}
         </select>
@@ -42,9 +67,12 @@ export function MapPicker({
           onChange={(event) => change({ ...value, lighting: event.target.value || undefined })}
         >
           <option value="">Map default</option>
+          {value.lighting && !catalog.lightings.some((entry) => entry.id === value.lighting) && (
+            <option value={value.lighting}>Unavailable: {lightingLabel(value.lighting)}</option>
+          )}
           {catalog.lightings.map((entry) => (
             <option key={entry.id} value={entry.id}>
-              {entry.displayName || entry.id}
+              {lightingLabel(entry.id, entry.displayName)}
             </option>
           ))}
         </select>
@@ -57,7 +85,10 @@ export function MapPicker({
               type="checkbox"
               checked={value.experiences.includes(entry.id)}
               disabled={
-                disabled || !!options.error || (!value.experiences.includes(entry.id) && value.experiences.length >= 10)
+                disabled ||
+                options.loading ||
+                !!options.error ||
+                (!value.experiences.includes(entry.id) && value.experiences.length >= 10)
               }
               onChange={(event) =>
                 change({
@@ -68,29 +99,61 @@ export function MapPicker({
                 })
               }
             />
-            {entry.displayName || entry.id}
+            {modeLabel(entry.id, entry.displayName)}
+          </label>
+        ))}
+        {unavailableModes.map((id) => (
+          <label key={id}>
+            <input
+              type="checkbox"
+              checked
+              disabled={disabled}
+              onChange={() => change({ ...value, experiences: value.experiences.filter((value) => value !== id) })}
+            />
+            Unavailable: {modeLabel(id)}
           </label>
         ))}
         <small>
-          {options.error || (value.map ? "Only options advertised by this server." : "Choose a map to see its modes.")}
+          {options.error ||
+            (value.map
+              ? options.loading
+                ? "Loading map options…"
+                : "Only options advertised by this server."
+              : "Choose a map to see its modes.")}
         </small>
       </fieldset>
       <label>
         Zone layout
         <select
-          value={value.zoneAlternator ?? ""}
-          disabled={disabled || !options.data?.zones || !!options.error}
+          value={value.zoneAlternator === "None" ? "" : (value.zoneAlternator ?? "")}
+          disabled={disabled || options.loading || !options.data?.zones || !!options.error}
           onChange={(event) => change({ ...value, zoneAlternator: event.target.value || undefined })}
         >
           <option value="">Map default</option>
+          {savedZoneMissing && (
+            <option value={value.zoneAlternator}>
+              {options.loading || options.error || !options.data?.zones ? "Saved" : "Unavailable"}:{" "}
+              {zoneLabel(value.zoneAlternator!)}
+            </option>
+          )}
           {options.data?.zones?.map((zone) => (
             <option key={zone} value={zone}>
-              {zone}
+              {zoneLabel(zone)}
             </option>
           ))}
         </select>
         <small>
-          {options.data?.zones ? "Choose a control-zone layout." : "This server has not supplied zone layouts."}
+          {!value.map
+            ? "Choose a map to see its zone layouts."
+            : options.loading
+              ? "Loading zone layouts…"
+              : options.error
+                ? "Zone layouts could not be checked."
+                : savedZoneMissing && options.data?.zones
+                  ? "This saved layout is not in the current catalog. Choose another layout before saving."
+                  : options.data?.zones
+                    ? "Choose a control-zone layout."
+                    : "This server has not supplied zone layouts."}
         </small>
       </label>
     </div>
