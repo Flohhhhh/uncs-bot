@@ -18,7 +18,12 @@ export function useResource<T>(path: string | null) {
       setResult({ path, data: null, loading: false, error: "" });
       return;
     }
-    setResult((previous) => ({ path, data: previous.path === path ? previous.data : null, loading: true, error: "" }));
+    setResult((previous) => ({
+      path,
+      data: previous.path === path ? previous.data : null,
+      loading: true,
+      error: previous.path === path ? previous.error : "",
+    }));
     void (isGameResource(path) ? gameApi : api)<T>(path, { signal: controller.signal })
       .then((data) => {
         if (!controller.signal.aborted) setResult({ path, data, loading: false, error: "" });
