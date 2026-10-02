@@ -36,13 +36,95 @@ The worker uses the existing `WardogsClient` and requires RCON connection settin
 | `SERVER_COMMUNITY_DISCORD_STATUS_ENABLED`  | `false`; edit the configured existing Discord message            |
 | `SERVER_COMMUNITY_WELCOME_MESSAGE`         | `Welcome to The UNCs! Squad up and enjoy the server.`            |
 | `SERVER_COMMUNITY_WELCOME_MESSAGES`        | Optional JSON array of 1–4 messages; replaces the single message |
+| `SERVER_COMMUNITY_WELCOME_VARIANTS`        | Optional JSON array of 1–20 sequences; one is picked per join    |
 | `SERVER_COMMUNITY_WELCOME_DELAY_SECONDS`   | `10`; first-message loading delay, 0–60 seconds                  |
 | `SERVER_COMMUNITY_WELCOME_SPACING_SECONDS` | `20`; minimum time after a confirmed send, 10–120 seconds        |
 | `SERVER_COMMUNITY_ROUND_MESSAGE`           | `GG! Thanks for playing on The UNCs. See you next round.`        |
+| `SERVER_COMMUNITY_ROUND_MESSAGES`          | Optional JSON array of 1–20 messages; one is picked per round    |
 | `SERVER_COMMUNITY_DISCORD_CHANNEL_ID`      | Existing Discord channel in `ADMIN_GUILD_ID`                     |
 | `SERVER_COMMUNITY_DISCORD_MESSAGE_ID`      | Existing message authored by this Gramps bot                     |
 
 Messages are literal, single-line text, 1–200 characters. There is no placeholder expansion or silent truncation. Invalid deployment values fail startup validation; the send boundary also refuses invalid text. When the optional array is absent, the existing single-message setting still works with the configured initial delay. Each feature is independent; status requires both message/channel IDs. Settings are deployment configuration, not editable dashboard controls.
+
+Precedence: `SERVER_COMMUNITY_WELCOME_VARIANTS` replaces `SERVER_COMMUNITY_WELCOME_MESSAGES`, which replaces `SERVER_COMMUNITY_WELCOME_MESSAGE`; `SERVER_COMMUNITY_ROUND_MESSAGES` replaces `SERVER_COMMUNITY_ROUND_MESSAGE`. A replaced setting is ignored while the newer one is set, but it is still validated at startup. With neither new variable set, behavior is unchanged.
+
+### Varied welcomes and round messages
+
+`SERVER_COMMUNITY_WELCOME_VARIANTS` is a JSON array of 1–20 variants; each variant is itself a JSON array of 1–4 messages, exactly like `SERVER_COMMUNITY_WELCOME_MESSAGES`. Each observed join picks one variant at random and sends that variant's whole sequence with the same loading delay, spacing, expiry, cancellation, audit reason and receipt handling as a single sequence. With two or more variants, a player never gets the variant they got last time; with three or more, a joiner also never gets the variant the previous joiner on that server got.
+
+`SERVER_COMMUNITY_ROUND_MESSAGES` is a JSON array of 1–20 single messages. Each inferred round transition picks one at random, never the one picked for that server's previous round.
+
+A choice is recorded when the welcome or round notice is queued, so a welcome that is later skipped or not confirmed still counts as that player's last variant. Rotation history is in memory and per server. It remembers the 2,048 most recently welcomed players and is lost on restart, so a player can see a repeat after a restart, after a long absence from a busy server, or on another server. Duplicate variants or round messages are rejected, as are values longer than 32,768 characters (variants) or 8,192 characters (round messages); twenty full-length entries fit within those limits.
+
+The staff status endpoint keeps `welcome.messages` (the first variant) and `round.message` (the first round message) for the current dashboard, and adds `welcome.variants` and `round.messages` listing every configured entry. The dashboard does not read the new fields yet: with variants set, it shows only the first variant as the welcome sequence and the first round message as the round message, with no sign of rotation. Until it does, confirm the configured entries in the status response itself while signed in as staff: `/admin/api/servers/ID/community-messages`, fields `welcome.variants` and `round.messages`.
+
+### Recommended rotating UNCs copy
+
+Dennis supplied rotating copy on October 2. Neither set below is live until both variables are set in the deployment; until then production keeps the sequence and round message described under [Newcomer wording and launch state](#newcomer-wording-and-launch-state). Every line is single-line and under 200 characters.
+
+Five of its welcome variants and one round message tie the whitelist to a shorter queue ("Get queue priority", "Less queue next time", "Tired of queues?", "Less queue, more crew"). Gramps does not provide queue priority. Approving a whitelist entry only adds the player to the game's reserved-slot list (see [Live whitelist behavior](ADMIN_DASHBOARD.md#live-whitelist-behavior)), seeding and queue benefits are not implemented (see the [release audit](ADMIN_RELEASE_AUDIT.md#launch-work-still-requiring-verified-configuration)), and the newcomer guidance below says not to promise queue tiers. The copy therefore comes in two sets that differ only in those lines:
+
+- **Ready-now set.** Neutral whitelist or website lines replace the queue lines. Use this set unless both checks below have passed for that server. The neutral lines were written for this guide, not by Dennis; review them like any other copy.
+- **Queue-priority set.** Dennis's original wording, unchanged. Use it on a server only after both checks pass, and switch back to the ready-now set if either stops being true, for example after a reserved-slot change or a game update:
+  1. In the dashboard, **Server settings → Joining → Reserved-slot capacity** for that server is greater than 0 and large enough for the whitelisted players expected online at once. At 0 the whitelist reserves no slots.
+  2. A whitelisted player has been seen joining that server while it was full with a queue, and getting in ahead of the queue.
+
+Welcome variants (each is a two-message sequence, sent with the usual delay and spacing):
+
+| #   | First message                                                        | Second message, ready-now set                                 | Second message, queue-priority set                              |
+| --- | -------------------------------------------------------------------- | ------------------------------------------------------------- | --------------------------------------------------------------- |
+| 1   | `Welcome to The UNCs. Good games, older knees.`                      | `Get whitelisted: theuncsgaming.com/whitelist`                | `Long queue? Get queue priority at theuncsgaming.com/whitelist` |
+| 2   | `Aged a little while you waited? Welcome to The UNCs.`               | `Apply for the whitelist: theuncsgaming.com/whitelist`        | `Less queue next time: theuncsgaming.com/whitelist`             |
+| 3   | `You made it. The UNCs salute your patience and your lower back.`    | `Sign in with Discord and apply: theuncsgaming.com/whitelist` | `Tired of queues? theuncsgaming.com/whitelist`                  |
+| 4   | `Welcome to The UNCs. Grab a squad, take the hill, mind your knees.` | `Discord and whitelist: theuncsgaming.com`                    | Same                                                            |
+| 5   | `Reading glasses on, soldier. The hill will not hold itself.`        | `Welcome to The UNCs: theuncsgaming.com`                      | Same                                                            |
+| 6   | `Welcome in. Fast trigger fingers, earned naps.`                     | `Join the crew: theuncsgaming.com/whitelist`                  | `Less queue, more crew: theuncsgaming.com/whitelist`            |
+| 7   | `Long queue? We noticed. Welcome to The UNCs.`                       | `Thanks for your patience. Website: theuncsgaming.com`        | `Get queue priority at theuncsgaming.com/whitelist`             |
+| 8   | `Welcome to The UNCs. Hydrate, squad up, use comms.`                 | `Find the crew at theuncsgaming.com`                          | Same                                                            |
+
+Round messages:
+
+| #   | Ready-now set                                                                         | Queue-priority set                                       |
+| --- | ------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| 1   | `GG! Get whitelisted at theuncsgaming.com/whitelist. Thanks for playing on The UNCs.` | Same                                                     |
+| 2   | `GG, all. Stretch, hydrate, run it back. theuncsgaming.com`                           | Same                                                     |
+| 3   | `GG! Good games, older knees. Join the crew: theuncsgaming.com`                       | Same                                                     |
+| 4   | `GG! More games, more crew: theuncsgaming.com/whitelist`                              | `GG! Less queue, more crew: theuncsgaming.com/whitelist` |
+| 5   | `GG. Thanks for playing on The UNCs. Discord and whitelist: theuncsgaming.com`        | Same                                                     |
+
+Paste the chosen set's exact single-line values into the deployment (Railway takes the raw value, without surrounding quotes). The blocks are plain text so formatters leave each value on one line. The existing `SERVER_COMMUNITY_WELCOME_MESSAGES` and `SERVER_COMMUNITY_ROUND_MESSAGE` values can stay as they are; they are ignored while the new variables are set and take over again if those are removed. Keep the rest of the newcomer guidance (no points, automatic rewards or XP/cash bonuses) for any new copy.
+
+`src/server-community/recommended-copy.spec.ts` checks that these tables, both sets' paste values and the ready-now values in `.env.example` agree, stay on one line and pass startup validation, and that the ready-now set makes no queue promise. Change all three places together.
+
+#### Ready-now set
+
+`SERVER_COMMUNITY_WELCOME_VARIANTS`
+
+```text
+[["Welcome to The UNCs. Good games, older knees.","Get whitelisted: theuncsgaming.com/whitelist"],["Aged a little while you waited? Welcome to The UNCs.","Apply for the whitelist: theuncsgaming.com/whitelist"],["You made it. The UNCs salute your patience and your lower back.","Sign in with Discord and apply: theuncsgaming.com/whitelist"],["Welcome to The UNCs. Grab a squad, take the hill, mind your knees.","Discord and whitelist: theuncsgaming.com"],["Reading glasses on, soldier. The hill will not hold itself.","Welcome to The UNCs: theuncsgaming.com"],["Welcome in. Fast trigger fingers, earned naps.","Join the crew: theuncsgaming.com/whitelist"],["Long queue? We noticed. Welcome to The UNCs.","Thanks for your patience. Website: theuncsgaming.com"],["Welcome to The UNCs. Hydrate, squad up, use comms.","Find the crew at theuncsgaming.com"]]
+```
+
+`SERVER_COMMUNITY_ROUND_MESSAGES`
+
+```text
+["GG! Get whitelisted at theuncsgaming.com/whitelist. Thanks for playing on The UNCs.","GG, all. Stretch, hydrate, run it back. theuncsgaming.com","GG! Good games, older knees. Join the crew: theuncsgaming.com","GG! More games, more crew: theuncsgaming.com/whitelist","GG. Thanks for playing on The UNCs. Discord and whitelist: theuncsgaming.com"]
+```
+
+#### Queue-priority set
+
+Only for a server where both reserved-slot checks above have passed.
+
+`SERVER_COMMUNITY_WELCOME_VARIANTS`
+
+```text
+[["Welcome to The UNCs. Good games, older knees.","Long queue? Get queue priority at theuncsgaming.com/whitelist"],["Aged a little while you waited? Welcome to The UNCs.","Less queue next time: theuncsgaming.com/whitelist"],["You made it. The UNCs salute your patience and your lower back.","Tired of queues? theuncsgaming.com/whitelist"],["Welcome to The UNCs. Grab a squad, take the hill, mind your knees.","Discord and whitelist: theuncsgaming.com"],["Reading glasses on, soldier. The hill will not hold itself.","Welcome to The UNCs: theuncsgaming.com"],["Welcome in. Fast trigger fingers, earned naps.","Less queue, more crew: theuncsgaming.com/whitelist"],["Long queue? We noticed. Welcome to The UNCs.","Get queue priority at theuncsgaming.com/whitelist"],["Welcome to The UNCs. Hydrate, squad up, use comms.","Find the crew at theuncsgaming.com"]]
+```
+
+`SERVER_COMMUNITY_ROUND_MESSAGES`
+
+```text
+["GG! Get whitelisted at theuncsgaming.com/whitelist. Thanks for playing on The UNCs.","GG, all. Stretch, hydrate, run it back. theuncsgaming.com","GG! Good games, older knees. Join the crew: theuncsgaming.com","GG! Less queue, more crew: theuncsgaming.com/whitelist","GG. Thanks for playing on The UNCs. Discord and whitelist: theuncsgaming.com"]
+```
 
 ### Newcomer wording and launch state
 
@@ -99,7 +181,7 @@ Run one Gramps replica with these switches enabled. There is no cross-process le
 
 Before activation, verify the current production capabilities, the configured existing Discord message, and the intended literal messages. Disable the overlapping third-party **game** welcome, round-announcement, and status-card features before enabling their Gramps replacements. Leave the separate Discord guild-join welcome enabled if desired. Do not change the existing `WDServerFeed` URL/token for this worker.
 
-Tests use mocked game, database, and Discord boundaries. They verify startup/outage suppression, map-load grace, conservative round detection, loading delay, spacing from slow actual sends, other-recipient progress, cancellation, configuration validation, bounded delivery, durable-before-send ordering, uncertain outcomes, and edit-only Discord behavior. They do not verify the production server's capabilities, private-message popup appearance, or whether clients actually display a delivered message.
+Tests use mocked game, database, and Discord boundaries. They verify startup/outage suppression, map-load grace, conservative round detection, loading delay, spacing from slow actual sends, other-recipient progress, cancellation, configuration validation and precedence, randomized variant and round-message choice without immediate repeats (using an injected, deterministic random source), bounded delivery, durable-before-send ordering, uncertain outcomes, and edit-only Discord behavior. They do not verify the production server's capabilities, private-message popup appearance, or whether clients actually display a delivered message.
 
 Protocol evidence checked 30 September 2026: [official RCON client](http://rcon.wardogs.com/js/api.js), [official polling configuration](http://rcon.wardogs.com/js/config.js), [Warcon live-build observations](https://github.com/warcon-app/warcon/blob/main/docs/wardogs-api.md), and [Warcon observation/rule implementation](https://github.com/warcon-app/warcon/blob/main/src/lib/server/trigger-rules.ts). Warcon is implementation evidence from another host, not verification of The UNCs production build.
 

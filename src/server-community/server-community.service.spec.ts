@@ -4,6 +4,7 @@ import type { AdminStore } from "../admin/admin.store";
 import { RconError, type WardogsClient } from "../admin/wardogs.client";
 import type { EnvService } from "../env/env.service";
 import { Env } from "../env/env";
+import { CommunityRotation, type RandomSource } from "./community-rotation";
 import type { CommunitySnapshot } from "./community-state";
 import { ServerCommunityWorker as ServerCommunityService } from "./server-community.service";
 
@@ -18,7 +19,11 @@ function snapshot(ids = [firstId], map = "Kavkazi"): CommunitySnapshot {
     players: ids.map((steamId) => ({ name: "Example player", steamId })),
   };
 }
-function fixture(overrides: Record<string, unknown> = {}, serverId = "primary") {
+function fixture(
+  overrides: Record<string, unknown> = {},
+  serverId = "primary",
+  random: jest.Mock<number, []> & RandomSource = jest.fn(() => 0),
+) {
   const values: Record<string, unknown> = {
     ADMIN_GUILD_ID: "guild",
     SERVER_COMMUNITY_ENABLED: true,
@@ -54,13 +59,15 @@ function fixture(overrides: Record<string, unknown> = {}, serverId = "primary") 
     { get: (key: string) => values[key] } as EnvService,
     discord as unknown as Client,
     { id: serverId, name: `Test ${serverId}`, version: "0".repeat(64) },
+    undefined,
+    new CommunityRotation(random),
   );
   const look = async (ids = [firstId], map = "Kavkazi", elapsed = 5_000) => {
     jest.setSystemTime(Date.now() + elapsed);
     game.overview.mockResolvedValue(snapshot(ids, map));
     return service.tick();
   };
-  return { service, game, store, message, channel, discord, look };
+  return { service, game, store, message, channel, discord, look, random };
 }
 
 describe("optional community worker", () => {
@@ -336,6 +343,99 @@ describe("optional community worker", () => {
   });
 });
 
+describe("varied community messages", () => {
+  const thirdId = "76561198000000003";
+  beforeEach(() => {
+    jest.useFakeTimers().setSystemTime(time);
+    jest.spyOn(Logger.prototype, "warn").mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    jest.restoreAllMocks();
+    jest.useRealTimers();
+  });
+
+  it.each([
+    [{}, "Welcome to The UNCs!"],
+    [{ SERVER_COMMUNITY_WELCOME_MESSAGES: ["Welcome!", "More info"] }, "Welcome!"],
+  ])("keeps legacy welcome and round text without randomness when new settings are unset: %j", async (values, text) => {
+    const { service, look, game, random } = fixture(values);
+    await service.tick();
+    await look([firstId, secondId]);
+    await look([firstId, secondId, thirdId]);
+    await look([firstId, secondId, thirdId], "Europe");
+    expect(game.execute.mock.calls.map(([action]) => action.message)).toEqual([text, text, "GG! Thanks for playing."]);
+    expect(random).not.toHaveBeenCalled();
+  });
+
+  it("prefers welcome variants over older welcome settings and sends one variant's whole sequence", async () => {
+    const { service, look, game, store } = fixture(
+      {
+        SERVER_COMMUNITY_WELCOME_VARIANTS: [
+          ["First hello", "First link"],
+          ["Second hello", "Second link"],
+        ],
+        SERVER_COMMUNITY_WELCOME_MESSAGES: ["Old sequence", "Old link"],
+        SERVER_COMMUNITY_WELCOME_MESSAGE: "Legacy welcome",
+      },
+      "primary",
+      jest.fn(() => 0.99),
+    );
+    await service.tick();
+    await look([firstId, secondId]);
+    for (let i = 0; i < 3; i++) await look([firstId, secondId]);
+    expect(game.execute).toHaveBeenCalledTimes(1);
+    await look([firstId, secondId]);
+    expect(game.execute.mock.calls.map(([action]) => [action.steamId, action.message])).toEqual([
+      [secondId, "Second hello"],
+      [secondId, "Second link"],
+    ]);
+    expect(store.begin).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "system:server-community" }),
+      expect.objectContaining({ action: "message", reason: "Automatic observed-join welcome." }),
+      expect.stringMatching(/^[a-f0-9]{64}$/),
+    );
+  });
+
+  it("never repeats a returning player's variant or the previous joiner's", async () => {
+    // The random source always prefers the first candidate, so only the exclusions move the choice.
+    const { service, look, game } = fixture({ SERVER_COMMUNITY_WELCOME_VARIANTS: [["V0"], ["V1"], ["V2"]] });
+    await service.tick();
+    await look([firstId, secondId]);
+    await look([firstId, secondId, thirdId]);
+    // Stay away past the observer's leave grace, then rejoin as a new session.
+    for (let i = 0; i < 3; i++) await look([firstId, thirdId], "Kavkazi", 25_000);
+    await look([firstId, thirdId, secondId]);
+    expect(game.execute.mock.calls.map(([action]) => [action.steamId, action.message])).toEqual([
+      [secondId, "V0"],
+      [thirdId, "V1"],
+      [secondId, "V2"],
+    ]);
+  });
+
+  it("rotates round messages ahead of the single round message without repeating the previous round", async () => {
+    const { service, look, game, store } = fixture({
+      SERVER_COMMUNITY_WELCOME_ENABLED: false,
+      SERVER_COMMUNITY_ROUND_MESSAGES: ["GG one", "GG two", "GG three"],
+      SERVER_COMMUNITY_ROUND_MESSAGE: "Legacy GG",
+    });
+    await service.tick();
+    for (const map of ["Europe", "Kavkazi", "Europe"]) {
+      await look([firstId], map);
+      for (let i = 0; i < 3; i++) await look([firstId], map, 25_000);
+    }
+    expect(game.execute.mock.calls.map(([action]) => [action.action, action.message])).toEqual([
+      ["broadcast", "GG one"],
+      ["broadcast", "GG two"],
+      ["broadcast", "GG one"],
+    ]);
+    expect(store.begin).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ reason: "Automatic observed round-transition message." }),
+      expect.any(String),
+    );
+  });
+});
+
 describe("welcome deployment settings", () => {
   it("validates a short literal sequence while preserving single-message installations", () => {
     expect(Env.shape.SERVER_COMMUNITY_WELCOME_MESSAGES.parse(undefined)).toBeUndefined();
@@ -358,6 +458,61 @@ describe("welcome deployment settings", () => {
     JSON.stringify(Array(5).fill("Hi")),
   ])("rejects invalid welcome configuration: %s", (value) => {
     expect(Env.shape.SERVER_COMMUNITY_WELCOME_MESSAGES.safeParse(value).success).toBe(false);
+  });
+
+  it("validates welcome variants and round messages", () => {
+    expect(Env.shape.SERVER_COMMUNITY_WELCOME_VARIANTS.parse(undefined)).toBeUndefined();
+    expect(Env.shape.SERVER_COMMUNITY_ROUND_MESSAGES.parse(undefined)).toBeUndefined();
+    expect(Env.shape.SERVER_COMMUNITY_WELCOME_VARIANTS.parse('[["Hi", "  Link  "], ["Hello"]]')).toEqual([
+      ["Hi", "Link"],
+      ["Hello"],
+    ]);
+    expect(Env.shape.SERVER_COMMUNITY_ROUND_MESSAGES.parse('["GG", "  GG all  "]')).toEqual(["GG", "GG all"]);
+  });
+
+  it("fits twenty full-length welcome variants and twenty full-length round messages", () => {
+    const text = (index: number) => String.fromCharCode(65 + index).repeat(200);
+    const variants = Array.from({ length: 20 }, (_, index) => Array.from({ length: 4 }, () => text(index)));
+    const rounds = Array.from({ length: 20 }, (_, index) => text(index));
+    expect(Env.shape.SERVER_COMMUNITY_WELCOME_VARIANTS.parse(JSON.stringify(variants, null, 2))).toEqual(variants);
+    expect(Env.shape.SERVER_COMMUNITY_ROUND_MESSAGES.parse(JSON.stringify(rounds, null, 2))).toEqual(rounds);
+  });
+
+  it.each([
+    "not JSON",
+    "{}",
+    "[]",
+    "[[]]",
+    '["Not a sequence"]',
+    '[[" "]]',
+    "[[123]]",
+    '[["line\\nbreak"]]',
+    JSON.stringify([["x".repeat(201)]]),
+    JSON.stringify([Array(5).fill("Hi")]),
+    JSON.stringify(Array.from({ length: 21 }, (_, index) => [`Welcome ${index}`])),
+    JSON.stringify([
+      ["Same", "Link"],
+      [" Same ", "Link"],
+    ]),
+    JSON.stringify([["Hi"]]) + " ".repeat(32_768),
+  ])("rejects invalid welcome variants: %s", (value) => {
+    expect(Env.shape.SERVER_COMMUNITY_WELCOME_VARIANTS.safeParse(value).success).toBe(false);
+  });
+
+  it.each([
+    "not JSON",
+    "{}",
+    "[]",
+    '[" "]',
+    "[123]",
+    '[["GG"]]',
+    '["line\\nbreak"]',
+    JSON.stringify(["x".repeat(201)]),
+    JSON.stringify(Array.from({ length: 21 }, (_, index) => `GG ${index}`)),
+    JSON.stringify(["GG", " GG "]),
+    JSON.stringify(["GG"]) + " ".repeat(8_192),
+  ])("rejects invalid round messages: %s", (value) => {
+    expect(Env.shape.SERVER_COMMUNITY_ROUND_MESSAGES.safeParse(value).success).toBe(false);
   });
 
   it.each([-1, 61, 1.5])("rejects invalid loading delay: %s", (value) => {

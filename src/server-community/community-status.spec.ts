@@ -64,7 +64,8 @@ it("reads disabled configuration without constructing a game client or claiming 
     enabled: false,
     workerStarted: false,
     lastObservedAt: null,
-    welcome: { enabled: false, messages: ["Welcome"], delaySeconds: 10, spacingSeconds: 20 },
+    welcome: { enabled: false, messages: ["Welcome"], variants: [["Welcome"]], delaySeconds: 10, spacingSeconds: 20 },
+    round: { enabled: false, message: "GG", messages: ["GG"] },
   });
   expect(servers.get).not.toHaveBeenCalled();
   expect(() => service.status()).toThrow("Choose a server");
@@ -76,11 +77,23 @@ it("keeps per-server status-card targets separate and never returns target IDs",
     SERVER_COMMUNITY_WELCOME_MESSAGES: ["First", "Second"],
   });
   expect(service.status("primary")).toMatchObject({
-    welcome: { messages: ["First", "Second"] },
+    welcome: { messages: ["First", "Second"], variants: [["First", "Second"]] },
     discordStatus: { enabled: true, configured: true },
   });
   expect(service.status("event")).toMatchObject({ discordStatus: { enabled: true, configured: false } });
   expect(JSON.stringify(service.status("primary"))).not.toMatch(/private-|legacy-/);
+});
+
+it("lists configured welcome variants and round messages while keeping the first of each in the older fields", () => {
+  const { service } = fixture({
+    SERVER_COMMUNITY_WELCOME_VARIANTS: [["Hello", "Link"], ["Hi"]],
+    SERVER_COMMUNITY_WELCOME_MESSAGES: ["Old", "Sequence"],
+    SERVER_COMMUNITY_ROUND_MESSAGES: ["GG one", "GG two"],
+  });
+  expect(service.status("primary")).toMatchObject({
+    welcome: { messages: ["Hello", "Link"], variants: [["Hello", "Link"], ["Hi"]], delaySeconds: 10 },
+    round: { message: "GG one", messages: ["GG one", "GG two"] },
+  });
 });
 
 it("distinguishes configured workers from observed activity without the status read triggering work", async () => {
