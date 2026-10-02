@@ -39,8 +39,7 @@ type DraftAction =
   | {
       action: "map-next";
       revision: string;
-      currentIndex: number | null;
-      nextIndex?: number;
+      currentIndex: number;
       currentMap: string;
       entry: MapSelection;
     };
@@ -182,16 +181,13 @@ export function RotationEditor({
   const ordered = snapshot.rotation.enabled && snapshot.rotation.mode === "Ordered";
   const currentMatches =
     currentIndex !== null && sameMap(snapshot.rotation.entries[currentIndex]?.map, snapshot.rotation.currentMap);
-  // With no running entry named, the game can still confirm the entry it plays next.
-  const nextOnly = currentIndex === null && nextIndex !== null && !!snapshot.rotation.entries[nextIndex];
-  const positionConfirmed = currentMatches || nextOnly;
+  // With no running entry named, the game still reports its own next entry; queuing waits for that round.
+  const gameNext = currentIndex === null && nextIndex !== null ? snapshot.rotation.entries[nextIndex] : undefined;
   const nextEntry = !ordered
     ? undefined
     : currentMatches
       ? snapshot.rotation.entries[(currentIndex + 1) % snapshot.rotation.entries.length]
-      : nextOnly
-        ? snapshot.rotation.entries[nextIndex]
-        : undefined;
+      : gameNext;
   function add(index: number) {
     if (!canAdd) return;
     const next = [...rows];
@@ -241,7 +237,7 @@ export function RotationEditor({
           </div>
         </div>
         {snapshot.rotation.note && <p className="notice warning">{snapshot.rotation.note}</p>}
-        {ordered && !positionConfirmed && (
+        {ordered && !currentMatches && (
           <div className="notice warning">
             <p>
               {snapshot.rotation.positionNote ||
@@ -382,22 +378,19 @@ export function RotationEditor({
                         editIndex !== null ||
                         !snapshot.rotation.enabled ||
                         snapshot.rotation.mode !== "Ordered" ||
-                        !positionConfirmed
+                        !currentMatches
                       }
                       onClick={() =>
                         setReview({
                           action: {
                             action: "map-next",
                             revision: snapshot.revision,
-                            ...(currentMatches ? { currentIndex } : { currentIndex: null, nextIndex: nextIndex! }),
+                            currentIndex: currentIndex!,
                             currentMap: snapshot.rotation.currentMap,
                             entry: structuredClone(selection),
                           },
                           summary: [
                             "Next round: " + selectionLabel(selection),
-                            ...(currentMatches
-                              ? []
-                              : [`Placed at rotation entry ${nextIndex! + 1}, which the game reports it plays next.`]),
                             "Updates the saved ordered rotation. The current match continues.",
                           ],
                         })
