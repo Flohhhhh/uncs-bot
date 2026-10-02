@@ -12,14 +12,18 @@ import { TeamMoveDialog, type TeamMoveResult } from "./team-move";
 /** A player to show in the panel. `name` is used when the player is no longer in the live roster. */
 export type SheetPlayer = { steamId: string; name?: string };
 
-/** `/activity?view=…&player=…`, keeping the selected server. */
-export function playerHistory(search: string, view: "combat" | "actions", steamId: string) {
+/** `/activity?view=…`, keeping only the selected server from the current URL. */
+export function activityLink(search: string, view: "feed" | "combat" | "actions", extra: Record<string, string> = {}) {
   const params = new URLSearchParams();
   const server = new URLSearchParams(search).get("server");
   if (server) params.set("server", server);
   params.set("view", view);
-  params.set("player", steamId);
+  for (const [key, value] of Object.entries(extra)) params.set(key, value);
   return { pathname: "/activity", search: `?${params}` };
+}
+/** `/activity?view=…&player=…`, keeping the selected server. */
+export function playerHistory(search: string, view: "combat" | "actions", steamId: string) {
+  return activityLink(search, view, { player: steamId });
 }
 
 /** Opens the player panel; shown wherever a player's name appears. */

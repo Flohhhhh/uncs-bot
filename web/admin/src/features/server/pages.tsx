@@ -1,14 +1,14 @@
 import { lightingLabel, mapLabel, modeLabel, zoneLabel } from "../../../../../src/common/map-labels";
 import { roundStamp } from "../../../../../src/common/game-round";
 import type { SettingsSnapshot } from "../../../../../src/common/server-settings";
-import { Fragment, useState, type CSSProperties, type ReactNode } from "react";
+import { Fragment, useId, useState, type CSSProperties, type ReactNode } from "react";
 import { ServerLink as Link } from "../../app/server-link";
 import { useGameAdmin as useAdmin } from "../../app/context";
 import { useResource } from "../../api/use-resource";
 import type { Audit, Ban, Whitelist } from "../../api/types";
 import { ActionButton, Badge, Card, Empty, OutcomeBadge, Search, date } from "../../components/ui";
 import { CopyValue, DataTable, compareValues } from "../../components/data-table";
-import { actionDefinitions, allowed } from "../actions/policy";
+import { actionDefinitions, allowed, singleLine } from "../actions/policy";
 import { FactionChip, liveFactions, playerFaction } from "../players/factions";
 import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 import { PlayerButton, PlayerSheet, type SheetPlayer } from "../players/player-actions";
@@ -496,22 +496,54 @@ export function BansPage() {
     </>
   );
 }
+const announcementTemplate = "GG! Get whitelisted at theuncsgaming.com/whitelist. Thanks for playing on The UNCs.";
 export function AnnouncementsPage() {
+  const { me, overview, stale, busy, openAction } = useAdmin();
+  const [draft, setDraft] = useState("");
+  const countId = useId();
+  const connected = overview?.status.players.current;
+  const ready = singleLine(draft) && allowed("broadcast", me, overview, stale, busy);
   return (
     <div className="split">
-      <Card title="In-game broadcast" badge={<Badge kind="good">SEND NOW</Badge>}>
-        <div className="card-body">
-          <p className="intro">
-            An announcement for everyone currently connected. Use it for server notices, community events, or a quick
-            thank-you.
-          </p>
-          <div className="copy-example">
-            GG! Get whitelisted at theuncsgaming.com/whitelist. Thanks for playing on The UNCs.
+      <Card title="In-game announcement" subtitle="Everyone connected sees it. You review it before it sends.">
+        <form
+          className="card-body announcement-composer"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (ready) openAction("broadcast", undefined, { initialMessage: draft.trim() });
+          }}
+        >
+          <label>
+            Message
+            <textarea
+              value={draft}
+              maxLength={200}
+              rows={3}
+              placeholder="Write an announcement…"
+              aria-describedby={countId}
+              // Announcements are one line in game.
+              onChange={(event) => setDraft(event.target.value.replace(/[\r\n]+/g, " "))}
+            />
+          </label>
+          <div className="composer-tools">
+            <button type="button" className="filter-chip" onClick={() => setDraft(announcementTemplate)}>
+              Use template
+            </button>
+            {draft && (
+              <button type="button" className="text-button" onClick={() => setDraft("")}>
+                Clear
+              </button>
+            )}
+            <span id={countId} className="composer-count">
+              {draft.length} / 200
+            </span>
           </div>
-          <ActionButton action="broadcast" kind="primary">
-            Write announcement ↗
-          </ActionButton>
-        </div>
+          <button type="submit" className="button primary" disabled={!ready}>
+            {typeof connected === "number"
+              ? `Send to ${connected} ${connected === 1 ? "player" : "players"}`
+              : "Review announcement"}
+          </button>
+        </form>
       </Card>
       <CommunityMessages />
     </div>
