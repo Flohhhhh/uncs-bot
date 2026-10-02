@@ -36,6 +36,14 @@ Routes:
 
 The public website uses same-origin `/community/api` rewrites to Gramps. The game ingest endpoint should target Gramps directly, or a separately verified host forwarding service, with its feed-only authorization.
 
+### Release order for names-only public rows
+
+Public leaderboard rows no longer carry `steamId`. As of October 2, the production website's leaderboard page still drops every row without a valid `steamId`. If Gramps ships this change first, the public leaderboard is empty and reads like a quiet period, not an error. The website's names-only leaderboard (its Pages adapter `proxy/gramps.mjs` and `dist/leaderboard.js`) accepts rows with or without `steamId`.
+
+- Do not merge this change to main or deploy it until the names-only website is published and live in production.
+- Once both are live, do not roll the website back to a deployment older than its names-only release.
+- If both must be reverted, roll Gramps back first, then the website.
+
 ## Retention and connection
 
 Ingestion purges event rows older than 90 days at most once per day. If ingestion stops, deletion waits for the next accepted batch; this is not a guarantee of deletion at exactly 90 days during inactivity. Administrative cleanup is required for a permanently retired feed. Queries remain bounded to the selected rolling period. First/last receipt metadata remains for coverage reporting.
