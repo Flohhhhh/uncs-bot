@@ -18,7 +18,7 @@ export class MapVotesStore {
       .select()
       .from(mapVotes)
       .where(eq(mapVotes.serverId, serverId))
-      .orderBy(desc(mapVotes.createdAt))
+      .orderBy(desc(mapVotes.createdAt), desc(mapVotes.id))
       .limit(20);
   }
   async liveCounts(ids: string[]) {
@@ -29,8 +29,22 @@ export class MapVotesStore {
       .where(inArray(mapVoteBallots.voteId, ids))
       .groupBy(mapVoteBallots.voteId, mapVoteBallots.choice);
   }
-  async create(input: typeof mapVotes.$inferInsert) {
-    const [created] = await this.db.insert(mapVotes).values(input).onConflictDoNothing().returning();
+  async create(input: typeof mapVotes.$inferInsert, expectedLatestId?: string | null) {
+    const [created] = await this.db.transaction(async (tx) => {
+      // Staff and automatic ballots share the lock, including ballots closed by another worker.
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${"map-vote:" + input.serverId}))`);
+      if (expectedLatestId !== undefined) {
+        const [latest] = await tx
+          .select({ id: mapVotes.id })
+          .from(mapVotes)
+          .where(eq(mapVotes.serverId, input.serverId))
+          .orderBy(desc(mapVotes.createdAt), desc(mapVotes.id))
+          .limit(1);
+        if ((latest?.id ?? null) !== expectedLatestId)
+          throw new ConflictException("Another ballot was recorded. Refresh before opening a vote.");
+      }
+      return tx.insert(mapVotes).values(input).onConflictDoNothing().returning();
+    });
     if (created) return { created: true, record: created };
     const existing = await this.get(input.id);
     if (!existing || existing.actorId !== input.actorId || existing.requestHash !== input.requestHash)
@@ -105,7 +119,7 @@ export class MapVotesStore {
       return claimed;
     });
   }
-  async finish(id: string, state: "queued" | "no_votes" | "needs_review", message: string) {
+  async finish(id: string, state: "queued" | "no_votes" | "tied" | "cancelled" | "needs_review", message: string) {
     const [vote] = await this.db
       .update(mapVotes)
       .set({ state, message, updatedAt: new Date() })

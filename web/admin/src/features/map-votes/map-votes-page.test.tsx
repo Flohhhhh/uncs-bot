@@ -88,27 +88,50 @@ it("excludes a running map reported by its in-game name from catalog choices", a
   expect(maps.getByRole("option", { name: "Bakurani" })).toBeInTheDocument();
   expect(request.mock.calls.some(([, options]) => options?.method === "POST")).toBe(false);
 });
-it("keeps ballot choices but blocks review until round timing is available", async () => {
+it("allows a ballot at a confirmed position without demanding an unreported game clock", async () => {
   matchSeconds = undefined;
   show();
   await choose("Europe");
   await choose("Islands");
-  expect(screen.getByRole("button", { name: "Review ballot" })).toBeDisabled();
-  expect(screen.getByText(/Round timing is unavailable/)).toBeInTheDocument();
-  matchSeconds = 125;
-  fireEvent.click(screen.getByRole("button", { name: "Check round timing" }));
-  await waitFor(() => expect(screen.getByRole("button", { name: "Review ballot" })).toBeEnabled());
+  expect(screen.getByRole("button", { name: "Review ballot" })).toBeEnabled();
+  expect(screen.queryByText(/Round timing is unavailable/)).not.toBeInTheDocument();
   expect(within(screen.getByRole("list", { name: "Ballot choices" })).getAllByRole("listitem")).toHaveLength(2);
   expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
 });
-it("checks timing again in review and blocks pending, failed and missing-clock responses", async () => {
+it("shows automatic progress and keeps manual publication under staff override", async () => {
+  const fallback = request.getMockImplementation()!;
+  request.mockImplementation(async (path, options) =>
+    path === "map-votes"
+      ? ({
+          enabled: true,
+          serverId: "primary",
+          votes: [],
+          automatic: {
+            enabled: true,
+            delaySeconds: 120,
+            minutes: 5,
+            choices: 3,
+            message: "Waiting for the next position.",
+            checkedAt: null,
+          },
+        } as never)
+      : fallback(path, options),
+  );
+  show();
+  expect(await screen.findByText("Automatic voting · Waiting for the next position.")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Review ballot" })).not.toBeVisible();
+  fireEvent.click(screen.getByText("Staff override"));
+  expect(screen.getByRole("button", { name: "Review ballot" })).toBeVisible();
+  expect(request.mock.calls.some(([, options]) => options?.method === "POST")).toBe(false);
+});
+it("checks rotation again in review and blocks pending, failed and changed-position responses", async () => {
   show();
   await choose("Europe");
   await choose("Islands");
   const fallback = request.getMockImplementation()!;
   let rejectTiming!: (error: Error) => void;
   request.mockImplementation((path, init) =>
-    path === "overview"
+    path === "settings"
       ? new Promise((_, reject) => {
           rejectTiming = reject;
         })
@@ -119,18 +142,21 @@ it("checks timing again in review and blocks pending, failed and missing-clock r
   const publish = dialog.getByRole("button", { name: "Publish ballot" });
   expect(publish).toBeDisabled();
   fireEvent.submit(publish.closest("form")!);
-  rejectTiming(new Error("Game status could not be read"));
-  await dialog.findByText("Game status could not be read");
+  rejectTiming(new Error("Rotation could not be read"));
+  await dialog.findByText("Rotation could not be read");
+  expect(publish).toBeDisabled();
+  fireEvent.submit(publish.closest("form")!);
+  request.mockImplementation(async (path, init) =>
+    path === "settings"
+      ? ({ ...settings, rotation: { ...settings.rotation, currentIndex: null } } as never)
+      : fallback(path, init),
+  );
+  fireEvent.click(dialog.getByRole("button", { name: "Check rotation" }));
+  await dialog.findByText(/rotation changed or its position is unavailable/);
   expect(publish).toBeDisabled();
   fireEvent.submit(publish.closest("form")!);
   request.mockImplementation(fallback);
-  matchSeconds = undefined;
-  fireEvent.click(dialog.getByRole("button", { name: "Check round timing" }));
-  await dialog.findByText(/Round timing is unavailable/);
-  expect(publish).toBeDisabled();
-  fireEvent.submit(publish.closest("form")!);
-  matchSeconds = 125;
-  fireEvent.click(dialog.getByRole("button", { name: "Check round timing" }));
+  fireEvent.click(dialog.getByRole("button", { name: "Check rotation" }));
   await waitFor(() => expect(publish).toBeEnabled());
   expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
   fireEvent.click(dialog.getByRole("button", { name: "Back" }));
@@ -228,7 +254,7 @@ it("reviews a frozen ballot without extra typing and sends exactly one request",
   await choose("Islands");
   fireEvent.click(screen.getByRole("button", { name: "Review ballot" }));
   const dialog = screen.getByRole("dialog");
-  expect(dialog).toHaveTextContent("Ties use the first listed option");
+  expect(dialog).toHaveTextContent("A tie or no votes keeps the rotation");
   expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
   expect(screen.queryByRole("textbox", { name: "Reason" })).not.toBeInTheDocument();
   const publish = within(dialog).getByRole("button", { name: "Publish ballot" });
