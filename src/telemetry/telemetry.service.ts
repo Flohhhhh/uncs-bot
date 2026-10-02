@@ -106,6 +106,12 @@ export class TelemetryService {
     } catch (error) {
       throw this.refuse(serverId, "storage unavailable", error);
     }
+    this.deliveries.accepted(serverId, {
+      accepted: parsed.events.length,
+      skipped: parsed.skipped,
+      invalid: parsed.invalid,
+      firstInvalid: parsed.firstInvalid,
+    });
     for (const key of this.snapshots.keys()) if (key.startsWith(`${serverId}:`)) this.snapshots.delete(key);
     return { ok: true, ...result };
   }

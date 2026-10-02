@@ -50,11 +50,15 @@ const feedText = z
       .trim(),
   );
 const optionalText = feedText.nullish().transform((value) => value || null);
+// Any 8-4-4-4-12 hex GUID, in either case. The game's GUIDs need not carry RFC 4122 version and
+// variant bits, and PostgreSQL uuid columns accept any 32 hex digits. Lowercasing keeps eventId
+// deduplication exact.
+const feedGuid = z.guid().transform((value) => value.toLowerCase());
 const eventSchema = z.object({
-  eventId: z.uuid(),
+  eventId: feedGuid,
   type: z.literal("killed"),
   eventTime: z.number().min(0).max(1e12),
-  matchId: z.uuid().nullish(),
+  matchId: feedGuid.nullish(),
   mapName: optionalText,
   killerSteamId: linkedId,
   killerName: optionalText,
@@ -68,12 +72,17 @@ const eventSchema = z.object({
     .nullish()
     .transform((value) => value ?? []),
 });
-const batchSchema = z.object({ serverId: z.uuid(), serverName: feedText, events: z.array(z.unknown()).max(200) });
+const batchSchema = z.object({ serverId: feedGuid, serverName: feedText, events: z.array(z.unknown()).max(200) });
 
 export type ParsedFeed = {
   serverId: string;
   serverName: string;
+  /** Entries not stored: other event types plus invalid entries. */
   skipped: number;
+  /** Malformed killed events, entries without a string type and non-objects. Included in skipped. */
+  invalid: number;
+  /** Schema location of the first invalid entry, never its value. */
+  firstInvalid: string | null;
   events: Array<{
     eventId: string;
     eventTime: number;
@@ -123,19 +132,35 @@ export function parseFeed(input: unknown): ParsedFeed {
     serverId: batch.data.serverId,
     serverName: batch.data.serverName,
     skipped: 0,
+    invalid: 0,
+    firstInvalid: null,
     events: [],
   };
+  // One odd entry never discards the batch: it is skipped and counted, and the first is named.
+  const invalid = (label: string) => {
+    output.skipped++;
+    output.invalid++;
+    output.firstInvalid ??= label;
+  };
   for (const [index, raw] of batch.data.events.entries()) {
-    if (raw && typeof raw === "object" && "type" in raw && raw.type !== "killed") {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      invalid(`events.${index} (not an object)`);
+      continue;
+    }
+    const type: unknown = (raw as { type?: unknown }).type;
+    if (typeof type !== "string") {
+      invalid(`events.${index}.type (missing or wrong type)`);
+      continue;
+    }
+    if (type !== "killed") {
       output.skipped++;
       continue;
     }
     const event = eventSchema.safeParse(raw);
-    if (!event.success)
-      throw new FeedRejectedException(
-        "Invalid killed event fields.",
-        `invalid payload: ${issueLabel(event.error, ["events", index])}`,
-      );
+    if (!event.success) {
+      invalid(issueLabel(event.error, ["events", index]));
+      continue;
+    }
     const value = event.data;
     const tags = new Set(
       value.contextTags.map((tag) =>

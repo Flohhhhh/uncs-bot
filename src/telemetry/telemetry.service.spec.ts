@@ -287,9 +287,9 @@ describe("telemetry authorization and reporting", () => {
       body: (payload) => ({ ...payload, events: Array.from({ length: 201 }, () => payload.events[0]) }),
     },
     {
-      reason: "invalid payload: events.0.eventId (bad format)",
+      reason: "invalid payload: serverName (over the limit)",
       status: 400,
-      body: (payload) => ({ ...payload, events: [{ ...payload.events[0], eventId: token }] }),
+      body: (payload) => ({ ...payload, serverName: token.repeat(4) }),
     },
     { reason: "too large", status: 400, body: (payload) => ({ ...payload, padding: token.repeat(2_000) }) },
     { reason: "storage unavailable", status: 503, storageFails: true },
@@ -312,8 +312,9 @@ describe("telemetry authorization and reporting", () => {
     expect(Logger.prototype.warn).toHaveBeenCalledWith(
       `Rejected a game feed delivery for server primary: ${test.status} ${test.reason}.`,
     );
+    expect(staff.lastBatch).toBeNull();
     const publicView = await service.leaderboard();
-    for (const key of ["lastRejected", "rejectedCount"]) expect(publicView).not.toHaveProperty(key);
+    for (const key of ["lastRejected", "rejectedCount", "lastBatch"]) expect(publicView).not.toHaveProperty(key);
   });
   it("counts refusals since start and keeps the latest one", async () => {
     const { service, payload } = fixture();
@@ -331,6 +332,65 @@ describe("telemetry authorization and reporting", () => {
         reason: "invalid payload: serverId (bad format)",
       },
       rejectedCount: 2,
+    });
+  });
+  it("stores the valid events of a partly invalid batch and shows staff what was skipped", async () => {
+    const { service, store, payload } = fixture();
+    await expect(service.combat()).resolves.toMatchObject({ lastBatch: null });
+    const good = payload.events[0];
+    const rawId = "ABCDEF01-2345-0789-0BCD-EF0123456789";
+    store.ingest.mockResolvedValueOnce({ inserted: 2, duplicates: 0, skipped: 4 });
+    await expect(
+      service.ingest(`Bearer ${token}`, {
+        ...payload,
+        events: [
+          good,
+          { ...good, eventId: rawId },
+          { ...good, eventId: randomUUID(), eventTime: `${token}` },
+          { eventId: randomUUID(), eventTime: 1 },
+          null,
+          { eventId: randomUUID(), type: "player-joined" },
+        ],
+      }),
+    ).resolves.toEqual({ ok: true, inserted: 2, duplicates: 0, skipped: 4 });
+    expect(store.ingest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        skipped: 4,
+        invalid: 3,
+        events: [
+          expect.objectContaining({ eventId: good.eventId }),
+          expect.objectContaining({ eventId: rawId.toLowerCase() }),
+        ],
+      }),
+      now,
+      "primary",
+    );
+    const staff = await service.combat();
+    expect(staff).toMatchObject({
+      lastBatch: {
+        at: now.toISOString(),
+        accepted: 2,
+        skipped: 4,
+        invalid: 3,
+        firstInvalid: "events.2.eventTime (missing or wrong type)",
+      },
+      lastRejected: null,
+      rejectedCount: 0,
+    });
+    expect(JSON.stringify(staff)).not.toContain(token);
+    expect(Logger.prototype.warn).toHaveBeenCalledWith(
+      "Accepted a game feed batch for server primary but skipped 3 invalid entries; first: events.2.eventTime (missing or wrong type).",
+    );
+    const publicView = await service.leaderboard();
+    expect(publicView).not.toHaveProperty("lastBatch");
+  });
+  it("does not record a batch that storage failed to save", async () => {
+    const { service, store, payload } = fixture();
+    store.ingest.mockRejectedValueOnce(new Error("database error"));
+    await expect(service.ingest(`Bearer ${token}`, payload)).rejects.toThrow();
+    await expect(service.combat()).resolves.toMatchObject({
+      lastBatch: null,
+      lastRejected: { status: 503, reason: "storage unavailable" },
     });
   });
 });

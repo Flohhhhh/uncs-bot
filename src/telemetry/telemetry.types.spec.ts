@@ -4,11 +4,10 @@ import { parseFeed } from "./telemetry.types";
 const killer = "76561198000000001";
 const victim = "76561198000000002";
 function batch(event: Record<string, unknown> = {}) {
-  return {
-    serverId: randomUUID(),
-    serverName: "The UNCs",
-    events: [{ eventId: randomUUID(), type: "killed", eventTime: 18.25, ...event }],
-  };
+  const events: Array<Record<string, unknown>> = [
+    { eventId: randomUUID(), type: "killed", eventTime: 18.25, ...event },
+  ];
+  return { serverId: randomUUID() as string, serverName: "The UNCs", events };
 }
 describe("Wardogs feed parsing", () => {
   it("keeps valid boundary IDs linked and never coerces numeric or invalid account IDs", () => {
@@ -72,26 +71,92 @@ describe("Wardogs feed parsing", () => {
   it("skips new event types without inventing combat data", () => {
     const value = batch();
     value.events.push({ eventId: randomUUID(), type: "future-event", eventTime: 1 });
-    expect(parseFeed(value)).toMatchObject({ skipped: 1, events: [expect.objectContaining({ eventTime: 18.25 })] });
+    expect(parseFeed(value)).toMatchObject({
+      skipped: 1,
+      invalid: 0,
+      firstInvalid: null,
+      events: [expect.objectContaining({ eventTime: 18.25 })],
+    });
   });
   it.each([
-    { eventId: "bad" },
-    { eventTime: -1 },
-    { eventTime: NaN },
-    { eventTime: Infinity },
-    { distance: -1 },
-    { distance: Infinity },
-    { killerName: "n".repeat(201) },
-    { contextTags: Array.from({ length: 33 }, () => "Headshot") },
-    { matchId: "bad" },
-  ])("rejects malformed known event fields", (event) => {
-    expect(() => parseFeed(batch(event))).toThrow("Invalid killed event fields");
-  });
-  it("bounds event count, metadata and payload bytes including discarded fields", () => {
+    [{ eventId: "secret-value" }, "events.1.eventId (bad format)"],
+    [{ eventId: undefined }, "events.1.eventId (missing or wrong type)"],
+    [{ eventTime: -1 }, "events.1.eventTime (under the limit)"],
+    [{ eventTime: NaN }, "events.1.eventTime (missing or wrong type)"],
+    [{ eventTime: Infinity }, "events.1.eventTime"],
+    [{ eventTime: "18" }, "events.1.eventTime (missing or wrong type)"],
+    [{ distance: -1 }, "events.1.distance (under the limit)"],
+    [{ distance: Infinity }, "events.1.distance"],
+    [{ killerName: "n".repeat(201) }, "events.1.killerName (over the limit)"],
+    [{ contextTags: Array.from({ length: 33 }, () => "Headshot") }, "events.1.contextTags (over the limit)"],
+    [{ contextTags: ["x".repeat(201)] }, "events.1.contextTags.0 (over the limit)"],
+    [{ matchId: "secret-value" }, "events.1.matchId (bad format)"],
+    [{ type: undefined }, "events.1.type (missing or wrong type)"],
+    [{ type: 5 }, "events.1.type (missing or wrong type)"],
+  ])("skips and counts a malformed killed event %j without discarding the batch", (event, firstInvalid) => {
     const value = batch();
-    expect(() => parseFeed({ ...value, events: Array.from({ length: 201 }, () => value.events[0]) })).toThrow();
-    expect(() => parseFeed({ ...value, serverId: "not-a-uuid" })).toThrow();
-    expect(() => parseFeed({ ...value, serverName: "x".repeat(201) })).toThrow();
+    const good = value.events[0];
+    value.events.push({ ...good, eventId: randomUUID(), ...event }, { ...good, eventId: randomUUID() });
+    const result = parseFeed(value);
+    expect(result.events.map((parsed) => parsed.eventId)).toEqual([good.eventId, value.events[2].eventId]);
+    expect(result).toMatchObject({ skipped: 1, invalid: 1 });
+    expect(result.firstInvalid).toContain(firstInvalid);
+    // The label names a schema location only, never the submitted value.
+    expect(result.firstInvalid).not.toMatch(/secret-value|nnnn|Headshot|xxxx/);
+  });
+  it("skips non-object entries and counts every invalid entry while naming only the first", () => {
+    const value: { serverId: string; serverName: string; events: unknown[] } = batch();
+    value.events.push(null, 5, "killed", [], { eventId: randomUUID(), eventTime: 1 });
+    value.events.push({ eventId: "bad", type: "killed", eventTime: 1 }, { type: "player-joined" });
+    expect(parseFeed(value)).toMatchObject({
+      skipped: 7,
+      invalid: 6,
+      firstInvalid: "events.1 (not an object)",
+      events: [expect.objectContaining({ eventTime: 18.25 })],
+    });
+  });
+  it("accepts any hexadecimal GUID, in either case, and stores it lowercase", () => {
+    // Version 0 / variant 0 GUIDs are not RFC 4122 UUIDs, which zod's uuid() rejects.
+    const eventId = "ABCDEF01-2345-0789-0BCD-EF0123456789",
+      matchId = "00000000-0000-0000-0000-00000000000A",
+      serverId = "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF";
+    const result = parseFeed({ ...batch({ eventId, matchId }), serverId });
+    expect(result).toMatchObject({ serverId: serverId.toLowerCase(), skipped: 0, invalid: 0 });
+    expect(result.events[0]).toMatchObject({ eventId: eventId.toLowerCase(), matchId: matchId.toLowerCase() });
+    // Case variants of one event normalize to the same ID, so storage deduplicates them.
+    const repeat = batch({ eventId });
+    repeat.events.push({ ...repeat.events[0], eventId: eventId.toLowerCase() });
+    const ids = parseFeed(repeat).events.map((event) => event.eventId);
+    expect(ids).toEqual([eventId.toLowerCase(), eventId.toLowerCase()]);
+  });
+  it.each([
+    "{abcdef01-2345-0789-0bcd-ef0123456789}",
+    "abcdef0123450789 0bcdef0123456789",
+    "abcdef0123450789-0bcd-ef0123456789",
+    "abcdef01-2345-0789-0bcd-ef012345678",
+    "abcdef01-2345-0789-0bcd-ef012345678g",
+    " abcdef01-2345-0789-0bcd-ef0123456789",
+  ])("still refuses a non-GUID ID: %s", (id) => {
+    expect(parseFeed(batch({ eventId: id }))).toMatchObject({ events: [], skipped: 1, invalid: 1 });
+    expect(() => parseFeed({ ...batch(), serverId: id })).toThrow("Invalid feed batch");
+  });
+  it("still refuses a malformed batch envelope", () => {
+    const value = batch();
+    const { serverId: _serverId, ...noServer } = value;
+    for (const invalid of [
+      noServer,
+      { ...value, serverId: "not-a-uuid" },
+      { ...value, serverName: "x".repeat(201) },
+      { ...value, events: value.events[0] },
+      { ...value, events: undefined },
+      { ...value, events: Array.from({ length: 201 }, () => value.events[0]) },
+      null,
+      [value],
+    ])
+      expect(() => parseFeed(invalid)).toThrow("Invalid feed batch or event count");
     expect(() => parseFeed({ ...value, ignored: "x".repeat(65536) })).toThrow("64 KiB");
+    expect(parseFeed({ ...value, events: Array.from({ length: 200 }, () => value.events[0]) }).events).toHaveLength(
+      200,
+    );
   });
 });

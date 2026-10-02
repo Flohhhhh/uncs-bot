@@ -2,22 +2,36 @@ import { Injectable, Logger } from "@nestjs/common";
 import { GameServers } from "../admin/game-servers";
 
 export type FeedRejection = { at: string; status: number; reason: string };
-export type FeedDeliveryStatus = { lastRejected: FeedRejection | null; rejectedCount: number };
+/** accepted: valid killed events (repeats included); skipped: other types plus invalid entries. */
+export type FeedBatchReceipt = {
+  at: string;
+  accepted: number;
+  skipped: number;
+  invalid: number;
+  firstInvalid: string | null;
+};
+export type FeedDeliveryStatus = {
+  lastBatch: FeedBatchReceipt | null;
+  lastRejected: FeedRejection | null;
+  rejectedCount: number;
+};
 
 export const FEED_WARNING_INTERVAL_MS = 60_000;
 const UNCONFIGURED = "(unconfigured)";
 const INGEST_ROUTE = /^\/api\/ingest(?:\/servers\/([^/?#]*))?\/events\/?(?:[?#]|$)/i;
 
 /**
- * Per-server, in-memory record of game feed deliveries that reached Gramps but were refused, so
- * staff can tell "nothing arrived" from "arrived but rejected". It holds only a time, an HTTP
- * status and a fixed category: never tokens, headers, bodies or addresses. It resets on restart.
+ * Per-server, in-memory record of game feed deliveries that reached Gramps, so staff can tell
+ * "nothing arrived" from "arrived but rejected" or "partly accepted". It holds only times, counts,
+ * HTTP statuses and fixed categories: never tokens, headers, bodies or addresses. It resets on
+ * restart.
  */
 @Injectable()
 export class TelemetryDeliveries {
   private readonly logger = new Logger(TelemetryDeliveries.name);
   private readonly rejections = new Map<string, { last: FeedRejection; count: number }>();
-  // One warning per server per interval; later ones are counted and summarized in the next line.
+  private readonly batches = new Map<string, FeedBatchReceipt>();
+  // One warning per server and kind per interval; later ones are counted and summarized in the next.
   private readonly warnings = new Map<string, { until: number; suppressed: number }>();
 
   constructor(private readonly servers: GameServers) {}
@@ -39,6 +53,20 @@ export class TelemetryDeliveries {
     );
   }
 
+  /** Records a stored batch for a resolved server, including how many entries were skipped. */
+  accepted(serverId: string, batch: Omit<FeedBatchReceipt, "at">) {
+    const now = new Date();
+    const { accepted, skipped, invalid, firstInvalid } = batch;
+    this.batches.set(serverId, { at: now.toISOString(), accepted, skipped, invalid, firstInvalid });
+    if (invalid)
+      this.warn(
+        `${serverId}:invalid`,
+        `Accepted a game feed batch for server ${serverId} but skipped ${invalid} invalid ` +
+          `${invalid === 1 ? "entry" : "entries"}; first: ${firstInvalid ?? "unknown"}.`,
+        now.getTime(),
+      );
+  }
+
   /** Records a refusal made before the ingest controller ran. Returns false for other routes. */
   rejectedRequest(url: string, status: number, reason: string) {
     const route = INGEST_ROUTE.exec(url);
@@ -55,7 +83,12 @@ export class TelemetryDeliveries {
 
   status(serverId: string): FeedDeliveryStatus {
     const entry = this.rejections.get(serverId);
-    return { lastRejected: entry ? { ...entry.last } : null, rejectedCount: entry?.count ?? 0 };
+    const batch = this.batches.get(serverId);
+    return {
+      lastBatch: batch ? { ...batch } : null,
+      lastRejected: entry ? { ...entry.last } : null,
+      rejectedCount: entry?.count ?? 0,
+    };
   }
 
   private configured(id: string | undefined) {

@@ -28,11 +28,12 @@ describe("refused feed delivery record", () => {
   });
   it("keeps the latest refusal and a running count per configured server", () => {
     const deliveries = multiServer();
-    expect(deliveries.status("east")).toEqual({ lastRejected: null, rejectedCount: 0 });
+    expect(deliveries.status("east")).toEqual({ lastBatch: null, lastRejected: null, rejectedCount: 0 });
     deliveries.rejected("east", 401, "token mismatch");
     jest.advanceTimersByTime(1_000);
     deliveries.rejected("east", 400, "invalid payload: serverId (bad format)");
     expect(deliveries.status("east")).toEqual({
+      lastBatch: null,
       lastRejected: {
         at: new Date(now.getTime() + 1_000).toISOString(),
         status: 400,
@@ -40,14 +41,14 @@ describe("refused feed delivery record", () => {
       },
       rejectedCount: 2,
     });
-    expect(deliveries.status("event")).toEqual({ lastRejected: null, rejectedCount: 0 });
+    expect(deliveries.status("event")).toEqual({ lastBatch: null, lastRejected: null, rejectedCount: 0 });
   });
   it("logs unconfigured server routes without storing them or echoing the requested ID", () => {
     const deliveries = multiServer();
     deliveries.rejected("attacker\nforged-line", 404, "unknown server");
     deliveries.rejected(undefined, 400, "server not selected");
     for (const id of ["east", "event", "attacker\nforged-line"])
-      expect(deliveries.status(id)).toEqual({ lastRejected: null, rejectedCount: 0 });
+      expect(deliveries.status(id)).toEqual({ lastBatch: null, lastRejected: null, rejectedCount: 0 });
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn.mock.calls[0][0]).toBe(
       "Rejected a game feed delivery for an unconfigured server route: 404 unknown server.",
@@ -72,7 +73,7 @@ describe("refused feed delivery record", () => {
       expect(deliveries.rejectedRequest(url, 429, "rate limited")).toBe(false);
     expect(deliveries.rejectedRequest("/api/ingest/servers/%FF/events", 400, "unreadable request")).toBe(true);
     expect(deliveries.rejectedRequest("/api/ingest/servers/other/events", 413, "too large")).toBe(true);
-    expect(deliveries.status("primary")).toEqual({ lastRejected: null, rejectedCount: 0 });
+    expect(deliveries.status("primary")).toEqual({ lastBatch: null, lastRejected: null, rejectedCount: 0 });
     expect(warn).toHaveBeenCalledTimes(1);
   });
   it("rate-limits warnings per server and reports how many were suppressed", () => {
@@ -92,5 +93,31 @@ describe("refused feed delivery record", () => {
       "Rejected a game feed delivery for server east: 400 too large. (5 similar warnings suppressed.)",
     );
     expect(deliveries.status("east").rejectedCount).toBe(7);
+  });
+  it("keeps each server's latest stored batch counts and warns about invalid entries at most once a minute", () => {
+    const deliveries = multiServer();
+    deliveries.accepted("east", { accepted: 3, skipped: 1, invalid: 0, firstInvalid: null });
+    expect(warn).not.toHaveBeenCalled();
+    jest.advanceTimersByTime(2_000);
+    deliveries.accepted("east", { accepted: 1, skipped: 2, invalid: 2, firstInvalid: "events.0.eventId (bad format)" });
+    deliveries.accepted("east", { accepted: 0, skipped: 1, invalid: 1, firstInvalid: "events.0 (not an object)" });
+    deliveries.rejected("east", 401, "token mismatch");
+    expect(deliveries.status("east")).toEqual({
+      lastBatch: {
+        at: new Date(now.getTime() + 2_000).toISOString(),
+        accepted: 0,
+        skipped: 1,
+        invalid: 1,
+        firstInvalid: "events.0 (not an object)",
+      },
+      lastRejected: { at: new Date(now.getTime() + 2_000).toISOString(), status: 401, reason: "token mismatch" },
+      rejectedCount: 1,
+    });
+    expect(deliveries.status("event").lastBatch).toBeNull();
+    // Partial-batch and refusal warnings are limited separately, so one never hides the other.
+    expect(warn.mock.calls.map(([message]) => message)).toEqual([
+      "Accepted a game feed batch for server east but skipped 2 invalid entries; first: events.0.eventId (bad format).",
+      "Rejected a game feed delivery for server east: 401 token mismatch.",
+    ]);
   });
 });

@@ -211,7 +211,7 @@ describe("telemetry HTTP boundaries", () => {
     });
     for (const secret of [feedToken, "Bearer", "127.0.0.1", "::1"]) expect(JSON.stringify(staff)).not.toContain(secret);
     const publicView = await request(app.getHttpServer()).get("/community/api/leaderboard").expect(200);
-    for (const key of ["lastRejected", "rejectedCount"]) expect(publicView.body).not.toHaveProperty(key);
+    for (const key of ["lastRejected", "rejectedCount", "lastBatch"]) expect(publicView.body).not.toHaveProperty(key);
     // A refused public read is not a feed delivery.
     await request(app.getHttpServer())
       .post("/community/api/leaderboard")
@@ -219,6 +219,28 @@ describe("telemetry HTTP boundaries", () => {
       .send("{")
       .expect(400);
     expect((await staffCombat()).rejectedCount).toBe(3);
+  });
+  it("accepts the valid events of a batch with one odd event and shows staff the skip", async () => {
+    const value = batch();
+    const odd = { ...value.events[0], eventId: "not-a-guid" };
+    const nonRfc = { ...value.events[0], eventId: "ABCDEF01-2345-0789-0BCD-EF0123456789" };
+    store.ingest.mockResolvedValueOnce({ inserted: 2, duplicates: 0, skipped: 1 });
+    const result = await request(app.getHttpServer())
+      .post("/api/ingest/events")
+      .set("Authorization", `Bearer ${feedToken}`)
+      .send({ ...value, events: [value.events[0], odd, nonRfc] })
+      .expect(201);
+    expect(result.body).toEqual({ ok: true, inserted: 2, duplicates: 0, skipped: 1 });
+    expect(store.ingest.mock.calls[0][0].events.map((event: { eventId: string }) => event.eventId)).toEqual([
+      value.events[0].eventId,
+      nonRfc.eventId.toLowerCase(),
+    ]);
+    await expect(staffCombat()).resolves.toMatchObject({
+      lastBatch: { accepted: 2, skipped: 1, invalid: 1, firstInvalid: "events.1.eventId (bad format)" },
+      lastRejected: null,
+    });
+    const publicView = await request(app.getHttpServer()).get("/community/api/leaderboard").expect(200);
+    expect(publicView.body).not.toHaveProperty("lastBatch");
   });
   it("records rate-limited feed deliveries against the server they targeted", async () => {
     for (let count = 0; count < 300; count++)
