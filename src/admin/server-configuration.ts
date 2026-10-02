@@ -252,20 +252,23 @@ export async function changeServerConfiguration(
         if (!existing[action.currentIndex] || existing[action.currentIndex].map !== status.map)
           throw new RconError("The running map does not match the saved rotation. Reload and review it.");
         entries = [...existing];
+        // Removing an earlier entry shifts the running numeric index onto another
+        // map. Only move a later entry; preserve the current position otherwise.
         const match = entries.findIndex(
-          (entry, index) => index !== action.currentIndex && formatRotation(entry) === formatRotation(action.entry),
+          (entry, index) => index > action.currentIndex && formatRotation(entry) === formatRotation(action.entry),
         );
-        let current = action.currentIndex;
-        if (match >= 0) {
-          entries.splice(match, 1);
-          if (match < current) current--;
-        }
-        entries.splice(current + 1, 0, action.entry);
+        if (match >= 0) entries.splice(match, 1);
+        entries.splice(action.currentIndex + 1, 0, action.entry);
       } else entries = action.entries;
       if (entries.length > 100) throw new RconError("Keep the rotation to 100 entries or fewer.");
       const catalog = await game.catalog();
       const reads = new Map<string, Promise<unknown>>();
-      for (const [index, entry] of entries.entries()) {
+      // A next-round choice preserves the other saved entries. Old catalog values
+      // elsewhere must not prevent a valid choice; native validation still checks
+      // the complete document before any conditional write.
+      const selections =
+        action.action === "map-next" ? [[entries.indexOf(action.entry), action.entry] as const] : entries.entries();
+      for (const [index, entry] of selections) {
         try {
           await validateMapSelection(game, entry, capabilities, catalog, reads);
         } catch (error) {

@@ -108,7 +108,8 @@ describe("React staff shell", () => {
   it("requires a fresh server check after returning from a records page", async () => {
     const fetcher = mount();
     await screen.findByText("Simulated UNCs");
-    fireEvent.click(screen.getByRole("link", { name: /Action history/ }));
+    fireEvent.click(screen.getByRole("link", { name: /Server activity/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Action history" }));
     await screen.findByText("No matching staff actions");
     let finish!: (value: Response) => void;
     fetcher.mockImplementation(

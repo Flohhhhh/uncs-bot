@@ -92,15 +92,15 @@ it("keeps a settings draft when leaving is cancelled, then discards only after c
   const { router, fetcher } = mount();
   await editName();
   expect(unload()).toBe(true);
-  fireEvent.click(screen.getByRole("link", { name: /Action history/ }));
+  fireEvent.click(screen.getByRole("link", { name: /Server activity/ }));
   expect(await screen.findByRole("dialog", { name: "Discard unsaved changes?" })).toBeInTheDocument();
   expect(router.state.location.pathname).toBe("/settings");
   fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
   expect(screen.getByRole("textbox", { name: /Server name/ })).toHaveValue("Event night");
   expect(unload()).toBe(true);
-  fireEvent.click(screen.getByRole("link", { name: /Action history/ }));
+  fireEvent.click(screen.getByRole("link", { name: /Server activity/ }));
   fireEvent.click(await screen.findByRole("button", { name: "Discard changes" }));
-  await waitFor(() => expect(router.state.location.pathname).toBe("/audit"));
+  await waitFor(() => expect(router.state.location.pathname).toBe("/activity"));
   expect(unload()).toBe(false);
   expect(actionCalls(fetcher)).toHaveLength(0);
 });
@@ -170,15 +170,15 @@ it("retains hidden rotation drafts and does not clear their warning when a setti
   fireEvent.click(screen.getByRole("button", { name: "Identity" }));
   await editName();
   fireEvent.click(screen.getByRole("button", { name: "Discard" }));
-  fireEvent.click(screen.getByRole("link", { name: /Action history/ }));
+  fireEvent.click(screen.getByRole("link", { name: /Server activity/ }));
   expect(await screen.findByRole("dialog", { name: "Discard unsaved changes?" })).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
   fireEvent.click(screen.getByRole("button", { name: "Rotation" }));
   expect(screen.getAllByRole("listitem")[0]).toHaveTextContent("Ozeti");
   fireEvent.click(screen.getByRole("button", { name: "Discard draft" }));
   expect(unload()).toBe(false);
-  fireEvent.click(screen.getByRole("link", { name: /Action history/ }));
-  await waitFor(() => expect(router.state.location.pathname).toBe("/audit"));
+  fireEvent.click(screen.getByRole("link", { name: /Server activity/ }));
+  await waitFor(() => expect(router.state.location.pathname).toBe("/activity"));
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });
 

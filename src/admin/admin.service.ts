@@ -28,6 +28,7 @@ export class AdminService {
       game = () => this.servers.get(id);
     const readers: Record<string, () => Promise<unknown>> = {
       overview: () => game().overview(),
+      activity: () => game().activity(),
       bans: () => game().bans(),
       whitelist: () => game().whitelist(),
       catalog: () => game().catalog(),

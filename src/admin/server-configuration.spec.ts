@@ -256,6 +256,45 @@ describe("server configuration boundaries", () => {
     expect(parseRotation(f.saved().text)[1]).toMatchObject({ map: "Europe", experiences: ["KOTH_InfantryOnly"] });
     expect(f.request.mock.calls.some(([, path]) => path.startsWith("/v1/match"))).toBe(false);
   });
+  it("preserves old unavailable rotation entries when queuing a valid Infantry Only round", async () => {
+    const f = fixture();
+    f.document.text = original.replace('Map="Europe",Experiences="KOTH"', 'Map="Europe",Experiences="RemovedMode"');
+    await f.game.execute({
+      id: randomUUID(),
+      reason: "Next round choice",
+      action: "map-next",
+      revision: "r1",
+      currentIndex: 0,
+      currentMap: "Kavkazi",
+      entry: { map: "Europe", experiences: ["KOTH", "KOTH_InfantryOnly"], lighting: "DayClear" },
+    });
+    expect(parseRotation(f.saved().text)).toEqual([
+      { map: "Kavkazi", experiences: ["KOTH"], lighting: "DayClear" },
+      { map: "Europe", experiences: ["KOTH", "KOTH_InfantryOnly"], lighting: "DayClear" },
+      { map: "Europe", experiences: ["RemovedMode"], lighting: "DayClear" },
+    ]);
+    expect(f.request.mock.calls.some(([method, path]) => method === "POST" && path === "/v1/config/validate")).toBe(
+      true,
+    );
+    expect(f.request.mock.calls.some(([, path]) => path.startsWith("/v1/match"))).toBe(false);
+  });
+  it("keeps the running rotation index fixed when the chosen map already appeared earlier", async () => {
+    const f = fixture();
+    f.status.map = "Europe";
+    f.status.rotation.nowIndex = 1;
+    await f.game.execute({
+      id: randomUUID(),
+      reason: "Next round choice",
+      action: "map-next",
+      revision: "r1",
+      currentIndex: 1,
+      currentMap: "Europe",
+      entry: { map: "Kavkazi", experiences: ["KOTH"], lighting: "DayClear" },
+    });
+    expect(parseRotation(f.saved().text).map((entry) => entry.map)).toEqual(["Kavkazi", "Europe", "Kavkazi"]);
+    expect(parseRotation(f.saved().text)[f.status.rotation.nowIndex].map).toBe(f.status.map);
+    expect(f.request.mock.calls.some(([, path]) => path.startsWith("/v1/match"))).toBe(false);
+  });
   it.each(["round", "random", "disabled", "unknown-mode"])("refuses unsafe next-map selection: %s", async (kind) => {
     const f = fixture();
     if (kind === "round") f.status.map = "Europe";

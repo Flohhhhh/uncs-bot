@@ -27,11 +27,12 @@ import { RconError, rejected } from "./rcon-protocol";
 import { GAME_LOG_LIMIT, parseGameLog, type GameLog } from "./game-log";
 import type { RconConnectionSource } from "../common/game-server";
 import type { IdentityValue, ServerIdentity } from "../common/server-identity";
+import { ServerActivity } from "./server-activity";
 export { RconError } from "./rcon-protocol";
 export { serves } from "../common/admin-policy";
 
 const catalogItem = z.object({ id: z.string(), displayName: z.string().optional() });
-type Overview = {
+export type Overview = {
   status: z.infer<typeof statusSchema>;
   players: z.infer<typeof playersSchema>["players"];
   unlinkedPlayerCount?: number;
@@ -44,6 +45,7 @@ const teamPlayersSchema = z.object({
 
 @Injectable()
 export class WardogsClient {
+  private readonly observations = new ServerActivity();
   private capabilitiesCache?: { until: number; value: Capabilities };
   private overviewCache?: { until: number; promise: Promise<Overview> };
   private holdUntil = 0;
@@ -148,6 +150,7 @@ export class WardogsClient {
       return value;
     } catch (error) {
       if (this.overviewCache === entry) this.overviewCache = undefined;
+      this.observations.failed();
       throw error;
     }
   }
@@ -158,7 +161,18 @@ export class WardogsClient {
       this.request("GET", "/v1/status").then((data) => statusSchema.parse(data)),
       this.request("GET", "/v1/players").then((data) => playersSchema.parse(data)),
     ]);
-    return { status, ...roster, capabilities, observedAt: new Date().toISOString() };
+    const value = { status, ...roster, capabilities, observedAt: new Date().toISOString() };
+    this.observations.observe(value);
+    return value;
+  }
+
+  async activity() {
+    try {
+      await this.overview();
+    } catch {
+      /* The observation records the unavailable connection. */
+    }
+    return this.observations.view();
   }
 
   async bans() {

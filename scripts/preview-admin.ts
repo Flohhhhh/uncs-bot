@@ -935,6 +935,11 @@ const eventStore = {
   },
 };
 const voteStore = {
+  async liveCounts(ids: string[]) {
+    return ids.flatMap((voteId) =>
+      (demoVotes.get(voteId)?.counts ?? []).map((total, choice) => ({ voteId, choice, total })),
+    );
+  },
   async get(id: string) {
     return structuredClone(demoVotes.get(id) ?? null);
   },

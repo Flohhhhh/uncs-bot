@@ -139,6 +139,7 @@ export function RotationQueue({
   add,
   disabled,
   children,
+  showQueue = true,
 }: {
   rows: RotationRow[];
   change: (rows: RotationRow[]) => void;
@@ -148,6 +149,7 @@ export function RotationQueue({
   add: (index: number) => void;
   disabled: boolean;
   children: ReactNode;
+  showQueue?: boolean;
 }) {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
@@ -162,6 +164,7 @@ export function RotationQueue({
     id === newEntry ? selectionLabel(selection) : mapLabel(rows.find((row) => row.id === id)?.entry.map ?? "Map");
   const destination = (id: string | number) =>
     id === queueEnd ? "the end" : `position ${rows.findIndex((row) => row.id === id) + 1}`;
+  if (!showQueue) return <>{children}</>;
   return (
     <DndContext
       sensors={sensors}
