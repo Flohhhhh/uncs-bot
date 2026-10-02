@@ -63,6 +63,8 @@ export const Env = z.object({
     .default("false")
     .transform((value) => value === "true"),
   MAP_VOTES_CHANNEL_ID: discordId.optional(),
+  /** Optional staff-only text channel in ADMIN_GUILD_ID for automation alerts. Never a community channel. */
+  STAFF_ALERTS_CHANNEL_ID: discordId.optional(),
   /** Optional event automation; requires a human-reviewed schema and controlled game rehearsal. */
   SERVER_EVENTS_ENABLED: z
     .enum(["true", "false"])
