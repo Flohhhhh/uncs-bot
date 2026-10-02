@@ -14,6 +14,7 @@ Manual changes in Discord always win:
 
 - A role that someone already has is only **noted** in the role ledger. Gramps never counts it as a role it added, so it never removes it.
 - If staff remove a role that Gramps added, Gramps does not add it back during that person's current membership. The status page lists it under **Needs attention** as `removed_in_discord`.
+- Gramps records that removal once as a note in the role ledger, as it does when a role it added is already gone by the time its reason ends. A role staff give back by hand afterwards therefore counts as theirs and is never removed automatically.
 - When someone leaves and rejoins the server, earlier history no longer applies and their earned roles are added again.
 
 Gramps removes a role in exactly two cases. The **UNC** role, when **all** of these hold:
@@ -34,11 +35,11 @@ The Supporter role is a Discord role only. It changes nothing in game: no whitel
 
 A person holds it while at least one supporter record with their Discord account linked counts as supporting:
 
-- **Patreon:** Patreon reports them as an active patron (`active_patron`), the latest charge was not refunded, fraudulent or otherwise reversed (Patreon's `Refunded`, `Partially Refunded`, `Refunded by Patreon`, `Refund Pending`, `Refund Declined`, `Fraud` and `Other`), and their newest known payment meets the founder minimum (at least US$5, or another currency that staff confirmed was worth at least US$5). Any tier counts.
+- **Patreon:** Patreon reports them as an active patron (`active_patron`), the latest charge was not refunded, fraudulent or otherwise reversed (Patreon's `Refunded`, `Partially Refunded`, `Refunded by Patreon`, `Refund Pending`, `Fraud` and `Other`; a `Refund Declined` charge still stands), and at least one completed payment is on record. Patreon charges the tier price itself, so any tier counts in any currency, and no founder minimum is checked again.
 - **Declined Patreon charge:** when Patreon reports a declined patron (`declined_patron`), the role stays for 7 days after the declined charge's date, because Patreon retries the card. After that it is removed unless Patreon reports them active again.
 - **PayPal:** a staff-recorded PayPal payment that meets the founder minimum keeps the role for 31 days after the payment date. That covers one-time gifts; a later payment starts a new 31 days.
 
-Patreon payment amounts come from the Patreon API import (or a staff receipt), so the import must be configured for Patreon supporters to receive the role. As with founders, an imported Patreon payment in another currency does not meet the minimum, because staff cannot confirm its value on an imported payment. A cancelled membership (`former_patron`) or a refund ends support at the next check. Every window ends exclusively: a PayPal payment made at noon on November 1 counts until just before noon on December 2.
+Patreon payments come from the Patreon API import (or a staff receipt), so the import must be configured for Patreon supporters to receive the role. Only records of the configured campaign count (`PATREON_ENABLED=true` and `PATREON_CAMPAIGN_ID`), the same records the supporter dashboard shows. While Patreon is switched off, Patreon records do not count, because their status is no longer kept up to date. A cancelled membership (`former_patron`) or a refund ends support at the next check. Every window ends exclusively: a PayPal payment made at noon on November 1 counts until just before noon on December 2.
 
 Gramps checks the Supporter role whenever a supporter record changes (a Patreon import change or signed webhook, a staff receipt, a Discord link or a new PayPal record). A role whose 7- or 31-day window simply runs out is removed by the next six-hour safety pass.
 
@@ -75,7 +76,7 @@ A role that is not configured is simply skipped. Founder awards also need the fo
 - `ready`: every configured role passes its checks;
 - `lastPass` (trigger, times, `added`, `removed`, `noted`, `confirmed`, `failed`, `blocked`, `deferred`, `attention`), `lastFullPass` (the same for the last check of everyone: startup, the safety pass or an untargeted staff run), `running`, `queued`, `fullPassQueued` and `nextRetryAt`. An event check that found nothing to do does not replace `lastPass`;
 - `summary: {memberEligible, founders, foundersWithoutDiscord, supporterEligible}`, where `supporterEligible` counts people who support right now and is `null` while `DISCORD_SUPPORTER_ROLE_ID` is unset;
-- `attention`: founders without a linked Discord account, people who are not in the server (except someone whose only reason is a Supporter role that has lapsed), roles removed in Discord, and failed changes. Items stay listed across checks until that person (and role) is checked again, so a later check of someone else never hides them;
+- `attention`: founders without a linked Discord account, people who are not in the server (except someone whose only reason is the Supporter role: joining the server queues a check that adds it), roles removed in Discord, and failed changes. Items stay listed across checks until that person (and role) is checked again, so a later check of someone else never hides them;
 - `recent`: the latest 25 role ledger rows.
 
 `POST /admin/api/discord-roles/reconcile` (administrators only, same-origin CSRF) takes `{id, reason, discordUserId?, dryRun?}`:
@@ -124,4 +125,5 @@ Record each PayPal donor with **Record PayPal supporter** (`POST /admin/api/supp
 
 - A declined or mistyped application still blocks a new application on that server (per-server unique indexes). A partial index excluding `declined`, or a staff reopen action, would fix it.
 - Reinstating a revoked application.
+- Marking a PayPal payment refunded or charged back. A recorded PayPal payment keeps the Supporter role for its 31 days; staff can remove the role by hand in Discord, and Gramps does not add it back during that membership.
 - Founder whitelist grants remain manual.

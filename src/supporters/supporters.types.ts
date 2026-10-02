@@ -275,7 +275,7 @@ export type SupportFacts = {
   patronStatus: string | null;
   lastChargeStatus: string | null;
   lastChargeAt: Date | string | null;
-  /** Verified payments with a known amount from founder-qualifying sources, newest first. */
+  /** Verified payments with a known amount from founder-qualifying sources, newest first (a bounded number). */
   payments: Pick<FounderPaymentFacts, "source" | "paidAt" | "amountCents" | "currency" | "minimumConfirmed">[];
 };
 /**
@@ -283,8 +283,9 @@ export type SupportFacts = {
  * only: it grants no whitelist or game access.
  *
  * - Patreon: an active patron, or a declined patron until 7 days after the declined charge (Patreon retries the
- *   card), whose latest charge was not refunded, fraudulent or otherwise reversed, and whose newest known payment
- *   meets the founder minimum. Any tier counts.
+ *   card), whose latest charge was not refunded, fraudulent or otherwise reversed, with at least one completed
+ *   payment on record. Patreon charges the tier price itself, so any tier and any currency counts; an imported
+ *   charge in another currency could never be confirmed against the founder minimum.
  * - PayPal: a staff-recorded payment that meets the founder minimum, until 31 days after it was paid.
  *
  * Every window ends exclusively at the stated time.
@@ -297,8 +298,7 @@ export function supportActive(record: SupportFacts, now: Date | number) {
       (payment) =>
         payment.source === "paypal" && meetsFounderMinimum(payment) && at < time(payment.paidAt) + PAYPAL_SUPPORT_MS,
     );
-  const [newest] = record.payments;
-  if (!newest || !meetsFounderMinimum(newest)) return false;
+  if (!record.payments.length) return false;
   if (record.lastChargeStatus && PATREON_REVERSED_CHARGE_STATUSES.has(record.lastChargeStatus)) return false;
   if (record.patronStatus === "active_patron") return true;
   return record.patronStatus === "declined_patron" && at < time(record.lastChargeAt) + SUPPORTER_DECLINE_GRACE_MS;

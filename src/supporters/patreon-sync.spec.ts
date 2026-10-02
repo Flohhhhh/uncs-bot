@@ -330,7 +330,16 @@ describe("first successful payment derivation", () => {
     expect(firstPaidEventId([at("pledge_start:1", "2026-10-01T00:00:00Z", "Declined"), paid], true)).toBe(
       "subscription:2",
     );
-    for (const status of ["Refunded", "Partially Refunded", "Fraud", "Refunded by Patreon"])
+    // A declined refund still means an earlier charge was taken.
+    for (const status of [
+      "Refunded",
+      "Partially Refunded",
+      "Fraud",
+      "Refunded by Patreon",
+      "Refund Pending",
+      "Refund Declined",
+      "Other",
+    ])
       expect(firstPaidEventId([at("pledge_start:1", "2026-10-01T00:00:00Z", status), paid], true)).toBeNull();
     expect(firstPaidEventId([paid, at("subscription:3", "2026-10-02T00:00:00Z", "Paid")], true)).toBeNull();
     expect(firstPaidEventId([], true)).toBeNull();

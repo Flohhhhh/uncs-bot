@@ -52,10 +52,22 @@ export type RoleFacts = {
   joinedAt: Date | null;
   lastEffective: LedgerEntry | null;
 };
+/**
+ * Ledger notes. Each records a role Gramps does not hold, so it is never removed automatically: one that was already
+ * present, or one Gramps added that is gone again because staff removed it in Discord.
+ */
+export const NOTE_MESSAGES = {
+  "already-present": "The role was already present. Gramps did not add it and will not remove it.",
+  "removed-in-discord":
+    "The role Gramps added was removed in Discord. Gramps will not add it back during this membership, and will not remove it if staff give it back.",
+  "already-absent":
+    "The role was not present when its reason ended, so there was nothing to remove. Gramps will not remove it if staff give it back.",
+} as const;
+export type NoteWhy = keyof typeof NOTE_MESSAGES;
 export type RoleDecision =
   | { op: "add"; basisId: string; why: "desired" | "retry-unknown-add" }
   | { op: "remove"; basisId: string; why: (typeof ENDED_WHY)[keyof typeof ENDED_WHY] | "retry-unknown-remove" }
-  | { op: "note"; basisId: string; why: "already-present" }
+  | { op: "note"; basisId: string; why: NoteWhy }
   | { op: "confirm"; entryId: string; why: "unknown-add-present" | "unknown-remove-absent" }
   | {
       op: "none";
@@ -69,6 +81,7 @@ const uncertain = (entry: LedgerEntry) => entry.state === "unknown" || entry.sta
  * win: a role that was already present is only noted, a role staff removed is not re-added during the same
  * membership, and only a role Gramps added during the current membership can be removed: the UNC role after
  * its application is revoked, or the Supporter role after support lapsed. The Founder role is never removed.
+ * When a role Gramps added is found gone, that is noted once, so a role staff give back by hand later is theirs.
  */
 export function decide(facts: RoleFacts): RoleDecision {
   // Ledger history from an earlier membership no longer applies after the person left and rejoined.
@@ -80,11 +93,15 @@ export function decide(facts: RoleFacts): RoleDecision {
     if (facts.hasRole) {
       if (current?.operation === "add" && uncertain(current))
         return { op: "confirm", entryId: current.id, why: "unknown-add-present" };
-      if (current && current.operation !== "remove") return { op: "none", why: "already-recorded" };
+      // An unconfirmed removal of Gramps' own role that has not taken effect stays the newest row, so the role is
+      // still Gramps' own and the removal is retried or confirmed if the reason ends again.
+      if (current && (current.operation !== "remove" || uncertain(current)))
+        return { op: "none", why: "already-recorded" };
       return { op: "note", basisId: facts.desiredBasis, why: "already-present" };
     }
-    if (current && current.operation !== "remove" && !(current.operation === "add" && uncertain(current)))
-      return { op: "none", why: "removed-in-discord" };
+    if (current?.operation === "add" && !uncertain(current))
+      return { op: "note", basisId: facts.desiredBasis, why: "removed-in-discord" };
+    if (current?.operation === "note") return { op: "none", why: "removed-in-discord" };
     return {
       op: "add",
       basisId: facts.desiredBasis,
@@ -99,9 +116,12 @@ export function decide(facts: RoleFacts): RoleDecision {
     return facts.hasRole
       ? { op: "remove", basisId: facts.endedBasis, why: "retry-unknown-remove" }
       : { op: "confirm", entryId: current.id, why: "unknown-remove-absent" };
-  if (!facts.hasRole) return { op: "none", why: "not-present" };
-  if (current?.operation === "add" && (current.changed || uncertain(current)))
-    return { op: "remove", basisId: facts.endedBasis, why: ENDED_WHY[facts.kind] };
+  const added = current?.operation === "add" && (current.changed || uncertain(current));
+  if (!facts.hasRole)
+    return added
+      ? { op: "note", basisId: facts.endedBasis, why: "already-absent" }
+      : { op: "none", why: "not-present" };
+  if (added) return { op: "remove", basisId: facts.endedBasis, why: ENDED_WHY[facts.kind] };
   return { op: "none", why: "not-ours" };
 }
 

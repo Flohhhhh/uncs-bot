@@ -62,6 +62,16 @@ describe("deciding one role for one member", () => {
     ],
     ["notes a role someone else gave", { desiredBasis: "app", hasRole: true }, { op: "note", basisId: "app" }],
     [
+      "keeps an unconfirmed removal as the newest row when the role is present and wanted again",
+      { desiredBasis: "app", hasRole: true, lastEffective: unknownRemove },
+      { op: "none", why: "already-recorded" },
+    ],
+    [
+      "keeps an unfinished removal as the newest row when the role is present and wanted again",
+      { desiredBasis: "app", hasRole: true, lastEffective: startedRemove },
+      { op: "none", why: "already-recorded" },
+    ],
+    [
       "notes a role present again after Gramps removed it",
       { desiredBasis: "app", hasRole: true, lastEffective: removal },
       { op: "note" },
@@ -74,9 +84,9 @@ describe("deciding one role for one member", () => {
     // Desired and missing.
     ["adds a role with no history", { desiredBasis: "app" }, { op: "add", basisId: "app", why: "desired" }],
     [
-      "does not re-add a role staff removed in this membership",
+      "records once that staff removed a role Gramps added in this membership, and does not re-add it",
       { desiredBasis: "app", lastEffective: applied },
-      { op: "none", why: "removed-in-discord" },
+      { op: "note", basisId: "app", why: "removed-in-discord" },
     ],
     [
       "does not add a role noted earlier and removed by staff",
@@ -106,7 +116,7 @@ describe("deciding one role for one member", () => {
     [
       "treats unknown join times as the same membership",
       { desiredBasis: "app", joinedAt: null, lastEffective: beforeJoin(applied) },
-      { op: "none", why: "removed-in-discord" },
+      { op: "note", why: "removed-in-discord" },
     ],
     // Not desired.
     [
@@ -166,8 +176,23 @@ describe("deciding one role for one member", () => {
       { op: "none", why: "not-ours" },
     ],
     [
-      "does nothing when the revoked member no longer has it",
+      "records once that a UNC role Gramps added was already gone when the application was revoked",
       { endedBasis: "app", lastEffective: applied },
+      { op: "note", basisId: "app", why: "already-absent" },
+    ],
+    [
+      "records once that a role from an unconfirmed add is absent after revocation",
+      { endedBasis: "app", lastEffective: unknownAdd },
+      { op: "note", basisId: "app", why: "already-absent" },
+    ],
+    [
+      "does nothing when an absent role was already recorded",
+      { endedBasis: "app", lastEffective: note },
+      { op: "none", why: "not-present" },
+    ],
+    [
+      "does nothing when the revoked member never had it from Gramps",
+      { endedBasis: "app", lastEffective: beforeJoin(applied) },
       { op: "none", why: "not-present" },
     ],
     [
@@ -192,9 +217,24 @@ describe("deciding one role for one member", () => {
       { op: "note", basisId: "record", why: "already-present" },
     ],
     [
-      "does not re-add a Supporter role staff removed in this membership",
+      "records once that staff removed a Supporter role Gramps added, and does not re-add it",
       { kind: "supporter", desiredBasis: "record", lastEffective: applied },
+      { op: "note", basisId: "record", why: "removed-in-discord" },
+    ],
+    [
+      "does not re-add a Supporter role whose manual removal is recorded",
+      { kind: "supporter", desiredBasis: "record", lastEffective: note },
       { op: "none", why: "removed-in-discord" },
+    ],
+    [
+      "keeps an unconfirmed Supporter removal as Gramps' own when support resumes before the retry",
+      { kind: "supporter", desiredBasis: "record", hasRole: true, lastEffective: unknownRemove },
+      { op: "none", why: "already-recorded" },
+    ],
+    [
+      "records once that a lapsed Supporter role Gramps added was already removed by hand",
+      { kind: "supporter", endedBasis: "record", lastEffective: applied },
+      { op: "note", basisId: "record", why: "already-absent" },
     ],
     [
       "removes a Supporter role Gramps added once support lapsed",

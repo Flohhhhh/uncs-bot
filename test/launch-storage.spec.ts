@@ -1723,15 +1723,18 @@ describe("launch storage on isolated PostgreSQL", () => {
     );
     expect(imported).toMatchObject({ discordLinked: true, discordId: patron });
     const within = new Date("2026-11-20T00:00:00.000Z");
-    expect(await roles.supporterDesired(undefined, within)).toEqual(
+    expect(await roles.supporterDesired(undefined, campaign, within)).toEqual(
       new Map([
         [donor, paypal.supporter.id],
         [patron, imported.memberId],
       ]),
     );
-    expect(await roles.supporterDesired([patron], within)).toEqual(new Map([[patron, imported.memberId]]));
+    expect(await roles.supporterDesired([patron], campaign, within)).toEqual(new Map([[patron, imported.memberId]]));
+    // Patreon records count only for the configured campaign; with Patreon off only PayPal records count.
+    for (const other of [null, "999999"])
+      expect(await roles.supporterDesired(undefined, other, within)).toEqual(new Map([[donor, paypal.supporter.id]]));
     // 31 days after the PayPal payment it no longer counts; the active patron still does.
-    expect(await roles.supporterDesired(undefined, new Date("2026-12-02T12:00:00.000Z"))).toEqual(
+    expect(await roles.supporterDesired(undefined, campaign, new Date("2026-12-02T12:00:00.000Z"))).toEqual(
       new Map([[patron, imported.memberId]]),
     );
     const base = {

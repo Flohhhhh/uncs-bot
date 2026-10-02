@@ -33,12 +33,12 @@ The founder window covers September 30 through October 14, 2026 (Eastern). Peopl
 
 The Supporter role is a Discord role only. It does not grant whitelist access, queue priority or any other in-game reward, and it does not change founder promises. Gramps adds it while a supporter with a linked Discord account supports right now, and removes it when that support ends:
 
-- a Patreon patron counts while Patreon reports them active, their latest charge was not refunded or reversed, and their newest payment is at least US$5 (the founder minimum). Any tier counts. After a declined charge the role stays for 7 days while Patreon retries the card;
+- a Patreon patron counts while Patreon reports them active, their latest charge was not refunded or reversed, and at least one completed payment is on record. Patreon charges the tier price itself, so any tier counts in any currency. After a declined charge the role stays for 7 days while Patreon retries the card;
 - a PayPal supporter counts for 31 days after each payment of at least US$5 that staff record. A payment in another currency counts when staff confirm it was worth at least US$5 (`minimumConfirmed`).
 
-Patreon amounts come from the Patreon API import (or a staff receipt), so Patreon supporters need the import configured. As with founders, an imported Patreon payment in another currency does not meet the minimum, because staff cannot confirm its value on an imported payment.
+Patreon payments come from the Patreon API import (or a staff receipt), so Patreon supporters need the import configured. Only records of the configured campaign count; while Patreon is switched off, Patreon records do not count.
 
-A founder who still supports holds both roles. A founder who stops supporting keeps Founder and loses Supporter. Gramps removes only a Supporter role it added itself; a role staff gave by hand stays.
+A founder who still supports holds both roles. A founder who stops supporting keeps Founder and loses Supporter. Gramps removes only a Supporter role it added itself; a role staff gave by hand stays, including one staff give back after removing the one Gramps added.
 
 ### Founder window settings
 

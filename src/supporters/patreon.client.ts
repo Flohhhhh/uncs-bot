@@ -198,18 +198,20 @@ export async function retryAfterMs(response: Response, now = Date.now()) {
 }
 
 /**
- * Patreon charge statuses for a charge that was taken and later reversed, disputed or otherwise went wrong
- * (refunds, fraud and Patreon's "Other"). A declined charge was never taken, so it is not one of them.
+ * Patreon charge statuses for a charge that was taken and later reversed, is being refunded, or otherwise went
+ * wrong (refunds, fraud and Patreon's "Other"). A declined charge was never taken, and a declined refund leaves
+ * the charge standing, so neither is one of them.
  */
 export const PATREON_REVERSED_CHARGE_STATUSES: ReadonlySet<string> = new Set([
   "Refunded",
   "Partially Refunded",
   "Refunded by Patreon",
   "Refund Pending",
-  "Refund Declined",
   "Fraud",
   "Other",
 ]);
+/** Statuses that show a charge was taken at some point, whether or not it still stands. */
+const chargedBefore: ReadonlySet<string> = new Set([...PATREON_REVERSED_CHARGE_STATUSES, "Refund Declined"]);
 /**
  * The member's first successful payment: the earliest `Paid` event of a complete history, only when
  * no earlier event could have been a charge that was later reversed and no other `Paid` event shares
@@ -228,11 +230,7 @@ export function firstPaidEventId(events: PatreonPledgeEvent[], complete: boolean
     )
   )
     return null;
-  if (
-    sorted
-      .slice(0, index)
-      .some((event) => event.paymentStatus && PATREON_REVERSED_CHARGE_STATUSES.has(event.paymentStatus))
-  )
+  if (sorted.slice(0, index).some((event) => event.paymentStatus && chargedBefore.has(event.paymentStatus)))
     return null;
   return first.id;
 }

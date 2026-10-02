@@ -101,6 +101,8 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
         founder: this.env.get("DISCORD_FOUNDER_ROLE_ID"),
         supporter: this.env.get("DISCORD_SUPPORTER_ROLE_ID"),
       } as Record<DiscordRoleKind, string | undefined>,
+      // Patreon records count for the Supporter role only for the configured campaign, as on the supporter dashboard.
+      patreonCampaignId: (this.env.get("PATREON_ENABLED") && this.env.get("PATREON_CAMPAIGN_ID")) || null,
       staffRoleIds: [
         ...ids(this.env.get("ADMIN_ADMIN_ROLE_IDS")),
         ...ids(this.env.get("ADMIN_MODERATOR_ROLE_IDS")),
@@ -303,7 +305,7 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
       const [desired, revoked, supporting, held] = await Promise.all([
         this.store.desired(list),
         this.store.revokedBasis(list),
-        supporterRole ? this.store.supporterDesired(list) : new Map<string, string>(),
+        supporterRole ? this.store.supporterDesired(list, options.patreonCampaignId) : new Map<string, string>(),
         supporterRole ? this.store.heldBasis(guildId, "supporter", supporterRole, list) : new Map<string, string>(),
       ]);
       const wanted: Record<DiscordRoleKind, Map<string, string>> = { ...desired, supporter: supporting };
@@ -358,8 +360,8 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
         }
         if (!member) {
           if (!dryRun) this.forgetAttention(userId);
-          // Someone whose only reason is a lapsed Supporter role has nothing to receive, so needs no attention.
-          if (ROLE_KINDS.some((kind) => wanted[kind].has(userId)) || revoked.has(userId))
+          // Someone whose only reason is the Supporter role needs no attention: joining queues a check that adds it.
+          if (wanted.member.has(userId) || wanted.founder.has(userId) || revoked.has(userId))
             attention({ kind: "not_in_server", discordUserId: userId });
           plan?.push({ discordUserId: userId, roleKind: null, op: "none", why: "not-in-server" });
           continue;
@@ -379,7 +381,7 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
             joinedAt: member.joinedAt,
             lastEffective: await this.store.lastEffective(guildId, userId, kind, roleId),
           });
-          if (decision.op === "none" && decision.why === "removed-in-discord")
+          if (decision.why === "removed-in-discord")
             attention({ kind: "removed_in_discord", discordUserId: userId, roleKind: kind, basisId: desiredBasis! });
           if (plan) {
             if (decision.op !== "none" || ["removed-in-discord", "not-ours"].includes(decision.why))
@@ -403,7 +405,7 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
             continue;
           }
           if (decision.op === "note") {
-            await this.store.note({ ...base, basisId: decision.basisId });
+            await this.store.note({ ...base, basisId: decision.basisId }, decision.why);
             summary.noted++;
             continue;
           }
@@ -531,7 +533,9 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
       this.store.foundersWithoutDiscord(),
       this.store.recent(25),
       // People who support right now; counted only while the Supporter role is configured.
-      options.roleIds.supporter ? this.store.supporterDesired().then((desired) => desired.size) : null,
+      options.roleIds.supporter
+        ? this.store.supporterDesired(undefined, options.patreonCampaignId).then((desired) => desired.size)
+        : null,
     ]);
     const next = Math.min(...[...this.deferredUsers.values()].map((entry) => entry.at));
     return {

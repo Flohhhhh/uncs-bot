@@ -11,7 +11,7 @@ import {
   type DiscordRoleTrigger,
 } from "../database/discord-roles.schema";
 import { FOUNDER_PAYMENT_SOURCES, supportActive, type SupportFacts } from "../supporters/supporters.types";
-import { ROLES_ACTOR_ID, ROLES_ACTOR_NAME, type LedgerEntry } from "./discord-roles.types";
+import { NOTE_MESSAGES, ROLES_ACTOR_ID, ROLES_ACTOR_NAME, type LedgerEntry, type NoteWhy } from "./discord-roles.types";
 
 /** Enough recent payments per record to find a qualifying PayPal payment inside its 31 days. */
 const SUPPORT_PAYMENTS_READ = 10;
@@ -73,14 +73,24 @@ export class DiscordRolesStore {
 
   /**
    * People who support The UNCs right now (see `supportActive`), with the first supporter record by ID that
-   * qualifies. Every supporter record with a linked Discord account is read; the rule is applied here.
+   * qualifies. Every PayPal record and every record of the configured Patreon campaign with a linked Discord account
+   * is read, as on the supporter dashboard; the rule is applied here. With no campaign configured (Patreon is off),
+   * Patreon records do not count: their status is no longer kept up to date.
    */
-  async supporterDesired(users?: string[], now: Date = new Date()): Promise<Map<string, string>> {
+  async supporterDesired(
+    users: string[] | undefined,
+    campaignId: string | null,
+    now: Date = new Date(),
+  ): Promise<Map<string, string>> {
     if (users && users.length === 0) return new Map();
     const sources = sql.join(
       FOUNDER_PAYMENT_SOURCES.map((source) => sql`${source}`),
       sql`, `,
     );
+    const providers =
+      campaignId === null
+        ? sql`m.provider = 'paypal'`
+        : sql`(m.provider = 'paypal' OR (m.provider = 'patreon' AND m.campaign_id = ${campaignId}))`;
     const result = await this.db.execute<SupportFacts & { userId: string; basisId: string }>(sql`
       SELECT m.discord_id AS "userId", m.id::text AS "basisId", m.provider, m.patron_status AS "patronStatus",
         m.last_charge_status AS "lastChargeStatus", m.last_charge_at AS "lastChargeAt",
@@ -92,7 +102,7 @@ export class DiscordRolesStore {
               AND p.source IN (${sources})
             ORDER BY p.paid_at DESC, p.recorded_at DESC LIMIT ${SUPPORT_PAYMENTS_READ}) recent) AS payments
       FROM supporter_members m
-      WHERE m.discord_id IS NOT NULL ${this.only(sql`m.discord_id`, users)}
+      WHERE m.discord_id IS NOT NULL AND ${providers} ${this.only(sql`m.discord_id`, users)}
       ORDER BY m.id`);
     const desired = new Map<string, string>();
     for (const record of result.rows)
@@ -201,8 +211,11 @@ export class DiscordRolesStore {
     return row.id;
   }
 
-  /** A role that was already present: recorded as Gramps did not add it, so it is never removed automatically. */
-  async note(input: Omit<RoleActionStart, "operation">) {
+  /**
+   * A role Gramps does not hold: one that was already present, or one Gramps added that staff removed in Discord.
+   * The note becomes the newest row, so the role is never removed automatically.
+   */
+  async note(input: Omit<RoleActionStart, "operation">, why: NoteWhy = "already-present") {
     await this.db.insert(discordRoleActions).values({
       id: randomUUID(),
       actorId: ROLES_ACTOR_ID,
@@ -211,7 +224,7 @@ export class DiscordRolesStore {
       operation: "note",
       changed: false,
       state: "applied",
-      message: "The role was already present. Gramps did not add it and will not remove it.",
+      message: NOTE_MESSAGES[why],
       completedAt: new Date(),
     });
   }

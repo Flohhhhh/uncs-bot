@@ -730,6 +730,113 @@ describe("the Supporter role", () => {
     expect(ledger).toHaveLength(1);
   });
 
+  it("keeps an unconfirmed Supporter removal as Gramps' own when support resumes before the retry", async () => {
+    const { service, state, addMember, ledger, store } = fixture(withSupporter);
+    state.supporter.set(A, "supporter-a");
+    const member = addMember(A);
+    let now = Date.parse("2026-11-01T12:00:00Z");
+    jest.spyOn(Date, "now").mockImplementation(() => now);
+    service.supporterChanged(A);
+    await service.tick();
+    // Support lapses and Discord does not confirm the removal.
+    state.supporter.delete(A);
+    member.remove.mockRejectedValueOnce(transient());
+    service.supporterChanged(A);
+    await service.tick();
+    expect(ledger.at(-1)).toMatchObject({ roleKind: "supporter", operation: "remove", state: "unknown" });
+    // Staff record a new payment before the retry runs.
+    state.supporter.set(A, "supporter-a");
+    now += 61_000;
+    await service.tick();
+    expect(store.note).not.toHaveBeenCalled();
+    expect(ledger.at(-1)).toMatchObject({ operation: "remove", state: "unknown" });
+    expect(member.roles.has(SUPPORTER)).toBe(true);
+    // When support lapses again, the unfinished removal is retried.
+    state.supporter.delete(A);
+    service.supporterChanged(A);
+    await service.tick();
+    expect(member.remove).toHaveBeenCalledTimes(2);
+    expect(member.roles.has(SUPPORTER)).toBe(false);
+    expect(ledger.at(-1)).toMatchObject({ operation: "remove", state: "applied", changed: true });
+  });
+
+  it("never removes a Supporter role staff gave back by hand after removing the one Gramps added", async () => {
+    const { service, state, addMember, ledger, status, store } = fixture(withSupporter);
+    state.supporter.set(A, "supporter-a");
+    state.supporter.set(B, "supporter-b");
+    const first = addMember(A);
+    const second = addMember(B);
+    service.supporterChanged(A);
+    service.supporterChanged(B);
+    await service.tick();
+    expect(first.add).toHaveBeenCalledWith(SUPPORTER, "Gramps: active supporter");
+    expect(second.add).toHaveBeenCalledWith(SUPPORTER, "Gramps: active supporter");
+    // Staff remove both roles by hand. A is checked while still supporting; B only after support lapsed.
+    first.roles.delete(SUPPORTER);
+    second.roles.delete(SUPPORTER);
+    service.supporterChanged(A);
+    await service.tick();
+    expect(ledger.at(-1)).toMatchObject({
+      discordUserId: A,
+      roleKind: "supporter",
+      operation: "note",
+      state: "applied",
+      changed: false,
+      basisId: "supporter-a",
+    });
+    expect(store.note).toHaveBeenLastCalledWith(expect.objectContaining({ discordUserId: A }), "removed-in-discord");
+    expect((await status()).attention).toContainEqual(
+      expect.objectContaining({ kind: "removed_in_discord", discordUserId: A, roleKind: "supporter" }),
+    );
+    expect(first.add).toHaveBeenCalledTimes(1);
+    state.supporter.delete(A);
+    state.supporter.delete(B);
+    service.supporterChanged(A);
+    service.supporterChanged(B);
+    await service.tick();
+    expect(ledger.at(-1)).toMatchObject({ discordUserId: B, operation: "note", basisId: "supporter-b" });
+    expect(store.note).toHaveBeenLastCalledWith(expect.objectContaining({ discordUserId: B }), "already-absent");
+    // Staff give both roles back by hand as a thank-you.
+    first.roles.add(SUPPORTER);
+    second.roles.add(SUPPORTER);
+    const { summary } = await service.reconcile(admin, reconcile());
+    expect(summary).toMatchObject({ removed: 0, failed: 0 });
+    expect(first.remove).not.toHaveBeenCalled();
+    expect(second.remove).not.toHaveBeenCalled();
+    expect(first.roles.has(SUPPORTER)).toBe(true);
+    expect(second.roles.has(SUPPORTER)).toBe(true);
+  });
+
+  it("reads Patreon support only from the configured Patreon campaign", async () => {
+    const on = fixture({ ...withSupporter, PATREON_ENABLED: true, PATREON_CAMPAIGN_ID: "123456" });
+    on.service.supporterChanged(A);
+    await on.service.tick();
+    await on.status();
+    expect(on.store.supporterDesired).toHaveBeenCalledWith([A], "123456");
+    expect(on.store.supporterDesired).toHaveBeenCalledWith(undefined, "123456");
+    // With Patreon switched off or no campaign set, only PayPal records count.
+    for (const env of [{ PATREON_ENABLED: false, PATREON_CAMPAIGN_ID: "123456" }, { PATREON_ENABLED: true }]) {
+      const off = fixture({ ...withSupporter, ...env });
+      off.service.supporterChanged(A);
+      await off.service.tick();
+      await off.status();
+      expect(off.store.supporterDesired).toHaveBeenCalledWith([A], null);
+      expect(off.store.supporterDesired).toHaveBeenCalledWith(undefined, null);
+    }
+  });
+
+  it("does not flag a current supporter who is not in the server, and adds the role when they join", async () => {
+    const { service, state, addMember, status } = fixture(withSupporter);
+    state.supporter.set(B, "supporter-b");
+    const { summary } = await service.reconcile(admin, reconcile());
+    expect(summary).toMatchObject({ users: 1, attention: [] });
+    expect((await status()).attention).not.toContainEqual(expect.objectContaining({ discordUserId: B }));
+    const joined = addMember(B);
+    service.memberJoined(GUILD, B);
+    await service.tick();
+    expect(joined.add).toHaveBeenCalledWith(SUPPORTER, "Gramps: active supporter");
+  });
+
   it("reports the Supporter role setup and how many people support right now", async () => {
     const { service, state } = fixture(withSupporter);
     state.supporter.set(A, "supporter-a");
