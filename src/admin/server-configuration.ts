@@ -67,7 +67,54 @@ export function parseRotation(text: string): MapSelection[] {
 export function formatRotation(entry: MapSelection) {
   return `(${[`Map="${entry.map}"`, `Experiences="${entry.experiences.join("+")}"`, ...(entry.lighting ? [`Lighting="${entry.lighting}"`] : []), ...(entry.zoneAlternator && entry.zoneAlternator !== "None" ? [`ZoneAlternator="${entry.zoneAlternator}"`] : [])].join(",")})`;
 }
-class UnavailableSelection extends RconError {}
+export class UnavailableSelection extends RconError {}
+
+/** Where a next-round choice ends up; `src/common/voting-policy.ts` mirrors this for the dashboard. */
+export type MapNextPlacement = "already-next" | "move" | "swap" | "insert" | "append";
+export type MapNextPlan = {
+  entries: MapSelection[];
+  /** The row the game plays after the running one; `length` when that is unconfirmed after the last row. */
+  nextSlot: number;
+  /** Where the chosen entry ends up. */
+  slot: number;
+  placement: MapNextPlacement;
+};
+/**
+ * Places a next-round choice without moving the running row. Live evidence (2 October 2026, c7d2b11)
+ * shows the game plays row currentIndex+1. After the last row the game wraps to row 0 only when its
+ * status reports `nextIndex` 0. A later copy of the choice is moved up and an earlier copy is swapped
+ * into the next slot, so neither grows the rotation. Otherwise the choice is inserted (or appended
+ * after the last row when no wrap is confirmed).
+ */
+export function planMapNext(
+  existing: MapSelection[],
+  currentIndex: number,
+  reportedNextIndex: number | null | undefined,
+  entry: MapSelection,
+): MapNextPlan {
+  const length = existing.length;
+  const last = currentIndex >= length - 1;
+  const nextSlot = last ? (reportedNextIndex === 0 ? 0 : length) : currentIndex + 1;
+  const key = formatRotation(entry);
+  const same = (candidate: MapSelection) => formatRotation(candidate) === key;
+  const entries = [...existing];
+  if (nextSlot < length && same(existing[nextSlot]))
+    return { entries, nextSlot, slot: nextSlot, placement: "already-next" };
+  // Removing an earlier entry would shift the running numeric index onto another map.
+  const later = existing.findIndex((candidate, index) => index > currentIndex && same(candidate));
+  if (later >= 0) {
+    entries.splice(later, 1);
+    entries.splice(currentIndex + 1, 0, entry);
+    return { entries, nextSlot, slot: currentIndex + 1, placement: "move" };
+  }
+  const earlier = existing.findIndex((candidate, index) => index < currentIndex && same(candidate));
+  if (earlier >= 0 && nextSlot < length) {
+    [entries[earlier], entries[nextSlot]] = [entries[nextSlot], entries[earlier]];
+    return { entries, nextSlot, slot: nextSlot, placement: "swap" };
+  }
+  entries.splice(currentIndex + 1, 0, entry);
+  return { entries, nextSlot, slot: currentIndex + 1, placement: last ? "append" : "insert" };
+}
 
 export async function validateMapSelection(
   game: WardogsClient,
@@ -341,6 +388,7 @@ export async function changeServerConfiguration(
       // Always parse the old list first; do not silently discard unsupported fields.
       const existing = parseRotation(doc.text);
       let entries: MapSelection[];
+      let placedAt = 0;
       if (action.action === "map-next") {
         const status = statusSchema.parse(await game.request("GET", "/v1/status"));
         const position = await rotationPosition(game, status, existing, doc, capabilities);
@@ -354,14 +402,17 @@ export async function changeServerConfiguration(
           throw new RconError("Enable an ordered rotation before choosing the next map.");
         if (!existing[action.currentIndex] || !sameMap(existing[action.currentIndex].map, status.map))
           throw new RconError("The running map does not match the saved rotation. Reload and review it.");
-        entries = [...existing];
-        // Removing an earlier entry shifts the running numeric index onto another
-        // map. Only move a later entry; preserve the current position otherwise.
-        const match = entries.findIndex(
-          (entry, index) => index > action.currentIndex && formatRotation(entry) === formatRotation(action.entry),
-        );
-        if (match >= 0) entries.splice(match, 1);
-        entries.splice(action.currentIndex + 1, 0, action.entry);
+        const plan = planMapNext(existing, action.currentIndex, status.rotation?.nextIndex, action.entry);
+        // Rewriting an unchanged list would still change the saved array syntax; send nothing.
+        if (plan.placement === "already-next")
+          return {
+            state: "applied",
+            revision: doc.revision,
+            changed: false,
+            message: "This entry is already next in the rotation. No change was sent.",
+          };
+        entries = plan.entries;
+        placedAt = plan.slot;
       } else entries = action.entries;
       if (entries.length > 100) throw new RconError("Keep the rotation to 100 entries or fewer.");
       const catalog = await game.catalog();
@@ -369,8 +420,7 @@ export async function changeServerConfiguration(
       // A next-round choice preserves the other saved entries. Old catalog values
       // elsewhere must not prevent a valid choice; native validation still checks
       // the complete document before any conditional write.
-      const selections =
-        action.action === "map-next" ? [[entries.indexOf(action.entry), action.entry] as const] : entries.entries();
+      const selections = action.action === "map-next" ? [[placedAt, action.entry] as const] : entries.entries();
       for (const [index, entry] of selections) {
         try {
           await validateMapSelection(game, entry, capabilities, catalog, reads);
