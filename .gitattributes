@@ -1,0 +1,10 @@
+# Match the source files managed by scripts/run-prettier.ts on every platform.
+src/**/*.ts text eol=lf
+test/**/*.ts text eol=lf
+scripts/**/*.ts text eol=lf
+web/admin/**/*.ts text eol=lf
+web/admin/**/*.tsx text eol=lf
+web/admin/**/*.mts text eol=lf
+web/admin/**/*.css text eol=lf
+web/admin/**/*.html text eol=lf
+web/admin/**/*.json text eol=lf
