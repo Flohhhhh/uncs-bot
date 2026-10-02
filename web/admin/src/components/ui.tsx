@@ -73,9 +73,24 @@ export function Search({
   clearLabel?: string;
 }) {
   const input = useRef<HTMLInputElement>(null);
+  const compactClear = clearLabel === "Clear search";
+  const clearButton = value && (
+    <button
+      type="button"
+      className={compactClear ? "icon-button search-clear" : "button secondary"}
+      aria-label={clearLabel}
+      title={clearLabel}
+      onClick={() => {
+        onChange("");
+        input.current?.focus();
+      }}
+    >
+      {compactClear ? "×" : clearLabel}
+    </button>
+  );
   return (
     <div className="toolbar">
-      <label className="search">
+      <div className="search">
         <input
           type="search"
           ref={input}
@@ -84,19 +99,9 @@ export function Search({
           placeholder={placeholder}
           aria-label={placeholder}
         />
-      </label>
-      {value && (
-        <button
-          type="button"
-          className="button secondary"
-          onClick={() => {
-            onChange("");
-            input.current?.focus();
-          }}
-        >
-          {clearLabel}
-        </button>
-      )}
+        {compactClear && clearButton}
+      </div>
+      {!compactClear && clearButton}
       {children}
     </div>
   );

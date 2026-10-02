@@ -37,12 +37,7 @@
   font-synthesis: none;
   -webkit-font-smoothing: antialiased;
 }
-.server-selection {
-  display: flex;
-  justify-content: flex-end;
-  margin-bottom: 20px;
-}
-.server-selection label,
+.server-selection,
 .login-copy > label {
   display: grid;
   gap: 6px;
@@ -353,16 +348,6 @@ main {
   justify-content: space-between;
   gap: 16px;
   font-size: 11px;
-}
-.breadcrumb {
-  color: #9aa297;
-}
-a.breadcrumb:hover {
-  color: var(--orange);
-}
-.divider {
-  padding: 0 12px;
-  color: #626b5c;
 }
 .topbar-right {
   display: flex;
@@ -735,10 +720,19 @@ a.breadcrumb:hover {
   border: 1px solid #495044;
   color: var(--cream);
   border-radius: 3px;
-  padding: 12px 14px;
+  padding: 12px 42px 12px 14px;
   font-size: 12px;
   width: 100%;
   outline-offset: 2px;
+}
+.search input::-webkit-search-cancel-button {
+  appearance: none;
+}
+.search-clear {
+  position: absolute;
+  right: 3px;
+  top: 50%;
+  transform: translateY(-50%);
 }
 input::placeholder,
 textarea::placeholder {
@@ -2021,9 +2015,6 @@ dialog textarea {
   }
   .topbar-right {
     gap: 10px;
-  }
-  .divider {
-    padding: 0 7px;
   }
   .topbar .pill {
     font-size: 8px;
