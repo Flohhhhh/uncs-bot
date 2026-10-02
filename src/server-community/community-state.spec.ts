@@ -40,6 +40,13 @@ describe("community observation semantics", () => {
     expect(observeCommunity(joined.state, renamed, 11_000).joined).toEqual([]);
   });
 
+  it("does not announce a round or suppress a welcome when only a verified map alias changes", () => {
+    const before = observeCommunity(initialCommunityState(), snapshot(), 1_000);
+    const next = observeCommunity(before.state, snapshot([id, "76561198000000002"], { map: "Bakurani" }), 6_000);
+    expect(next).toMatchObject({ joined: ["76561198000000002"], round: false });
+    expect(next.state.pendingRoundAt).toBeNull();
+  });
+
   it("does not welcome everyone again after an empty map-loading roster", () => {
     let state = observeCommunity(initialCommunityState(), snapshot(), 1_000).state;
     state = observeCommunity(state, snapshot([], { map: "Europe" }), 6_000).state;
