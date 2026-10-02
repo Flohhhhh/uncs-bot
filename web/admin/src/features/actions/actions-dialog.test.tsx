@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../../api/client";
 import { AdminContext } from "../../app/context";
-import { alice, bob, context } from "../players/test-fixtures";
+import { alice, bob, context, overview } from "../players/test-fixtures";
 import { ActionsDialog } from "./actions-dialog";
 import { actionSchema } from "../../../../../src/admin/admin.types";
 
@@ -62,6 +62,56 @@ describe("server action review", () => {
     expect(screen.getByRole("button", { name: "Restart current match" })).toBeDisabled();
     expect(request).toHaveBeenCalledTimes(1);
   });
+  it("retains the reviewed round across refreshes and captures a new round only after a rejected attempt", async () => {
+    request.mockResolvedValue({ state: "failed", message: "The round changed. Nothing was sent." });
+    const first = overview();
+    const later = { ...first, status: { ...first.status, map: "Europe", matchSeconds: 1 } };
+    const tree = (value: typeof first) => (
+      <AdminContext.Provider value={context({ overview: value })}>
+        <ActionsDialog action="match-restart" onClose={vi.fn()} />
+      </AdminContext.Provider>
+    );
+    const { rerender } = render(tree(first));
+    fireEvent.change(screen.getByPlaceholderText("RESTART MATCH"), { target: { value: "RESTART MATCH" } });
+    rerender(tree(later));
+    expect(screen.getByRole("note", { name: "Live match warning" })).toHaveTextContent("Reviewed match: Harbor");
+    fireEvent.click(screen.getByRole("button", { name: "Restart current match" }));
+    await screen.findByText("The round changed. Nothing was sent.");
+    expect(JSON.parse(String(request.mock.calls[0][1]?.body)).expectedRound).toEqual({
+      map: "Harbor",
+      startedAt: Date.parse(first.observedAt) - 120_000,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Back to edits" }));
+    expect(screen.getByRole("note", { name: "Live match warning" })).toHaveTextContent("Reviewed match: Ozeti");
+    expect(screen.getByRole("button", { name: "Restart current match" })).toBeDisabled();
+    fireEvent.change(screen.getByPlaceholderText("RESTART MATCH"), { target: { value: "RESTART MATCH" } });
+    fireEvent.click(screen.getByRole("button", { name: "Restart current match" }));
+    await screen.findByText("The round changed. Nothing was sent.");
+    expect(JSON.parse(String(request.mock.calls[1][1]?.body)).expectedRound).toEqual({
+      map: "Europe",
+      startedAt: Date.parse(first.observedAt) - 1_000,
+    });
+  });
+  it.each(["match-end", "match-restart", "map"] as const)(
+    "blocks %s when the reviewed match clock is unavailable",
+    (action) => {
+      const current = overview();
+      current.status.matchSeconds = undefined;
+      request.mockImplementation(() => new Promise(() => {}));
+      render(
+        <AdminContext.Provider value={context({ overview: current })}>
+          <ActionsDialog action={action} onClose={vi.fn()} />
+        </AdminContext.Provider>,
+      );
+      const phrase = action === "match-end" ? "END MATCH" : action === "match-restart" ? "RESTART MATCH" : "CHANGE MAP";
+      const input = screen.getByPlaceholderText(phrase);
+      fireEvent.change(input, { target: { value: phrase } });
+      expect(screen.getByRole("note", { name: "Live match warning" })).toHaveTextContent("match clock is unavailable");
+      expect(input.closest("form")!.querySelector("button[type=submit]")).toBeDisabled();
+      fireEvent.submit(input.closest("form")!);
+      expect(request.mock.calls.some(([path]) => path === "actions")).toBe(false);
+    },
+  );
   it.each(["receipt", "http"])(
     "preserves entries after a definite %s rejection and records a reviewed retry separately",
     async (kind) => {
@@ -247,6 +297,8 @@ describe("server action review", () => {
     const call = request.mock.calls.find(([path]) => path === "actions")!;
     const body = JSON.parse(String(call[1]?.body));
     expect(body).toMatchObject({ action: "map", map: "Harbor", confirm: "CHANGE MAP" });
+    expect(actionSchema.safeParse(body).success).toBe(true);
+    expect(body.expectedRound).toEqual({ map: "Harbor", startedAt: Date.parse(overview().observedAt) - 120_000 });
     expect(body).not.toHaveProperty("lighting");
     expect(body).not.toHaveProperty("experiences");
   });

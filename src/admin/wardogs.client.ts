@@ -553,6 +553,24 @@ export class WardogsClient {
       if (!catalog.lightings.some((entry) => entry.id === action.lighting))
         throw new RconError("Choose lighting from the current server catalog.");
     }
+    if (action.action === "map" || action.action === "match-end" || action.action === "match-restart") {
+      let currentRound: RoundStamp | null;
+      try {
+        const status = statusSchema.parse(await this.request("GET", "/v1/status"));
+        currentRound = roundStamp(status, Date.now());
+      } catch {
+        throw new RconError(
+          "The current round could not be verified. Nothing was sent. Close this review and refresh the dashboard.",
+        );
+      }
+      if (!action.expectedRound || !currentRound || !sameRound(action.expectedRound, currentRound))
+        return {
+          state: "failed",
+          changed: false,
+          message:
+            "The reviewed round changed or its clock is unavailable. Nothing was sent. Review the current match again.",
+        };
+    }
     const result = await this.request(method, path, body);
     if (rejected(result)) throw new RconError("The game did not accept this action.");
     if (action.action === "ban" || action.action === "unban") {
