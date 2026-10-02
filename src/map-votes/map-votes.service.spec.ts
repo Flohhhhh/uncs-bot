@@ -201,6 +201,16 @@ describe("durable Discord map voting", () => {
     expect(store.create).not.toHaveBeenCalled();
     expect(game.configuration).not.toHaveBeenCalled();
   });
+  it("excludes the running map when status uses its in-game name and the ballot uses its catalog ID", async () => {
+    const { service, input, game, store, discord } = fixture();
+    const settings = await game.configuration();
+    game.configuration.mockResolvedValue({ ...settings, rotation: { ...settings.rotation, currentMap: "Ozeti" } });
+    const overview = await game.overview();
+    game.overview.mockResolvedValue({ ...overview, status: { ...overview.status, map: "Ozeti" } });
+    await expect(service.start(staff, input)).rejects.toThrow("Leave the current map out");
+    expect(store.create).not.toHaveBeenCalled();
+    expect(discord.publish).not.toHaveBeenCalled();
+  });
   it("validates maps and the round, saves intent before publishing and never changes the game when starting", async () => {
     const { service, input, store, discord, admin } = fixture();
     expect(await service.start(staff, input)).toMatchObject({

@@ -156,37 +156,68 @@ describe("server configuration boundaries", () => {
     expect(view.scoreTick).toMatchObject({ min: 20, max: 30 });
     expect(JSON.stringify(view)).not.toMatch(/private-|WDServerFeed|DefaultReservedPlayerIds/);
   });
-  it("uses the advertised running rotation marker when status omits its position", async () => {
+  it.each(["Europe", "Ozeti"])(
+    "uses the running marker with status map %s when status omits its position",
+    async (map) => {
+      const f = fixture();
+      f.status.map = map;
+      f.capabilities.routes.push("GET /v1/rotation");
+      const originalRequest = f.request.getMockImplementation()!;
+      f.request.mockImplementation(async (...args) => {
+        if (args[1] === "/v1/status") return { ...f.status, rotation: undefined };
+        if (args[1] === "/v1/rotation")
+          return {
+            enabled: true,
+            mode: "Ordered",
+            entries: parseRotation(original).map((entry, index) => ({
+              ...entry,
+              map: map === "Ozeti" ? (index === 0 ? "Bakurani" : "Ozeti") : entry.map,
+              index,
+              status: index === 1 ? "now" : null,
+            })),
+          };
+        return originalRequest(...args);
+      });
+      expect((await f.game.configuration()).rotation.currentIndex).toBe(1);
+      expect(f.request.mock.calls.some(([method]) => method !== "GET")).toBe(false);
+      await f.game.execute({
+        id: randomUUID(),
+        action: "map-next",
+        reason: "Next round choice",
+        revision: "r1",
+        currentIndex: 1,
+        currentMap: map,
+        entry: { map: "Kavkazi", experiences: ["KOTH"], lighting: "DayClear" },
+      });
+      expect(parseRotation(f.saved().text).map((entry) => entry.map)).toEqual(["Kavkazi", "Europe", "Kavkazi"]);
+      expect(f.request.mock.calls.some(([, path]) => path.startsWith("/v1/match"))).toBe(false);
+    },
+  );
+  it.each([
+    ["Kavkazi", "Bakurani"],
+    ["Europe", "Ozeti"],
+    ["NorthAmerica", "Zestafona"],
+  ])("matches saved %s to live %s without rewriting catalog IDs", async (id, name) => {
     const f = fixture();
-    f.status.map = "Europe";
-    f.capabilities.routes.push("GET /v1/rotation");
-    const originalRequest = f.request.getMockImplementation()!;
-    f.request.mockImplementation(async (...args) => {
-      if (args[1] === "/v1/status") return { ...f.status, rotation: undefined };
-      if (args[1] === "/v1/rotation")
-        return {
-          enabled: true,
-          mode: "Ordered",
-          entries: parseRotation(original).map((entry, index) => ({
-            ...entry,
-            index,
-            status: index === 1 ? "now" : null,
-          })),
-        };
-      return originalRequest(...args);
-    });
-    expect((await f.game.configuration()).rotation.currentIndex).toBe(1);
-    expect(f.request.mock.calls.some(([method]) => method !== "GET")).toBe(false);
+    f.document.text = original.replace('Map="Kavkazi"', `Map="${id}"`);
+    f.status.map = name;
+    const snapshot = await f.game.configuration();
+    expect(snapshot.rotation).toMatchObject({ currentIndex: 0, currentMap: name, positionNote: "" });
+    expect(f.request.mock.calls.every(([method]) => method === "GET")).toBe(true);
     await f.game.execute({
       id: randomUUID(),
       action: "map-next",
       reason: "Next round choice",
       revision: "r1",
-      currentIndex: 1,
-      currentMap: "Europe",
-      entry: { map: "Kavkazi", experiences: ["KOTH"], lighting: "DayClear" },
+      currentIndex: 0,
+      currentMap: name,
+      entry: { map: "Europe", experiences: ["KOTH", "KOTH_InfantryOnly"] },
     });
-    expect(parseRotation(f.saved().text).map((entry) => entry.map)).toEqual(["Kavkazi", "Europe", "Kavkazi"]);
+    expect(parseRotation(f.saved().text).slice(0, 2)).toEqual([
+      { map: id, experiences: ["KOTH"], lighting: "DayClear" },
+      { map: "Europe", experiences: ["KOTH", "KOTH_InfantryOnly"] },
+    ]);
+    expect(f.request.mock.calls.filter(([method]) => method === "PUT")).toHaveLength(1);
     expect(f.request.mock.calls.some(([, path]) => path.startsWith("/v1/match"))).toBe(false);
   });
   it("uses the marked occurrence for duplicate maps without requiring a numeric index", async () => {

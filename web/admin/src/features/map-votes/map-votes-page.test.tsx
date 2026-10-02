@@ -76,6 +76,18 @@ async function choose(map: string) {
   await waitFor(() => expect(screen.getByRole("button", { name: "Add map option" })).toBeEnabled());
   fireEvent.click(screen.getByRole("button", { name: "Add map option" }));
 }
+it("excludes a running map reported by its in-game name from catalog choices", async () => {
+  const fallback = request.getMockImplementation()!;
+  request.mockImplementation(async (path, options) => {
+    if (path !== "settings") return fallback(path, options);
+    return { ...settings, rotation: { ...settings.rotation, currentMap: "Ozeti" } } as never;
+  });
+  show();
+  const maps = within(await screen.findByRole("combobox", { name: "Map" }));
+  expect(maps.queryByRole("option", { name: "Ozeti" })).not.toBeInTheDocument();
+  expect(maps.getByRole("option", { name: "Bakurani" })).toBeInTheDocument();
+  expect(request.mock.calls.some(([, options]) => options?.method === "POST")).toBe(false);
+});
 it("keeps ballot choices but blocks review until round timing is available", async () => {
   matchSeconds = undefined;
   show();

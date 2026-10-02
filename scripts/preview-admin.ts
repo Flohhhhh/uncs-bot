@@ -16,6 +16,7 @@ import { configuredWhitelist } from "../src/admin/whitelist-document";
 import { settingFields, SESSION, ROTATION } from "../src/common/server-settings";
 import { scalarValue } from "../src/admin/config-document";
 import { parseRotation, auditAction } from "../src/admin/server-configuration";
+import { mapLabel } from "../src/common/map-labels";
 import type { ActionResult, AdminAction, Staff } from "../src/admin/admin.types";
 import { ApplicationsModule } from "../src/applications/applications.module";
 import { ApplicationsStore } from "../src/applications/applications.store";
@@ -184,7 +185,7 @@ function createPreviewGame(name: string, reportsClock: boolean) {
       if (path === "/v1/status")
         return {
           serverName: scalarValue(text, SESSION, "ServerName") || "Local preview",
-          map: currentMap,
+          map: mapLabel(currentMap),
           ...(reportsClock ? { matchSeconds: (Date.now() - previewRoundStart) / 1000 } : {}),
           lighting,
           alternator: currentMap === "Kavkazi" ? "ZoneAlternator.Bakurani.Farmland.Circle" : "None",
