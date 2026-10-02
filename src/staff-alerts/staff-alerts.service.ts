@@ -317,6 +317,9 @@ export class StaffAlerts {
       !!role &&
       check.channel.guild.roles.cache.has(role) &&
       now - this.lastPingAt >= PING_INTERVAL_MS;
+    // Reserve the ping before the send, so an alert from another server meanwhile does not ping too.
+    const previousPingAt = this.lastPingAt;
+    if (ping) this.lastPingAt = now;
     const embed = this.embed(record);
     // No "Open in dashboard" button until the dashboard's Staff alerts tab can show the alert.
     const options: MessageCreateOptions = {
@@ -329,12 +332,10 @@ export class StaffAlerts {
     try {
       const message = await check.channel.send(options);
       record.message = { channelId: check.channel.id, messageId: message.id, embed };
-      if (ping) {
-        this.lastPingAt = now;
-        record.pinged = true;
-      }
+      if (ping) record.pinged = true;
       return { state: "posted", reason: null };
     } catch {
+      if (ping && this.lastPingAt === now) this.lastPingAt = previousPingAt;
       return { state: "failed", reason: "discord error" };
     }
   }

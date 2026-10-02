@@ -140,6 +140,30 @@ describe("alert-only staff alert delivery", () => {
     expect((await rich.service.raise(input({ kind: "seeding-prime" })))?.pinged).toBe(true);
   });
 
+  it("pings once for high alerts from two servers raised at the same time", async () => {
+    const rich = richFixture();
+    rich.channel.send.mockImplementation(
+      () => new Promise((resolve) => setTimeout(() => resolve({ id: "999999999999999999" }), 50)),
+    );
+    const both = Promise.all([
+      rich.service.raise(input({ serverId: "eu" })),
+      rich.service.raise(input({ serverId: "us" })),
+    ]);
+    await jest.advanceTimersByTimeAsync(50);
+    const alerts = await both;
+    expect(alerts.map((alert) => alert?.delivery.state)).toEqual(["posted", "posted"]);
+    expect(alerts.filter((alert) => alert?.pinged)).toHaveLength(1);
+    expect(rich.channel.send.mock.calls.filter(([options]) => options.content)).toHaveLength(1);
+  });
+
+  it("frees the ping for the next high alert when the send fails", async () => {
+    const rich = richFixture();
+    rich.channel.send.mockRejectedValueOnce(new Error("Discord unavailable"));
+    expect(await rich.service.raise(input())).toMatchObject({ pinged: false, delivery: { state: "failed" } });
+    expect((await rich.service.raise(input()))?.pinged).toBe(true);
+    expect(sent(rich, 1).content).toBe(`<@&${rich.pingRole}>`);
+  });
+
   it.each([
     ["the @everyone role (the guild ID)", { STAFF_ALERTS_PING_ROLE_ID: guild }, "invalid"],
     ["a role missing from the guild", { STAFF_ALERTS_PING_ROLE_ID: "789012345678901234" }, "ok"],
