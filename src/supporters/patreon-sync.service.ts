@@ -1,7 +1,7 @@
 import { Injectable, Logger, type OnApplicationBootstrap, type OnModuleDestroy } from "@nestjs/common";
 import { EnvService } from "../env/env.service";
 import { PatreonApiError, PatreonClient } from "./patreon.client";
-import { SupportersStore } from "./supporters.store";
+import { SupportersStore, type FounderReview } from "./supporters.store";
 
 export const PATREON_SYNC_STARTUP_DELAY_MS = 15_000;
 export const PATREON_SYNC_STAFF_COOLDOWN_MS = 30_000;
@@ -20,13 +20,7 @@ export type PatreonSyncConflict = {
   patreonMemberId: string;
   reason: "discord-in-use" | "discord-differs";
 };
-export type PatreonFounderReview = {
-  supporterId: string;
-  patreonMemberId: string;
-  paymentId: string;
-  paymentSource: string;
-  reference: string;
-};
+export type PatreonFounderReview = FounderReview;
 export type PatreonSyncStatus = {
   configured: boolean;
   running: boolean;

@@ -31,6 +31,16 @@ export type ApiImportResult = {
   discordLinked: boolean;
   conflict: "discord-in-use" | "discord-differs" | null;
 };
+/** A founder promise for staff review, with the payment that is no longer verified. */
+export type FounderReview = {
+  supporterId: string;
+  patreonMemberId: string;
+  paymentId: string;
+  paymentSource: string;
+  reference: string;
+  unverifiedPaymentId: string;
+  unverifiedReference: string;
+};
 type MemberRow = typeof supporterMembers.$inferSelect;
 type ObservedFields = Pick<PatreonObservation, "displayName" | "patronStatus" | "lastChargeStatus" | "lastChargeAt">;
 
@@ -48,6 +58,21 @@ function observedPatch(member: MemberRow, observation: ObservedFields) {
       }
     : {};
 }
+/**
+ * Staff estimate a receipt's time from Patreon's date-only payment history, so the imported row for the same charge
+ * can fall on either side of it. Monthly charges are weeks apart.
+ */
+const RECEIPT_COPY_TOLERANCE = "interval '36 hours'";
+/**
+ * Lateral subquery for the imported copy of the staff receipt aliased `receipt`: the patreon_api payment with the
+ * receipt's amount and currency nearest in time to it, within the tolerance. Yields no row for other sources.
+ */
+const receiptCopy = (receipt: string) =>
+  sql.raw(`(SELECT api.id, api.verification_state FROM supporter_payments api
+      WHERE ${receipt}.source = 'manual_receipt' AND api.member_id = ${receipt}.member_id AND api.source = 'patreon_api'
+      AND api.amount_cents = ${receipt}.amount_cents AND api.currency = ${receipt}.currency
+      AND api.paid_at BETWEEN ${receipt}.paid_at - ${RECEIPT_COPY_TOLERANCE} AND ${receipt}.paid_at + ${RECEIPT_COPY_TOLERANCE}
+      ORDER BY abs(extract(epoch FROM api.paid_at - ${receipt}.paid_at)), api.paid_at, api.id LIMIT 1)`);
 const sha256 = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 /** Canonical member snapshot: an unchanged Patreon record hashes the same and adds no observation. */
 export function apiSnapshotHash(campaignId: string, snapshot: PatreonMemberSnapshot) {
@@ -358,22 +383,29 @@ export class SupportersStore {
     });
   }
 
-  /** Permanent founder promises whose qualifying payment is no longer verified, for staff review. */
-  async founderReviews(campaignId: string) {
-    return this.db
-      .select({
-        supporterId: supporterFounders.memberId,
-        patreonMemberId: supporterMembers.patreonMemberId,
-        paymentId: supporterFounders.paymentId,
-        paymentSource: supporterPayments.source,
-        reference: supporterPayments.reference,
-      })
-      .from(supporterFounders)
-      .innerJoin(supporterMembers, eq(supporterMembers.id, supporterFounders.memberId))
-      .innerJoin(supporterPayments, eq(supporterPayments.id, supporterFounders.paymentId))
-      .where(and(eq(supporterMembers.campaignId, campaignId), ne(supporterPayments.verificationState, "verified")))
-      .orderBy(supporterFounders.awardedAt)
-      .limit(50);
+  /**
+   * Permanent founder promises for staff review: the founder's own payment, or an imported payment dated inside the
+   * founder window (widened by the receipt-copy tolerance), is no longer verified. This also covers a founder awarded
+   * on a staff receipt whose charge Patreon later reports as refunded, declined or fraudulent.
+   */
+  async founderReviews(campaignId: string): Promise<FounderReview[]> {
+    const tolerance = sql.raw(RECEIPT_COPY_TOLERANCE);
+    const result = await this.db.execute<FounderReview>(sql`
+      SELECT f.member_id AS "supporterId", m.patreon_member_id AS "patreonMemberId", f.payment_id AS "paymentId",
+        q.source AS "paymentSource", q.reference,
+        unverified.id AS "unverifiedPaymentId", unverified.reference AS "unverifiedReference"
+      FROM supporter_founders f
+      JOIN supporter_members m ON m.id = f.member_id
+      JOIN supporter_payments q ON q.id = f.payment_id
+      JOIN LATERAL (SELECT x.id, x.reference FROM supporter_payments x
+        WHERE x.member_id = f.member_id AND x.verification_state <> 'verified'
+        AND (x.id = f.payment_id OR (x.source = 'patreon_api'
+          AND x.paid_at >= f.window_start - ${tolerance} AND x.paid_at < f.window_end + ${tolerance}))
+        ORDER BY (x.id = f.payment_id) DESC, x.paid_at, x.id LIMIT 1) unverified ON true
+      WHERE m.campaign_id = ${campaignId}
+      ORDER BY f.awarded_at, f.member_id LIMIT 50
+    `);
+    return result.rows;
   }
 
   async list(campaignId: string, policy: FounderPolicy, memberId?: string, search = ""): Promise<SupporterView[]> {
@@ -390,14 +422,17 @@ export class SupportersStore {
         'latestPayment', (SELECT ${payment("p")} FROM supporter_payments p WHERE p.member_id = m.id
           ORDER BY (p.verification_state = 'verified') DESC, p.paid_at DESC, (p.source = 'manual_receipt') DESC,
             p.recorded_at DESC LIMIT 1),
-        'founderEligiblePayment', (SELECT ${payment("p")} FROM supporter_payments p WHERE p.member_id = m.id
+        'founderEligiblePayment', (SELECT ${payment("p")} FROM supporter_payments p
+          LEFT JOIN LATERAL ${receiptCopy("p")} dup ON true
+          WHERE p.member_id = m.id
           AND ${policy.configured} AND p.source IN ('manual_receipt', 'patreon_api') AND p.verification_state = 'verified'
           AND p.first_successful_payment_verified AND NOT EXISTS (SELECT 1 FROM supporter_payments earlier
-            WHERE earlier.member_id = m.id AND earlier.paid_at < p.paid_at
+            WHERE earlier.member_id = m.id AND earlier.paid_at < p.paid_at AND earlier.id IS DISTINCT FROM dup.id
             AND (p.source = 'manual_receipt' OR earlier.source <> 'signed_status'))
+          AND (dup.id IS NULL OR dup.verification_state = 'verified')
           AND p.amount_cents >= ${policy.amountCents} AND p.currency = ${policy.currency}
           AND p.paid_at >= ${policy.startsAt}::timestamptz AND p.paid_at < ${policy.endsAt}::timestamptz
-          ORDER BY p.paid_at DESC, p.recorded_at DESC LIMIT 1),
+          ORDER BY (p.source = 'manual_receipt') DESC, p.paid_at DESC, p.recorded_at DESC LIMIT 1),
         'founder', (SELECT json_build_object('awardedAt', f.awarded_at, 'paymentId', f.payment_id) FROM supporter_founders f WHERE f.member_id = m.id)
       ) AS supporter FROM supporter_members m WHERE m.campaign_id = ${campaignId}
       ${memberId ? sql`AND m.id = ${memberId}` : sql``}
@@ -496,6 +531,20 @@ export class SupportersStore {
           throw new ConflictException(
             "A linked identity and checked qualifying payment inside the founder window are required.",
           );
+        // The imported copy of a receipt's own charge is not an earlier payment, but a refund of it disqualifies.
+        const [copy] =
+          payment.source === "manual_receipt"
+            ? (
+                await tx.execute<{ id: string; verification_state: "verified" | "unverified" }>(
+                  sql`SELECT dup.id, dup.verification_state FROM supporter_payments p
+                    CROSS JOIN LATERAL ${receiptCopy("p")} dup WHERE p.id = ${payment.id}`,
+                )
+              ).rows
+            : [];
+        if (copy && copy.verification_state !== "verified")
+          throw new ConflictException(
+            "Patreon no longer reports this receipt's charge as paid. Review the payment before recording a founder promise.",
+          );
         const [earlier] = await tx
           .select({ id: supporterPayments.id })
           .from(supporterPayments)
@@ -506,6 +555,7 @@ export class SupportersStore {
               // Webhook status rows carry no amount and repeat charges the authenticated history already
               // covers, so they cannot block a verified first payment imported from the Patreon API.
               payment.source === "patreon_api" ? ne(supporterPayments.source, "signed_status") : undefined,
+              copy ? ne(supporterPayments.id, copy.id) : undefined,
             ),
           )
           .limit(1);

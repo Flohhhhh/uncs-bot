@@ -68,6 +68,8 @@ function fixture() {
     observed: true,
     otherDiscord: false,
     earlier: false,
+    // The imported copy of a staff receipt's charge, as the receipt-copy lookup returns it.
+    copy: null as { id: string; verification_state: string } | null,
     member: {
       id: memberId,
       campaignId: campaign,
@@ -94,6 +96,7 @@ function fixture() {
     if (text.startsWith('insert into "supporter_observations"')) return { rows: state.observed ? [[params[0]]] : [] };
     if (text.startsWith('select "id" from "supporter_payments"'))
       return { rows: state.earlier ? [[randomUUID()]] : [] };
+    if (text.startsWith("SELECT dup.id")) return { rows: state.copy ? [state.copy] : [] };
     if (text.startsWith("select") && text.includes('from "supporter_payments"'))
       return { rows: state.payments.map((value) => row(supporterPayments, value)) };
     if (text.startsWith('insert into "supporter_payments"')) return { rows: [[randomUUID()]] };
@@ -277,9 +280,19 @@ describe("Patreon API import persistence", () => {
     const { store, query } = fixture();
     await store.founderReviews(campaign);
     const [statement, values] = query.mock.calls[0];
-    expect(statement.text).toContain('from "supporter_founders"');
-    expect(statement.text).toContain('"supporter_payments"."verification_state" <>');
-    expect(values).toEqual(expect.arrayContaining([campaign, "verified"]));
+    expect(statement.text).toContain("FROM supporter_founders f");
+    expect(statement.text).toContain("x.verification_state <> 'verified'");
+    expect(statement.text).toContain("WHERE m.campaign_id = $1");
+    expect(values).toEqual([campaign]);
+  });
+  it("also lists a founder awarded on a staff receipt when an imported payment around the founder window is no longer verified", async () => {
+    const { store, query } = fixture();
+    await store.founderReviews(campaign);
+    const text = query.mock.calls[0][0].text;
+    expect(text).toContain("x.id = f.payment_id OR (x.source = 'patreon_api'");
+    expect(text).toContain("x.paid_at >= f.window_start - interval '36 hours'");
+    expect(text).toContain("x.paid_at < f.window_end + interval '36 hours'");
+    expect(text).toContain('unverified.id AS "unverifiedPaymentId", unverified.reference AS "unverifiedReference"');
   });
 });
 
@@ -291,6 +304,24 @@ describe("founder eligibility for authenticated Patreon payments", () => {
     expect(text).toContain("p.source IN ('manual_receipt', 'patreon_api') AND p.verification_state = 'verified'");
     expect(text).toContain("AND p.first_successful_payment_verified AND NOT EXISTS");
     expect(text).toContain("AND (p.source = 'manual_receipt' OR earlier.source <> 'signed_status')");
+  });
+  it("lists a staff receipt despite the earlier imported copy of its own charge, and prefers the receipt", async () => {
+    const { store, query } = fixture();
+    await store.list(campaign, policy);
+    const text = query.mock.calls[0][0].text;
+    // The copy is the nearest imported payment with the receipt's amount and currency within 36 hours.
+    expect(text).toContain("LEFT JOIN LATERAL (SELECT api.id, api.verification_state FROM supporter_payments api");
+    expect(text).toContain("WHERE p.source = 'manual_receipt' AND api.member_id = p.member_id");
+    expect(text).toContain("AND api.amount_cents = p.amount_cents AND api.currency = p.currency");
+    expect(text).toContain(
+      "AND api.paid_at BETWEEN p.paid_at - interval '36 hours' AND p.paid_at + interval '36 hours'",
+    );
+    expect(text).toContain(
+      "ORDER BY abs(extract(epoch FROM api.paid_at - p.paid_at)), api.paid_at, api.id LIMIT 1) dup",
+    );
+    expect(text).toContain("AND (dup.id IS NULL OR dup.verification_state = 'verified')");
+    expect(text).toContain("AND earlier.id IS DISTINCT FROM dup.id");
+    expect(text).toContain("ORDER BY (p.source = 'manual_receipt') DESC, p.paid_at DESC, p.recorded_at DESC LIMIT 1");
   });
   const founder = (paymentId: string) => ({
     kind: "founder" as const,
@@ -316,13 +347,41 @@ describe("founder eligibility for authenticated Patreon payments", () => {
     expect(earlier.text).toContain('"supporter_payments"."source" <>');
     expect(values).toContain("signed_status");
     expect(calls('insert into "supporter_founders"')).toHaveLength(1);
+    expect(calls("SELECT dup.id")).toHaveLength(0);
   });
   it("still lets any earlier payment, including a webhook status row, block a manual receipt", async () => {
     const { store, state, calls } = linked("manual_receipt");
     await store.mutate(memberId, founder(state.payments[0].id as string), staff, campaign, policy);
     const [[earlier, values]] = calls('select "id" from "supporter_payments"');
     expect(earlier.text).not.toContain('"source"');
+    expect(earlier.text).not.toContain('"id" <>');
     expect(values).not.toContain("signed_status");
+  });
+  it("does not let the verified imported copy of a staff receipt's charge count as an earlier payment", async () => {
+    const { store, state, calls } = linked("manual_receipt", { reference: "receipt-1", verifiedBy: staff.id });
+    const copy = randomUUID();
+    state.copy = { id: copy, verification_state: "verified" };
+    await expect(
+      store.mutate(memberId, founder(state.payments[0].id as string), staff, campaign, policy),
+    ).resolves.toMatchObject({ ok: true, replayed: false });
+    const [[lookup, lookupValues]] = calls("SELECT dup.id");
+    expect(lookup.text).toContain(
+      "CROSS JOIN LATERAL (SELECT api.id, api.verification_state FROM supporter_payments api",
+    );
+    expect(lookupValues).toEqual([state.payments[0].id]);
+    const [[earlier, values]] = calls('select "id" from "supporter_payments"');
+    expect(earlier.text).toContain('"supporter_payments"."id" <>');
+    expect(values).toContain(copy);
+    expect(calls('insert into "supporter_founders"')).toHaveLength(1);
+  });
+  it("refuses a staff receipt whose imported copy Patreon no longer reports as paid", async () => {
+    const { store, state, calls, query } = linked("manual_receipt", { reference: "receipt-1", verifiedBy: staff.id });
+    state.copy = { id: randomUUID(), verification_state: "unverified" };
+    await expect(
+      store.mutate(memberId, founder(state.payments[0].id as string), staff, campaign, policy),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(calls('insert into "supporter_founders"')).toHaveLength(0);
+    expect(query.mock.calls.at(-1)![0].text).toBe("rollback");
   });
   it.each([
     ["an earlier verified payment", {}, true],
