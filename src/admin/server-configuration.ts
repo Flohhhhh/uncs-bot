@@ -133,6 +133,56 @@ export async function checkSavedRotation(game: WardogsClient) {
   }
   return { revision: doc.revision, total: entries.length, issues };
 }
+async function rotationPosition(
+  game: WardogsClient,
+  status: z.infer<typeof statusSchema> | null,
+  entries: MapSelection[],
+  doc: ConfigDocument,
+  capabilities: Capabilities,
+): Promise<{ currentIndex: number | null; positionNote: string }> {
+  const unavailable = (positionNote: string) => ({ currentIndex: null, positionNote });
+  if (!status) return unavailable("The running map could not be read. Refresh to try again.");
+  const mismatch = "The running map and saved rotation do not agree. Refresh to check again.";
+  const index = status.rotation?.nowIndex;
+  if (index !== undefined && index !== null && index !== -1)
+    return Number.isSafeInteger(index) && index >= 0 && entries[index]?.map === status.map
+      ? { currentIndex: index, positionNote: "" }
+      : unavailable(mismatch);
+  if (!serves(capabilities, "GET", "/v1/rotation"))
+    return unavailable("The game has not supplied its place in the rotation. Refresh after the next round starts.");
+  try {
+    // The official console uses the rotation's `now` marker when status has no index.
+    // Match the ordered rows, not just the map name: a map may appear more than once.
+    const running = await game.rotation();
+    const now = running.entries.flatMap((entry, i) => (entry.status === "now" ? [i] : []));
+    if (now.length !== 1)
+      return unavailable(
+        "The game has not identified one current rotation entry. Refresh after the next round starts.",
+      );
+    if (
+      running.enabled !== (scalarValue(doc.text, ROTATION, "bEnabled")?.toLowerCase() === "true") ||
+      running.mode.toLowerCase() !== scalarValue(doc.text, ROTATION, "RotationMode")?.toLowerCase() ||
+      running.entries.length !== entries.length ||
+      running.entries.some((entry, i) => {
+        const saved = entries[i];
+        return (
+          entry.index !== i ||
+          entry.map !== saved.map ||
+          (saved.experiences.length > 0 &&
+            JSON.stringify([...saved.experiences].sort()) !== JSON.stringify([...(entry.experiences ?? [])].sort())) ||
+          (!!saved.lighting && saved.lighting !== entry.lighting) ||
+          (!!saved.zoneAlternator && saved.zoneAlternator !== "None" && saved.zoneAlternator !== entry.zoneAlternator)
+        );
+      }) ||
+      running.entries[now[0]].map !== status.map ||
+      running.entries[now[0]].denied
+    )
+      return unavailable(mismatch);
+    return { currentIndex: now[0], positionNote: "" };
+  } catch {
+    return unavailable("The running rotation could not be read. Refresh to try again.");
+  }
+}
 export async function readServerConfiguration(game: WardogsClient): Promise<SettingsSnapshot> {
   const capabilities = await game.capabilities();
   const doc = await game.document();
@@ -186,7 +236,7 @@ export async function readServerConfiguration(game: WardogsClient): Promise<Sett
       entries,
       editable: rotationEditable,
       note: rotationNote,
-      currentIndex: status?.rotation?.nowIndex ?? null,
+      ...(await rotationPosition(game, status, entries, doc, capabilities)),
       currentMap: status?.map ?? "",
       enabled: fields.find((f) => f.id === "rotationEnabled")?.value === true,
       mode: String(fields.find((f) => f.id === "rotationMode")?.value ?? ""),
@@ -242,7 +292,9 @@ export async function changeServerConfiguration(
       let entries: MapSelection[];
       if (action.action === "map-next") {
         const status = statusSchema.parse(await game.request("GET", "/v1/status"));
-        if (status.rotation?.nowIndex !== action.currentIndex || status.map !== action.currentMap)
+        const position = await rotationPosition(game, status, existing, doc, capabilities);
+        if (position.currentIndex === null) throw new RconError(position.positionNote);
+        if (position.currentIndex !== action.currentIndex || status.map !== action.currentMap)
           throw new RconError("The current round changed. Reload before queuing a map.");
         if (
           scalarValue(doc.text, ROTATION, "bEnabled")?.toLowerCase() !== "true" ||

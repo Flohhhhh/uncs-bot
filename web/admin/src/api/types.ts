@@ -22,6 +22,7 @@ export type Overview = {
     serverName: string;
     map: string;
     lighting?: string;
+    alternator?: string;
     experiences?: string[];
     players: { current: number; max: number };
     factionScores: Faction[];

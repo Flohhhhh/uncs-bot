@@ -156,6 +156,160 @@ describe("server configuration boundaries", () => {
     expect(view.scoreTick).toMatchObject({ min: 20, max: 30 });
     expect(JSON.stringify(view)).not.toMatch(/private-|WDServerFeed|DefaultReservedPlayerIds/);
   });
+  it("uses the advertised running rotation marker when status omits its position", async () => {
+    const f = fixture();
+    f.status.map = "Europe";
+    f.capabilities.routes.push("GET /v1/rotation");
+    const originalRequest = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (...args) => {
+      if (args[1] === "/v1/status") return { ...f.status, rotation: undefined };
+      if (args[1] === "/v1/rotation")
+        return {
+          enabled: true,
+          mode: "Ordered",
+          entries: parseRotation(original).map((entry, index) => ({
+            ...entry,
+            index,
+            status: index === 1 ? "now" : null,
+          })),
+        };
+      return originalRequest(...args);
+    });
+    expect((await f.game.configuration()).rotation.currentIndex).toBe(1);
+    expect(f.request.mock.calls.some(([method]) => method !== "GET")).toBe(false);
+    await f.game.execute({
+      id: randomUUID(),
+      action: "map-next",
+      reason: "Next round choice",
+      revision: "r1",
+      currentIndex: 1,
+      currentMap: "Europe",
+      entry: { map: "Kavkazi", experiences: ["KOTH"], lighting: "DayClear" },
+    });
+    expect(parseRotation(f.saved().text).map((entry) => entry.map)).toEqual(["Kavkazi", "Europe", "Kavkazi"]);
+    expect(f.request.mock.calls.some(([, path]) => path.startsWith("/v1/match"))).toBe(false);
+  });
+  it("uses the marked occurrence for duplicate maps without requiring a numeric index", async () => {
+    const f = fixture();
+    f.document.text = original.replace(
+      'Map="Europe",Experiences="KOTH"',
+      'Map="Kavkazi",Experiences="KOTH+KOTH_InfantryOnly"',
+    );
+    f.status.rotation.nowIndex = -1;
+    f.capabilities.routes.push("GET /v1/rotation");
+    const fallback = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (...args) =>
+      args[1] === "/v1/rotation"
+        ? {
+            enabled: true,
+            mode: "ordered",
+            entries: parseRotation(f.document.text).map((entry, i) => ({ ...entry, status: i === 1 ? "now" : null })),
+          }
+        : fallback(...args),
+    );
+    expect((await f.game.configuration()).rotation.currentIndex).toBe(1);
+    expect(f.request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+  });
+  it.each([
+    "unadvertised",
+    "outage",
+    "no-marker",
+    "two-markers",
+    "wrong-index",
+    "wrong-map",
+    "wrong-rules",
+    "wrong-light",
+    "wrong-zone",
+    "wrong-length",
+    "wrong-order",
+    "disabled",
+    "denied",
+    "conflicting-status-index",
+  ])("keeps next-map writes blocked when rotation evidence is unsafe: %s", async (kind) => {
+    const f = fixture();
+    f.status.rotation.nowIndex = kind === "conflicting-status-index" ? 1 : -1;
+    if (kind !== "unadvertised") f.capabilities.routes.push("GET /v1/rotation");
+    if (kind === "wrong-zone")
+      f.document.text = original.replace('Lighting="DayClear"', 'Lighting="DayClear",ZoneAlternator="Zone.Default"');
+    const running = {
+      enabled: kind !== "disabled",
+      mode: kind === "wrong-order" ? "random" : "ordered",
+      entries: parseRotation(f.document.text).map((entry, i) => ({
+        ...entry,
+        index: i,
+        status: (kind === "two-markers" || i === 0) && kind !== "no-marker" ? "now" : null,
+        denied: kind === "denied",
+      })),
+    };
+    if (kind === "wrong-index") running.entries[0].index = 1;
+    if (kind === "wrong-map") running.entries[1].map = "Kavkazi";
+    if (kind === "wrong-rules") running.entries[1].experiences = ["KOTH_InfantryOnly"];
+    if (kind === "wrong-light") running.entries[1].lighting = "Night";
+    if (kind === "wrong-zone") running.entries[0].zoneAlternator = "Zone.River";
+    if (kind === "wrong-length") running.entries.pop();
+    const fallback = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (...args) => {
+      if (args[1] === "/v1/rotation") {
+        if (kind === "outage") throw new Error("private-upstream-error");
+        return running;
+      }
+      return fallback(...args);
+    });
+    const view = await f.game.configuration();
+    expect(view.rotation.currentIndex).toBeNull();
+    expect(view.rotation.positionNote).toBeTruthy();
+    expect(JSON.stringify(view)).not.toContain("private-upstream-error");
+    expect(view.rotation.entries).toHaveLength(2);
+    await expect(
+      f.game.execute({
+        id: randomUUID(),
+        action: "map-next",
+        reason: "Next round choice",
+        revision: "r1",
+        currentIndex: 0,
+        currentMap: "Kavkazi",
+        entry: { map: "Europe", experiences: ["KOTH"] },
+      }),
+    ).rejects.toThrow();
+    expect(f.request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+    if (kind === "conflicting-status-index" || kind === "unadvertised")
+      expect(f.request.mock.calls.some(([, path]) => path === "/v1/rotation")).toBe(false);
+  });
+  it("rechecks the running marker before writing and refuses a round that moved after review", async () => {
+    const f = fixture();
+    f.status.rotation.nowIndex = -1;
+    f.capabilities.routes.push("GET /v1/rotation");
+    let now = 0;
+    const fallback = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (...args) =>
+      args[1] === "/v1/rotation"
+        ? {
+            enabled: true,
+            mode: "ordered",
+            entries: parseRotation(original).map((entry, index) => ({
+              ...entry,
+              index,
+              status: index === now ? "now" : null,
+            })),
+          }
+        : fallback(...args),
+    );
+    expect((await f.game.configuration()).rotation.currentIndex).toBe(0);
+    now = 1;
+    f.status.map = "Europe";
+    await expect(
+      f.game.execute({
+        id: randomUUID(),
+        action: "map-next",
+        reason: "Next round choice",
+        revision: "r1",
+        currentIndex: 0,
+        currentMap: "Kavkazi",
+        entry: { map: "Europe", experiences: ["KOTH"] },
+      }),
+    ).rejects.toThrow("current round changed");
+    expect(f.request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+  });
   it("changes only reviewed fields, validates, uses If-Match and confirms the stored values", async () => {
     const { game, saved, request } = fixture();
     const result = await game.execute(save({ serverName: "The UNCs Event", scorePeriod: 30 }));
