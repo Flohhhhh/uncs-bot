@@ -4,17 +4,20 @@ import type { MapSelection, SettingsSnapshot } from "../../../../../src/common/s
 import type { mapVoteView } from "../../../../../src/map-votes/map-votes.types";
 import { useGameApi } from "../../api/server-client";
 import { useResource } from "../../api/use-resource";
-import type { Catalog } from "../../api/types";
+import type { Catalog, Overview } from "../../api/types";
 import { useGameAdmin as useAdmin } from "../../app/context";
 import { ServerLink as Link } from "../../app/server-link";
 import { Badge, Card, Empty, Modal, date } from "../../components/ui";
 import { CopyValue, DataTable } from "../../components/data-table";
+import { hasRoundTiming, RoundTimingNotice } from "../../components/round-timing";
 import { MapPicker } from "../actions/map-picker";
 import { errorMessage } from "../actions/policy";
 
 type Vote = ReturnType<typeof mapVoteView>;
 type VoteList = { enabled: boolean; serverId: string; votes: Vote[] };
 type Draft = { serverId: string; revision: string; choices: MapSelection[]; minutes: number };
+const timingMessage =
+  "Round timing is unavailable. Voting needs it to check that the winner still belongs to this round.";
 const stateLabels = {
   publishing: "Creating ballot",
   open: "Voting open",
@@ -30,20 +33,25 @@ function VoteReview({
   vote,
   close,
   finished,
+  statusUnavailable,
 }: {
   draft?: Draft;
   vote?: Vote;
   close: () => void;
   finished: () => void;
+  statusUnavailable: boolean;
 }) {
   const { busy, setBusy } = useAdmin();
   const api = useGameApi();
   const [id] = useState(() => crypto.randomUUID());
   const submitted = useRef(false);
   const [result, setResult] = useState<string | null>(null);
+  const overview = useResource<Overview>(draft ? "overview" : null);
+  const blocked = !!draft && statusUnavailable;
+  const timingReady = !draft || (!overview.loading && !overview.error && hasRoundTiming(overview.data));
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (busy || submitted.current) return;
+    if (busy || submitted.current || blocked || !timingReady) return;
     const reason = vote ? "Staff closed map vote." : "Staff started map vote.";
     submitted.current = true;
     setBusy(true);
@@ -101,11 +109,13 @@ function VoteReview({
         </>
       ) : (
         <form onSubmit={(event) => void submit(event)}>
+          {blocked && <p role="alert">Refresh ballot history before publishing.</p>}
+          {draft && <RoundTimingNotice resource={overview} busy={busy} message={timingMessage} />}
           <div className="dialog-actions">
             <button type="button" className="button secondary" disabled={busy} onClick={close}>
               Back
             </button>
-            <button className="button primary" disabled={busy}>
+            <button className="button primary" disabled={busy || blocked || !timingReady}>
               {busy ? "Saving…" : vote ? "Confirm close" : "Publish ballot"}
             </button>
           </div>
@@ -133,7 +143,7 @@ export function MapVotesPage() {
             <summary>How to enable voting</summary>
             <p>
               A server owner needs to choose a Discord voting channel and enable map voting in Gramps. This setup is not
-              available in the dashboard yet.
+              available in the dashboard yet. Automatic voting also needs reliable round timing from the game.
             </p>
           </details>
         </div>
@@ -164,6 +174,7 @@ function EnabledMapVotes({
   const active = data.votes.some((vote) => ["publishing", "open", "closing", "needs_review"].includes(vote.state));
   const settings = useResource<SettingsSnapshot>(active ? null : "settings");
   const catalog = useResource<Catalog>(active ? null : "catalog");
+  const overview = useResource<Overview>(active ? null : "overview");
   const [selection, setSelection] = useState<MapSelection>({ map: "", experiences: [] });
   const [selectionReady, setSelectionReady] = useState(false);
   const [choices, setChoices] = useState<MapSelection[]>([]);
@@ -182,7 +193,8 @@ function EnabledMapVotes({
     loading || !!error || admin.busy || !!settings.error || settings.loading || !!catalog.error || catalog.loading;
   const rotationReady =
     rotation?.editable && rotation.enabled && rotation.mode === "Ordered" && rotation.currentIndex !== null;
-  const canStart = !active && !unavailable && !changed && rotationReady;
+  const canEdit = !active && !unavailable && !changed && rotationReady;
+  const canStart = canEdit && !overview.loading && !overview.error && hasRoundTiming(overview.data);
   function clear() {
     setChoices([]);
     setSelection({ map: "", experiences: [] });
@@ -192,12 +204,17 @@ function EnabledMapVotes({
   return (
     <>
       {error && (
-        <p className="notice error" role="alert">
-          {error}
-        </p>
+        <div className="notice error" role="alert">
+          <p>{error}</p>
+          <p>Showing last-known ballots. Check history before publishing another vote.</p>
+          <button type="button" className="button secondary" disabled={admin.busy || loading} onClick={refresh}>
+            Refresh ballot history
+          </button>
+        </div>
       )}
       <Card title="Choose the next map" subtitle="Publish a ballot in the community’s configured Discord channel.">
         <div className="card-body">
+          {!active && <RoundTimingNotice resource={overview} busy={admin.busy} message={timingMessage} />}
           {active && (
             <p className="notice warning">
               An active ballot or unresolved result needs attention below before another vote can start.
@@ -219,7 +236,7 @@ function EnabledMapVotes({
                 value={selection}
                 change={setSelection}
                 onReadyChange={setSelectionReady}
-                disabled={!canStart}
+                disabled={!canEdit}
                 catalog={{
                   ...catalog.data,
                   maps: catalog.data.maps.filter(
@@ -232,7 +249,7 @@ function EnabledMapVotes({
                   type="button"
                   className="button secondary"
                   disabled={
-                    !canStart ||
+                    !canEdit ||
                     !selectionReady ||
                     choices.length >= 5 ||
                     selection.map === rotation?.currentMap ||
@@ -271,7 +288,7 @@ function EnabledMapVotes({
                     max={30}
                     step={1}
                     value={minutes}
-                    disabled={!canStart}
+                    disabled={!canEdit}
                     onChange={(event) => setMinutes(Number(event.target.value))}
                   />
                 </label>
@@ -366,7 +383,7 @@ function EnabledMapVotes({
                     {["open", "needs_review"].includes(vote.state) && (
                       <button
                         className="button secondary small"
-                        disabled={admin.busy || loading || !!error}
+                        disabled={admin.busy}
                         onClick={() => setReview({ vote })}
                       >
                         Close ballot
@@ -382,6 +399,7 @@ function EnabledMapVotes({
       {review && (
         <VoteReview
           {...review}
+          statusUnavailable={loading || !!error || active}
           close={() => setReview(null)}
           finished={() => {
             if (review.draft) clear();
