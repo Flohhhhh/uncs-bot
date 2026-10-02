@@ -31,6 +31,10 @@ const snapshot: SettingsSnapshot = {
   },
 };
 afterEach(() => vi.unstubAllGlobals());
+function chooseEventServer() {
+  fireEvent.click(screen.getByRole("combobox", { name: "Game server" }));
+  fireEvent.click(screen.getByRole("option", { name: /^Event server / }));
+}
 
 function mount() {
   const fetcher = vi.fn(
@@ -109,13 +113,13 @@ it("keeps a settings draft when leaving is cancelled, then discards only after c
 it("guards a server switch on the same page and remounts only after discarding the draft", async () => {
   const { router, fetcher } = mount();
   await editName();
-  fireEvent.change(screen.getByRole("combobox", { name: "Game server" }), { target: { value: "event" } });
+  chooseEventServer();
   expect(await screen.findByRole("dialog", { name: "Discard unsaved changes?" })).toBeInTheDocument();
   expect(router.state.location.search).toBe("");
   expect(fetcher.mock.calls.some(([url]) => url.includes("/servers/event/"))).toBe(false);
   fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
   expect(screen.getByRole("textbox", { name: /Server name/ })).toHaveValue("Event night");
-  fireEvent.change(screen.getByRole("combobox", { name: "Game server" }), { target: { value: "event" } });
+  chooseEventServer();
   fireEvent.click(await screen.findByRole("button", { name: "Discard changes" }));
   await waitFor(() => expect(router.state.location.search).toBe("?server=event"));
   expect(await screen.findByRole("textbox", { name: /Server name/ })).toHaveValue("The UNCs");

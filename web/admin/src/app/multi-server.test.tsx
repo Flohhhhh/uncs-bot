@@ -31,12 +31,18 @@ function mount(
   return { fetcher, router };
 }
 afterEach(() => vi.unstubAllGlobals());
+function switchServer(name: string) {
+  fireEvent.click(screen.getByRole("combobox", { name: "Game server" }));
+  fireEvent.click(screen.getByRole("option", { name: new RegExp(`^${name} `) }));
+}
 
 it("requires an explicit selection before any game read and hides inaccessible game controls", async () => {
   const { fetcher } = mount("/players");
   expect(await screen.findByRole("heading", { name: "Choose a server" })).toBeInTheDocument();
   expect(fetcher.mock.calls).toHaveLength(2);
-  fireEvent.change(screen.getByRole("combobox", { name: "Game server" }), { target: { value: "event" } });
+  expect(screen.queryByRole("combobox", { name: "Game server" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Primary admin" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Events viewer" }));
   await screen.findByText("Events player");
   expect(screen.queryByRole("link", { name: /Server settings/ })).not.toBeInTheDocument();
   expect(screen.queryByRole("link", { name: /Applications/ })).not.toBeInTheDocument();
@@ -66,7 +72,8 @@ it("cancels a previous server read and ignores its late response after a switch"
   );
   expect(await screen.findByText("Connecting…")).toBeInTheDocument();
   expect(screen.queryByText("Connection needs attention")).not.toBeInTheDocument();
-  fireEvent.change(await screen.findByRole("combobox", { name: "Game server" }), { target: { value: "event" } });
+  await screen.findByRole("combobox", { name: "Game server" });
+  switchServer("Events");
   await screen.findByText("Events player");
   const first = fetcher.mock.calls.find(([url]) => url.includes("/primary/overview"))!;
   expect(first[1]?.signal?.aborted).toBe(true);
@@ -80,9 +87,57 @@ it("clears a player selection on switching servers even when both rosters contai
   mount("/players?server=primary");
   fireEvent.click(await screen.findByRole("checkbox", { name: "Select Primary player" }));
   expect(screen.getByText("1 selected")).toBeInTheDocument();
-  fireEvent.change(screen.getByRole("combobox", { name: "Game server" }), { target: { value: "event" } });
+  switchServer("Events");
   await screen.findByText("Events player");
   expect(screen.getByText("0 selected")).toBeInTheDocument();
+});
+it("moves through servers with the keyboard and switches only on Enter", async () => {
+  const { router, fetcher } = mount("/players?server=primary");
+  const switcher = await screen.findByRole("combobox", { name: "Game server" });
+  await screen.findByText("Primary player");
+  expect(switcher).toHaveTextContent("Primary");
+  expect(switcher).toHaveAttribute("aria-expanded", "false");
+  const eventReads = () => fetcher.mock.calls.filter(([url]) => url.includes("/servers/event/"));
+  switcher.focus();
+  fireEvent.keyDown(switcher, { key: "ArrowDown" });
+  expect(switcher).toHaveAttribute("aria-expanded", "true");
+  const options = within(screen.getByRole("listbox", { name: "Game server" })).getAllByRole("option");
+  expect(options.map((option) => option.textContent)).toEqual(["Primary admin✓", "Events viewer"]);
+  expect(options[0]).toHaveAttribute("aria-selected", "true");
+  expect(switcher).toHaveAttribute("aria-activedescendant", options[0].id);
+  fireEvent.keyDown(switcher, { key: "ArrowDown" });
+  expect(switcher).toHaveAttribute("aria-activedescendant", options[1].id);
+  // Highlighting a server is not a switch.
+  expect(router.state.location.search).toBe("?server=primary");
+  expect(eventReads()).toHaveLength(0);
+  fireEvent.keyDown(switcher, { key: "Escape" });
+  expect(switcher).toHaveAttribute("aria-expanded", "false");
+  expect(router.state.location.search).toBe("?server=primary");
+  fireEvent.keyDown(switcher, { key: "ArrowDown" });
+  fireEvent.keyDown(switcher, { key: "End" });
+  fireEvent.keyDown(switcher, { key: "Tab" });
+  expect(switcher).toHaveAttribute("aria-expanded", "false");
+  expect(router.state.location.search).toBe("?server=primary");
+  expect(eventReads()).toHaveLength(0);
+  fireEvent.keyDown(switcher, { key: "ArrowDown" });
+  fireEvent.keyDown(switcher, { key: "ArrowDown" });
+  fireEvent.keyDown(switcher, { key: "Enter" });
+  await waitFor(() => expect(router.state.location.search).toBe("?server=event"));
+  await screen.findByText("Events player");
+  expect(screen.getByRole("combobox", { name: "Game server" })).toHaveTextContent("Events");
+});
+it("closes on an outside click and keeps the current server when it is chosen again", async () => {
+  const { router } = mount("/players?server=primary");
+  await screen.findByText("Primary player");
+  const switcher = screen.getByRole("combobox", { name: "Game server" });
+  fireEvent.click(switcher);
+  expect(switcher).toHaveAttribute("aria-expanded", "true");
+  fireEvent.pointerDown(document.body);
+  expect(switcher).toHaveAttribute("aria-expanded", "false");
+  switchServer("Primary");
+  expect(screen.getByRole("combobox", { name: "Game server" })).toHaveAttribute("aria-expanded", "false");
+  expect(router.state.location.search).toBe("?server=primary");
+  expect(screen.getByText("Primary player")).toBeInTheDocument();
 });
 it("does not silently fall back when an unavailable server is in a deep link", async () => {
   const { fetcher } = mount("/players?server=missing");

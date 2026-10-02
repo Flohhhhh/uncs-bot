@@ -14,6 +14,7 @@ import { SupportersPage } from "../features/supporters";
 import { CombatPage } from "../features/combat/combat-page";
 import { SettingsPage, PermissionsPage } from "../features/server/settings-page";
 import { NavigationGuard } from "./navigation-guard";
+import { ServerChoices, ServerSwitcher } from "./server-switcher";
 import { MapVotesPage } from "../features/map-votes/map-votes-page";
 import { EventsPage } from "../features/events/events-page";
 import { ActivityPage } from "../features/server/activity-page";
@@ -173,17 +174,7 @@ function CardServerChoice({
             : "Select the server you want to manage."}
         </p>
         {servers.length ? (
-          <label>
-            Game server
-            <select value="" onChange={(event) => choose(event.target.value)}>
-              <option value="">Choose a server</option>
-              {servers.map((server) => (
-                <option key={server.id} value={server.id}>
-                  {server.name} · {server.role}
-                </option>
-              ))}
-            </select>
-          </label>
+          <ServerChoices servers={servers} choose={choose} />
         ) : (
           <p>No game servers are available to this staff account.</p>
         )}
@@ -414,20 +405,12 @@ function Dashboard({
             </div>
           )}
           <header className="topbar">
-            <label className="server-selection">
-              Game server
-              <select
-                value={server.id}
-                disabled={busy || dialogOpen}
-                onChange={(event) => navigate({ pathname: location.pathname, search: `?server=${event.target.value}` })}
-              >
-                {servers.map((option) => (
-                  <option key={option.id} value={option.id}>
-                    {option.name} · {option.role}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <ServerSwitcher
+              servers={servers}
+              current={server}
+              disabled={busy || dialogOpen}
+              choose={(id) => navigate({ pathname: location.pathname, search: `?server=${id}` })}
+            />
             <div className="topbar-right">
               {gamePage && (
                 <Badge kind={stale ? "warn" : "good"}>
