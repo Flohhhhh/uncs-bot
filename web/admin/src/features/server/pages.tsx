@@ -9,7 +9,7 @@ import { CopyValue, DataTable } from "../../components/data-table";
 import { actionDefinitions, allowed } from "../actions/policy";
 import { FactionChip, liveFactions, playerFaction } from "../players/factions";
 import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
-import { PlayerActions } from "../players/player-actions";
+import { PlayerSheet } from "../players/player-actions";
 import { EmptyRoster } from "../players/empty-roster";
 import { GameLogView } from "./game-log";
 import { CommunityMessages } from "./community-messages";
@@ -146,7 +146,7 @@ export function OverviewPage() {
           <EmptyRoster overview={overview} stale={stale} />
         )}
       </Card>
-      {managedId && <PlayerActions steamId={managedId} onClose={() => setManagedId(null)} />}
+      {managedId && <PlayerSheet player={{ steamId: managedId }} onClose={() => setManagedId(null)} />}
     </>
   );
 }

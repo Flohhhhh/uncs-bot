@@ -1,42 +1,59 @@
-import { useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { Player } from "../../api/types";
 import { useGameAdmin as useAdmin } from "../../app/context";
 import { Badge, Card, Empty, Search } from "../../components/ui";
-import { DataTable, CopyValue } from "../../components/data-table";
+import { DataTable } from "../../components/data-table";
 import { allowed } from "../actions/policy";
-import { PlayerActions } from "./player-actions";
+import { PlayerButton, PlayerSheet, type SheetPlayer } from "./player-actions";
 import { FactionChip, FactionOptions, liveFactions, playerFaction } from "./factions";
 import { TeamMoveDialog, TeamResults, type TeamMoveResult } from "./team-move";
 import { EmptyRoster } from "./empty-roster";
 
+/** A one-line, honest summary of a move that finished without a failure or stop. */
+function moveSummary(result: TeamMoveResult) {
+  const count = (state: string) => result.items.filter((item) => item.state === state).length;
+  const parts = [
+    count("applied") && `${count("applied")} applied`,
+    count("accepted") && `${count("accepted")} accepted, not verified`,
+    count("pending") && `${count("pending")} pending`,
+    count("skipped") && `${count("skipped")} already on that team`,
+  ].filter(Boolean);
+  return `Team move to ${result.label}: ${parts.join(", ") || "no requests sent"}.`;
+}
+
 export function PlayersPage() {
   const admin = useAdmin();
   const [query, setQuery] = useState("");
-  const [nameOnly, setNameOnly] = useState(false);
+  const [uncOnly, setUncOnly] = useState(false);
   const [teamFilter, setTeamFilter] = useState("");
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
-  const [destinations, setDestinations] = useState<Record<string, string>>({});
   const [bulkFaction, setBulkFaction] = useState("");
   const [move, setMove] = useState<{ players: Player[]; faction: string; key: string } | null>(null);
   const [lastMove, setLastMove] = useState<TeamMoveResult | null>(null);
-  const [managedId, setManagedId] = useState<string | null>(null);
+  const [moved, setMoved] = useState<{ text: string; key: string } | null>(null);
+  const [managed, setManaged] = useState<SheetPlayer | null>(null);
   const players = admin.overview?.players ?? [];
   const teams = liveFactions(admin.overview);
   const canMove = allowed("team", admin.me, admin.overview, admin.stale, admin.busy);
+  const search = query.trim().toLowerCase();
   const found = players.filter(
     (player) =>
       (!teamFilter ||
         playerFaction(player, teams)?.name === teamFilter ||
         (teamFilter === "unassigned" && !playerFaction(player, teams))) &&
-      (nameOnly
-        ? [player.name]
-        : [player.name, player.steamId, player.faction, playerFaction(player, teams)?.label]
-      ).some((value) => (value ?? "").toLowerCase().includes(query.trim().toLowerCase())),
+      (!uncOnly || player.name.toLowerCase().includes("unc")) &&
+      [player.name, player.steamId, player.faction, playerFaction(player, teams)?.label].some((value) =>
+        (value ?? "").toLowerCase().includes(search),
+      ),
   );
   const selection = players.filter((player) => selected.has(player.steamId));
   const allShownSelected = found.length > 0 && found.every((player) => selected.has(player.steamId));
   const unassigned = players.filter((player) => !playerFaction(player, teams)).length;
-  const manageAllowed = !admin.busy && !admin.stale && Boolean(admin.me && admin.me.role !== "viewer");
+  useEffect(() => {
+    if (!moved) return;
+    const timer = window.setTimeout(() => setMoved(null), 8000);
+    return () => window.clearTimeout(timer);
+  }, [moved]);
 
   function toggle(id: string, checked: boolean) {
     if (!canMove) return;
@@ -56,10 +73,29 @@ export function PlayersPage() {
     });
   }
   function completed(result: TeamMoveResult) {
-    setLastMove(result);
     const attempted = new Set(result.items.filter((item) => item.state !== "queued").map((item) => item.steamId));
     setSelected((previous) => new Set([...previous].filter((id) => !attempted.has(id))));
-    setDestinations((previous) => Object.fromEntries(Object.entries(previous).filter(([id]) => !attempted.has(id))));
+    // Keep the full results only when something needs attention: they list the unsent players.
+    if (result.stopped || result.items.some((item) => item.state === "failed" || item.state === "unknown")) {
+      setLastMove(result);
+      setMoved(null);
+    } else {
+      setLastMove(null);
+      setMoved({ text: moveSummary(result), key: crypto.randomUUID() });
+    }
+  }
+  function chip(id: string, label: ReactNode, count: number) {
+    return (
+      <button
+        type="button"
+        key={id || "all"}
+        className="filter-chip"
+        aria-pressed={teamFilter === id}
+        onClick={() => setTeamFilter(id)}
+      >
+        {label} <span className="chip-count">{count}</span>
+      </button>
+    );
   }
 
   if (!admin.overview)
@@ -74,148 +110,103 @@ export function PlayersPage() {
           and team counts below exclude {admin.overview.unlinkedPlayerCount === 1 ? "it" : "them"}.
         </p>
       )}
-      <div className="team-counts">
-        {teams.map((team) => {
-          const count = players.filter((player) => playerFaction(player, teams)?.name === team.name).length;
-          return (
-            <div key={team.name} className="team-count">
-              <FactionChip team={team} />
-              <strong>
-                {count}
-                <span> player{count === 1 ? "" : "s"}</span>
-              </strong>
-            </div>
-          );
-        })}
-        {unassigned > 0 && (
-          <div className="team-count">
-            <span>Unassigned / unrecognized</span>
-            <strong>
-              {unassigned}
-              <span> player{unassigned === 1 ? "" : "s"}</span>
-            </strong>
-          </div>
-        )}
-      </div>
-      <Search
-        value={query}
-        onChange={(value) => {
-          setQuery(value);
-          setNameOnly(false);
-        }}
-        placeholder="Search name, SteamID, or faction"
-      >
-        <select
-          aria-label="Filter players by team"
-          value={teamFilter}
-          onChange={(event) => setTeamFilter(event.target.value)}
-        >
-          <option value="">All teams</option>
-          {teams.map((team) => (
-            <option key={team.name} value={team.name}>
-              {team.label}
-            </option>
-          ))}
-          <option value="unassigned">Unassigned / unrecognized</option>
-        </select>
-        <button
-          type="button"
-          className="button secondary"
-          onClick={() => {
-            setQuery("UNC");
-            setNameOnly(true);
-          }}
-        >
-          UNC in name
-        </button>
-        {teamFilter && (
+      <Search value={query} onChange={setQuery} placeholder="Search name, SteamID, or faction">
+        <div className="filter-chips" role="group" aria-label="Filter players by team">
+          {chip("", "All", players.length)}
+          {teams.map((team) =>
+            chip(
+              team.name,
+              <FactionChip team={team} />,
+              players.filter((player) => playerFaction(player, teams)?.name === team.name).length,
+            ),
+          )}
+          {unassigned > 0 && chip("unassigned", "Unassigned", unassigned)}
           <button
             type="button"
-            className="button secondary"
-            onClick={() => {
-              setTeamFilter("");
-              setQuery("");
-              setNameOnly(false);
-            }}
+            className="filter-chip"
+            aria-pressed={uncOnly}
+            title="Matches player names only. It does not verify community membership."
+            onClick={() => setUncOnly((value) => !value)}
           >
-            Reset filters
+            UNC in name
           </button>
-        )}
+        </div>
       </Search>
-      <p className="filter-note">“UNC in name” only searches player names. It does not verify community membership.</p>
-      <div className="bulk-team-bar">
-        <label className="selection-label">
-          <input
-            type="checkbox"
-            aria-label="Select all shown players"
-            checked={allShownSelected}
-            disabled={!canMove || !found.length}
-            onChange={(event) => {
-              const checked = event.target.checked;
-              setSelected((previous) => {
-                const next = new Set([...previous].filter((id) => players.some((player) => player.steamId === id)));
-                for (const player of found) {
-                  if (checked) next.add(player.steamId);
-                  else next.delete(player.steamId);
-                }
-                return next;
-              });
-            }}
-          />
-          Select shown
-        </label>
-        <span className="selection-count">
+      <div className={selection.length ? "bulk-team-bar" : "sr-only"}>
+        <span className="selection-count" role="status">
           {selection.length} selected
           {selection.some((player) => !found.includes(player)) && " (includes hidden players)"}
         </span>
-        <button
-          type="button"
-          className="text-button"
-          disabled={!selection.length || admin.busy}
-          onClick={() => setSelected(new Set())}
-        >
-          Clear
-        </button>
         {selection.length > 0 && (
           <div className="bulk-team-controls">
+            <span aria-hidden="true">Move to</span>
             <select
               aria-label="Destination team for selected players"
               value={bulkFaction}
               onChange={(event) => setBulkFaction(event.target.value)}
-              disabled={!canMove || !selection.length}
+              disabled={!canMove}
             >
               <FactionOptions teams={teams} />
             </select>
             <button
               type="button"
-              className="button primary"
-              disabled={!canMove || !selection.length || !teams.some((team) => team.name === bulkFaction)}
+              className="button primary small"
+              disabled={!canMove || !teams.some((team) => team.name === bulkFaction)}
               onClick={() => openMove(selection, bulkFaction)}
             >
               Review move
             </button>
+            <button type="button" className="text-button" disabled={admin.busy} onClick={() => setSelected(new Set())}>
+              Clear
+            </button>
           </div>
         )}
       </div>
+      {moved && (
+        <p className="team-move-status" role="status">
+          {moved.text}
+        </p>
+      )}
       {lastMove && (
-        <details className="team-results" open={lastMove.stopped || undefined}>
+        <details className="team-results" open>
           <summary>
             Last team move · {lastMove.label} ·{" "}
             {lastMove.items.filter((item) => ["applied", "accepted", "pending"].includes(item.state)).length}{" "}
             acknowledged{lastMove.stopped && " · stopped early"}
           </summary>
-          <p className="muted">
-            Accepted means the game received the request. Assignment confirmation does not force a respawn. Unsent
-            players stay selected for a new review.
-          </p>
+          <p className="muted">Unsent players stay selected for a new review.</p>
           <TeamResults items={lastMove.items} />
         </details>
       )}
       <Card
         className="player-roster"
         title={`${found.length} player${found.length === 1 ? "" : "s"} shown`}
-        subtitle={`${players.length} in the current roster · click a column to sort`}
-        badge={<Badge kind={admin.stale ? "warn" : "good"}>{admin.stale ? "LAST ROSTER" : "LIVE ROSTER"}</Badge>}
+        subtitle={`${players.length} in the current roster`}
+        badge={
+          <div className="roster-tools">
+            <label className="selection-label">
+              <input
+                type="checkbox"
+                aria-label="Select all shown players"
+                checked={allShownSelected}
+                disabled={!canMove || !found.length}
+                onChange={(event) => {
+                  const checked = event.target.checked;
+                  setSelected((previous) => {
+                    const next = new Set([...previous].filter((id) => players.some((player) => player.steamId === id)));
+                    for (const player of found) {
+                      if (checked) next.add(player.steamId);
+                      else next.delete(player.steamId);
+                    }
+                    return next;
+                  });
+                }}
+              />
+              Select shown
+            </label>
+            <Badge kind={admin.stale ? "warn" : "good"}>{admin.stale ? "LAST ROSTER" : "LIVE ROSTER"}</Badge>
+          </div>
+        }
       >
         {found.length ? (
           <DataTable
@@ -227,13 +218,10 @@ export function PlayersPage() {
               { label: "Team", value: (player) => playerFaction(player, teams)?.label ?? player.faction },
               { label: "Kills", value: (player) => player.kills, firstDirection: "descending" },
               { label: "Deaths", value: (player) => player.deaths, firstDirection: "descending" },
-              { label: "Cash", value: (player) => player.cash, firstDirection: "descending" },
               { label: "Ping", value: (player) => player.pingMs },
-              { label: "Team / actions" },
             ]}
             renderRow={(player) => {
               const current = playerFaction(player, teams);
-              const destination = destinations[player.steamId] ?? "";
               const movable = canMove && teams.some((team) => team.name !== current?.name);
               return (
                 <tr key={player.steamId}>
@@ -247,61 +235,15 @@ export function PlayersPage() {
                     />
                   </td>
                   <td className="player-identity">
-                    <div className="player-name">
-                      <span className="player-icon">{player.name.slice(0, 2).toUpperCase()}</span>
-                      <div>
-                        <strong>{player.name}</strong>
-                        <small>
-                          <CopyValue value={player.steamId} />
-                        </small>
-                      </div>
-                    </div>
+                    <PlayerButton player={player} onOpen={setManaged} />
                   </td>
-                  <td className="player-team" data-label="Team">
+                  <td className="player-team">
                     <FactionChip team={current} fallback={player.faction || "Choosing team"} />
                   </td>
                   <td data-label="Kills">{player.kills ?? "—"}</td>
                   <td data-label="Deaths">{player.deaths ?? "—"}</td>
-                  <td data-label="Cash">{player.cash?.toLocaleString() ?? "—"}</td>
                   <td data-label="Ping">
                     {player.pingMs ?? "—"} <span className="muted">ms</span>
-                  </td>
-                  <td className="player-controls">
-                    <div className="row-actions">
-                      <div className="team-row-controls">
-                        <select
-                          aria-label={`Destination team for ${player.name}`}
-                          value={destination}
-                          disabled={!movable}
-                          onChange={(event) =>
-                            setDestinations((previous) => ({ ...previous, [player.steamId]: event.target.value }))
-                          }
-                        >
-                          <FactionOptions teams={teams} excluded={current?.name} />
-                        </select>
-                        <button
-                          type="button"
-                          className="button secondary small"
-                          disabled={
-                            !movable ||
-                            !destination ||
-                            destination === current?.name ||
-                            !teams.some((team) => team.name === destination)
-                          }
-                          onClick={() => openMove([player], destination)}
-                        >
-                          Move
-                        </button>
-                      </div>
-                      <button
-                        type="button"
-                        className="button secondary small"
-                        disabled={!manageAllowed}
-                        onClick={() => setManagedId(player.steamId)}
-                      >
-                        More
-                      </button>
-                    </div>
                   </td>
                 </tr>
               );
@@ -313,7 +255,7 @@ export function PlayersPage() {
           <EmptyRoster overview={admin.overview} stale={admin.stale} />
         )}
       </Card>
-      {managedId && <PlayerActions steamId={managedId} onClose={() => setManagedId(null)} />}
+      {managed && <PlayerSheet player={managed} onClose={() => setManaged(null)} onTeamMoveComplete={completed} />}
       {move && (
         <TeamMoveDialog
           key={move.key}

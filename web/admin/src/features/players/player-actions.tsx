@@ -1,38 +1,190 @@
-import type { ActionName } from "../../api/types";
+import { useState } from "react";
+import { Link, useLocation } from "react-router-dom";
+import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
+import type { ActionName, Player } from "../../api/types";
 import { useGameAdmin as useAdmin } from "../../app/context";
-import { Modal } from "../../components/ui";
+import { Sheet } from "../../components/ui";
+import { CopyValue } from "../../components/data-table";
 import { actionDefinitions, allowed } from "../actions/policy";
+import { FactionChip, liveFactions, playerFaction } from "./factions";
+import { TeamMoveDialog, type TeamMoveResult } from "./team-move";
 
-export function PlayerActions({ steamId, onClose }: { steamId: string; onClose: () => void }) {
-  const admin = useAdmin();
-  const player = admin.overview?.players.find((entry) => entry.steamId === steamId);
+/** A player to show in the panel. `name` is used when the player is no longer in the live roster. */
+export type SheetPlayer = { steamId: string; name?: string };
+
+/** `/activity?view=…&player=…`, keeping the selected server. */
+export function playerHistory(search: string, view: "combat" | "actions", steamId: string) {
+  const params = new URLSearchParams();
+  const server = new URLSearchParams(search).get("server");
+  if (server) params.set("server", server);
+  params.set("view", view);
+  params.set("player", steamId);
+  return { pathname: "/activity", search: `?${params}` };
+}
+
+/** Opens the player panel; shown wherever a player's name appears. */
+export function PlayerButton({
+  player,
+  onOpen,
+}: {
+  player: Player | SheetPlayer;
+  onOpen: (player: SheetPlayer) => void;
+}) {
+  const name = player.name || player.steamId;
   return (
-    <Modal serverScoped title={player?.name ?? "Player unavailable"} description={steamId} onClose={onClose}>
-      {player ? (
-        <div className="action-list">
-          {(["message", "kick", "ban", "whitelist-add", "team", "kill"] as ActionName[]).map((action) => (
-            <button
-              type="button"
-              key={action}
-              className="button secondary small"
-              disabled={!allowed(action, admin.me, admin.overview, admin.stale, admin.busy)}
-              onClick={() => {
-                onClose();
-                admin.openAction(action, steamId);
-              }}
-            >
-              {actionDefinitions[action][0]}
-            </button>
-          ))}
-        </div>
-      ) : (
-        <p>This player is no longer in the current roster.</p>
+    <button
+      type="button"
+      className="player-link"
+      aria-haspopup="dialog"
+      onClick={() => onOpen({ steamId: player.steamId, name })}
+    >
+      {name}
+    </button>
+  );
+}
+
+const stat = (value: number | undefined) =>
+  typeof value === "number" && Number.isFinite(value) ? value.toLocaleString() : "—";
+
+/**
+ * The player panel: stats, SteamID, history links and grouped actions. Each action opens its own
+ * review on top of the panel, which stays open behind it.
+ */
+export function PlayerSheet({
+  player: target,
+  onClose,
+  onTeamMoveComplete,
+}: {
+  player: SheetPlayer;
+  onClose: () => void;
+  onTeamMoveComplete?: (result: TeamMoveResult) => void;
+}) {
+  const admin = useAdmin();
+  const location = useLocation();
+  const [move, setMove] = useState<{ players: Player[]; faction: string; key: string } | null>(null);
+  const { steamId } = target;
+  const player = admin.overview?.players.find((entry) => entry.steamId === steamId);
+  const teams = liveFactions(admin.overview);
+  const current = player ? playerFaction(player, teams) : undefined;
+  const can = (action: ActionName) => allowed(action, admin.me, admin.overview, admin.stale, admin.busy);
+  const button = (action: ActionName, kind = "secondary") => (
+    <button
+      type="button"
+      className={`button ${kind} small`}
+      disabled={!can(action)}
+      onClick={() => admin.openAction(action, steamId)}
+    >
+      {actionDefinitions[action][0]}
+    </button>
+  );
+  const linkable = isPublicIndividualSteamId(steamId);
+  const server = new URLSearchParams(location.search).get("server");
+  return (
+    <>
+      <Sheet title={player?.name ?? target.name ?? steamId} onClose={onClose} className="player-sheet">
+        {player ? (
+          <>
+            <FactionChip team={current} fallback={player.faction || "Choosing team"} />
+            <dl className="player-stats">
+              <div>
+                <dt>Kills</dt>
+                <dd>{stat(player.kills)}</dd>
+              </div>
+              <div>
+                <dt>Deaths</dt>
+                <dd>{stat(player.deaths)}</dd>
+              </div>
+              <div>
+                <dt>Ping</dt>
+                <dd>{typeof player.pingMs === "number" ? `${player.pingMs} ms` : "—"}</dd>
+              </div>
+              <div>
+                <dt>Cash</dt>
+                <dd>{stat(player.cash)}</dd>
+              </div>
+            </dl>
+            {admin.stale && <p className="muted">From the last roster check.</p>}
+          </>
+        ) : !admin.overview ? (
+          // Records pages do not read the live roster; never present that as the player leaving.
+          <p className="notice info">
+            The live roster is not loaded on this page.{" "}
+            <Link to={{ pathname: "/players", search: server ? `?${new URLSearchParams({ server })}` : "" }}>
+              Open Live players
+            </Link>{" "}
+            to act on this player.
+          </p>
+        ) : (
+          <p className="notice info">
+            {admin.stale ? "Not in the last roster check." : "This player is no longer in the current roster."}
+          </p>
+        )}
+        <p className="player-sheet-id">
+          <span className="muted">SteamID</span> <CopyValue value={steamId} />
+        </p>
+        {linkable && (
+          <p className="player-sheet-links">
+            <Link className="text-button" to={playerHistory(location.search, "combat", steamId)} onClick={onClose}>
+              Combat history →
+            </Link>
+            <Link className="text-button" to={playerHistory(location.search, "actions", steamId)} onClick={onClose}>
+              Actions on this player →
+            </Link>
+          </p>
+        )}
+        {player && (
+          <div className="player-sheet-actions">
+            <section aria-label="Message">
+              <h3>Message</h3>
+              <div className="action-list">{button("message")}</div>
+            </section>
+            <section aria-label="Team">
+              <h3>Team</h3>
+              <div className="action-list">
+                {teams
+                  .filter((team) => team.name !== current?.name)
+                  .map((team) => (
+                    <button
+                      type="button"
+                      key={team.name}
+                      className="button secondary small"
+                      aria-label={`Move to ${team.label}`}
+                      disabled={!can("team")}
+                      onClick={() => setMove({ players: [player], faction: team.name, key: crypto.randomUUID() })}
+                    >
+                      <FactionChip team={team} />
+                    </button>
+                  ))}
+                {teams.length === 0 && <span className="muted">No teams reported</span>}
+              </div>
+            </section>
+            <section aria-label="Moderation">
+              <h3>Moderation</h3>
+              <div className="action-list">
+                {button("kick", "danger")}
+                {button("ban", "danger")}
+              </div>
+            </section>
+            <section aria-label="Whitelist">
+              <h3>Whitelist</h3>
+              <div className="action-list">{button("whitelist-add")}</div>
+            </section>
+            <details className="player-sheet-more">
+              <summary>More</summary>
+              <div className="action-list">{button("kill")}</div>
+            </details>
+          </div>
+        )}
+      </Sheet>
+      {move && (
+        <TeamMoveDialog
+          key={move.key}
+          players={move.players}
+          initialFaction={move.faction}
+          onClose={() => setMove(null)}
+          onComplete={onTeamMoveComplete}
+        />
       )}
-      <div className="dialog-actions">
-        <button type="button" className="button secondary" onClick={onClose}>
-          Close
-        </button>
-      </div>
-    </Modal>
+    </>
   );
 }
