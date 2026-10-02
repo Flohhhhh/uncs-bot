@@ -22,7 +22,11 @@ export function VotingControlsPanel({ onDirty }: { onDirty: (value: boolean) => 
   const [message, setMessage] = useState("");
   const [uncertain, setUncertain] = useState(false);
   const saving = useRef(false);
+  // A reload this panel asked for (after a save, or to recover from an uncertain one) keeps the switches locked until
+  // fresh controls arrive, so a toggle cannot build on the snapshot being replaced. Background refreshes do not.
+  const [reloadingFrom, setReloadingFrom] = useState<VotingControls | null>(null);
   const data = resource.data;
+  const reloading = !!data && data === reloadingFrom;
   useEffect(() => {
     onDirty(!!draft);
     return () => onDirty(false);
@@ -58,6 +62,7 @@ export function VotingControlsPanel({ onDirty }: { onDirty: (value: boolean) => 
       setDraft(null);
       setReview(false);
       setMessage("Voting controls saved.");
+      setReloadingFrom(data);
       resource.refresh();
     } catch (error) {
       setMessage(`${errorMessage(error)} Reload the saved controls before trying again.`);
@@ -88,7 +93,7 @@ export function VotingControlsPanel({ onDirty }: { onDirty: (value: boolean) => 
       <p className="muted">{data.message}</p>
       <fieldset
         className="mode-choices"
-        disabled={busy || resource.loading || !data.available || changed || !!resource.error || uncertain}
+        disabled={busy || resource.loading || reloading || !data.available || changed || !!resource.error || uncertain}
       >
         <legend>Community voting</legend>
         {toggles.map(({ key, label }) => (
@@ -159,6 +164,7 @@ export function VotingControlsPanel({ onDirty }: { onDirty: (value: boolean) => 
               setReview(false);
               setUncertain(false);
               setMessage("");
+              setReloadingFrom(data);
               resource.refresh();
             }}
           >
