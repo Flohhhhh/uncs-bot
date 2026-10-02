@@ -217,7 +217,12 @@ describe("durable Discord map voting", () => {
   });
   it("checks disabled voting setup for the selected server without enabling or sending effects", async () => {
     const f = fixture(false, "event");
-    f.store.policy.mockResolvedValue({ serverId: "event", actorId: staff.id, policy: defaultVotingPolicy });
+    f.store.policy.mockResolvedValue({
+      serverId: "event",
+      actorId: staff.id,
+      policy: defaultVotingPolicy,
+      connectionHash: f.record.connectionHash,
+    });
     const result = await f.service.setup({ ...staff, serverId: "event" });
     expect(result.serverId).toBe("event");
     expect(result.checks.map((item) => item.status)).toEqual(["ok", "ok", "ok", "ok"]);
@@ -235,7 +240,12 @@ describe("durable Discord map voting", () => {
   it("reports setup failures independently without exposing provider details", async () => {
     const f = fixture(false);
     const privateError = new Error("private connection and credential details");
-    f.store.policy.mockResolvedValue({ serverId: "primary", actorId: staff.id, policy: defaultVotingPolicy });
+    f.store.policy.mockResolvedValue({
+      serverId: "primary",
+      actorId: staff.id,
+      policy: defaultVotingPolicy,
+      connectionHash: f.record.connectionHash,
+    });
     f.store.checkSetup.mockRejectedValue(privateError);
     f.discord.check.mockRejectedValue(privateError);
     f.auth.serverStaff.mockRejectedValue(privateError);
@@ -893,6 +903,23 @@ describe("score-based voting controls and reminders", () => {
         policy: { ...defaultVotingPolicy, enabled: true },
       }),
     ).rejects.toMatchObject({ status: 503 });
+  });
+  it("requires an explicit off/save step before moving an enabled policy to a changed game connection", async () => {
+    const f = scored();
+    f.environment.WARDOGS_RCON_URL = "https://changed.example.test";
+    expect(await f.service.controls(staff)).toMatchObject({
+      ready: false,
+      message: expect.stringContaining("connection changed"),
+    });
+    expect((await f.service.list(staff)).automatic).toMatchObject({
+      enabled: false,
+      message: expect.stringContaining("connection changed"),
+    });
+    await expect(
+      f.service.saveControls(staff, { serverId: "primary", version: 1, policy: f.saved.policy }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(f.store.savePolicy).not.toHaveBeenCalled();
+    expect(f.admin.act).not.toHaveBeenCalled();
   });
   it("refuses unauthorized and cross-server control writes, and reports missing storage honestly", async () => {
     const f = fixture(false);

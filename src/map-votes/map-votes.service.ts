@@ -70,18 +70,20 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
   }
   private async automaticStatus(serverId: string): Promise<AutomaticVoteStatus | null> {
     const saved = await this.store.policy(serverId);
+    const connectionMatches = !saved || saved.connectionHash === this.servers.connectionHash(serverId);
     if (saved)
       return {
-        enabled: this.options().enabled && saved.policy.enabled,
+        enabled: this.options().enabled && saved.policy.enabled && connectionMatches,
         delaySeconds: 120,
         closesAtScore: votingMilestones.close,
         choices: 5,
-        message:
-          saved.policy.enabled && this.options().enabled
+        message: !connectionMatches
+          ? "The server connection changed. Switch voting off and save its controls before setup."
+          : saved.policy.enabled && this.options().enabled
             ? "Waiting for confirmed rotation and scores. Ballots close at 95 points."
             : "Automatic voting is switched off.",
         checkedAt: null,
-        ...(saved.policy.enabled ? this.automaticMessages.get(serverId) : {}),
+        ...(saved.policy.enabled && connectionMatches ? this.automaticMessages.get(serverId) : {}),
       };
     return null;
   }
@@ -98,15 +100,18 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
     const serverId = this.servers.resolve(staff.serverId);
     try {
       const saved = await this.store.policy(serverId);
+      const connectionMatches = !saved || saved.connectionHash === this.servers.connectionHash(serverId);
       return {
         serverId,
         version: saved?.version ?? 0,
         policy: saved ? votingPolicySchema.parse(saved.policy) : defaultVotingPolicy,
         available: true,
-        ready: this.options().enabled,
-        message: this.options().enabled
-          ? "Changes apply to the next ballot. Switching off stops open automatic ballots."
-          : "Live voting is disabled in Gramps. You can prepare these settings without opening a ballot.",
+        ready: this.options().enabled && connectionMatches,
+        message: !connectionMatches
+          ? "The server connection changed. Switch voting off and save before enabling it for this connection."
+          : this.options().enabled
+            ? "Changes apply to the next ballot. Switching off stops open automatic ballots."
+            : "Live voting is disabled in Gramps. You can prepare these settings without opening a ballot.",
       };
     } catch {
       return {
@@ -131,6 +136,11 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
     if (!parsed.success || parsed.data.serverId !== serverId)
       throw new BadRequestException("Review the voting controls for the selected server.");
     if (parsed.data.policy.enabled) {
+      const saved = await this.store.policy(serverId);
+      if (saved && saved.connectionHash !== this.servers.connectionHash(serverId))
+        throw new ConflictException(
+          "The server connection changed. Save voting off before reviewing activation again.",
+        );
       const options = this.enabled();
       await this.discord.check(options.guildId, options.channelId);
     }
@@ -187,6 +197,12 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
         "Automatic voting",
         async () => {
           const saved = await this.store.policy(serverId);
+          if (saved && saved.connectionHash !== this.servers.connectionHash(serverId))
+            return {
+              status: "review",
+              message:
+                "Voting controls belong to the previous server connection. Switch voting off and save before setting it up again.",
+            };
           const actorId = saved?.actorId;
           if (!actorId) return { status: "blocked", message: "Save voting controls for this server." };
           const actor = await this.auth.serverStaff(
