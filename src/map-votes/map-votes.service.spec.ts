@@ -601,9 +601,11 @@ describe("durable Discord map voting", () => {
   }
   it("keeps automatic observation valid across known configuration/status map names", async () => {
     const f = automatic();
+    const overview = await f.game.overview();
     f.game.overview.mockImplementation(async () => ({
+      ...overview,
       observedAt: new Date().toISOString(),
-      status: { serverName: "Test", map: "Bakurani", matchSeconds: undefined },
+      status: { ...overview.status, map: "Bakurani" },
     }));
     await observeForWindow(f);
     expect(f.discord.publish).toHaveBeenCalledTimes(1);
