@@ -170,8 +170,10 @@ export function observeHealth(previous: HealthState, reading: HealthReading, now
       ? `connection lost ${formatDuration(now - outage.since)}`
       : `no reads for ${formatDuration(now - last.at)}`;
     // One failed read inside the normal read gap can be a hitch during map travel. A new map, clock
-    // or round then proves nothing, and an empty roster may be the next map loading.
-    const hitch = !!outage && outage.failures < 2 && !gap;
+    // or round then proves nothing, and an empty roster may be the next map loading. The gap is
+    // measured on each side of the failed read, so its timeout and the slower retry do not count.
+    const hitch =
+      !!outage && outage.failures < 2 && outage.since - last.at <= ROUND_GAP_MS && now - outage.since <= ROUND_GAP_MS;
     if (!hitch || rebuilt) {
       if (signals.length) {
         restartLike = true;

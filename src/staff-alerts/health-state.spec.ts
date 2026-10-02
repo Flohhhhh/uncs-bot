@@ -241,6 +241,25 @@ describe("health inference from RCON reads", () => {
     expect(update.kinds()).toEqual(["game-restart", "game-build"]);
   });
 
+  it("keeps one failed read a hitch when timeouts and a cached read push the good reads over a minute apart", () => {
+    // A cached read 3 s old, the next read 15 s later timing out after 8 s, a 30 s retry and a 4.5 s recovery.
+    const next = { map: "Europe", matchSeconds: 5, roundChanged: true };
+    const slow = harness();
+    slow.read(slow.good({ players: 30 }));
+    slow.read(slow.fail(), 3_000 + 15_000 + 8_000);
+    expect(slow.read(slow.good({ players: 30, ...next }), 30_000 + 4_500).restartLike).toBe(false);
+    slow.read(slow.good({ players: 30, map: "Europe", matchSeconds: 20 }), 15_000);
+    expect(slow.alerts).toEqual([]);
+    expect(slow.state).toMatchObject({ lastRestartAt: null, watch: null, pending: null, outage: null });
+
+    // A failed read after more than a minute without one is a read gap, not a hitch.
+    const quiet = harness();
+    quiet.read(quiet.good({ players: 30 }));
+    quiet.read(quiet.fail(), 5 * 60_000);
+    expect(quiet.read(quiet.good({ players: 30, ...next }), 30_000).restartLike).toBe(true);
+    expect(quiet.kinds()).toEqual(["game-restart"]);
+  });
+
   it("sends no restart alert after an interruption with no restart signal", () => {
     const h = harness();
     h.read(h.good());
