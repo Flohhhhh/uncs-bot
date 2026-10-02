@@ -90,6 +90,11 @@ function describe(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** A message nonce (Discord allows at most 25 characters) that stays the same if the REST client resends. */
+function nonce(key: string) {
+  return createHash("sha256").update(key).digest("hex").slice(0, 24);
+}
+
 /**
  * The opt-in Seeder role. The role itself is the list of who opted in, so there is no database state. Pings are
  * only ever sent by a staff member running /seeding ping; nothing here runs on a timer or kicks, bans or grants.
@@ -133,18 +138,24 @@ export class SeedingService {
   /** Posts the persistent opt-in buttons in the channel the staff member ran the command in. */
   async panel(request: SeedingRequest): Promise<string> {
     const config = this.settings();
-    if (!config.enabled) return STAFF_COPY.off;
     try {
+      // Staff first, so members never see the setup replies meant for staff.
       const context = await this.staff(request, config.guildId);
       if (typeof context === "string") return context;
+      if (!config.enabled) return STAFF_COPY.off;
       if (!config.roleId) return STAFF_COPY.roleUnset;
       const { problem } = await this.checkRole(context.guild, config.roleId);
       if (problem) return ROLE_PROBLEMS[problem];
       const channel = request.channelId ? await this.textChannel(context.guild, request.channelId) : null;
       if (!channel) return STAFF_COPY.panelChannel;
       try {
-        // One send, never retried.
-        await channel.send(panelMessage());
+        // Gramps sends once and never retries. The REST client repeats a request that timed out or hit a 5xx;
+        // the nonce lets Discord drop that duplicate instead of posting a second panel.
+        await channel.send({
+          ...panelMessage(),
+          nonce: nonce(`seeding-panel:${context.guild.id}:${channel.id}:${Date.now()}`),
+          enforceNonce: true,
+        });
       } catch (error) {
         if (refused(error)) return STAFF_COPY.panelRefused;
         this.logger.warn(`Seeding panel in channel ${channel.id} was not confirmed: ${describe(error)}`);
@@ -162,14 +173,15 @@ export class SeedingService {
    */
   async ping(request: SeedingRequest, note?: string | null): Promise<string> {
     const config = this.settings();
-    if (!config.enabled) return STAFF_COPY.off;
     let context: MemberContext | string;
     try {
+      // Staff first, so members never see the setup replies meant for staff.
       context = await this.staff(request, config.guildId);
     } catch (error) {
       return this.unexpected("ping", error);
     }
     if (typeof context === "string") return context;
+    if (!config.enabled) return STAFF_COPY.off;
     const { roleId, channelId } = config;
     if (!roleId || !channelId) return STAFF_COPY.pingUnset;
 
@@ -211,12 +223,13 @@ export class SeedingService {
     }
 
     try {
-      // One send, never retried. The nonce lets Discord drop a duplicate if the request itself is replayed.
+      // Gramps sends once and never retries. The REST client repeats a request that timed out or hit a 5xx;
+      // the nonce lets Discord drop that duplicate instead of pinging twice.
       await channel.send({
         content,
         allowedMentions: { roles: [roleId] },
         flags: MessageFlags.SuppressEmbeds,
-        nonce: createHash("sha256").update(`seeding-ping:${guildId}:${claimedAt}`).digest("hex").slice(0, 24),
+        nonce: nonce(`seeding-ping:${guildId}:${claimedAt}`),
         enforceNonce: true,
       });
     } catch (error) {
@@ -274,14 +287,19 @@ export class SeedingService {
     }
   }
 
+  /**
+   * The dashboard's admins and moderators: an owner ID or a listed admin or moderator role. Like the dashboard,
+   * Discord permissions alone (Manage Roles, Administrator) never count, and a viewer role is not enough.
+   */
   isStaff(member: GuildMember) {
     const role = staffRoleFor(member.id, [...member.roles.cache.keys()], this.admin.staffPolicy());
-    return role === "admin" || role === "moderator" || member.permissions.has(PermissionFlagsBits.ManageRoles);
+    return role === "admin" || role === "moderator";
   }
 
+  /** Joining needs the switch on. Leaving works whenever the role is set, so nobody is ever stuck with it. */
   private async toggle(request: SeedingRequest, join: boolean): Promise<string> {
     const config = this.settings();
-    if (!config.enabled) return MEMBER_COPY.off;
+    if (join && !config.enabled) return MEMBER_COPY.off;
     if (!config.guildId || !config.roleId) return MEMBER_COPY.unconfigured;
     try {
       const context = await this.member(request, config.guildId);
@@ -323,7 +341,12 @@ export class SeedingService {
   }
 
   private async staff(request: SeedingRequest, guildId: string | undefined): Promise<MemberContext | string> {
-    if (!guildId) return STAFF_COPY.guildUnset;
+    // Without ADMIN_GUILD_ID no roles can be read, so only an owner ID gets the setup hint; everyone else
+    // gets the plain member reply.
+    if (!guildId)
+      return this.admin.staffPolicy().ownerIds.includes(request.userId)
+        ? STAFF_COPY.guildUnset
+        : MEMBER_COPY.unconfigured;
     const context = await this.member(request, guildId);
     if (typeof context === "string") return context;
     return this.isStaff(context.member) ? context : STAFF_COPY.staffOnly;
@@ -348,14 +371,22 @@ export class SeedingService {
     return { role, problem: null };
   }
 
-  /** @everyone, integration roles, staff roles and roles with moderation powers are never self-assignable. */
+  /**
+   * @everyone, integration roles, staff roles and roles with moderation powers are never self-assignable. Powers
+   * count whether the role has them server-wide or through a channel permission override in Gramps' cache.
+   */
   private unsafe(guild: Guild, role: Role) {
     const staff = this.admin.staffPolicy();
     return (
       role.id === guild.id ||
       role.managed ||
       [...staff.adminRoleIds, ...staff.moderatorRoleIds, ...staff.viewerRoleIds].includes(role.id) ||
-      role.permissions.any(ELEVATED_PERMISSIONS)
+      role.permissions.any(ELEVATED_PERMISSIONS) ||
+      guild.channels.cache.some(
+        (channel) =>
+          "permissionOverwrites" in channel &&
+          channel.permissionOverwrites.cache.get(role.id)?.allow.any(ELEVATED_PERMISSIONS) === true,
+      )
     );
   }
 

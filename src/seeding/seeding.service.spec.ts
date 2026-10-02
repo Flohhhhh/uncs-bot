@@ -1,6 +1,7 @@
 import { Logger } from "@nestjs/common";
 import {
   ChannelType,
+  Collection,
   DiscordAPIError,
   MessageFlags,
   PermissionFlagsBits,
@@ -34,6 +35,7 @@ const GUILD = "200000000000000001",
   OWNER = "500000000000000003",
   ROLE_MANAGER = "500000000000000004",
   VIEWER = "500000000000000005",
+  DISCORD_ADMIN = "500000000000000006",
   STRANGER = "500000000000000009",
   BOT = "500000000000000099";
 const JOIN_ID = "11111111-1111-4111-8111-111111111111";
@@ -103,6 +105,7 @@ function fixture(overrides: Record<string, unknown> = {}, servers: GameServerSum
       fakeMember(OWNER),
       fakeMember(ROLE_MANAGER, [], [PermissionFlagsBits.ManageRoles]),
       fakeMember(VIEWER, [VIEWER_ROLE]),
+      fakeMember(DISCORD_ADMIN, [], [PermissionFlagsBits.Administrator]),
     ].map((member) => [member.id, member]),
   );
   const guild = {
@@ -120,6 +123,8 @@ function fixture(overrides: Record<string, unknown> = {}, servers: GameServerSum
       fetch: jest.fn(async (id: string): Promise<typeof role | null> => (id === role.id ? role : null)),
       fetchMemberCounts: jest.fn(async () => new Map([[ROLE, 12]])),
     },
+    /** Gramps' channel cache, read for permission overrides on the Seeder role. */
+    channels: { cache: new Collection<string, object>() },
   };
   const permissions = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages];
   const channel = fakeChannel(CHANNEL, [...permissions, PermissionFlagsBits.MentionEveryone]);
@@ -187,21 +192,44 @@ describe("/seeding join and leave", () => {
     expect(member.roles.remove).not.toHaveBeenCalled();
   });
 
-  it("does nothing while the feature is off, which is the default", async () => {
-    const { service, discord, request } = fixture({ SEEDING_ENABLED: false });
+  it("takes no new sign-ups while the feature is off, which is the default", async () => {
+    const { service, discord, members, request } = fixture({ SEEDING_ENABLED: false });
     expect(await service.join(request(MEMBER))).toBe(MEMBER_COPY.off);
-    expect(await service.leave(request(MEMBER))).toBe(MEMBER_COPY.off);
     expect(discord.guilds.fetch).not.toHaveBeenCalled();
+    expect(members.get(MEMBER)!.roles.add).not.toHaveBeenCalled();
   });
 
-  it.each([{ SEEDING_ROLE_ID: undefined }, { ADMIN_GUILD_ID: undefined }])(
-    "explains that seeding is not set up yet when %o",
-    async (overrides) => {
-      const { service, discord, request } = fixture(overrides);
-      expect(await service.join(request(MEMBER))).toBe(MEMBER_COPY.unconfigured);
-      expect(discord.guilds.fetch).not.toHaveBeenCalled();
-    },
-  );
+  it("still lets a Seeder opt out while the feature is off", async () => {
+    const { service, members, request } = fixture({ SEEDING_ENABLED: false });
+    const member = members.get(MEMBER)!;
+    member.roles.cache.set(ROLE, {});
+    expect(await service.leave(request(MEMBER))).toBe(MEMBER_COPY.left);
+    expect(member.roles.remove).toHaveBeenCalledWith(ROLE, "Opted out of seeding pings");
+    expect(await service.leave(request(MEMBER))).toBe(MEMBER_COPY.alreadyLeft);
+    expect(member.roles.add).not.toHaveBeenCalled();
+  });
+
+  it("keeps the safety and role-height checks on an opt-out while the feature is off", async () => {
+    const { service, role, me, members, request } = fixture({ SEEDING_ENABLED: false });
+    const member = members.get(MEMBER)!;
+    member.roles.cache.set(ROLE, {});
+    me.roles.highest.comparePositionTo.mockReturnValue(0);
+    expect(await service.leave(request(MEMBER))).toBe(MEMBER_COPY.roleTooLow);
+    role.permissions = new PermissionsBitField([PermissionFlagsBits.KickMembers]);
+    expect(await service.leave(request(MEMBER))).toBe(MEMBER_COPY.roleUnusable);
+    expect(member.roles.remove).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { SEEDING_ROLE_ID: undefined },
+    { ADMIN_GUILD_ID: undefined },
+    { SEEDING_ENABLED: false, SEEDING_ROLE_ID: undefined },
+  ])("explains that seeding is not set up yet when %o", async (overrides) => {
+    const { service, discord, request } = fixture(overrides);
+    if (overrides.SEEDING_ENABLED !== false) expect(await service.join(request(MEMBER))).toBe(MEMBER_COPY.unconfigured);
+    expect(await service.leave(request(MEMBER))).toBe(MEMBER_COPY.unconfigured);
+    expect(discord.guilds.fetch).not.toHaveBeenCalled();
+  });
 
   it.each([OTHER_GUILD, null])("only works inside the configured Discord server (guild %s)", async (guildId) => {
     const { service, discord } = fixture();
@@ -290,13 +318,33 @@ describe("/seeding join and leave", () => {
     expect(members.get(MEMBER)!.roles.add).not.toHaveBeenCalled();
     expect(members.get(MEMBER)!.roles.remove).not.toHaveBeenCalled();
   });
+
+  it("never hands out a role that gets moderation powers through a channel override", async () => {
+    const { service, guild, members, request } = fixture();
+    const overrides = (allow: bigint[]) => ({
+      permissionOverwrites: { cache: new Collection([[ROLE, { allow: new PermissionsBitField(allow) }]]) },
+    });
+    // A thread has no overrides of its own, and a plain view-and-send override is fine.
+    guild.channels.cache.set("400000000000000010", { id: "400000000000000010" });
+    guild.channels.cache.set(CHANNEL, overrides([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]));
+    expect(await service.join(request(MEMBER))).toBe(MEMBER_COPY.joined);
+    guild.channels.cache.set(
+      PANEL_CHANNEL,
+      overrides([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ManageMessages]),
+    );
+    expect(await service.leave(request(MEMBER))).toBe(MEMBER_COPY.roleUnusable);
+    expect(await service.join(request(MODERATOR))).toBe(MEMBER_COPY.roleUnusable);
+    expect(members.get(MEMBER)!.roles.remove).not.toHaveBeenCalled();
+    expect(members.get(MODERATOR)!.roles.add).not.toHaveBeenCalled();
+  });
 });
 
 describe("staff check", () => {
   it.each([
     ["an owner ID", OWNER, true],
     ["a moderator role", MODERATOR, true],
-    ["the Manage Roles permission", ROLE_MANAGER, true],
+    ["only the Manage Roles permission", ROLE_MANAGER, false],
+    ["only the Administrator permission", DISCORD_ADMIN, false],
     ["a viewer role", VIEWER, false],
     ["no staff access", MEMBER, false],
   ])("treats a member with %s as staff: %s", async (_label, userId, staff) => {
@@ -315,8 +363,12 @@ describe("/seeding panel", () => {
     const { service, panelChannel, request } = fixture();
     expect(await service.panel(request(MODERATOR))).toBe(STAFF_COPY.panelPosted);
     expect(panelChannel.send).toHaveBeenCalledTimes(1);
-    const [payload] = panelChannel.send.mock.calls[0] as [{ allowedMentions: unknown; components: any[] }];
+    const [payload] = panelChannel.send.mock.calls[0] as [
+      { allowedMentions: unknown; components: any[]; nonce: string; enforceNonce: boolean },
+    ];
     expect(payload.allowedMentions).toEqual({ parse: [] });
+    expect(payload.enforceNonce).toBe(true);
+    expect(payload.nonce).toMatch(/^[0-9a-f]{24}$/);
     const buttons = payload.components[0].toJSON().components;
     expect(buttons.map((button: { custom_id: string; label: string }) => [button.custom_id, button.label])).toEqual([
       [SEEDING_BUTTONS.join, "I'll help seed"],
@@ -326,14 +378,15 @@ describe("/seeding panel", () => {
 
   it("is staff only", async () => {
     const { service, panelChannel, request } = fixture();
-    expect(await service.panel(request(MEMBER))).toBe(STAFF_COPY.staffOnly);
-    expect(await service.panel(request(VIEWER))).toBe(STAFF_COPY.staffOnly);
+    for (const userId of [MEMBER, VIEWER, ROLE_MANAGER, DISCORD_ADMIN])
+      expect(await service.panel(request(userId))).toBe(STAFF_COPY.staffOnly);
     expect(panelChannel.send).not.toHaveBeenCalled();
   });
 
-  it("stays off while the feature is off", async () => {
+  it("stays off while the feature is off, and tells only staff how to turn it on", async () => {
     const { service, panelChannel, request } = fixture({ SEEDING_ENABLED: false });
     expect(await service.panel(request(MODERATOR))).toBe(STAFF_COPY.off);
+    expect(await service.panel(request(MEMBER))).toBe(STAFF_COPY.staffOnly);
     expect(panelChannel.send).not.toHaveBeenCalled();
   });
 
@@ -346,9 +399,13 @@ describe("/seeding panel", () => {
     expect(panelChannel.send).not.toHaveBeenCalled();
   });
 
-  it("asks for ADMIN_GUILD_ID when it is missing", async () => {
-    const { service, request } = fixture({ ADMIN_GUILD_ID: undefined });
-    expect(await service.panel(request(MODERATOR))).toBe(STAFF_COPY.guildUnset);
+  it("asks an owner for ADMIN_GUILD_ID when it is missing, and gives everyone else the plain reply", async () => {
+    const { service, discord, request } = fixture({ ADMIN_GUILD_ID: undefined });
+    expect(await service.panel(request(OWNER))).toBe(STAFF_COPY.guildUnset);
+    // Without the server, a moderator role can't be read.
+    expect(await service.panel(request(MODERATOR))).toBe(MEMBER_COPY.unconfigured);
+    expect(await service.panel(request(MEMBER))).toBe(MEMBER_COPY.unconfigured);
+    expect(discord.guilds.fetch).not.toHaveBeenCalled();
   });
 
   it("refuses a channel Gramps cannot post in, in another server or of the wrong kind", async () => {
@@ -369,12 +426,17 @@ describe("/seeding panel", () => {
   });
 
   it("sends the panel once and reports a refusal or an unconfirmed send without retrying", async () => {
+    jest.useFakeTimers({ now: new Date("2026-10-02T20:00:00Z") });
     const { service, panelChannel, request } = fixture();
     panelChannel.send.mockRejectedValueOnce(discordError(50013, 403));
     expect(await service.panel(request(MODERATOR))).toBe(STAFF_COPY.panelRefused);
+    jest.advanceTimersByTime(1_000);
     panelChannel.send.mockRejectedValueOnce(new Error("socket hang up"));
     expect(await service.panel(request(MODERATOR))).toBe(STAFF_COPY.panelUnknown);
     expect(panelChannel.send).toHaveBeenCalledTimes(2);
+    // Each panel staff ask for gets its own nonce; only the REST client's own resend of one request shares it.
+    const [[first], [second]] = panelChannel.send.mock.calls as [[{ nonce: string }], [{ nonce: string }]];
+    expect(second.nonce).not.toBe(first.nonce);
   });
 
   it("answers safely when Discord fails unexpectedly", async () => {
@@ -478,11 +540,28 @@ describe("/seeding ping", () => {
     expect(off.channel.send).not.toHaveBeenCalled();
   });
 
-  it("works for owners and members with Manage Roles", async () => {
+  it("tells a member 'staff only', not how to turn seeding on, while the feature is off", async () => {
+    const { service, channel, request } = fixture({ SEEDING_ENABLED: false });
+    expect(await service.ping(request(MEMBER), "Hop on")).toBe(STAFF_COPY.staffOnly);
+    expect(await service.ping(request(VIEWER))).toBe(STAFF_COPY.staffOnly);
+    expect(channel.send).not.toHaveBeenCalled();
+    expect(service.cooldownRemaining(GUILD)).toBe(0);
+  });
+
+  it("gives a member the plain reply, not the ADMIN_GUILD_ID hint, when the server is not set", async () => {
+    const { service, channel, request } = fixture({ ADMIN_GUILD_ID: undefined });
+    expect(await service.ping(request(MEMBER))).toBe(MEMBER_COPY.unconfigured);
+    expect(await service.ping(request(OWNER))).toBe(STAFF_COPY.guildUnset);
+    expect(channel.send).not.toHaveBeenCalled();
+  });
+
+  it("works for owners, but never for Discord permissions alone", async () => {
     const { service, channel, request } = fixture();
+    expect(await service.ping(request(ROLE_MANAGER))).toBe(STAFF_COPY.staffOnly);
+    expect(await service.ping(request(DISCORD_ADMIN))).toBe(STAFF_COPY.staffOnly);
+    expect(channel.send).not.toHaveBeenCalled();
+    expect(service.cooldownRemaining(GUILD)).toBe(0);
     expect(await service.ping(request(OWNER))).toBe(STAFF_COPY.pingSent(CHANNEL, 120 * MINUTE));
-    const other = fixture();
-    expect(await other.service.ping(other.request(ROLE_MANAGER))).toBe(STAFF_COPY.pingSent(CHANNEL, 120 * MINUTE));
     expect(channel.send).toHaveBeenCalledTimes(1);
   });
 
@@ -573,8 +652,15 @@ describe("/seeding ping", () => {
     expect(await service.ping(request(MODERATOR))).toBe(`${ROLE_PROBLEMS.missing} Nothing was sent.`);
     role.permissions = new PermissionsBitField([PermissionFlagsBits.BanMembers]);
     expect(await service.ping(request(MODERATOR))).toBe(`${ROLE_PROBLEMS.unsafe} Nothing was sent.`);
-    expect(channel.send).not.toHaveBeenCalled();
     role.permissions = new PermissionsBitField();
+    guild.channels.cache.set(CHANNEL, {
+      permissionOverwrites: {
+        cache: new Collection([[ROLE, { allow: new PermissionsBitField([PermissionFlagsBits.MentionEveryone]) }]]),
+      },
+    });
+    expect(await service.ping(request(MODERATOR))).toBe(`${ROLE_PROBLEMS.unsafe} Nothing was sent.`);
+    expect(channel.send).not.toHaveBeenCalled();
+    guild.channels.cache.clear();
     me.roles.highest.comparePositionTo.mockReturnValue(-1);
     expect(await service.ping(request(MODERATOR))).toBe(STAFF_COPY.pingSent(CHANNEL, 120 * MINUTE));
   });
@@ -652,7 +738,14 @@ describe("/seeding status", () => {
 
   it("is staff only", async () => {
     const { service, request } = fixture();
-    expect(await service.status(request(MEMBER))).toBe(STAFF_COPY.staffOnly);
+    for (const userId of [MEMBER, VIEWER, ROLE_MANAGER, DISCORD_ADMIN])
+      expect(await service.status(request(userId))).toBe(STAFF_COPY.staffOnly);
+  });
+
+  it("names ADMIN_GUILD_ID only to an owner when it is missing", async () => {
+    const { service, request } = fixture({ ADMIN_GUILD_ID: undefined });
+    expect(await service.status(request(OWNER))).toBe(STAFF_COPY.guildUnset);
+    expect(await service.status(request(MEMBER))).toBe(MEMBER_COPY.unconfigured);
   });
 
   it("answers safely when Discord fails unexpectedly", async () => {

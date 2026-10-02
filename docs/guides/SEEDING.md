@@ -14,14 +14,16 @@ All replies are private (ephemeral).
 | Command                | Who        | What it does                                                                      |
 | ---------------------- | ---------- | --------------------------------------------------------------------------------- |
 | `/seeding join`        | Any member | Adds the Seeder role to you.                                                      |
-| `/seeding leave`       | Any member | Removes the Seeder role from you.                                                 |
+| `/seeding leave`       | Any member | Removes the Seeder role from you. Works even while seeding is switched off.       |
 | `/seeding panel`       | Staff      | Posts the opt-in panel with the two buttons in the channel you run it in.         |
 | `/seeding ping [note]` | Staff      | Posts one call to the Seeder role in the ping channel. Subject to the cooldown.   |
 | `/seeding status`      | Staff      | Shows whether seeding is configured, how many Seeders there are and the cooldown. |
 
-**Staff** means the same Discord identities as the staff dashboard's admin and moderator access: a user in `ADMIN_OWNER_IDS`, or a member with a role in `ADMIN_ADMIN_ROLE_IDS` or `ADMIN_MODERATOR_ROLE_IDS`. Members with Discord's **Manage Roles** permission also count. A viewer role alone does not. These settings work without `ADMIN_ENABLED`. Discord lists every subcommand for everyone, because one command can't hide only some of its subcommands; Gramps checks staff access when a staff subcommand runs.
+**Staff** means the same Discord identities as the staff dashboard's admin and moderator access: a user in `ADMIN_OWNER_IDS`, or a member with a role in `ADMIN_ADMIN_ROLE_IDS` or `ADMIN_MODERATOR_ROLE_IDS`. Only those listed IDs count. Discord permissions on their own, including **Manage Roles** and **Administrator**, do not, and neither does a viewer role. These settings work without `ADMIN_ENABLED`. Discord lists every subcommand for everyone, because one command can't hide only some of its subcommands; Gramps checks staff access when a staff subcommand runs, before anything else, so a member who tries one only ever hears that it's for staff.
 
-Everything works only inside the `ADMIN_GUILD_ID` server. Elsewhere, Gramps says so and does nothing.
+Everything works only inside the `ADMIN_GUILD_ID` server. Elsewhere, Gramps says so and does nothing. Until `ADMIN_GUILD_ID` is set, Gramps can't read anyone's roles, so only a user in `ADMIN_OWNER_IDS` is told to set it; everyone else hears that seeding isn't set up yet.
+
+**`/seeding` is listed in Discord while seeding is off.** Discord commands are registered when Gramps starts, so after the first deploy `/seeding` and its five subcommands show in the command list for every member of every server Gramps is in, even with `SEEDING_ENABLED=false`. While the switch is off, `join` says sign-ups are switched off, `leave` still removes the role from anyone who has it, `panel` and `ping` tell staff to turn seeding on (and members that they're staff only), and `status` reports the setup. Nothing is pinged and nobody gets the role.
 
 ## Setup
 
@@ -35,14 +37,14 @@ Everything works only inside the `ADMIN_GUILD_ID` server. Elsewhere, Gramps says
 
 ## Configuration
 
-| Setting                         | Default | Notes                                                                                  |
-| ------------------------------- | ------- | -------------------------------------------------------------------------------------- |
-| `SEEDING_ENABLED`               | `false` | Turns on join, leave, the buttons, panel and ping. `/seeding status` works either way. |
-| `SEEDING_ROLE_ID`               | none    | The Seeder role in `ADMIN_GUILD_ID`.                                                   |
-| `SEEDING_PING_CHANNEL_ID`       | none    | Text or announcement channel in `ADMIN_GUILD_ID` for `/seeding ping`.                  |
-| `SEEDING_PING_COOLDOWN_MINUTES` | `120`   | Minimum minutes between pings, 15–1440, per Discord server.                            |
+| Setting                         | Default | Notes                                                                                       |
+| ------------------------------- | ------- | ------------------------------------------------------------------------------------------- |
+| `SEEDING_ENABLED`               | `false` | Turns on join, the **I'll help seed** button, panel and ping. Leave and status always work. |
+| `SEEDING_ROLE_ID`               | none    | The Seeder role in `ADMIN_GUILD_ID`.                                                        |
+| `SEEDING_PING_CHANNEL_ID`       | none    | Text or announcement channel in `ADMIN_GUILD_ID` for `/seeding ping`.                       |
+| `SEEDING_PING_COOLDOWN_MINUTES` | `120`   | Minimum minutes between pings, 15–1440, per Discord server.                                 |
 
-While `SEEDING_ENABLED=false`, members are told sign-ups are switched off, and panel and ping tell staff to turn it on first. Existing Seeders keep the role; nobody is pinged.
+While `SEEDING_ENABLED=false`, `/seeding join` and **I'll help seed** tell members sign-ups are switched off, and panel and ping tell staff to turn it on first. `/seeding leave` and **Stop pinging me** keep working whenever `ADMIN_GUILD_ID` and `SEEDING_ROLE_ID` are set, with the same safety and role-height checks, so a Seeder can always opt out. Existing Seeders keep the role until they leave; Gramps pings nobody.
 
 ## What a ping looks like
 
@@ -65,7 +67,8 @@ Staff note: Map night at 8, bring a friend
 - A refused ping tells staff how long is left, for example `The next seeding ping opens in 1 h 12 min.` Minutes are rounded up.
 - The cooldown is claimed the moment a ping starts, before Gramps reads the role, channel or game, so two staff members pinging at once send one message.
 - It is given back only when nothing was posted: a setup problem found before sending, or Discord definitely refusing the send (a 4xx answer such as 50013 Missing Permissions).
-- **Uncertain sends are never retried.** If Discord doesn't confirm the send (a timeout or network error), Gramps keeps the cooldown, asks staff to check the channel, and does not resend. The send carries a nonce with `enforceNonce`, so Discord drops a duplicate if the request itself is replayed.
+- **Uncertain sends are never retried by Gramps.** If Discord doesn't confirm the send (a timeout or network error), Gramps keeps the cooldown, asks staff to check the channel, and does not resend.
+- **Discord.js may repeat the request itself.** Its REST client resends a request that timed out or got a 5xx answer, up to three times. Both the ping and the panel carry a nonce with `enforceNonce`, so Discord drops that repeat instead of posting a second message. Each `/seeding ping` or `/seeding panel` gets its own nonce.
 
 ## Safety checks
 
@@ -73,7 +76,8 @@ Gramps refuses to add or remove the configured role, and won't post the panel, w
 
 - `@everyone`, or a managed role (a bot or integration role);
 - one of the staff roles in `ADMIN_ADMIN_ROLE_IDS`, `ADMIN_MODERATOR_ROLE_IDS` or `ADMIN_VIEWER_ROLE_IDS`;
-- a role with any of: Administrator, Manage Server, Manage Roles, Manage Channels, Manage Webhooks, Manage Messages, Manage Threads, Manage Nicknames, Manage Events, Manage Expressions, Kick Members, Ban Members, Timeout Members, Mute Members, Deafen Members, Move Members, Mention @everyone, @here and All Roles, or View Audit Log.
+- a role with any of: Administrator, Manage Server, Manage Roles, Manage Channels, Manage Webhooks, Manage Messages, Manage Threads, Manage Nicknames, Manage Events, Manage Expressions, Kick Members, Ban Members, Timeout Members, Mute Members, Deafen Members, Move Members, Mention @everyone, @here and All Roles, or View Audit Log;
+- a role that gets any of those through a channel or category permission override. Gramps reads the overrides from its channel cache, which Discord fills when Gramps connects. An override that only allows things like View Channel or Send Messages is fine.
 
 A ping is refused for such a role too. A ping does not need Gramps to be able to assign the role, so it still works while the role sits above Gramps; joining and leaving don't.
 
