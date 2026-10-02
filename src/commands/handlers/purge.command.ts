@@ -5,12 +5,12 @@
  */
 import { Injectable } from "@nestjs/common";
 import { InteractionContextType, MessageFlags, PermissionFlagsBits } from "discord.js";
-import { Context, NumberOption, Options, SlashCommand, type SlashCommandContext } from "necord";
-import { InteractionError } from "src/common/errors/interaction-error";
-import { RequiredBotPermission } from "src/common/guards/require-bot-permission.guard";
+import { Context, IntegerOption, Options, SlashCommand, type SlashCommandContext } from "necord";
+import { InteractionError } from "../../common/errors/interaction-error";
+import { RequiredBotPermission } from "../../common/guards/require-bot-permission.guard";
 
 class PurgeOptions {
-  @NumberOption({
+  @IntegerOption({
     name: "amount",
     description: "Number of messages to delete (max 100)",
     required: true,
