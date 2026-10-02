@@ -84,6 +84,11 @@ function ReviewChanges({
   }
   return (
     <Modal serverScoped title={saveLabels[action.action]} onClose={close} busy={admin.busy}>
+      {!result && action.action === "settings-save" && (
+        <p className="notice warning">
+          Changes marked Now affect the running server when saved. Other changes follow the timing shown below.
+        </p>
+      )}
       <ul className="change-summary">
         {summary.map((item, index) => (
           <li key={index}>{item}</li>

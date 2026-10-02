@@ -419,20 +419,26 @@ export function MatchPage() {
               <span>Experience</span>
               <strong>{status.experiences?.map((id) => modeLabel(id)).join(", ") || "Not supplied"}</strong>
             </div>
-            <p className="intro">
-              Map and match actions affect everyone in the game. Confirm the exact action before sending it to the
-              server.
-            </p>
             <div className="action-list">
-              <ActionButton action="map">Change map</ActionButton>
               <ActionButton action="lighting">Set lighting</ActionButton>
-              <ActionButton action="match-end" kind="danger small">
-                End match
-              </ActionButton>
-              <ActionButton action="match-restart" kind="danger small">
-                Restart match
-              </ActionButton>
             </div>
+            <details>
+              <summary>Change, end or restart the current match</summary>
+              <p className="notice warning">
+                These controls affect everyone playing. Each action requires a separate confirmation.
+              </p>
+              <div className="action-list">
+                <ActionButton action="map" kind="danger small">
+                  Change map
+                </ActionButton>
+                <ActionButton action="match-end" kind="danger small">
+                  End match
+                </ActionButton>
+                <ActionButton action="match-restart" kind="danger small">
+                  Restart match
+                </ActionButton>
+              </div>
+            </details>
           </div>
         </Card>
         <Card title="Map rotation" badge={<Badge>{error ? "UNAVAILABLE" : rotation?.mode || "LOADING"}</Badge>}>
