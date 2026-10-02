@@ -265,3 +265,26 @@ it("drops private details immediately on role change and ignores an in-flight re
   expect(request.mock.calls).toHaveLength(callsBefore);
   expect(screen.queryByText(record.email!)).not.toBeInTheDocument();
 });
+
+it("filters loaded requests with counted status chips", async () => {
+  const second = { ...record, id: "01234567-89ab-4cde-8fab-0123456789ac", discordDisplayName: "Follow-up player" };
+  const third = { ...record, id: "01234567-89ab-4cde-8fab-0123456789ad", discordDisplayName: "Approved player" };
+  request.mockResolvedValue({
+    applications: [record, { ...second, status: "needs_review" }, { ...third, status: "approved" }],
+  });
+  render(page());
+  await screen.findByText("Follow-up player");
+  expect(screen.queryByRole("combobox", { name: "Application status" })).not.toBeInTheDocument();
+  const chips = screen.getByRole("group", { name: "Application status" });
+  expect(within(chips).getByRole("button", { name: "All 3" })).toHaveAttribute("aria-pressed", "true");
+  expect(within(chips).getByRole("button", { name: "Awaiting review 1" })).toBeInTheDocument();
+  expect(within(chips).getByRole("button", { name: "Declined 0" })).toBeInTheDocument();
+  fireEvent.click(within(chips).getByRole("button", { name: "Need follow-up 1" }));
+  const table = screen.getByRole("table", { name: "Community requests" });
+  expect(within(table).getByText("Follow-up player")).toBeInTheDocument();
+  expect(within(table).queryByText("Approved player")).not.toBeInTheDocument();
+  expect(screen.getByText(/^1 shown of 3 loaded/)).toBeInTheDocument();
+  fireEvent.click(within(chips).getByRole("button", { name: "All 3" }));
+  expect(within(screen.getByRole("table", { name: "Community requests" })).getAllByRole("row")).toHaveLength(4);
+  expect(postCalls()).toHaveLength(0);
+});

@@ -4,7 +4,7 @@ import { useResource } from "../../api/use-resource";
 import { useAdmin } from "../../app/context";
 import { Badge, Card, Empty, Modal, ReasonField, date } from "../../components/ui";
 import { CopyValue, DataTable } from "../../components/data-table";
-import { founderReady, paymentDescription, reviewInput } from "./policy";
+import { founderReady, founderWindowLabel, newYork, paymentDescription, reviewInput } from "./policy";
 import { ManualMember } from "./manual-member";
 import type { FounderPolicy, Supporter, SupporterDecision, SupporterReviewResponse, SupportersResponse } from "./types";
 
@@ -410,11 +410,19 @@ function SupporterReview({
   );
 }
 
+type SupporterFilter = "" | "review" | "unlinked" | "founder";
+const supporterFilters: { id: SupporterFilter; label: string; matches: (record: Supporter) => boolean }[] = [
+  { id: "", label: "All", matches: () => true },
+  { id: "review", label: "Awaiting review", matches: (record) => record.reviewState !== "verified" },
+  { id: "unlinked", label: "Accounts to match", matches: (record) => record.identityState !== "staff_linked" },
+  { id: "founder", label: "Founder promises", matches: (record) => !!record.founder },
+];
+
 function AdminSupporters() {
   const { busy } = useAdmin();
   const [query, setQuery] = useState("");
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState("");
+  const [filter, setFilter] = useState<SupporterFilter>("");
   const resource = useResource<SupportersResponse>(
     search ? `supporters?search=${encodeURIComponent(search)}` : "supporters",
   );
@@ -429,87 +437,52 @@ function AdminSupporters() {
       />
     );
   const records = data.supporters;
-  const rows = records.filter(
-    (record) =>
-      !filter ||
-      (filter === "review" && record.reviewState !== "verified") ||
-      (filter === "unlinked" && record.identityState !== "staff_linked") ||
-      (filter === "founder" && record.founder),
-  );
+  const rows = records.filter((supporterFilters.find((entry) => entry.id === filter) ?? supporterFilters[0]).matches);
   const policy = data.founderPolicy;
-  const windowDate = (value: string | null) =>
-    value
-      ? new Date(value).toLocaleString(undefined, { timeZone: "America/New_York", timeZoneName: "short" })
-      : "Not set";
-  const founderWindow = policy.configured
-    ? `${windowDate(policy.startsAt)} → ${windowDate(policy.endsAt)} (end exclusive)`
-    : "15 days from launch · dates not set";
+  const exactWindow = (value: string | null) =>
+    value ? new Date(value).toLocaleString(undefined, { timeZone: newYork, timeZoneName: "short" }) : "Not set";
+  const ready = data.enabled && data.configured;
   return (
     <>
-      <div className="supporter-intro">
-        <div>
-          <p className="eyebrow">PATREON / PRIVATE STAFF RECORDS</p>
-          <h2>
-            THANK THE CREW.
-            <br />
-            <span>KEEP THE PROMISE.</span>
-          </h2>
-          <p>
-            Monthly support and permanent founder recognition have separate records. A founder promise does not expire
-            when a membership ends.
-          </p>
-        </div>
-        <div className="supporter-launch">
-          <span className="eyebrow">FOUNDER WINDOW</span>
-          <strong>{founderWindow}</strong>
-          <small>
-            {policy.configured
-              ? "Use the completed payment date, not the date a membership appeared here."
-              : "The launch dates must be set before any founder promise can be recorded."}
-          </small>
-          <Badge kind={data.enabled && data.configured ? "neutral" : "warn"}>
-            {data.enabled && data.configured ? "SUPPORTER RECORDS READY" : "NOT CONFIGURED"}
-          </Badge>
-          <small>
-            {data.webhookConfigured
-              ? "Patreon webhook configured; check delivery in Patreon."
-              : "Automatic Patreon updates are not connected. Verified member details can be entered manually when records are ready."}
-          </small>
-        </div>
+      <div className="supporter-summary">
+        <p>Records only. Grants no game or Discord access. A membership is not a verified payment.</p>
+        <span
+          className={`pill ${policy.configured ? "neutral" : "warn"}`}
+          title={
+            policy.configured
+              ? `${exactWindow(policy.startsAt)} until ${exactWindow(policy.endsAt)}, end not included. Use the completed payment date, not the date a membership appeared here.`
+              : "Set the launch dates before any founder promise can be recorded."
+          }
+        >
+          {founderWindowLabel(policy)}
+        </span>
+        {!ready && <Badge kind="warn">Not configured</Badge>}
+        <span
+          className="muted"
+          title={
+            data.webhookConfigured
+              ? "Check delivery in Patreon."
+              : "Verified member details can be entered by hand when records are ready."
+          }
+        >
+          Patreon webhook {data.webhookConfigured ? "connected" : "not connected"}
+        </span>
       </div>
-      <div className="notice info">
-        <strong>Future benefit only.</strong> Founder recognition records lifetime standard whitelist access for when
-        Wardogs queue tiers launch. No whitelist, priority tier, or Discord role is granted from this page. Current free
-        whitelist access stays in place.
-      </div>
-      {data.note && <p className="supporter-note">{data.note}</p>}
       {resource.error && (
         <p className="notice warning" role="alert">
           Supporter records could not be refreshed. Refresh before recording another review.
         </p>
       )}
-      <div className="application-counts supporter-counts">
-        <span>
-          <strong>{records.filter((record) => record.reviewState !== "verified").length}</strong> awaiting review
-        </span>
-        <span>
-          <strong>{records.filter((record) => record.identityState !== "staff_linked").length}</strong> accounts to
-          match
-        </span>
-        <span>
-          <strong>{records.filter((record) => record.founder).length}</strong> founder promises
-        </span>
-        <span>Counts refer to loaded records</span>
-      </div>
-      <form
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (busy || resource.loading || query.trim().length > 100) return;
-          if (query.trim() === search) resource.refresh();
-          else setSearch(query.trim());
-        }}
-      >
-        <div className="toolbar">
+      <div className="toolbar">
+        <form
+          className="supporter-search"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (busy || resource.loading || query.trim().length > 100) return;
+            if (query.trim() === search) resource.refresh();
+            else setSearch(query.trim());
+          }}
+        >
           <label className="search">
             <input
               type="search"
@@ -536,43 +509,36 @@ function AdminSupporters() {
               Clear search
             </button>
           )}
-        </div>
-      </form>
-      <p className="muted">
+        </form>
+        <button
+          className="button secondary"
+          disabled={busy || resource.loading || Boolean(resource.error) || !ready}
+          onClick={() => setAdding(true)}
+        >
+          Record existing Patreon member
+        </button>
+      </div>
+      <p className="filter-note">
         {search
           ? `Searching all records for “${search}”. Up to 100 matching records are shown.`
           : "Showing up to 100 recent records. Search all records to find earlier supporters."}
       </p>
-      <div className="toolbar">
-        <select
-          aria-label="Filter supporter records"
-          value={filter}
-          onChange={(event) => setFilter(event.target.value)}
-        >
-          <option value="">All loaded supporters</option>
-          <option value="review">Awaiting review</option>
-          <option value="unlinked">Accounts to match</option>
-          <option value="founder">Founder promises</option>
-        </select>
-        {filter && (
-          <button type="button" className="button secondary" onClick={() => setFilter("")}>
-            Reset filter
+      <div className="filter-chips record-filters" role="group" aria-label="Filter supporter records">
+        {supporterFilters.map((entry) => (
+          <button
+            type="button"
+            key={entry.id || "all"}
+            className="filter-chip"
+            aria-pressed={filter === entry.id}
+            onClick={() => setFilter(entry.id)}
+          >
+            {entry.label} <span className="chip-count">{records.filter(entry.matches).length}</span>
           </button>
-        )}
-        <span className="muted">
-          {rows.length} shown of {records.length} loaded
-        </span>
+        ))}
       </div>
-      <button
-        className="button secondary"
-        disabled={busy || resource.loading || Boolean(resource.error) || !data.enabled || !data.configured}
-        onClick={() => setAdding(true)}
-      >
-        Record existing Patreon member
-      </button>
       <Card
         title="Patreon supporters"
-        subtitle="Membership status is not proof of a completed payment. Open a record to check evidence."
+        subtitle={`${rows.length} shown of ${records.length} loaded`}
         badge={<Badge>ADMIN ONLY</Badge>}
       >
         {rows.length ? (
