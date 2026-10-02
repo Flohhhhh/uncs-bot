@@ -4,7 +4,7 @@ import { MemoryRouter, useLocation } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import { AdminContext } from "../app/context";
 import { context } from "../features/players/test-fixtures";
-import { ActionButton, Empty, OutcomeBadge, Sheet, Tabs, type OutcomeState } from "./ui";
+import { ActionButton, Empty, Metric, Modal, OutcomeBadge, Sheet, Tabs, type OutcomeState } from "./ui";
 
 describe("OutcomeBadge", () => {
   it.each([
@@ -39,6 +39,31 @@ describe("Empty", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(retry).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Metric", () => {
+  it("shows no link arrow, because a metric is not a link", () => {
+    render(<Metric label="PLAYERS ONLINE" value={6} note="of 100" />);
+    expect(screen.getByText("PLAYERS ONLINE")).toHaveTextContent(/^PLAYERS ONLINE$/);
+    expect(screen.queryByText("↗")).not.toBeInTheDocument();
+  });
+});
+
+describe("Modal", () => {
+  const modal = (eyebrow?: string | null) => (
+    <AdminContext.Provider value={context()}>
+      <Modal title="Kick player" eyebrow={eyebrow} onClose={vi.fn()}>
+        <p>Body</p>
+      </Modal>
+    </AdminContext.Provider>
+  );
+  it("labels a review by default and leaves the eyebrow out when asked", () => {
+    const { rerender } = render(modal());
+    expect(screen.getByRole("dialog", { name: "Kick player" })).toHaveTextContent("STAFF REVIEW");
+    rerender(modal(null));
+    expect(screen.getByRole("dialog", { name: "Kick player" })).not.toHaveTextContent("STAFF REVIEW");
+    expect(screen.getByRole("button", { name: "Close dialog" })).toBeInTheDocument();
   });
 });
 
