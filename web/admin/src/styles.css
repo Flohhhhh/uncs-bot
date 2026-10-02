@@ -2365,6 +2365,7 @@ dialog.sheet {
   padding: 12px;
   border: 1px solid var(--line);
   min-width: 0;
+  font-size: var(--text-sm);
 }
 .mode-choices label {
   display: inline-flex;
@@ -2557,7 +2558,9 @@ dialog .map-picker-fields {
 dialog .map-picker-fields > label {
   margin-top: 0;
 }
-.map-picker-fields > label {
+.map-picker-fields > label,
+.ballot-fields > label,
+.event-fields > label {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
@@ -2814,6 +2817,20 @@ dialog .map-picker-fields > label {
   color: var(--accent);
 }
 
+/* Optional events */
+.event-respawn {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-4) 0 var(--space-2);
+  font-size: var(--text-sm);
+}
+.event-teams {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+}
 @media (max-width: 680px) {
   .map-picker-fields,
   dialog .map-picker-fields {

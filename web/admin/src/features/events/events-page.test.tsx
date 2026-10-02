@@ -88,8 +88,23 @@ it("defaults to no forced respawns and requires two different teams", async () =
   await selectTeams();
   expect(screen.getByRole("button", { name: "Review event" })).toBeEnabled();
   expect(
-    within(screen.getByRole("combobox", { name: "Team 2" })).queryByRole("option", { name: "Valkyra" }),
+    within(screen.getByRole("combobox", { name: "Team 2" })).queryByRole("option", { name: "Red · Valkyra" }),
   ).not.toBeInTheDocument();
+});
+it("labels event teams by their current colors", async () => {
+  events = [{ ...event, state: "complete" }];
+  show();
+  const first = await screen.findByRole("combobox", { name: "Team 1" });
+  await waitFor(() => expect(first).toBeEnabled());
+  expect(
+    within(first)
+      .getAllByRole("option")
+      .map((option) => option.textContent),
+  ).toEqual(["Choose team…", "Red · Valkyra", "Blue · Lonestar", "Green · Manticore"]);
+  expect(screen.getByRole("table", { name: "Optional events" })).toHaveTextContent("Red · Valkyra vs Blue · Lonestar");
+  await selectTeams();
+  fireEvent.click(screen.getByRole("button", { name: "Review event" }));
+  expect(screen.getByRole("dialog")).toHaveTextContent("Red · Valkyra vs Blue · Lonestar");
 });
 it("explains missing round timing before review and keeps the draft when timing is checked again", async () => {
   matchSeconds = undefined;
