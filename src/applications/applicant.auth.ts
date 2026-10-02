@@ -1,8 +1,15 @@
-import { ForbiddenException, Injectable, ServiceUnavailableException, UnauthorizedException } from "@nestjs/common";
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  ServiceUnavailableException,
+  UnauthorizedException,
+} from "@nestjs/common";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { Request, Response } from "express";
 import { z } from "zod";
 import { AdminSettings } from "../admin/admin.settings";
+import { gameServerId } from "../common/game-server";
 
 const SESSION_MS = 30 * 60_000;
 const OAUTH_MS = 5 * 60_000;
@@ -68,10 +75,17 @@ export class ApplicantAuth {
       .digest("hex");
   }
 
-  login(_req: Request, res: Response) {
+  login(req: Request, res: Response) {
     const config = this.settings.applicant();
+    const server = req.query?.server;
+    if (
+      server !== undefined &&
+      (!gameServerId.safeParse(server).success || !this.settings.servers().some(({ id }) => id === server))
+    )
+      throw new BadRequestException("Choose a configured game server before signing in.");
+    res.locals.applicantServer = server;
     const nonce = randomBytes(32).toString("hex");
-    const value = `${nonce}.${Date.now()}`;
+    const value = `${nonce}.${Date.now()}${server === undefined ? "" : `.${server}`}`;
     res.cookie(this.cookieName("oauth"), `${value}.${this.sign("oauth", value)}`, {
       ...this.cookieOptions(),
       maxAge: OAUTH_MS,
@@ -119,18 +133,30 @@ export class ApplicantAuth {
 
   async callback(req: Request, res: Response) {
     const config = this.settings.applicant();
-    const [nonce, issued, signature, extra] = cookie(req, this.cookieName("oauth")).split(".");
+    const parts = cookie(req, this.cookieName("oauth")).split(".");
+    const [nonce, issued] = parts;
+    // Existing in-flight sign-ins have three parts; an explicit server adds one
+    // signed field without changing Discord's registered callback or state nonce.
+    const server = parts.length === 4 ? parts[2] : undefined;
+    const signature = parts.at(-1) ?? "";
     res.clearCookie(this.cookieName("oauth"), this.cookieOptions());
-    const age = Date.now() - Number(issued);
     if (
       !hexToken.test(nonce ?? "") ||
       !/^\d{13}$/.test(issued ?? "") ||
-      !hexToken.test(signature ?? "") ||
-      extra !== undefined ||
+      !hexToken.test(signature) ||
+      ![3, 4].includes(parts.length) ||
+      (server !== undefined && !gameServerId.safeParse(server).success) ||
+      !equal(signature, this.sign("oauth", parts.slice(0, -1).join(".")))
+    )
+      throw new UnauthorizedException("Sign-in expired. Start again from the whitelist application.");
+    // Retain only the signed target on failure, including cancellation/expiry.
+    // The exception filter must never copy callback query parameters.
+    res.locals.applicantServer = server;
+    const age = Date.now() - Number(issued);
+    if (
       !Number.isFinite(age) ||
       age < 0 ||
       age > OAUTH_MS ||
-      !equal(signature, this.sign("oauth", `${nonce}.${issued}`)) ||
       typeof req.query.state !== "string" ||
       !hexToken.test(req.query.state) ||
       !equal(req.query.state, nonce) ||
@@ -139,6 +165,8 @@ export class ApplicantAuth {
       req.query.code.length > 2048
     )
       throw new UnauthorizedException("Sign-in expired. Start again from the whitelist application.");
+    if (server !== undefined && !this.settings.servers().some(({ id }) => id === server))
+      throw new BadRequestException("Choose a configured game server before signing in.");
 
     const tokens = z.object({ access_token: z.string().min(1).max(4096) }).safeParse(
       await this.discord("/oauth2/token", {
@@ -175,7 +203,7 @@ export class ApplicantAuth {
       ...this.cookieOptions(),
       maxAge: SESSION_MS,
     });
-    res.redirect("/whitelist");
+    res.redirect(server === undefined ? "/whitelist" : `/whitelist?${new URLSearchParams({ server })}`);
   }
 
   private readSession(req: Request) {

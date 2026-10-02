@@ -16,21 +16,25 @@ const config = {
 const member = { user: { id: userId, bot: false }, roles: [], pending: false };
 
 function response() {
-  return { cookie: jest.fn(), clearCookie: jest.fn(), redirect: jest.fn() };
+  return { cookie: jest.fn(), clearCookie: jest.fn(), redirect: jest.fn(), locals: {} as Record<string, unknown> };
 }
-function fixture() {
-  const settings = { applicant: () => ({ ...config }) } as unknown as AdminSettings;
+function fixture(server?: string) {
+  const settings = {
+    applicant: () => ({ ...config }),
+    servers: () => [{ id: "primary" }, { id: "event" }],
+  } as unknown as AdminSettings;
   const auth = new ApplicantAuth(settings);
   const res = response();
-  auth.login({} as Request, res as unknown as Response);
+  auth.login({ query: server === undefined ? {} : { server } } as Request, res as unknown as Response);
   const [name, value] = res.cookie.mock.calls[0];
+  res.locals = {};
   const state = new URL(res.redirect.mock.calls[0][0]).searchParams.get("state");
   const req = {
     method: "GET",
     headers: { cookie: `${name}=${value}` },
     query: { code: "one-use-code", state },
   } as unknown as Request;
-  return { auth, req, res };
+  return { auth, req, res, settings };
 }
 function validDiscord(identity = { id: userId, username: "Community applicant", bot: false, mfa_enabled: false }) {
   return jest
@@ -98,6 +102,60 @@ describe("public applicant Discord authentication", () => {
     });
     expect(network.mock.calls[2][1]?.signal).toBeInstanceOf(AbortSignal);
   });
+
+  it("returns to the server selected before sign-in, ignoring a callback target override", async () => {
+    const { auth, req, res } = fixture("event");
+    req.query.server = "primary";
+    validDiscord();
+    await auth.callback(req, res as unknown as Response);
+    expect(res.redirect).toHaveBeenLastCalledWith("/whitelist?server=event");
+  });
+
+  it("rejects a changed server in the signed OAuth cookie before contacting Discord", async () => {
+    const { auth, req, res } = fixture("event");
+    req.headers.cookie = req.headers.cookie!.replace(".event.", ".primary.");
+    const network = jest.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected Discord request"));
+    await expect(auth.callback(req, res as unknown as Response)).rejects.toThrow("Sign-in expired");
+    expect(network).not.toHaveBeenCalled();
+    expect(res.locals.applicantServer).toBeUndefined();
+  });
+
+  it("does not finish sign-in if the selected server was removed during OAuth", async () => {
+    const { auth, req, res, settings } = fixture("event");
+    jest.spyOn(settings, "servers").mockReturnValue([{ id: "primary", name: "The UNCs", version: "test" }]);
+    const network = jest.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected Discord request"));
+    await expect(auth.callback(req, res as unknown as Response)).rejects.toThrow("Choose a configured game server");
+    expect(network).not.toHaveBeenCalled();
+    expect(res.locals.applicantServer).toBe("event");
+    expect(res.cookie).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["", "missing", "//evil.example", ["event", "primary"]])(
+    "rejects an invalid or unconfigured login target: %j",
+    (server) => {
+      const { auth } = fixture();
+      const res = response();
+      expect(() => auth.login({ query: { server } } as unknown as Request, res as unknown as Response)).toThrow(
+        "Choose a configured game server",
+      );
+      expect(res.cookie).not.toHaveBeenCalled();
+      expect(res.redirect).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["cancelled", "expired", "discord-unavailable"])(
+    "retains the signed server for the error page when sign-in is %s",
+    async (failure) => {
+      const { auth, req, res } = fixture("event");
+      res.locals = {};
+      const network = jest.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Discord unavailable"));
+      if (failure === "cancelled") delete req.query.code;
+      if (failure === "expired") jest.spyOn(Date, "now").mockReturnValue(Date.now() + 301_000);
+      await expect(auth.callback(req, res as unknown as Response)).rejects.toThrow();
+      expect(res.locals.applicantServer).toBe("event");
+      if (failure !== "discord-unavailable") expect(network).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(["forged", "wrong-state", "expired", "oversized-code", "array-code"])(
     "rejects %s OAuth callbacks before any Discord request",
