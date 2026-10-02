@@ -8,6 +8,7 @@ import { AdminService } from "./admin.service";
 import { AdminSettings } from "./admin.settings";
 import { AdminStore } from "./admin.store";
 import { GameServers } from "./game-servers";
+import { GameRounds } from "./game-rounds";
 
 @Module({
   imports: [
@@ -26,10 +27,11 @@ import { GameServers } from "./game-servers";
     AdminServerGuard,
     AdminService,
     GameServers,
+    GameRounds,
     AdminExceptionFilter,
   ],
   controllers: [AdminPageController, AdminApiController, AdminGameController],
-  exports: [AdminSettings, AdminStore, AdminAuth, AdminGuard, AdminServerGuard, AdminService, GameServers],
+  exports: [AdminSettings, AdminStore, AdminAuth, AdminGuard, AdminServerGuard, AdminService, GameServers, GameRounds],
 })
 export class AdminModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {
