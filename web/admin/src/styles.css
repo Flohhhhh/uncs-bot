@@ -3433,6 +3433,11 @@ tr.audit-more[hidden] {
   gap: var(--space-2) var(--space-4);
   margin-bottom: var(--space-4);
 }
+/* A short note under the status line, such as setup guidance. */
+.status-row > .muted {
+  flex-basis: 100%;
+  margin: 0;
+}
 .status-line {
   display: flex;
   flex-wrap: wrap;
@@ -3794,7 +3799,7 @@ tr.audit-more[hidden] {
   font-weight: 650;
   font-variant-numeric: tabular-nums;
 }
-.supporter-sync h4 {
+.supporter-sync h3 {
   margin: var(--space-3) 0 var(--space-1);
   font-size: var(--text-sm);
 }

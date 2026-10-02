@@ -28,6 +28,12 @@ export function ahead(at: string, now = Date.now()) {
   const remaining = Date.parse(at) - now;
   return remaining <= 0 ? "due now" : `in ${duration(remaining)}`;
 }
+/** The latest attempt did not succeed: the token was refused, nothing has succeeded yet, or it came after the last success. */
+function lastAttemptFailed(sync: PatreonSyncStatus) {
+  if (sync.tokenRejected) return true;
+  if (!valid(sync.lastAttemptAt)) return false;
+  return !valid(sync.lastSuccessAt) || Date.parse(sync.lastAttemptAt) > Date.parse(sync.lastSuccessAt);
+}
 /** A relative time with the exact time in its tooltip. */
 function Moment({ at, children }: { at: string; children: ReactNode }) {
   return (
@@ -69,7 +75,7 @@ function LastImport({ sync }: { sync: PatreonSyncStatus }) {
         </dl>
         {sync.conflictDetails.length > 0 && (
           <>
-            <h4>Discord conflicts</h4>
+            <h3>Discord conflicts</h3>
             <ul aria-label="Discord conflicts">
               {sync.conflictDetails.map((conflict) => (
                 <li key={`${conflict.supporterId}:${conflict.reason}`}>
@@ -82,7 +88,7 @@ function LastImport({ sync }: { sync: PatreonSyncStatus }) {
         )}
         {sync.founderReviews.length > 0 && (
           <>
-            <h4>Founder records to recheck</h4>
+            <h3>Founder records to recheck</h3>
             <ul aria-label="Founder records to recheck">
               {sync.founderReviews.map((review) => (
                 <li key={`${review.supporterId}:${review.unverifiedPaymentId}`}>
@@ -145,15 +151,29 @@ export function PatreonImport({
     try {
       const response = await api<PatreonSyncResponse>("supporters/sync", { method: "POST", body: "{}" });
       if (!mounted.current) return;
-      const attemptAt = response.sync?.lastAttemptAt ?? null;
+      const status = response.sync;
+      const attemptAt = status?.lastAttemptAt ?? null;
+      const failed = status ? lastAttemptFailed(status) : false;
+      // The server reuses any attempt from the last 30 seconds, whether or not it worked.
       if (response.recent)
+        setResult(
+          failed
+            ? { ok: false, message: "The last import failed under 30 seconds ago. Try again in a moment.", attemptAt }
+            : {
+                ok: !status?.lastError,
+                message: "An import finished under 30 seconds ago, so it was not repeated.",
+                attemptAt,
+              },
+        );
+      // No new attempt was recorded: the server holds imports while Patreon's rate limit lasts.
+      else if (status && !response.joined && attemptAt === before)
         setResult({
-          ok: true,
-          message: "An import finished under 30 seconds ago, so it was not repeated.",
+          ok: false,
+          message: "No import ran because Patreon asked the sync to slow down. It will retry automatically.",
           attemptAt,
         });
       // A failed import is explained by the refreshed status below.
-      else if (!response.sync?.lastError && !response.sync?.tokenRejected)
+      else if (!failed && !status?.lastError)
         setResult({
           ok: true,
           message: response.joined ? "Joined the import already running. It has finished." : "Patreon import finished.",
@@ -188,8 +208,23 @@ export function PatreonImport({
   // An attempt after the last success that is no longer running did not succeed.
   const failedAt =
     show && !running && attempt && (!success || Date.parse(attempt) > Date.parse(success)) ? attempt : null;
+  // From the last successful import: founder promises whose payment Patreon no longer reports as paid, and conflicts.
+  const founderRechecks = show && success ? sync.founderReviews.length : 0;
+  const conflicts = show && success ? sync.conflicts : 0;
   const tone =
-    unavailable || sync.tokenRejected || sync.lastError ? "attention" : sync.configured && success ? "good" : "quiet";
+    unavailable || sync.tokenRejected || sync.lastError || founderRechecks > 0 || conflicts > 0
+      ? "attention"
+      : sync.configured && success
+        ? "good"
+        : "quiet";
+  // The schedule's own cadence. A rejected token or Patreon's rate limit can push the next run later, and a failed
+  // run's end is not recorded, so allow two minutes past its start.
+  const intervalMs = sync.intervalMinutes * 60_000;
+  const lastRun = failedAt ?? success;
+  const regular =
+    !sync.tokenRejected &&
+    next !== null &&
+    (lastRun === null || Date.parse(next) - Date.parse(lastRun) <= intervalMs + 2 * 60_000);
   const state = unavailable ? (
     "Status unavailable"
   ) : !sync.configured ? (
@@ -206,15 +241,8 @@ export function PatreonImport({
   return (
     <>
       <div className="status-row supporter-sync">
-        <p
-          className={`status-line ${tone}`}
-          aria-busy={running}
-          title={
-            !unavailable && !sync.configured
-              ? "Set PATREON_ENABLED, PATREON_CAMPAIGN_ID and PATREON_CREATOR_ACCESS_TOKEN in Railway to import members."
-              : undefined
-          }
-        >
+        {/* The page is a polite live region; the relative times change every minute and are not announced. */}
+        <p className={`status-line ${tone}`} aria-live="off">
           <span>
             Patreon import: <strong>{state}</strong>
           </span>
@@ -228,10 +256,12 @@ export function PatreonImport({
               last tried <Moment at={failedAt}>{ago(failedAt, now)}</Moment>
             </span>
           )}
+          {founderRechecks > 0 && <span>{plural(founderRechecks, "founder record")} to recheck</span>}
+          {conflicts > 0 && <span>{plural(conflicts, "Discord conflict")}</span>}
           {show && success && <span>{plural(sync.members, "member")}</span>}
           {show && success && <span>{plural(sync.payments, "new payment")}</span>}
           {show && !running && next && (
-            <span title={`Runs every ${sync.intervalMinutes} min`}>
+            <span title={regular ? `Runs every ${duration(intervalMs)}` : undefined}>
               next <Moment at={next}>{ahead(next, now)}</Moment>
             </span>
           )}
@@ -247,12 +277,18 @@ export function PatreonImport({
           </button>
         )}
         {show && success && <LastImport sync={sync} />}
+        {!unavailable && !sync.configured && (
+          <p className="muted">
+            Set PATREON_ENABLED, PATREON_CAMPAIGN_ID and PATREON_CREATOR_ACCESS_TOKEN in Railway to import members.
+          </p>
+        )}
       </div>
       {!unavailable &&
         (sync.tokenRejected ? (
           <p className="notice warning">
             <strong>Patreon rejected the access token.</strong> Renew the Creator's Access Token on the Patreon client
-            page and update PATREON_CREATOR_ACCESS_TOKEN in Railway.
+            page, update PATREON_CREATOR_ACCESS_TOKEN in Railway, and check that PATREON_CAMPAIGN_ID belongs to that
+            creator.
           </p>
         ) : sync.lastError ? (
           <p className="notice warning">

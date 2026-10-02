@@ -805,6 +805,9 @@ const supporterStore = {
   },
 };
 // A simulated Patreon import: no token and no Patreon calls. "Sync now" runs for two seconds.
+// It reports one Discord conflict and one founder promise to recheck, so both review lists show on a phone.
+const [, previewFounder, previewBacker] = [...demoSupporters.values()];
+const previewUnverifiedPaymentId = randomUUID();
 let previewSyncRun: Promise<PatreonSyncStatus> | null = null;
 let previewSyncedAt = Date.now() - 12 * 60_000;
 const previewSyncStatus = (): PatreonSyncStatus => ({
@@ -819,14 +822,28 @@ const previewSyncStatus = (): PatreonSyncStatus => ({
   updated: 1,
   payments: 2,
   discordLinks: 1,
-  conflicts: 0,
+  conflicts: 1,
   truncated: 0,
-  revokedPayments: 0,
+  revokedPayments: 1,
   memberListComplete: true,
   intervalMinutes: 30,
   nextAttemptAt: new Date(previewSyncedAt + 30 * 60_000).toISOString(),
-  conflictDetails: [],
-  founderReviews: [],
+  conflictDetails: [
+    { supporterId: previewBacker.id, patreonMemberId: previewBacker.patreonMemberId, reason: "discord-in-use" },
+  ],
+  founderReviews: previewFounder.founder
+    ? [
+        {
+          supporterId: previewFounder.id,
+          patreonMemberId: previewFounder.patreonMemberId,
+          paymentId: previewFounder.founder.paymentId,
+          paymentSource: "manual_receipt",
+          reference: "DEMO-RECEIPT-2",
+          unverifiedPaymentId: previewUnverifiedPaymentId,
+          unverifiedReference: "DEMO-PLEDGE-EVENT-2",
+        },
+      ]
+    : [],
 });
 const patreonSync = {
   configured: () => true,
