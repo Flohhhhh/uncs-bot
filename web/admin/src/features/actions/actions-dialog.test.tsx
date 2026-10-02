@@ -93,10 +93,10 @@ describe("server action review", () => {
     });
   });
   it.each(["match-end", "match-restart", "map"] as const)(
-    "blocks %s when the reviewed match clock is unavailable",
+    "blocks %s when the reviewed map is unavailable",
     (action) => {
       const current = overview();
-      current.status.matchSeconds = undefined;
+      current.status.map = "";
       request.mockImplementation(() => new Promise(() => {}));
       render(
         <AdminContext.Provider value={context({ overview: current })}>
@@ -106,12 +106,34 @@ describe("server action review", () => {
       const phrase = action === "match-end" ? "END MATCH" : action === "match-restart" ? "RESTART MATCH" : "CHANGE MAP";
       const input = screen.getByPlaceholderText(phrase);
       fireEvent.change(input, { target: { value: phrase } });
-      expect(screen.getByRole("note", { name: "Live match warning" })).toHaveTextContent("match clock is unavailable");
+      expect(screen.getByRole("note", { name: "Live match warning" })).toHaveTextContent("current map is unavailable");
       expect(input.closest("form")!.querySelector("button[type=submit]")).toBeDisabled();
       fireEvent.submit(input.closest("form")!);
       expect(request.mock.calls.some(([path]) => path === "actions")).toBe(false);
     },
   );
+  it("allows an explicitly reviewed map when this game build supplies no round clock", async () => {
+    const current = overview();
+    current.status.matchSeconds = undefined;
+    request.mockResolvedValue({ state: "accepted", message: "Restart requested" });
+    render(
+      <AdminContext.Provider value={context({ overview: current })}>
+        <ActionsDialog action="match-restart" onClose={vi.fn()} />
+      </AdminContext.Provider>,
+    );
+    expect(screen.getByRole("note", { name: "Live match warning" })).toHaveTextContent(
+      "not a new round on the same map",
+    );
+    expect(screen.getByRole("button", { name: "Restart current match" })).toBeDisabled();
+    fireEvent.change(screen.getByPlaceholderText("RESTART MATCH"), { target: { value: "RESTART MATCH" } });
+    expect(screen.getByRole("button", { name: "Restart current match" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Restart current match" }));
+    await screen.findByText("Restart requested");
+    expect(JSON.parse(String(request.mock.calls[0][1]?.body)).expectedRound).toEqual({
+      map: "Harbor",
+      startedAt: null,
+    });
+  });
   it.each(["receipt", "http"])(
     "preserves entries after a definite %s rejection and records a reviewed retry separately",
     async (kind) => {

@@ -51,13 +51,13 @@ const base = {
     .optional(),
 };
 const player = { ...base, steamId };
+const expectedRound = z.object({ map: selection, startedAt: z.number().finite().nonnegative() }).strict().optional();
 const reviewedRound = z
   .object(
-    { map: selection, startedAt: z.number().finite().nonnegative() },
+    { map: selection, startedAt: z.number().finite().nonnegative().nullable() },
     { error: "The reviewed round is missing. Refresh the dashboard and open a new review." },
   )
   .strict();
-const expectedRound = reviewedRound.optional();
 const revision = z
   .string()
   .min(1)

@@ -31,7 +31,7 @@ describe("reviewed match changes", () => {
       confirm: kind === "match-end" ? "END MATCH" : "RESTART MATCH",
       reason: "Staff reviewed the current match.",
       expectedRound,
-    }) as AdminAction;
+    }) as Extract<AdminAction, { action: "match-end" | "match-restart" }>;
 
   it.each(["match-end", "match-restart"] as const)(
     "does not send %s after the reviewed round has changed",
@@ -63,6 +63,18 @@ describe("reviewed match changes", () => {
     await expect(client.execute(action("match-restart"))).rejects.toMatchObject({ unknownResult: false });
     expect(request.mock.calls.some(([method]) => method !== "GET")).toBe(false);
   });
+  it.each(["match-end", "match-restart"] as const)(
+    "uses the reviewed map for %s when this build supplies no clock",
+    async (kind) => {
+      const input = { ...action(kind), expectedRound: { map: status.map, startedAt: null } };
+      expect(actionSchema.safeParse(input).success).toBe(true);
+      const sameMap = fixture({ ...status, matchSeconds: undefined });
+      await expect(sameMap.client.execute(input)).resolves.toMatchObject({ state: "accepted" });
+      const otherMap = fixture({ ...status, map: "Europe", matchSeconds: undefined });
+      await expect(otherMap.client.execute(input)).resolves.toMatchObject({ state: "failed", changed: false });
+      expect(otherMap.request.mock.calls.some(([method]) => method !== "GET")).toBe(false);
+    },
+  );
   it("rejects older clients without the reviewed round and accepts complete current requests", () => {
     for (const input of [
       action("match-end"),
