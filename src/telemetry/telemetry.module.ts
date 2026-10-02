@@ -16,7 +16,7 @@ import { TelemetryStore } from "./telemetry.store";
   imports: [AdminModule],
   providers: [TelemetryService, TelemetryStore, TelemetryDeliveries, TelemetryExceptionFilter],
   controllers: [TelemetryIngestController, TelemetryPublicController, TelemetryAdminController],
-  exports: [TelemetryService, TelemetryStore],
+  exports: [TelemetryService, TelemetryStore, TelemetryDeliveries],
 })
 export class TelemModule implements NestModule, OnModuleInit {
   constructor(
