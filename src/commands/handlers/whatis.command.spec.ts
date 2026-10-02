@@ -55,6 +55,17 @@ describe("/whatis on a member", () => {
     expect(roles).not.toContain("@everyone");
   });
 
+  it("lists every role when the full list just fits, without reserving room for a suffix it does not need", async () => {
+    const { command, context, field } = fixture();
+    const names = ["Z", ...Array.from({ length: 10 }, (_, i) => `${i}`.padEnd(100, "x"))];
+    await command.handleWhatis(context, { thing: memberWithRoles(names) });
+
+    const roles = field("Roles")!;
+    expect(roles.length).toBe(1021);
+    expect(roles).not.toContain("more");
+    expect(roles.endsWith(", Z")).toBe(true);
+  });
+
   it("lists every role, highest first and without @everyone, when they fit", async () => {
     const { command, context, field } = fixture();
     await command.handleWhatis(context, { thing: memberWithRoles(["Squad Lead", "Medic", "Admin"]) });

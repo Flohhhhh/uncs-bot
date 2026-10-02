@@ -13,6 +13,8 @@ const FIELD_VALUE_LIMIT = 1024;
 /** Joins role names, leaving out as many as needed to fit one embed field and saying how many were left out. */
 function listRoles(names: string[]): string {
   if (names.length === 0) return "None";
+  const all = names.join(", ");
+  if (all.length <= FIELD_VALUE_LIMIT) return all;
   let value = "";
   let shown = 0;
   for (const name of names) {
