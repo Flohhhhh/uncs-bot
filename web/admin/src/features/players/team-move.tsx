@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useGameApi } from "../../api/server-client";
 import type { ActionResult, Player } from "../../api/types";
 import { useGameAdmin as useAdmin } from "../../app/context";
-import { Badge, Modal, Table } from "../../components/ui";
+import { Badge, Modal, OutcomeBadge, Table } from "../../components/ui";
 import { allowed, errorMessage, rejectionState } from "../actions/policy";
 import { ActionReceipt } from "../actions/action-receipt";
 import { FactionOptions, liveFactions, playerFaction } from "./factions";
@@ -18,16 +18,7 @@ export type TeamItem = {
   message: string;
 };
 export type TeamMoveResult = { label: string; items: TeamItem[]; stopped: boolean };
-const labels: Record<ItemState, string> = {
-  queued: "Not sent",
-  sending: "Sending…",
-  applied: "Assignment confirmed",
-  accepted: "Accepted · not verified",
-  pending: "Pending",
-  failed: "Failed",
-  unknown: "Unconfirmed",
-  skipped: "Already on team",
-};
+const localLabels = { queued: "Not sent", sending: "Sending…", skipped: "Already on team" } as const;
 
 export function TeamResults({ items }: { items: TeamItem[] }) {
   return (
@@ -39,19 +30,11 @@ export function TeamResults({ items }: { items: TeamItem[] }) {
             <small>{item.steamId}</small>
           </td>
           <td>
-            <Badge
-              kind={
-                item.state === "applied"
-                  ? "good"
-                  : item.state === "failed"
-                    ? "bad"
-                    : ["unknown", "pending", "sending"].includes(item.state)
-                      ? "warn"
-                      : "neutral"
-              }
-            >
-              {labels[item.state]}
-            </Badge>
+            {item.state === "queued" || item.state === "sending" || item.state === "skipped" ? (
+              <Badge kind={item.state === "sending" ? "warn" : "neutral"}>{localLabels[item.state]}</Badge>
+            ) : (
+              <OutcomeBadge state={item.state} />
+            )}
           </td>
           <td className="audit-detail">
             {item.message}

@@ -1,26 +1,134 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { expect, it, vi } from "vitest";
-import { AdminContext } from "../../app/context";
-import { alice, bob, context } from "../players/test-fixtures";
+import { beforeEach, expect, it, vi } from "vitest";
+import { api } from "../../api/client";
+import { AdminContext, type AdminContextValue } from "../../app/context";
+import { alice, bob, cara, context } from "../players/test-fixtures";
 import { OverviewPage } from "./pages";
 
 vi.mock("../../api/client", () => ({ api: vi.fn() }));
-
-it("opens the chosen overview player's controls without making staff search again", () => {
-  const admin = context();
-  render(
-    <MemoryRouter initialEntries={["/admin/overview?server=primary"]}>
+const request = vi.mocked(api);
+const rotation = {
+  enabled: true,
+  mode: "Ordered",
+  editable: true,
+  note: "",
+  currentMap: "Harbor",
+  currentIndex: 0,
+  nextIndex: 1,
+  entries: [
+    { map: "Harbor", experiences: [] },
+    { map: "Ozeti", experiences: [], lighting: "DayClear" },
+  ],
+};
+let reads: Record<string, unknown>;
+beforeEach(() => {
+  request.mockReset();
+  reads = {
+    activity: {
+      connection: "available",
+      limit: 300,
+      startedAt: "2026-09-30T17:00:00Z",
+      events: [
+        {
+          id: "join",
+          observedAt: "2026-09-30T17:59:00Z",
+          category: "players",
+          message: "Cara joined",
+          steamId: cara.steamId,
+        },
+      ],
+    },
+    "audit-notable": [],
+    settings: { revision: "r1", fields: [], rotation },
+    "map-votes": { enabled: true, serverId: "primary", votes: [] },
+  };
+  request.mockImplementation(async (path) =>
+    path in reads ? (reads[path] as never) : Promise.reject(new Error(`Unexpected read ${path}`)),
+  );
+});
+function show(admin: AdminContextValue = context()) {
+  return render(
+    <MemoryRouter initialEntries={["/overview?server=primary"]}>
       <AdminContext.Provider value={admin}>
         <OverviewPage />
       </AdminContext.Provider>
     </MemoryRouter>,
   );
-  const row = screen.getByText(bob.name).closest("tr")!;
-  fireEvent.click(within(row).getByRole("button", { name: /View player/ }));
+}
+
+it("opens the chosen overview player's panel without making staff search again", async () => {
+  const admin = context();
+  show(admin);
+  const players = screen.getByRole("list", { name: "Players on this server" });
+  fireEvent.click(within(players).getByRole("button", { name: bob.name }));
   const dialog = screen.getByRole("dialog");
   expect(within(dialog).getByText(bob.steamId)).toBeInTheDocument();
   expect(within(dialog).queryByText(alice.steamId)).not.toBeInTheDocument();
   fireEvent.click(within(dialog).getByRole("button", { name: "Message player" }));
   expect(admin.openAction).toHaveBeenCalledWith("message", bob.steamId);
+  await screen.findByText("Saved next round");
+});
+it("shows the live match at a glance with an honest round clock and the saved next round", async () => {
+  show();
+  const now = screen.getByRole("region", { name: "Now" });
+  expect(within(now).getByText("3")).toBeInTheDocument();
+  expect(within(now).getByText("Harbor")).toBeInTheDocument();
+  expect(within(now).getByText("2:00 elapsed")).toBeInTheDocument();
+  expect(within(now).getByText(/^checked /)).toBeInTheDocument();
+  expect(await within(now).findByText("Ozeti · Day clear")).toBeInTheDocument();
+  expect(within(now).getByText("Saved next round")).toBeInTheDocument();
+  expect(within(now).getByText("None")).toBeInTheDocument();
+  expect(screen.queryByText(/YOUR ACCESS|SERVER STATUS|WARDOGS|STAFF TOOLS/i)).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Send an announcement" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Add to whitelist" })).toBeEnabled();
+});
+it("does not invent a round clock or a next round it cannot confirm", async () => {
+  const admin = context();
+  delete admin.overview!.status.matchSeconds;
+  reads.settings = { revision: "r1", fields: [], rotation: { ...rotation, currentMap: "Ozeti" } };
+  show(admin);
+  const now = screen.getByRole("region", { name: "Now" });
+  expect(within(now).getByText("No clock")).toBeInTheDocument();
+  expect(await within(now).findByText("Not confirmed")).toBeInTheDocument();
+  expect(within(now).queryByText("Saved next round")).not.toBeInTheDocument();
+});
+it("treats a failed settings read as unavailable and shows an open vote", async () => {
+  reads.settings = undefined;
+  reads["map-votes"] = {
+    enabled: true,
+    serverId: "primary",
+    votes: [{ state: "open", closesAt: "2026-09-30T18:12:00Z", automation: null }],
+  };
+  request.mockImplementation(async (path) =>
+    path === "settings" ? Promise.reject(new Error("Settings unavailable")) : (reads[path] as never),
+  );
+  show();
+  const now = screen.getByRole("region", { name: "Now" });
+  expect(await within(now).findByText("Settings could not be read")).toBeInTheDocument();
+  expect(within(now).getByText("Unavailable")).toBeInTheDocument();
+  expect(within(now).getByText(/^Open · ends /)).toBeInTheDocument();
+});
+it("shows recent non-combat activity and labels scores with live team colors", async () => {
+  show();
+  const activity = screen.getByRole("link", { name: "All activity →" });
+  expect(activity).toHaveAttribute("href", "/activity?server=primary");
+  const line = await screen.findByText(
+    (_, element) => element?.className === "activity-line" && element.textContent === "Cara joined",
+  );
+  fireEvent.click(within(line).getByRole("button", { name: "Cara" }));
+  expect(within(screen.getByRole("dialog")).getByText(cara.steamId)).toBeInTheDocument();
+  expect(screen.getByText("Red · Valkyra", { selector: ".overview-scores .faction-chip" })).toBeInTheDocument();
+  expect(request.mock.calls.map(([path]) => path)).not.toContain("combat?period=day");
+});
+it("hides admin-only reads from moderators", () => {
+  const admin = context();
+  admin.me.role = "moderator";
+  show(admin);
+  const now = screen.getByRole("region", { name: "Now" });
+  expect(within(now).queryByText("Next round")).not.toBeInTheDocument();
+  expect(within(now).queryByText("Vote")).not.toBeInTheDocument();
+  const paths = request.mock.calls.map(([path]) => path);
+  expect(paths).not.toContain("settings");
+  expect(paths).not.toContain("map-votes");
 });
