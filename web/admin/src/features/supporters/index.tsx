@@ -474,7 +474,7 @@ function AdminSupporters() {
         <PatreonImport
           sync={data.sync}
           unavailable={Boolean(resource.error)}
-          disabled={busy || resource.loading}
+          disabled={busy || resource.loading || resource.refreshing}
           onSynced={resource.refresh}
         />
       )}
