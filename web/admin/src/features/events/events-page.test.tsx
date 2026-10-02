@@ -89,7 +89,7 @@ it("defaults to no forced respawns and requires two different teams", async () =
     within(screen.getByRole("combobox", { name: "Team 2" })).queryByRole("option", { name: "Valkyra" }),
   ).not.toBeInTheDocument();
 });
-it("reviews a frozen start request and requires exact confirmation before a single submission", async () => {
+it("reviews a frozen start request without typing and waits for the separate confirmation button", async () => {
   const { state } = show();
   await selectTeams();
   expect(state.setUnsavedChanges).toHaveBeenCalledWith(true);
@@ -99,11 +99,8 @@ it("reviews a frozen start request and requires exact confirmation before a sing
   expect(dialog).toHaveTextContent("off — a normal respawn may be needed");
   expect(screen.queryByRole("textbox", { name: "Reason" })).not.toBeInTheDocument();
   const submit = within(dialog).getByRole("button", { name: "Arm event" });
-  fireEvent.submit(submit.closest("form")!);
   expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
-  fireEvent.change(within(dialog).getByRole("textbox", { name: "Type START 50V50" }), {
-    target: { value: "START 50V50" },
-  });
+  expect(within(dialog).queryByRole("textbox")).not.toBeInTheDocument();
   fireEvent.click(submit);
   fireEvent.click(submit);
   await screen.findByText("Event request recorded");
@@ -132,7 +129,6 @@ it("does not retry an uncertain start response", async () => {
   await selectTeams();
   fireEvent.click(screen.getByRole("button", { name: "Review event" }));
   expect(screen.queryByRole("textbox", { name: "Reason" })).not.toBeInTheDocument();
-  fireEvent.change(screen.getByRole("textbox", { name: "Type START 50V50" }), { target: { value: "START 50V50" } });
   fireEvent.click(screen.getByRole("button", { name: "Arm event" }));
   await screen.findByText(/Connection lost.*will not be sent again/);
   expect(screen.queryByRole("button", { name: "Arm event" })).not.toBeInTheDocument();
@@ -173,9 +169,7 @@ it("loads the current lock only for explicit restoration review", async () => {
   await screen.findByText("Population lock: on → on.");
   expect(screen.getByRole("dialog")).toHaveTextContent("stop the affected Gramps instance");
   expect(screen.queryByRole("textbox", { name: "Reason" })).not.toBeInTheDocument();
-  fireEvent.change(screen.getByRole("textbox", { name: "Type RESTORE TEAM LOCK" }), {
-    target: { value: "RESTORE TEAM LOCK" },
-  });
+  expect(within(screen.getByRole("dialog")).queryByRole("textbox")).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Restore reviewed lock" }));
   await screen.findByText("Event request recorded");
   const posts = request.mock.calls.filter(([, init]) => init?.method === "POST");
@@ -208,7 +202,6 @@ it("keeps an event draft but blocks starting it when event-history refresh fails
   await screen.findByText("Refresh event history before continuing.");
   const submit = screen.getByRole("button", { name: "Arm event" });
   expect(submit).toBeDisabled();
-  fireEvent.change(screen.getByRole("textbox", { name: "Type START 50V50" }), { target: { value: "START 50V50" } });
   fireEvent.submit(submit.closest("form")!);
   expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
   fireEvent.click(screen.getByRole("button", { name: "Back" }));

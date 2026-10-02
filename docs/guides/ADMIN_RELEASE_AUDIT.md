@@ -1,5 +1,11 @@
 # Dashboard release audit
 
+## October 1 21:30 EDT — use click confirmation, not phrase entry
+
+Dennis explicitly requested an extra confirmation step without retyping a phrase. The restart/end/map and event start/restoration reviews now remove those text fields and their validation state. Opening a review still sends nothing; only the separately named action button submits. Consequence warnings, explicit server/map targeting, duplicate-send prevention, stale-data checks and backend request validation remain. Returning from a definite rejection opens another review; it does not resend. This supersedes earlier instructions in this chronological audit to require a typed phrase.
+
+All **241 dashboard tests**, the frontend production build/typecheck, touched-file lint, global formatting and whitespace checks pass. The isolated browser shows a restart review with no text input, clear impact and target, Cancel and Restart current match. Cancel closes without a command. Final deployment is pending the combined release. A fresh read of live Identity still shows the older banner URL `https://files.catbox.moe/mcttle.png`; the prepared QR banner has not been applied. No live game action or Discord message was sent.
+
 ## October 1 21:24 EDT — missing live clock compatibility correction
 
 Read-only acceptance of [release #47](https://github.com/Flohhhhh/uncs-bot/pull/47), main `3898c9023f458a48c538ba8f5afeb21bdefdd75b`, found a real incompatibility: **the live overview does not supply a usable match clock**. Its restart review displayed the new clock-unavailable warning and disabled submission. Cancel closed it without a game command. Railway `28c3dec1-e1ec-44d4-84ad-b2efbecb429a` was Active, health returned 200, and `index-DASW4hvO.js` matched the tested build. Passing tests with a clock were insufficient production evidence; this section supersedes the preceding claim that missing clocks should always disable manual match controls.
