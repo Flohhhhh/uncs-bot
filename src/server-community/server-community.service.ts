@@ -8,6 +8,7 @@ import { EnvService } from "../env/env.service";
 import { GameServers } from "../admin/game-servers";
 import type { GameServerSummary } from "../common/game-server";
 import type { CommunityMessagesStatus } from "../common/community-messages";
+import { CommunityRotation } from "./community-rotation";
 import { initialCommunityState, observeCommunity, statusCard, type CommunitySnapshot } from "./community-state";
 
 const SYSTEM_ACTOR: Staff = {
@@ -32,6 +33,19 @@ function communityOptions(env: EnvService, card: StatusCardTarget) {
   return { welcome, round, status, channelId, messageId, active: welcome || round || status };
 }
 
+/** Variants take precedence over the sequence, which takes precedence over the legacy single message. */
+function welcomeVariants(env: EnvService): string[][] {
+  return (
+    env.get("SERVER_COMMUNITY_WELCOME_VARIANTS") ?? [
+      env.get("SERVER_COMMUNITY_WELCOME_MESSAGES") ?? [env.get("SERVER_COMMUNITY_WELCOME_MESSAGE")],
+    ]
+  );
+}
+
+function roundMessages(env: EnvService): string[] {
+  return env.get("SERVER_COMMUNITY_ROUND_MESSAGES") ?? [env.get("SERVER_COMMUNITY_ROUND_MESSAGE")];
+}
+
 @Injectable()
 export class ServerCommunityService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(ServerCommunityService.name);
@@ -52,6 +66,8 @@ export class ServerCommunityService implements OnApplicationBootstrap, OnModuleD
     const serverId = this.servers.resolve(id);
     const options = communityOptions(this.env, this.cardTarget(serverId));
     const worker = this.workers.get(serverId);
+    const variants = welcomeVariants(this.env);
+    const rounds = roundMessages(this.env);
     return {
       enabled: this.env.get("SERVER_COMMUNITY_ENABLED") === true,
       workerStarted: !!worker && options.active,
@@ -62,13 +78,12 @@ export class ServerCommunityService implements OnApplicationBootstrap, OnModuleD
       }),
       welcome: {
         enabled: options.welcome,
-        messages: this.env.get("SERVER_COMMUNITY_WELCOME_MESSAGES") ?? [
-          this.env.get("SERVER_COMMUNITY_WELCOME_MESSAGE"),
-        ],
+        messages: variants[0],
+        variants,
         delaySeconds: this.env.get("SERVER_COMMUNITY_WELCOME_DELAY_SECONDS"),
         spacingSeconds: this.env.get("SERVER_COMMUNITY_WELCOME_SPACING_SECONDS"),
       },
-      round: { enabled: options.round, message: this.env.get("SERVER_COMMUNITY_ROUND_MESSAGE") },
+      round: { enabled: options.round, message: rounds[0], messages: rounds },
       discordStatus: {
         enabled:
           this.env.get("SERVER_COMMUNITY_ENABLED") === true &&
@@ -123,6 +138,7 @@ export class ServerCommunityWorker implements OnApplicationBootstrap, OnModuleDe
     private readonly discord: Client,
     private readonly server: GameServerSummary = { id: "primary", name: "The UNCs", version: "0".repeat(64) },
     private readonly card?: StatusCardTarget,
+    private readonly rotation = new CommunityRotation(),
   ) {}
 
   private options() {
@@ -192,18 +208,20 @@ export class ServerCommunityWorker implements OnApplicationBootstrap, OnModuleDe
           expiresAt > now &&
           (action.action === "message" ? options.welcome && connected.has(action.steamId) : options.round),
       );
-      if (options.round && observation.round)
-        this.enqueue({ action: "broadcast", message: this.env.get("SERVER_COMMUNITY_ROUND_MESSAGE") }, now, true);
+      if (options.round && observation.round) {
+        const messages = roundMessages(this.env);
+        this.enqueue({ action: "broadcast", message: messages[this.rotation.round(messages.length)] }, now, true);
+      }
       if (options.welcome) {
-        const messages = this.env.get("SERVER_COMMUNITY_WELCOME_MESSAGES") ?? [
-          this.env.get("SERVER_COMMUNITY_WELCOME_MESSAGE"),
-        ];
+        const variants = welcomeVariants(this.env);
         const readyAt = now + this.env.get("SERVER_COMMUNITY_WELCOME_DELAY_SECONDS") * 1000;
         const available = MAX_QUEUE - this.queue.length;
         if (observation.joined.length > available)
           this.logger.warn("Community message queue is full; excess welcomes were skipped.");
-        for (const steamId of observation.joined.slice(0, available))
-          this.enqueue({ action: "message", steamId, message: messages[0] }, readyAt, false, messages.slice(1));
+        for (const steamId of observation.joined.slice(0, available)) {
+          const [message, ...followUps] = variants[this.rotation.welcome(steamId, variants.length)];
+          this.enqueue({ action: "message", steamId, message }, readyAt, false, followUps);
+        }
       }
       for (let sent = 0; sent < MAX_SENDS_PER_TICK && this.queue.length && !this.stopped; sent++) {
         // A future welcome must not hold up another recipient or a ready round message.

@@ -13,6 +13,11 @@ const communityMessage = z
     (value) => [...value].every((character) => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127),
     "Use a single-line message without control characters.",
   );
+const welcomeSequence = z.array(communityMessage).min(1).max(4);
+const distinct = <T>(values: T[]) => new Set(values.map((value) => JSON.stringify(value))).size === values.length;
+/** 20 variants of four 200-character messages, with room for JSON escapes and formatting. */
+const WELCOME_VARIANTS_MAX_LENGTH = 32_768;
+const ROUND_MESSAGES_MAX_LENGTH = 8_192;
 const discordIds = z
   .string()
   .default("")
@@ -94,10 +99,20 @@ export const Env = z.object({
     .transform((value) => value === "true"),
   SERVER_COMMUNITY_WELCOME_MESSAGE: communityMessage.default("Welcome to The UNCs! Squad up and enjoy the server."),
   /** Optional JSON array replaces the legacy single message. No placeholder expansion. */
-  SERVER_COMMUNITY_WELCOME_MESSAGES: jsonSetting(z.array(communityMessage).min(1).max(4), 2048).optional(),
+  SERVER_COMMUNITY_WELCOME_MESSAGES: jsonSetting(welcomeSequence, 2048).optional(),
+  /** Optional JSON array of 1-20 welcome sequences; one is chosen per join. Replaces both settings above. */
+  SERVER_COMMUNITY_WELCOME_VARIANTS: jsonSetting(
+    z.array(welcomeSequence).min(1).max(20).refine(distinct, "Use different welcome variants."),
+    WELCOME_VARIANTS_MAX_LENGTH,
+  ).optional(),
   SERVER_COMMUNITY_WELCOME_DELAY_SECONDS: z.coerce.number().int().min(0).max(60).default(10),
   SERVER_COMMUNITY_WELCOME_SPACING_SECONDS: z.coerce.number().int().min(10).max(120).default(20),
   SERVER_COMMUNITY_ROUND_MESSAGE: communityMessage.default("GG! Thanks for playing on The UNCs. See you next round."),
+  /** Optional JSON array of 1-20 round messages; one is chosen per round. Replaces the single message. */
+  SERVER_COMMUNITY_ROUND_MESSAGES: jsonSetting(
+    z.array(communityMessage).min(1).max(20).refine(distinct, "Use different round messages."),
+    ROUND_MESSAGES_MAX_LENGTH,
+  ).optional(),
   SERVER_COMMUNITY_DISCORD_CHANNEL_ID: discordId.optional(),
   SERVER_COMMUNITY_DISCORD_MESSAGE_ID: discordId.optional(),
 
