@@ -276,6 +276,41 @@ describe("watch-list joins", () => {
     expect(lookup.mock.calls.map(([steamIds]) => steamIds)).toEqual([[clean]]);
   });
 
+  it("keeps the start window open when Gramps starts during a map load", async () => {
+    const role = "678901234567890123";
+    const { pass, alerts, discord } = workerFixture(
+      { ...values, STAFF_ALERTS_PING_ROLE_ID: role },
+      { sources: [sourceFor()] },
+    );
+    discord.channel.guild.roles.cache.set(role, { id: role, mentionable: true });
+    // The first read after a redeploy lands while the next map loads, with nobody listed yet.
+    await pass(snapshot([], { map: "Europe", matchSeconds: 5 }), 0);
+    await pass(roster(listed, clean), 15_000);
+    expect(alerts.list("primary")).toEqual([
+      expect.objectContaining({
+        title: "Watch list: player online",
+        pinged: false,
+        delivery: { state: "suppressed", reason: "online when Gramps started, recorded only" },
+      }),
+    ]);
+    expect(discord.channel.send).not.toHaveBeenCalled();
+    await pass(roster(listed, clean, noted));
+    expect(alerts.list("primary")[0]).toMatchObject({
+      title: "Watch list: player joined",
+      player: { steamId: noted },
+      delivery: { state: "posted" },
+    });
+
+    // A server that was really empty at the start alerts on joins once it stays empty past a map load.
+    const empty = workerFixture(values, { sources: [sourceFor()] });
+    await empty.pass(roster(), 0);
+    for (let read = 0; read < 12; read++) await empty.pass(roster(), 15_000);
+    await empty.pass(roster(clean, listed), 15_000);
+    expect(empty.alerts.list("primary")).toEqual([
+      expect.objectContaining({ title: "Watch list: player joined", delivery: { state: "posted", reason: null } }),
+    ]);
+  });
+
   it("records players online when Gramps starts without posting or pinging, and still posts a later join", async () => {
     const role = "678901234567890123";
     const { pass, alerts, discord } = workerFixture(

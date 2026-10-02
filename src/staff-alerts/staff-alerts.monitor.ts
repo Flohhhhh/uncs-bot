@@ -15,7 +15,7 @@ import type { GameServerSummary } from "../common/game-server";
 import { mapLabel } from "../common/map-labels";
 import type { FeedContextView, RoundPeakView, StaffAlertsStatus, StaffAlertsWorkerView } from "../common/staff-alerts";
 import { EnvService } from "../env/env.service";
-import { LEAVE_GRACE_MS, MAX_ROSTER } from "../server-community/community-state";
+import { LEAVE_GRACE_MS, MAX_ROSTER, ROUND_HOLD_MS } from "../server-community/community-state";
 import { FEED_CONTEXT, type FeedContextSource } from "./feed-context";
 import { initialHealthState, observeHealth, type HealthAlert } from "./health-state";
 import { formatLocal } from "./local-time";
@@ -129,6 +129,8 @@ export class StaffAlertsWorker {
   /** SteamIDs already offered to the network-ban sources, with when a good read last listed each. */
   private readonly watchSeen = new Map<string, number>();
   private bootChecked = false;
+  /** The first good read: the start window stays open past an empty roster until ROUND_HOLD_MS after it. */
+  private bootAt: number | null = null;
   private lastObservedAt: string | null = null;
   private lastReadAt: string | null = null;
   private reachable: boolean | null = null;
@@ -400,9 +402,12 @@ export class StaffAlertsWorker {
   private async checkWatchlist(overview: Overview, options: StaffAlertsOptions, now: number) {
     const ids = this.watchJoins(overview, now);
     // Players online at the first read may have been reported before a redeploy: record them for
-    // the staff API without posting or pinging. Joins seen after that alert as usual.
-    const presentAtStart = !this.bootChecked;
-    this.bootChecked = true;
+    // the staff API without posting or pinging. Joins seen after that alert as usual. A start during
+    // a map load reads an empty roster first, so the window stays open until a populated read or
+    // until the roster stays empty past a map load.
+    this.bootAt ??= now;
+    const presentAtStart = !this.bootChecked && now - this.bootAt < ROUND_HOLD_MS;
+    if (overview.players.length || !presentAtStart) this.bootChecked = true;
     if (!ids.length) return;
     const knownGood = options.performance.knownGood;
     for (const source of this.sources) {
