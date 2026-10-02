@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import { api } from "../../api/client";
@@ -96,4 +96,25 @@ it("keeps missing-migration controls disabled with an explanation", async () => 
   await screen.findByText(saved.message);
   for (const checkbox of screen.getAllByRole("checkbox")) expect(checkbox).toBeDisabled();
   expect(request.mock.calls.some(([, options]) => options?.method === "POST")).toBe(false);
+});
+it("retries a failed first controls read without enabling voting or losing the failure while pending", async () => {
+  request.mockRejectedValueOnce(new Error("Controls read failed"));
+  show();
+  expect(await screen.findByRole("alert")).toHaveTextContent("Controls read failed");
+  let finish!: (value: unknown) => void;
+  request.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Reload saved controls" }));
+  expect(screen.getByRole("button", { name: "Reload saved controls" })).toBeDisabled();
+  expect(screen.getByRole("alert")).toHaveTextContent("Controls read failed");
+  expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  await act(async () => finish(saved));
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.getByRole("checkbox", { name: "Automatic community voting" })).not.toBeChecked();
+  expect(screen.getByRole("checkbox", { name: "Automatic community voting" })).toBeDisabled();
+  expect(request.mock.calls.every(([path, options]) => path === "map-votes/controls" && !options?.method)).toBe(true);
 });

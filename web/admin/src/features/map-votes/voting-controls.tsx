@@ -66,7 +66,22 @@ export function VotingControlsPanel({ onDirty }: { onDirty: (value: boolean) => 
       setBusy(false);
     }
   }
-  if (!data || !policy) return <p role="status">{resource.error || "Loading voting controls…"}</p>;
+  if (!data || !policy)
+    return resource.error ? (
+      <div className="notice error" role="alert">
+        <p>{resource.error}</p>
+        <button
+          type="button"
+          className="button secondary"
+          disabled={busy || resource.loading}
+          onClick={resource.refresh}
+        >
+          Reload saved controls
+        </button>
+      </div>
+    ) : (
+      <p role="status">Loading voting controls…</p>
+    );
   return (
     <>
       <p className="muted">{data.message}</p>
@@ -136,7 +151,7 @@ export function VotingControlsPanel({ onDirty }: { onDirty: (value: boolean) => 
         {(draft || uncertain || resource.error) && (
           <button
             className="button secondary"
-            disabled={busy}
+            disabled={busy || resource.loading}
             onClick={() => {
               setDraft(null);
               setReview(false);
