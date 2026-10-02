@@ -1,6 +1,6 @@
 import type { MapSelection } from "./server-settings";
 
-// Presentation only. Requests and saved rotations retain the catalog's exact IDs.
+// Requests and saved rotations retain the catalog's exact IDs.
 // Name mapping: boets.world/news/wardogs-maps-and-modes.html (2026-09-14),
 // corroborated by the live map-specific zone namespaces on 2026-10-01.
 const maps: Record<string, string> = { Kavkazi: "Bakurani", Europe: "Ozeti", NorthAmerica: "Zestafona" };
@@ -25,6 +25,9 @@ const lightings: Record<string, string> = {
 const label = (names: Record<string, string>, id: string, displayName?: string) =>
   (Object.hasOwn(names, id) ? names[id] : displayName) || id;
 export const mapLabel = (id: string, displayName?: string) => label(maps, id, displayName);
+// Live status uses in-game names; the catalog and saved INI use the IDs above.
+// Compare only these known aliases, never arbitrary display names or partial names.
+export const sameMap = (a: string | undefined, b: string | undefined) => !!a && !!b && mapLabel(a) === mapLabel(b);
 export const modeLabel = (id: string, displayName?: string) => label(modes, id, displayName);
 // The official console separates the base game mode from these additive rules.
 export const isModeModifier = (id: string) => id === "KOTH_InfantryOnly" || id === "KOTH_Hardcore";

@@ -185,26 +185,36 @@ it("keeps join passwords out of review text", async () => {
   expect(screen.getByRole("dialog")).not.toHaveTextContent("test-password-not-real");
   expect(screen.getByRole("dialog")).toHaveTextContent("Password updated");
 });
-it("queues a map independently of ending the current match", async () => {
-  show();
-  await screen.findByRole("button", { name: "Rotation" });
-  fireEvent.click(screen.getByRole("button", { name: "Rotation" }));
-  fireEvent.click(screen.getByRole("button", { name: "Next round" }));
-  fireEvent.change(await screen.findByRole("combobox", { name: "Map" }), { target: { value: "Europe" } });
-  await screen.findByRole("checkbox", { name: "Infantry only" });
-  await waitFor(() => expect(screen.getByRole("button", { name: "Queue next map" })).toBeEnabled());
-  fireEvent.click(screen.getByRole("button", { name: "Queue next map" }));
-  const dialog = screen.getByRole("dialog");
-  expect(screen.queryByRole("textbox", { name: "Reason" })).not.toBeInTheDocument();
-  fireEvent.click(within(dialog).getByRole("button", { name: "Queue next map" }));
-  await waitFor(() => expect(request.mock.calls.some(([path]) => path === "actions")).toBe(true));
-  expect(JSON.parse(String(request.mock.calls.find(([path]) => path === "actions")![1]?.body))).toMatchObject({
-    action: "map-next",
-    currentMap: "Kavkazi",
-    currentIndex: 0,
-    entry: { map: "Europe" },
-  });
-});
+it.each(["Kavkazi", "Bakurani"])(
+  "queues a map with live %s independently of ending the current match",
+  async (currentMap) => {
+    const fallback = request.getMockImplementation()!;
+    request.mockImplementation(async (path, options) => {
+      if (path !== "settings") return fallback(path, options);
+      const snapshot = structuredClone(sample);
+      snapshot.rotation.currentMap = currentMap;
+      return snapshot as never;
+    });
+    show();
+    await screen.findByRole("button", { name: "Rotation" });
+    fireEvent.click(screen.getByRole("button", { name: "Rotation" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next round" }));
+    fireEvent.change(await screen.findByRole("combobox", { name: "Map" }), { target: { value: "Europe" } });
+    await screen.findByRole("checkbox", { name: "Infantry only" });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Queue next map" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Queue next map" }));
+    const dialog = screen.getByRole("dialog");
+    expect(screen.queryByRole("textbox", { name: "Reason" })).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Queue next map" }));
+    await waitFor(() => expect(request.mock.calls.some(([path]) => path === "actions")).toBe(true));
+    expect(JSON.parse(String(request.mock.calls.find(([path]) => path === "actions")![1]?.body))).toMatchObject({
+      action: "map-next",
+      currentMap,
+      currentIndex: 0,
+      entry: { map: "Europe" },
+    });
+  },
+);
 it("explains a missing position and refreshes it without losing the chosen map or sending an action", async () => {
   let available = false;
   const fallback = request.getMockImplementation()!;

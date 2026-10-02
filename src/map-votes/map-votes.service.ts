@@ -14,6 +14,7 @@ import { AdminAuth } from "../admin/admin.auth";
 import { AdminService } from "../admin/admin.service";
 import { GameServers } from "../admin/game-servers";
 import { validateMapSelection } from "../admin/server-configuration";
+import { sameMap } from "../common/map-labels";
 import type { Staff } from "../admin/admin.types";
 import { EnvService } from "../env/env.service";
 import { MapVotesStore } from "./map-votes.store";
@@ -102,7 +103,7 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
       settings.rotation.currentIndex === null
     )
       throw new ConflictException("Refresh settings. Map votes need the current editable, ordered rotation.");
-    if (action.choices.some((choice) => choice.map === settings.rotation.currentMap))
+    if (action.choices.some((choice) => sameMap(choice.map, settings.rotation.currentMap)))
       throw new BadRequestException("Leave the current map out of this ballot.");
     const capabilities = await game.capabilities(),
       catalog = await game.catalog();

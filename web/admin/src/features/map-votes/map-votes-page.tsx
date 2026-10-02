@@ -1,4 +1,4 @@
-import { mapLabel, selectionLabel } from "../../../../../src/common/map-labels";
+import { mapLabel, selectionLabel, sameMap } from "../../../../../src/common/map-labels";
 import { useEffect, useRef, useState } from "react";
 import type { MapSelection, SettingsSnapshot } from "../../../../../src/common/server-settings";
 import { VoteResults, voteStateLabels as stateLabels, type Vote, type VoteList } from "./vote-status";
@@ -235,7 +235,7 @@ function EnabledMapVotes({
                 catalog={{
                   ...catalog.data,
                   maps: catalog.data.maps.filter(
-                    (map) => map.id !== rotation?.currentMap && !choices.some((choice) => choice.map === map.id),
+                    (map) => !sameMap(map.id, rotation?.currentMap) && !choices.some((choice) => choice.map === map.id),
                   ),
                 }}
               />
@@ -247,7 +247,7 @@ function EnabledMapVotes({
                     !canEdit ||
                     !selectionReady ||
                     choices.length >= 5 ||
-                    selection.map === rotation?.currentMap ||
+                    sameMap(selection.map, rotation?.currentMap) ||
                     choices.some((choice) => choice.map === selection.map)
                   }
                   onClick={() => {
