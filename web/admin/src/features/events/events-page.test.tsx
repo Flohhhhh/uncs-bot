@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, within, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { EventsPage } from "./events-page";
 import { api } from "../../api/client";
@@ -297,4 +297,143 @@ it("labels stale event records while retaining the stop control when history can
   fireEvent.click(screen.getByRole("button", { name: "Stop event" }));
   expect(screen.getByRole("button", { name: "Confirm stop" })).toBeEnabled();
   expect(request.mock.calls.some(([path]) => path === "settings" || path === "overview")).toBe(false);
+});
+
+it.each(["initial", "previously disabled"])(
+  "recovers a failed %s event-status read without assuming activation",
+  async (phase) => {
+    enabled = false;
+    let fail = phase === "initial";
+    const fallback = request.getMockImplementation()!;
+    request.mockImplementation(async (path, init) => {
+      if (path === "events" && fail) throw new Error("History unavailable");
+      return fallback(path, init);
+    });
+    const { state, rerender } = show();
+    if (!fail) {
+      await screen.findByText("Optional events are not enabled");
+      fail = true;
+      rerender(
+        <AdminContext.Provider value={{ ...state, refreshVersion: 1 }}>
+          <EventsPage />
+        </AdminContext.Provider>,
+      );
+    }
+    expect(await screen.findByRole("alert")).toHaveTextContent("Event status could not be loaded");
+    expect(screen.queryByText("Optional events are not enabled")).not.toBeInTheDocument();
+    let resolveRead!: (data: never) => void;
+    request.mockImplementation(() => new Promise((resolve) => (resolveRead = resolve)));
+    const retry = screen.getByRole("button", { name: "Retry event status" });
+    fireEvent.click(retry);
+    expect(retry).toBeDisabled();
+    expect(screen.getByRole("alert")).toHaveTextContent("Event status could not be loaded");
+    await act(async () => resolveRead({ enabled: false, serverId: "primary", events: [] } as never));
+    await screen.findByText("Optional events are not enabled");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(request.mock.calls.every(([path, init]) => path === "events" && !init?.method)).toBe(true);
+  },
+);
+
+it("retries failed draft settings without discarding selected teams", async () => {
+  const { state, rerender } = show();
+  await selectTeams();
+  const fallback = request.getMockImplementation()!;
+  request.mockImplementation(async (path, init) => {
+    if (path === "settings") throw new Error("Settings unavailable");
+    return fallback(path, init);
+  });
+  rerender(
+    <AdminContext.Provider value={{ ...state, refreshVersion: 1 }}>
+      <EventsPage />
+    </AdminContext.Provider>,
+  );
+  await screen.findByText("Settings unavailable");
+  expect(screen.getByRole("button", { name: "Review event" })).toBeDisabled();
+  request.mockImplementation(fallback);
+  fireEvent.click(screen.getByRole("button", { name: "Retry server settings" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Review event" })).toBeEnabled());
+  expect(screen.getByRole("combobox", { name: "Team 1" })).toHaveValue("Valkyra");
+  expect(screen.getByRole("combobox", { name: "Team 2" })).toHaveValue("Lonestar");
+  expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+});
+
+it("retries the restoration settings read while keeping submission blocked until it succeeds", async () => {
+  events = [{ ...event, state: "needs_review", stop: { actorName: "Admin", reason: "Stop" } }];
+  const fallback = request.getMockImplementation()!;
+  request.mockImplementation(async (path, init) => {
+    if (path === "settings") throw new Error("Lock settings unavailable");
+    return fallback(path, init);
+  });
+  show();
+  fireEvent.click(await screen.findByRole("button", { name: "Review restoration" }));
+  const dialog = within(screen.getByRole("dialog"));
+  await dialog.findByText("Lock settings unavailable");
+  const submit = dialog.getByRole("button", { name: "Restore reviewed lock" });
+  expect(submit).toBeDisabled();
+  fireEvent.submit(submit.closest("form")!);
+  let resolveRead!: (data: never) => void;
+  request.mockImplementation(() => new Promise((resolve) => (resolveRead = resolve)));
+  const retry = dialog.getByRole("button", { name: "Retry lock settings" });
+  fireEvent.click(retry);
+  expect(retry).toBeDisabled();
+  expect(submit).toBeDisabled();
+  fireEvent.submit(submit.closest("form")!);
+  await act(async () => resolveRead({ revision: "r2", fields: [{ id: "lockOverpopulated", value: false }] } as never));
+  await dialog.findByText("Population lock: off → on.");
+  expect(submit).toBeEnabled();
+  expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+});
+
+it("ends the loading state when the first action-history read fails and recovers with a read-only refresh", async () => {
+  events = [event];
+  const fallback = request.getMockImplementation()!;
+  request.mockImplementation(async (path, init) => {
+    if (path.endsWith("/operations")) throw new Error("Actions unavailable");
+    return fallback(path, init);
+  });
+  show();
+  fireEvent.click(await screen.findByRole("button", { name: "View actions" }));
+  const dialog = within(screen.getByRole("dialog"));
+  await dialog.findByRole("alert");
+  expect(dialog.queryByText("Loading actions…")).not.toBeInTheDocument();
+  expect(dialog.getByText("Event actions unavailable")).toBeInTheDocument();
+  request.mockImplementation(fallback);
+  fireEvent.click(dialog.getByRole("button", { name: "Refresh actions" }));
+  await dialog.findByText("No actions recorded yet");
+  expect(dialog.queryByRole("alert")).not.toBeInTheDocument();
+  expect(
+    request.mock.calls.every(
+      ([path, init]) => ["events", `events/${event.id}/operations`].includes(path) && !init?.method,
+    ),
+  ).toBe(true);
+});
+
+it("labels retained event actions after a failed refresh", async () => {
+  events = [event];
+  const fallback = request.getMockImplementation()!;
+  request.mockImplementation(async (path, init) => {
+    if (path.endsWith("/operations"))
+      return {
+        operations: [
+          {
+            id: "recorded-move",
+            operation: { kind: "move_player" },
+            state: "applied",
+            message: "Recorded team move",
+            createdAt: event.createdAt,
+            actorName: "Event worker",
+          },
+        ],
+      } as never;
+    return fallback(path, init);
+  });
+  show();
+  fireEvent.click(await screen.findByRole("button", { name: "View actions" }));
+  const dialog = within(screen.getByRole("dialog"));
+  await dialog.findByText("Recorded team move");
+  request.mockRejectedValue(new Error("Actions unavailable"));
+  fireEvent.click(dialog.getByRole("button", { name: "Refresh actions" }));
+  expect(await dialog.findByRole("alert")).toHaveTextContent("Showing the last received actions");
+  expect(dialog.getByText("Recorded team move")).toBeInTheDocument();
+  expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
 });
