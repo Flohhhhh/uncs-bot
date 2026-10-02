@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { SettingsSnapshot } from "../../../../../src/common/server-settings";
-import { nextRoundSummary, roundLabel, type RotationSnapshot } from "./next-round";
+import {
+  nextRoundLine,
+  nextRoundSummary,
+  roundLabel,
+  runningRotationSnapshot,
+  type RotationSnapshot,
+  type RunningRotation,
+} from "./next-round";
 
 const entries = [
   { map: "Kavkazi", experiences: ["Bakurani_KOTH_01"], lighting: "DayLateGray" },
@@ -46,6 +53,7 @@ describe("nextRoundSummary", () => {
         index: null,
         label: "Unavailable",
         note: "",
+        caption: "Rotation not read",
       });
   });
 
@@ -56,6 +64,7 @@ describe("nextRoundSummary", () => {
       index: 1,
       label: "Ozeti · King of the Hill · Farmland · Day clear",
       note: "",
+      caption: "Saved next round",
     });
   });
 
@@ -77,6 +86,7 @@ describe("nextRoundSummary", () => {
       index: 2,
       label: "Zestafona",
       note: positionNote,
+      caption: "Game's next rotation entry",
     });
   });
 
@@ -96,22 +106,81 @@ describe("nextRoundSummary", () => {
       index: null,
       label: "Not confirmed",
       note: positionNote,
+      caption: "Rotation position unknown",
     });
     expect(nextRoundSummary(rotation({ currentIndex: null, nextIndex: 7 }))).toMatchObject({ state: "unconfirmed" });
     expect(nextRoundSummary(rotation({ currentIndex: 7, nextIndex: 8 }))).toMatchObject({ state: "unconfirmed" });
   });
 
   it("has no fixed next round when the rotation is off, random or empty", () => {
-    for (const changes of [
-      { enabled: false },
-      { mode: "Random" },
-      { entries: [], currentIndex: null, nextIndex: null },
-    ])
+    const cases: [Partial<RotationSnapshot>, string][] = [
+      [{ enabled: false }, "Rotation is off"],
+      [{ mode: "Random" }, "Rotation is random"],
+      [{ entries: [], currentIndex: null, nextIndex: null }, "Rotation is empty"],
+    ];
+    for (const [changes, caption] of cases)
       expect(nextRoundSummary(rotation(changes))).toMatchObject({
         state: "unconfirmed",
         entry: null,
         index: null,
         label: "No fixed next round",
+        caption,
       });
+  });
+});
+
+describe("nextRoundLine", () => {
+  it("names the next round only with its source", () => {
+    expect(nextRoundLine(nextRoundSummary(rotation()))).toBe(
+      "Next: Ozeti · King of the Hill · Farmland · Day clear (saved rotation)",
+    );
+    expect(nextRoundLine(nextRoundSummary(rotation({ currentIndex: null, nextIndex: 2 })))).toBe(
+      "Next: Zestafona (game's next rotation entry)",
+    );
+  });
+  it("says plainly when the next map is not confirmed or not fixed", () => {
+    expect(nextRoundLine(nextRoundSummary(rotation({ currentMap: "Europe" })))).toBe("Next map not confirmed");
+    expect(nextRoundLine(nextRoundSummary(null))).toBe("Next map not confirmed");
+    expect(nextRoundLine(nextRoundSummary(rotation({ mode: "Random" })))).toBe("No fixed next map: rotation is random");
+  });
+});
+
+describe("runningRotationSnapshot", () => {
+  const running = (statuses: (string | null)[], denied: number[] = []): RunningRotation => ({
+    enabled: true,
+    mode: "Ordered",
+    entries: entries.map((entry, index) => ({ ...entry, status: statuses[index], denied: denied.includes(index) })),
+  });
+  it("follows one now marker on the map being played", () => {
+    const snapshot = runningRotationSnapshot(running(["now", "next", null]), "Bakurani");
+    expect(snapshot).toMatchObject({ currentIndex: 0, nextIndex: 1, currentMap: "Bakurani", editable: false });
+    expect(snapshot.entries[1]).toEqual(entries[1]);
+    expect(nextRoundSummary(snapshot)).toMatchObject({ state: "saved", index: 1 });
+  });
+  it("does not trust a now marker on another map", () => {
+    expect(nextRoundSummary(runningRotationSnapshot(running(["now", null, null]), "Ozeti"))).toMatchObject({
+      state: "unconfirmed",
+      label: "Not confirmed",
+    });
+  });
+  it("uses one next marker only when no entry is running", () => {
+    expect(nextRoundSummary(runningRotationSnapshot(running([null, null, "next"]), "Ozeti"))).toMatchObject({
+      state: "game-next",
+      index: 2,
+    });
+    for (const statuses of [
+      ["now", "now", "next"],
+      [null, "next", "next"],
+      [null, null, null],
+    ])
+      expect(nextRoundSummary(runningRotationSnapshot(running(statuses), "Bakurani")).state).toBe("unconfirmed");
+  });
+  it("never names an entry the game marks unavailable", () => {
+    expect(nextRoundSummary(runningRotationSnapshot(running(["now", null, null], [1]), "Bakurani")).state).toBe(
+      "unconfirmed",
+    );
+    expect(nextRoundSummary(runningRotationSnapshot(running([null, "next", null], [1]), "Bakurani")).state).toBe(
+      "unconfirmed",
+    );
   });
 });
