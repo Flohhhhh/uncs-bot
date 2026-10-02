@@ -10,6 +10,7 @@ const envExample = read(".env.example");
 
 const sets = ["Ready-now set", "Queue-priority set"] as const;
 type CopySet = (typeof sets)[number];
+const whitelistedCopy = "### Recommended whitelisted welcome copy";
 
 /** Lines after an exact heading, up to the next heading of any level. */
 function section(heading: string) {
@@ -21,9 +22,9 @@ function section(heading: string) {
 }
 
 /** The single-line value in the plain-text block under a `NAME` label. A reflowed block does not match. */
-function pasteValue(set: CopySet, name: string) {
+function pasteValue(heading: string, name: string) {
   const block = new RegExp(`^\`${name}\`\\n\\n\`\`\`text\\n(.*)\\n\`\`\`$`, "gm");
-  const values = [...section(`#### ${set}`).matchAll(block)].map((match) => match[1]);
+  const values = [...section(heading).matchAll(block)].map((match) => match[1]);
   expect(values).toHaveLength(1);
   return values[0];
 }
@@ -40,9 +41,9 @@ function literal(cell: string) {
   return match[1];
 }
 
-/** The copy as the guide's two tables show it; "Same" repeats the ready-now message. */
-function tables() {
-  const [welcome, round] = section("### Recommended rotating UNCs copy")
+/** Each table's numbered rows under a heading, as trimmed cells after the number column. */
+function tableRows(heading: string) {
+  return section(heading)
     .split(/\n{2,}/)
     .filter((block) => block.startsWith("|"))
     .map((table) =>
@@ -56,6 +57,11 @@ function tables() {
             .map((cell) => cell.trim()),
         ),
     );
+}
+
+/** The copy as the guide's two tables show it; "Same" repeats the ready-now message. */
+function tables() {
+  const [welcome, round] = tableRows("### Recommended rotating UNCs copy");
   if (!welcome || !round) throw new Error("Expected the welcome-variant table followed by the round-message table.");
   const pick = (cell: string, readyNow: string) => (cell === "Same" ? readyNow : literal(cell));
   return {
@@ -73,8 +79,8 @@ function tables() {
 describe("recommended UNCs community copy", () => {
   it.each(sets)("keeps the %s paste values single-line, valid and identical to the guide's tables", (set) => {
     const expected = tables()[set];
-    const variants = pasteValue(set, "SERVER_COMMUNITY_WELCOME_VARIANTS");
-    const rounds = pasteValue(set, "SERVER_COMMUNITY_ROUND_MESSAGES");
+    const variants = pasteValue(`#### ${set}`, "SERVER_COMMUNITY_WELCOME_VARIANTS");
+    const rounds = pasteValue(`#### ${set}`, "SERVER_COMMUNITY_ROUND_MESSAGES");
     expect(expected.variants).toHaveLength(8);
     expect(expected.rounds).toHaveLength(5);
     expect(JSON.parse(variants)).toEqual(expected.variants);
@@ -87,7 +93,7 @@ describe("recommended UNCs community copy", () => {
     "repeats the guide's ready-now %s in .env.example exactly",
     (name) => {
       const value = envExampleValue(name);
-      expect(value).toBe(pasteValue("Ready-now set", name));
+      expect(value).toBe(pasteValue("#### Ready-now set", name));
       // An apostrophe would end the single-quoted .env value early.
       expect(value).not.toContain("'");
     },
@@ -100,5 +106,41 @@ describe("recommended UNCs community copy", () => {
     expect(variants.filter(promisesQueue)).toEqual([]);
     expect(rounds.filter((message) => /queue/i.test(message))).toEqual([]);
     expect(tables()["Queue-priority set"]).not.toEqual(tables()["Ready-now set"]);
+  });
+});
+
+describe("recommended whitelisted welcome copy", () => {
+  const name = "SERVER_COMMUNITY_WHITELISTED_WELCOME_VARIANTS";
+  /** The whitelisted variants as the guide's one table shows them. */
+  function table() {
+    const tables = tableRows(whitelistedCopy);
+    expect(tables).toHaveLength(1);
+    return tables[0].map((row) => row.map(literal));
+  }
+
+  it("keeps the paste value single-line, valid, identical to the guide's table and repeated in .env.example", () => {
+    const expected = table();
+    const value = pasteValue(whitelistedCopy, name);
+    expect(expected).toHaveLength(4);
+    expect(JSON.parse(value)).toEqual(expected);
+    expect(Env.shape[name].parse(value)).toEqual(expected);
+    expect(envExampleValue(name)).toBe(value);
+    // An apostrophe would end the single-quoted .env value early.
+    expect(value).not.toContain("'");
+    for (const message of expected.flat()) expect(message.length).toBeLessThan(200);
+  });
+
+  it("never tells whitelisted players to get whitelisted or promises queue priority, rewards or points", () => {
+    const promises = /whitelist|queue|priority|reward|\bpoints?\b|bonus|\bXP\b|cash|\bfree\b/i;
+    expect(
+      table()
+        .flat()
+        .filter((message) => promises.test(message)),
+    ).toEqual([]);
+  });
+
+  it("shares no variant with either standard set", () => {
+    const standard = new Set(sets.flatMap((set) => tables()[set].variants.map((variant) => JSON.stringify(variant))));
+    expect(table().filter((variant) => standard.has(JSON.stringify(variant)))).toEqual([]);
   });
 });

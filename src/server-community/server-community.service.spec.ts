@@ -1,12 +1,12 @@
 import { Logger } from "@nestjs/common";
 import type { Client } from "discord.js";
 import type { AdminStore } from "../admin/admin.store";
-import { RconError, type WardogsClient } from "../admin/wardogs.client";
+import { RconError, RESERVED_SLOTS_CACHE_MS, WardogsClient, type ReservedSlots } from "../admin/wardogs.client";
 import type { EnvService } from "../env/env.service";
 import { Env } from "../env/env";
 import { CommunityRotation, type RandomSource } from "./community-rotation";
 import type { CommunitySnapshot } from "./community-state";
-import { ServerCommunityWorker as ServerCommunityService } from "./server-community.service";
+import { ServerCommunityWorker as ServerCommunityService, WHITELIST_RETRY_MS } from "./server-community.service";
 
 const firstId = "76561198000000001";
 const secondId = "76561198000000002";
@@ -41,6 +41,9 @@ function fixture(
   const game = {
     overview: jest.fn().mockResolvedValue(snapshot()),
     execute: jest.fn().mockResolvedValue({ state: "accepted", message: "Accepted." }),
+    reservedSlots: jest
+      .fn<Promise<ReservedSlots>, []>()
+      .mockResolvedValue({ ids: new Set<string>(), loadedAt: new Date().toISOString() }),
   };
   const store = {
     begin: jest.fn().mockResolvedValue({ created: true, record: {} }),
@@ -436,6 +439,198 @@ describe("varied community messages", () => {
   });
 });
 
+describe("whitelist-aware welcomes", () => {
+  const thirdId = "76561198000000003";
+  const fourthId = "76561198000000004";
+  const fifthId = "76561198000000005";
+  const pools = {
+    SERVER_COMMUNITY_WELCOME_VARIANTS: [["Get whitelisted", "Apply on the website"]],
+    SERVER_COMMUNITY_WHITELISTED_WELCOME_VARIANTS: [["Welcome back", "Thanks for being here"]],
+  };
+  const singles = {
+    SERVER_COMMUNITY_WELCOME_VARIANTS: [["Get whitelisted"]],
+    SERVER_COMMUNITY_WHITELISTED_WELCOME_VARIANTS: [["Welcome back"]],
+  };
+  const whitelist = (...ids: string[]): ReservedSlots => ({ ids: new Set(ids), loadedAt: new Date().toISOString() });
+  const sent = (game: ReturnType<typeof fixture>["game"]) =>
+    game.execute.mock.calls.map(([action]) => [action.steamId, action.message]);
+  beforeEach(() => {
+    jest.useFakeTimers().setSystemTime(time);
+    jest.spyOn(Logger.prototype, "warn").mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    jest.restoreAllMocks();
+    jest.useRealTimers();
+  });
+
+  it("sends whitelisted joiners the whitelisted variants and everyone else the standard ones", async () => {
+    const { service, look, game } = fixture(pools);
+    game.reservedSlots.mockResolvedValue(whitelist(secondId));
+    await service.tick();
+    await look([firstId, secondId]);
+    for (let i = 0; i < 10; i++) await look([firstId, secondId, thirdId]);
+    expect(sent(game).filter(([steamId]) => steamId === secondId)).toEqual([
+      [secondId, "Welcome back"],
+      [secondId, "Thanks for being here"],
+    ]);
+    expect(sent(game).filter(([steamId]) => steamId === thirdId)).toEqual([
+      [thirdId, "Get whitelisted"],
+      [thirdId, "Apply on the website"],
+    ]);
+    // Only passes with new joiners ask; the connection's shared cache decides whether that reaches the game.
+    expect(game.reservedSlots).toHaveBeenCalledTimes(2);
+    expect(service.whitelistObservations()).toEqual({ lastLoadedAt: time.toISOString(), lastFailedAt: null });
+  });
+
+  it.each([
+    [{}, "Welcome to The UNCs!"],
+    [{ SERVER_COMMUNITY_WELCOME_VARIANTS: pools.SERVER_COMMUNITY_WELCOME_VARIANTS }, "Get whitelisted"],
+  ])("never reads the whitelist while whitelisted variants are unset: %j", async (values, text) => {
+    const { service, look, game, random } = fixture(values);
+    game.reservedSlots.mockResolvedValue(whitelist(secondId));
+    await service.tick();
+    await look([firstId, secondId]);
+    expect(sent(game)).toEqual([[secondId, text]]);
+    expect(game.reservedSlots).not.toHaveBeenCalled();
+    expect(random).not.toHaveBeenCalled();
+    expect(service.whitelistObservations()).toEqual({ lastLoadedAt: null, lastFailedAt: null });
+  });
+
+  it("never reads the whitelist while welcomes are off", async () => {
+    const { service, look, game } = fixture({ ...pools, SERVER_COMMUNITY_WELCOME_ENABLED: false });
+    await service.tick();
+    await look([firstId, secondId]);
+    expect(game.reservedSlots).not.toHaveBeenCalled();
+    expect(game.execute).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the standard variants when the whitelist cannot be read, and asks again after a minute", async () => {
+    const { service, look, game } = fixture(singles);
+    game.reservedSlots.mockRejectedValueOnce(new RconError("The game server could not be reached."));
+    game.reservedSlots.mockImplementation(async () => whitelist(secondId, thirdId, fourthId));
+    await service.tick();
+    await look([firstId, secondId]);
+    const failedAt = new Date().toISOString();
+    expect(service.whitelistObservations()).toEqual({ lastLoadedAt: null, lastFailedAt: failedAt });
+    const ids = [firstId, secondId, thirdId];
+    await look(ids);
+    while (Date.now() < Date.parse(failedAt) + WHITELIST_RETRY_MS) await look(ids);
+    expect(game.reservedSlots).toHaveBeenCalledTimes(1);
+    await look([...ids, fourthId]);
+    expect(game.reservedSlots).toHaveBeenCalledTimes(2);
+    expect(sent(game)).toEqual([
+      [secondId, "Get whitelisted"],
+      [thirdId, "Get whitelisted"],
+      [fourthId, "Welcome back"],
+    ]);
+    expect(service.whitelistObservations()).toEqual({ lastLoadedAt: new Date().toISOString(), lastFailedAt: failedAt });
+  });
+
+  it("treats an unexpected whitelist error like an unreadable whitelist", async () => {
+    const { service, look, game } = fixture(singles);
+    game.reservedSlots.mockRejectedValueOnce(new TypeError("Unexpected response"));
+    await service.tick();
+    await expect(look([firstId, secondId])).resolves.toBe(5_000);
+    expect(sent(game)).toEqual([[secondId, "Get whitelisted"]]);
+  });
+
+  it("reuses one running-whitelist read for five minutes of joins and reads again after an approval", async () => {
+    const { service, look, game } = fixture(singles);
+    const running = [secondId];
+    const transport = jest.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (init?.method === "POST" && path === "/v1/reserved-slots")
+        running.push((JSON.parse(String(init.body)) as { steamId: string }).steamId);
+      return new Response(JSON.stringify(path === "/v1/reserved-slots" ? { reservedSlots: running } : { ok: true }));
+    });
+    const client = new WardogsClient({ rcon: () => ({ rconUrl: "https://rcon.example.test", password: "test-only" }) });
+    game.reservedSlots.mockImplementation(() => client.reservedSlots());
+    const reads = () =>
+      transport.mock.calls.filter(([url, init]) => init?.method === "GET" && String(url).endsWith("/v1/reserved-slots"))
+        .length;
+    await service.tick();
+    const ids = [firstId, secondId];
+    await look(ids);
+    const loadedAt = Date.now();
+    let next = 10;
+    while (Date.now() + 25_000 < loadedAt + RESERVED_SLOTS_CACHE_MS) {
+      ids.push(`765611980000000${next++}`);
+      await look(ids, "Kavkazi", 25_000);
+    }
+    expect(reads()).toBe(1);
+    ids.push(`765611980000000${next++}`);
+    await look(ids, "Kavkazi", 25_000);
+    expect(reads()).toBe(2);
+    // Gramps approves a whitelist application on the same connection, and the player joins right away.
+    await client.request("POST", "/v1/reserved-slots", { steamId: fifthId });
+    await look([...ids, fifthId]);
+    expect(reads()).toBe(3);
+    expect(sent(game).filter(([, message]) => message === "Welcome back")).toEqual([
+      [secondId, "Welcome back"],
+      [fifthId, "Welcome back"],
+    ]);
+  });
+
+  it("keeps separate no-repeat history for whitelisted and standard variants", async () => {
+    // The random source always prefers the first candidate, so only the exclusions move the choice.
+    const { service, look, game } = fixture({
+      SERVER_COMMUNITY_WELCOME_VARIANTS: [["S0"], ["S1"], ["S2"]],
+      SERVER_COMMUNITY_WHITELISTED_WELCOME_VARIANTS: [["W0"], ["W1"], ["W2"]],
+    });
+    game.reservedSlots.mockResolvedValue(whitelist(secondId, fourthId));
+    await service.tick();
+    const ids = [firstId];
+    for (const steamId of [secondId, thirdId, fourthId, fifthId]) {
+      ids.push(steamId);
+      await look(ids);
+    }
+    // The second player stays away past the observer's leave grace, then rejoins as a new session.
+    const others = ids.filter((steamId) => steamId !== secondId);
+    for (let i = 0; i < 3; i++) await look(others, "Kavkazi", 25_000);
+    await look([...others, secondId]);
+    expect(sent(game)).toEqual([
+      [secondId, "W0"],
+      [thirdId, "S0"],
+      [fourthId, "W1"],
+      [fifthId, "S1"],
+      [secondId, "W2"],
+    ]);
+  });
+
+  it("checks each server's own whitelist and keeps a failure on one server from affecting another", async () => {
+    const first = fixture(singles, "primary");
+    const second = fixture(singles, "event");
+    first.game.reservedSlots.mockResolvedValue(whitelist(secondId));
+    second.game.reservedSlots.mockRejectedValue(new Error("offline"));
+    await first.service.tick();
+    await second.service.tick();
+    await second.look([firstId, secondId]);
+    await first.look([firstId, secondId]);
+    expect(first.game.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ serverId: "primary", steamId: secondId, message: "Welcome back" }),
+    );
+    expect(second.game.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ serverId: "event", steamId: secondId, message: "Get whitelisted" }),
+    );
+    expect(first.service.whitelistObservations().lastFailedAt).toBeNull();
+    expect(second.service.whitelistObservations()).toMatchObject({
+      lastLoadedAt: null,
+      lastFailedAt: expect.any(String),
+    });
+  });
+
+  it("sends nothing when shut down during a whitelist read", async () => {
+    const { service, look, game } = fixture(singles);
+    game.reservedSlots.mockImplementationOnce(async () => {
+      service.onModuleDestroy();
+      return whitelist(secondId);
+    });
+    await service.tick();
+    await expect(look([firstId, secondId])).resolves.toBe(30_000);
+    expect(game.execute).not.toHaveBeenCalled();
+  });
+});
+
 describe("welcome deployment settings", () => {
   it("validates a short literal sequence while preserving single-message installations", () => {
     expect(Env.shape.SERVER_COMMUNITY_WELCOME_MESSAGES.parse(undefined)).toBeUndefined();
@@ -462,6 +657,10 @@ describe("welcome deployment settings", () => {
 
   it("validates welcome variants and round messages", () => {
     expect(Env.shape.SERVER_COMMUNITY_WELCOME_VARIANTS.parse(undefined)).toBeUndefined();
+    expect(Env.shape.SERVER_COMMUNITY_WHITELISTED_WELCOME_VARIANTS.parse(undefined)).toBeUndefined();
+    expect(Env.shape.SERVER_COMMUNITY_WHITELISTED_WELCOME_VARIANTS.parse('[["Welcome back", "  Thanks  "]]')).toEqual([
+      ["Welcome back", "Thanks"],
+    ]);
     expect(Env.shape.SERVER_COMMUNITY_ROUND_MESSAGES.parse(undefined)).toBeUndefined();
     expect(Env.shape.SERVER_COMMUNITY_WELCOME_VARIANTS.parse('[["Hi", "  Link  "], ["Hello"]]')).toEqual([
       ["Hi", "Link"],
@@ -475,6 +674,7 @@ describe("welcome deployment settings", () => {
     const variants = Array.from({ length: 20 }, (_, index) => Array.from({ length: 4 }, () => text(index)));
     const rounds = Array.from({ length: 20 }, (_, index) => text(index));
     expect(Env.shape.SERVER_COMMUNITY_WELCOME_VARIANTS.parse(JSON.stringify(variants, null, 2))).toEqual(variants);
+    expect(Env.shape.SERVER_COMMUNITY_WHITELISTED_WELCOME_VARIANTS.parse(JSON.stringify(variants))).toEqual(variants);
     expect(Env.shape.SERVER_COMMUNITY_ROUND_MESSAGES.parse(JSON.stringify(rounds, null, 2))).toEqual(rounds);
   });
 
@@ -495,8 +695,9 @@ describe("welcome deployment settings", () => {
       [" Same ", "Link"],
     ]),
     JSON.stringify([["Hi"]]) + " ".repeat(32_768),
-  ])("rejects invalid welcome variants: %s", (value) => {
+  ])("rejects invalid welcome variants, whitelisted or not: %s", (value) => {
     expect(Env.shape.SERVER_COMMUNITY_WELCOME_VARIANTS.safeParse(value).success).toBe(false);
+    expect(Env.shape.SERVER_COMMUNITY_WHITELISTED_WELCOME_VARIANTS.safeParse(value).success).toBe(false);
   });
 
   it.each([

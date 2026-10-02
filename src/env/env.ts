@@ -18,6 +18,10 @@ const distinct = <T>(values: T[]) => new Set(values.map((value) => JSON.stringif
 /** 20 variants of four 200-character messages, with room for JSON escapes and formatting. */
 const WELCOME_VARIANTS_MAX_LENGTH = 32_768;
 const ROUND_MESSAGES_MAX_LENGTH = 8_192;
+const welcomeVariants = jsonSetting(
+  z.array(welcomeSequence).min(1).max(20).refine(distinct, "Use different welcome variants."),
+  WELCOME_VARIANTS_MAX_LENGTH,
+).optional();
 const discordIds = z
   .string()
   .default("")
@@ -101,10 +105,12 @@ export const Env = z.object({
   /** Optional JSON array replaces the legacy single message. No placeholder expansion. */
   SERVER_COMMUNITY_WELCOME_MESSAGES: jsonSetting(welcomeSequence, 2048).optional(),
   /** Optional JSON array of 1-20 welcome sequences; one is chosen per join. Replaces both settings above. */
-  SERVER_COMMUNITY_WELCOME_VARIANTS: jsonSetting(
-    z.array(welcomeSequence).min(1).max(20).refine(distinct, "Use different welcome variants."),
-    WELCOME_VARIANTS_MAX_LENGTH,
-  ).optional(),
+  SERVER_COMMUNITY_WELCOME_VARIANTS: welcomeVariants,
+  /**
+   * Optional variants, in the same shape, for joiners on that server's running whitelist (reserved slots).
+   * Unset, or when the whitelist cannot be read, every joiner gets the ordinary welcome settings above.
+   */
+  SERVER_COMMUNITY_WHITELISTED_WELCOME_VARIANTS: welcomeVariants,
   SERVER_COMMUNITY_WELCOME_DELAY_SECONDS: z.coerce.number().int().min(0).max(60).default(10),
   SERVER_COMMUNITY_WELCOME_SPACING_SECONDS: z.coerce.number().int().min(10).max(120).default(20),
   SERVER_COMMUNITY_ROUND_MESSAGE: communityMessage.default("GG! Thanks for playing on The UNCs. See you next round."),

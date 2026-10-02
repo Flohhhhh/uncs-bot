@@ -42,12 +42,17 @@ export type Overview = {
 const teamPlayersSchema = z.object({
   players: z.array(z.object({ steamId: z.string().nullable().optional(), faction: z.string().nullable().optional() })),
 });
+/** The running whitelist as read at `loadedAt`. */
+export type ReservedSlots = { ids: ReadonlySet<string>; loadedAt: string };
+/** How long the community worker reuses a running-whitelist read. Whitelist changes made through Gramps clear it. */
+export const RESERVED_SLOTS_CACHE_MS = 300_000;
 
 @Injectable()
 export class WardogsClient {
   private readonly observations = new ServerActivity();
   private capabilitiesCache?: { until: number; value: Capabilities };
   private overviewCache?: { until: number; promise: Promise<Overview> };
+  private reservedSlotsCache?: { until: number; promise: Promise<ReservedSlots> };
   private holdUntil = 0;
   constructor(private readonly settings: RconConnectionSource) {}
 
@@ -61,7 +66,10 @@ export class WardogsClient {
       throw error;
     }
     const mutates = method !== "GET" && !(method === "POST" && path === "/v1/config/validate");
+    // Whitelist edits and configuration saves (the fallback whitelist edit) can change the running whitelist.
+    const changesWhitelist = mutates && (path.startsWith("/v1/reserved-slots") || path === "/v1/config");
     if (mutates) this.overviewCache = undefined;
+    if (changesWhitelist) this.reservedSlotsCache = undefined;
     let response: Response;
     try {
       response = await fetch(`${config.rconUrl.replace(/\/$/, "")}${path}`, {
@@ -86,6 +94,7 @@ export class WardogsClient {
     } finally {
       // Discard observations started during an action, including uncertain ones.
       if (mutates) this.overviewCache = undefined;
+      if (changesWhitelist) this.reservedSlotsCache = undefined;
     }
     if (!response.ok) {
       // Translate only known codes. Never forward upstream text, which can
@@ -245,7 +254,8 @@ export class WardogsClient {
     return result;
   }
 
-  async whitelist() {
+  /** Valid SteamIDs on the running whitelist, plus the number of entries that are not one. */
+  private async readReservedSlots() {
     // Tolerate individual bad rows for display, without weakening action input
     // validation or the strict readback used to confirm a whitelist mutation.
     const slots = z
@@ -255,6 +265,35 @@ export class WardogsClient {
       const parsed = steamId.safeParse(value);
       return parsed.success ? [parsed.data] : [];
     });
+    return { live, invalidEntryCount: slots.length - live.length };
+  }
+
+  /**
+   * The running whitelist for the community worker, shared for up to five minutes. A failed read is not
+   * cached, and a whitelist change or configuration save through this client discards the cached copy.
+   */
+  async reservedSlots(): Promise<ReservedSlots> {
+    if (this.reservedSlotsCache && this.reservedSlotsCache.until > Date.now()) return this.reservedSlotsCache.promise;
+    const entry = {
+      until: Infinity,
+      promise: this.readReservedSlots().then(({ live }) => ({
+        ids: new Set(live),
+        loadedAt: new Date().toISOString(),
+      })),
+    };
+    this.reservedSlotsCache = entry;
+    try {
+      const value = await entry.promise;
+      entry.until = Date.now() + RESERVED_SLOTS_CACHE_MS;
+      return value;
+    } catch (error) {
+      if (this.reservedSlotsCache === entry) this.reservedSlotsCache = undefined;
+      throw error;
+    }
+  }
+
+  async whitelist() {
+    const { live, invalidEntryCount } = await this.readReservedSlots();
     let configured: string[] | null = null;
     let configuredInvalidEntryCount = 0;
     try {
@@ -273,7 +312,7 @@ export class WardogsClient {
     return {
       entries,
       configurationAvailable: configured !== null,
-      invalidEntryCount: slots.length - live.length,
+      invalidEntryCount,
       configuredInvalidEntryCount,
     };
   }

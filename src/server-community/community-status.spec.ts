@@ -1,4 +1,4 @@
-import { BadRequestException } from "@nestjs/common";
+import { BadRequestException, Logger } from "@nestjs/common";
 import type { Client } from "discord.js";
 import type { AdminStore } from "../admin/admin.store";
 import type { GameServers } from "../admin/game-servers";
@@ -36,6 +36,7 @@ function fixture(overrides: Record<string, unknown> = {}) {
       {
         overview: jest.fn().mockResolvedValue(snapshot),
         execute: jest.fn(),
+        reservedSlots: jest.fn().mockResolvedValue({ ids: new Set<string>(), loadedAt: "2026-10-01T12:00:15.000Z" }),
       },
     ]),
   );
@@ -55,7 +56,10 @@ function fixture(overrides: Record<string, unknown> = {}) {
   );
   return { service, servers, games };
 }
-afterEach(() => jest.useRealTimers());
+afterEach(() => {
+  jest.useRealTimers();
+  jest.restoreAllMocks();
+});
 
 it("reads disabled configuration without constructing a game client or claiming a running worker", () => {
   const { service, servers } = fixture();
@@ -64,7 +68,15 @@ it("reads disabled configuration without constructing a game client or claiming 
     enabled: false,
     workerStarted: false,
     lastObservedAt: null,
-    welcome: { enabled: false, messages: ["Welcome"], variants: [["Welcome"]], delaySeconds: 10, spacingSeconds: 20 },
+    welcome: {
+      enabled: false,
+      messages: ["Welcome"],
+      variants: [["Welcome"]],
+      whitelistedVariants: null,
+      whitelist: null,
+      delaySeconds: 10,
+      spacingSeconds: 20,
+    },
     round: { enabled: false, message: "GG", messages: ["GG"] },
   });
   expect(servers.get).not.toHaveBeenCalled();
@@ -110,4 +122,35 @@ it("distinguishes configured workers from observed activity without the status r
   service.onModuleDestroy();
   expect(service.status("primary").workerStarted).toBe(false);
   expect(servers.get).toHaveBeenCalledTimes(2);
+});
+
+it("lists whitelisted welcome variants with where and when each server's whitelist was read", async () => {
+  jest.useFakeTimers().setSystemTime(new Date("2026-10-01T12:00:00.000Z"));
+  jest.spyOn(Logger.prototype, "warn").mockImplementation(() => undefined);
+  const { service, games } = fixture({
+    SERVER_COMMUNITY_ENABLED: true,
+    SERVER_COMMUNITY_DISCORD_STATUS_ENABLED: false,
+    SERVER_COMMUNITY_WELCOME_VARIANTS: [["Get whitelisted"]],
+    SERVER_COMMUNITY_WHITELISTED_WELCOME_VARIANTS: [["Welcome back"], ["Good to see you"]],
+  });
+  const unread = { source: "running-whitelist", cacheSeconds: 300, lastLoadedAt: null, lastFailedAt: null };
+  expect(service.status("primary").welcome).toMatchObject({
+    variants: [["Get whitelisted"]],
+    whitelistedVariants: [["Welcome back"], ["Good to see you"]],
+    whitelist: unread,
+  });
+  service.onApplicationBootstrap();
+  await jest.advanceTimersByTimeAsync(0);
+  // A player joins the primary server only, so only that server reads its whitelist.
+  games.primary.overview.mockResolvedValue({
+    observedAt: "2026-10-01T12:00:15.000Z",
+    status: { map: "Europe", players: { current: 1, max: 100 }, factionScores: [] },
+    players: [{ name: "Example player", steamId: "76561198000000001" }],
+  });
+  await jest.advanceTimersByTimeAsync(15_000);
+  expect(games.primary.reservedSlots).toHaveBeenCalledTimes(1);
+  expect(games.event.reservedSlots).not.toHaveBeenCalled();
+  expect(service.status("primary").welcome.whitelist).toEqual({ ...unread, lastLoadedAt: "2026-10-01T12:00:15.000Z" });
+  expect(service.status("event").welcome.whitelist).toEqual(unread);
+  service.onModuleDestroy();
 });
