@@ -1,151 +1,271 @@
-import { mapLabel, modeLabel } from "../../../../../src/common/map-labels";
-import { useState, type CSSProperties } from "react";
+import { lightingLabel, mapLabel, modeLabel, zoneLabel } from "../../../../../src/common/map-labels";
+import { roundStamp } from "../../../../../src/common/game-round";
+import type { SettingsSnapshot } from "../../../../../src/common/server-settings";
+import { useState, type CSSProperties, type ReactNode } from "react";
 import { ServerLink as Link } from "../../app/server-link";
 import { useGameAdmin as useAdmin } from "../../app/context";
 import { useResource } from "../../api/use-resource";
 import type { Audit, Ban, Whitelist } from "../../api/types";
-import { ActionButton, Badge, Card, Empty, Metric, Search, Table, date } from "../../components/ui";
-import { CopyValue, DataTable } from "../../components/data-table";
+import { ActionButton, Badge, Card, Empty, Search, date } from "../../components/ui";
+import { CopyValue, DataTable, compareValues } from "../../components/data-table";
 import { actionDefinitions, allowed } from "../actions/policy";
 import { FactionChip, liveFactions, playerFaction } from "../players/factions";
 import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
-import { PlayerSheet } from "../players/player-actions";
+import { PlayerButton, PlayerSheet, type SheetPlayer } from "../players/player-actions";
 import { EmptyRoster } from "../players/empty-roster";
+import { nextRoundSummary } from "./next-round";
+import { ActivityLine, When, useActivityEntries } from "./activity-entries";
 import { CommunityMessages } from "./community-messages";
+
+/** Only the fields the Overview reads from the voting status. */
+type VoteSummary = { enabled?: boolean; votes?: { state?: string; closesAt?: string; automation?: unknown }[] };
+const voteStates: Record<string, string> = {
+  publishing: "Creating ballot",
+  closing: "Counting votes",
+  needs_review: "Needs review",
+};
+const clockTime = (value: string | number) =>
+  new Date(value).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+function elapsed(seconds: number) {
+  const total = Math.floor(seconds);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  const minutes = Math.floor(total / 60);
+  return minutes >= 60
+    ? `${Math.floor(minutes / 60)}:${pad(minutes % 60)}:${pad(total % 60)}`
+    : `${minutes}:${pad(total % 60)}`;
+}
+function NowItem({ label, value, note, title }: { label: string; value: ReactNode; note?: ReactNode; title?: string }) {
+  return (
+    <div className="now-item" title={title}>
+      <span className="now-label">{label}</span>
+      <strong className="now-value">{value}</strong>
+      {note && <span className="now-note">{note}</span>}
+    </div>
+  );
+}
+
 export function OverviewPage() {
   const { overview, me, stale, busy, openAction } = useAdmin();
-  const [managedId, setManagedId] = useState<string | null>(null);
+  const isAdmin = me.role === "admin";
+  const settings = useResource<SettingsSnapshot>(isAdmin ? "settings" : null);
+  const voting = useResource<VoteSummary>(isAdmin ? "map-votes" : null);
+  const activity = useActivityEntries(false);
+  const [managed, setManaged] = useState<SheetPlayer | null>(null);
   if (!overview)
     return <Empty title="Waiting for the server" detail="Connection details will appear when the server responds." />;
   const { status, players } = overview;
   const teams = liveFactions(overview);
   const max = status.scoreCap || Math.max(1, ...status.factionScores.map((team) => team.score));
+  const stamp = roundStamp(status, Date.parse(overview.observedAt));
+  const setup = [
+    ...(status.experiences ?? []).map((id) => modeLabel(id)),
+    status.alternator && status.alternator !== "None" ? zoneLabel(status.alternator) : "",
+    status.lighting ? lightingLabel(status.lighting).replaceAll(" · ", " ") : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  // A malformed read counts as unavailable, never as a confirmed next round.
+  const snapshot =
+    settings.data && typeof settings.data === "object" && "rotation" in settings.data && settings.data.rotation
+      ? settings.data
+      : null;
+  const next = nextRoundSummary(snapshot);
+  const votes = voting.data && Array.isArray(voting.data.votes) ? voting.data : null;
+  const vote = votes?.votes?.find((item) =>
+    ["publishing", "open", "closing", "needs_review"].includes(item.state ?? ""),
+  );
+  const top = [...players].sort((a, b) => compareValues(a.kills, b.kills, "descending")).slice(0, 8);
+  const recent = activity.entries.filter((entry) => entry.category !== "combat").slice(0, 6);
   return (
     <>
-      <div className="metrics">
-        <Metric
-          label="PLAYERS ONLINE"
+      <div className="overview-actions">
+        <button
+          type="button"
+          className="button primary small"
+          disabled={!allowed("broadcast", me, overview, stale, busy)}
+          onClick={() => openAction("broadcast")}
+        >
+          Send an announcement
+        </button>
+        <button
+          type="button"
+          className="button secondary small"
+          disabled={!allowed("whitelist-add", me, overview, stale, busy)}
+          onClick={() => openAction("whitelist-add")}
+        >
+          Add to whitelist
+        </button>
+      </div>
+      <section className="now-band" aria-label="Now">
+        <NowItem
+          label="Players"
           value={
             <>
               {status.players.current}
               <small> / {status.players.max}</small>
             </>
           }
-          note={stale ? "Last reported population" : "Current game population"}
+          note={
+            teams.length > 0 && (
+              <span className="team-split">
+                {teams.map((team) => (
+                  <span key={team.name} title={team.label}>
+                    {team.color ? (
+                      <svg width="8" height="8" viewBox="0 0 10 10" aria-hidden="true">
+                        <circle cx="5" cy="5" r="5" fill={team.color} />
+                      </svg>
+                    ) : (
+                      `${team.name} `
+                    )}
+                    <span className="sr-only">{team.label}: </span>
+                    {players.filter((player) => playerFaction(player, teams)?.name === team.name).length}
+                  </span>
+                ))}
+              </span>
+            )
+          }
         />
-        <Metric
-          label="CURRENT MAP"
-          value={mapLabel(status.map)}
-          note={status.experiences?.map((id) => modeLabel(id)).join(" · ") || "Live game"}
-          word
+        <NowItem label="Map" value={mapLabel(status.map)} note={setup || "Mode not reported"} />
+        <NowItem
+          label="Round"
+          value={stamp ? `${elapsed(status.matchSeconds ?? 0)} elapsed` : "No clock"}
+          note={
+            stamp
+              ? `${stale ? "last checked" : "checked"} ${clockTime(overview.observedAt)}`
+              : "Not reported by the game"
+          }
         />
-        <Metric label="YOUR ACCESS" value={me.role} note="Verified through Discord" word />
-        <Metric label="SERVER STATUS" value={stale ? "Needs refresh" : "Connected"} note="RCON connection" word />
-      </div>
+        {isAdmin && (
+          <NowItem
+            label="Next round"
+            value={snapshot ? next.label : settings.loading && !settings.error ? "Checking…" : "Unavailable"}
+            note={
+              !snapshot
+                ? settings.error && "Settings could not be read"
+                : next.state === "saved"
+                  ? "Saved next round"
+                  : next.state === "game-next"
+                    ? "Next in the game’s rotation"
+                    : undefined
+            }
+            title={next.note || undefined}
+          />
+        )}
+        {isAdmin && (
+          <NowItem
+            label="Vote"
+            value={
+              !votes
+                ? voting.loading && !voting.error
+                  ? "Checking…"
+                  : "Unavailable"
+                : !votes.enabled
+                  ? "Off"
+                  : !vote
+                    ? "None"
+                    : vote.state === "open"
+                      ? vote.automation || !vote.closesAt
+                        ? "Open"
+                        : `Open · ends ${clockTime(vote.closesAt)}`
+                      : voteStates[vote.state ?? ""]
+            }
+            note={vote?.state === "open" && vote.automation ? "Closes automatically" : undefined}
+          />
+        )}
+        <Link className="text-button now-link" to="/match">
+          Match &amp; maps →
+        </Link>
+      </section>
       <div className="overview-grid">
         <Card
-          title="Current match"
-          subtitle={status.scoreCap ? "Faction scores" : "Scores relative to the leading faction"}
-          badge={<Badge>WARDOGS</Badge>}
+          className="overview-scores"
+          title="Scores"
+          subtitle={status.scoreCap ? `First to ${status.scoreCap.toLocaleString()}` : "Relative to the leading team"}
         >
           <div className="card-body">
             {status.factionScores.length ? (
-              status.factionScores.map((team) => (
-                <div className="score-row" key={team.name}>
-                  <div className="score-label">
-                    <span>{team.name}</span>
-                    <strong>{team.score.toLocaleString()}</strong>
+              status.factionScores.map((team) => {
+                const faction = teams.find((entry) => entry.name === team.name);
+                return (
+                  <div className="score-row" key={team.name}>
+                    <div className="score-label">
+                      <FactionChip team={faction} fallback={team.name} />
+                      <strong>{team.score.toLocaleString()}</strong>
+                    </div>
+                    <progress
+                      max={max}
+                      value={team.score}
+                      aria-label={`${team.name} score`}
+                      style={{ "--faction-color": faction?.color || undefined } as CSSProperties}
+                    />
                   </div>
-                  <progress
-                    max={max}
-                    value={team.score}
-                    aria-label={`${team.name} score`}
-                    style={
-                      {
-                        "--faction-color": teams.find((entry) => entry.name === team.name)?.color || undefined,
-                      } as CSSProperties
-                    }
-                  />
-                </div>
-              ))
+                );
+              })
             ) : (
-              <Empty title="Waiting for faction scores" />
+              <p className="muted">Waiting for team scores.</p>
             )}
           </div>
         </Card>
-        <Card title="Quick actions" badge={<Badge>STAFF TOOLS</Badge>}>
-          <div className="card-body quick-actions">
-            <button
-              className="quick-action"
-              disabled={!allowed("broadcast", me, overview, stale, busy)}
-              onClick={() => openAction("broadcast")}
-            >
-              <span>
-                Send an announcement<small>Reach everyone currently in game</small>
-              </span>
-              <span>↗</span>
-            </button>
-            <button
-              className="quick-action"
-              disabled={!allowed("whitelist-add", me, overview, stale, busy)}
-              onClick={() => openAction("whitelist-add")}
-            >
-              <span>
-                Add whitelist access<small>Welcome another community member</small>
-              </span>
-              <span>＋</span>
-            </button>
-            <Link className="quick-action" to="/audit">
-              <span>
-                Review staff activity<small>Reasons, outcomes, and accountability</small>
-              </span>
-              <span>→</span>
+        <Card
+          className="overview-players"
+          title="Players"
+          subtitle={players.length > top.length ? `Top ${top.length} by kills` : "By kills"}
+          badge={
+            <Link className="text-button" to="/players">
+              Manage {players.length} →
             </Link>
-          </div>
+          }
+        >
+          {players.length ? (
+            <ul className="overview-roster" aria-label="Players on this server">
+              {top.map((player) => (
+                <li key={player.steamId}>
+                  <span className="overview-roster-name">
+                    <PlayerButton player={player} onOpen={setManaged} />
+                    <FactionChip team={playerFaction(player, teams)} fallback={player.faction || "Choosing team"} />
+                  </span>
+                  <span className="overview-roster-kd">
+                    <span className="sr-only">Kills / deaths </span>
+                    {player.kills ?? "—"} / {player.deaths ?? "—"}
+                  </span>
+                  <span className="muted">{player.pingMs ?? "—"} ms</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <EmptyRoster overview={overview} stale={stale} />
+          )}
+        </Card>
+        <Card
+          className="overview-activity"
+          title="Recent activity"
+          badge={
+            <Link className="text-button" to="/activity">
+              All activity →
+            </Link>
+          }
+        >
+          {recent.length ? (
+            <ol className="overview-feed">
+              {recent.map((entry) => (
+                <li key={entry.id}>
+                  <When at={entry.at} />
+                  <ActivityLine entry={entry} onPlayer={setManaged} />
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p className="muted card-body">
+              {activity.loading
+                ? "Loading recent activity…"
+                : activity.failed.length
+                  ? "Recent activity could not be loaded."
+                  : "No recent activity yet."}
+            </p>
+          )}
         </Card>
       </div>
-      <Card
-        title="On the server"
-        subtitle={`${players.length} players in the current snapshot`}
-        badge={
-          <Link className="text-button" to="/players">
-            All players →
-          </Link>
-        }
-      >
-        {players.length ? (
-          <Table label="Players on this server" headers={["PLAYER", "FACTION", "K / D", "PING", ""]} scrollable>
-            {players.slice(0, 6).map((player) => (
-              <tr key={player.steamId}>
-                <td>
-                  <div className="player-name">
-                    <span className="player-icon">{player.name.slice(0, 2).toUpperCase()}</span>
-                    <div>
-                      <strong>{player.name}</strong>
-                      <small>{player.steamId}</small>
-                    </div>
-                  </div>
-                </td>
-                <td>
-                  <FactionChip team={playerFaction(player, teams)} fallback={player.faction || "Choosing team"} />
-                </td>
-                <td>
-                  {player.kills ?? "—"} / {player.deaths ?? "—"}
-                </td>
-                <td>{player.pingMs ?? "—"} ms</td>
-                <td>
-                  <button type="button" className="text-button" onClick={() => setManagedId(player.steamId)}>
-                    View player →
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </Table>
-        ) : (
-          <EmptyRoster overview={overview} stale={stale} />
-        )}
-      </Card>
-      {managedId && <PlayerSheet player={{ steamId: managedId }} onClose={() => setManagedId(null)} />}
+      {managed && <PlayerSheet player={managed} onClose={() => setManaged(null)} />}
     </>
   );
 }
