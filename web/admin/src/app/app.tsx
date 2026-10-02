@@ -5,19 +5,16 @@ import { validateOverview, validateStaff, validateServers } from "../api/validat
 import type { ActionName, Overview, Staff } from "../api/types";
 import { AdminContext, type ActionOptions, type SelectedServer } from "./context";
 import { Empty, Sheet } from "../components/ui";
-import { OverviewPage, WhitelistPage, BansPage, AnnouncementsPage, AuditPage } from "../features/server/pages";
+import { OverviewPage, WhitelistPage, BansPage, AnnouncementsPage } from "../features/server/pages";
 import { MatchPage } from "../features/server/match-page";
 import { PlayersPage } from "../features/players/players-page";
 import { ActionsDialog } from "../features/actions/actions-dialog";
 import { ApplicationsPage } from "../features/applications";
 import { SupportersPage } from "../features/supporters";
-import { CombatPage } from "../features/combat/combat-page";
 import { SettingsPage, PermissionsPage } from "../features/server/settings-page";
 import { NavigationGuard } from "./navigation-guard";
 import { ServerChoices, ServerSwitcher } from "./server-switcher";
 import { AccountDetails, AccountMenu, StatusPill } from "./shell";
-import { MapVotesPage } from "../features/map-votes/map-votes-page";
-import { EventsPage } from "../features/events/events-page";
 import { ActivityPage } from "../features/server/activity-page";
 
 type Page = { icon: string; label: string; title: string; short?: string };
@@ -27,15 +24,11 @@ const pages = {
   players: { icon: "♟", label: "Players", title: "Live players", short: "Players" },
   match: { icon: "◇", label: "Match & maps", title: "Match & maps", short: "Match" },
   activity: { icon: "◷", label: "Server activity", title: "Server activity", short: "Activity" },
-  combat: { icon: "⌁", label: "Combat history", title: "Combat history" },
   whitelist: { icon: "☷", label: "Whitelist", title: "Community whitelist" },
   applications: { icon: "✉", label: "Applications", title: "Whitelist applications" },
   bans: { icon: "⊘", label: "Bans", title: "Server bans" },
   announcements: { icon: "↗", label: "Announcements", title: "Announcements" },
   supporters: { icon: "✳", label: "Supporters", title: "Community supporters" },
-  votes: { icon: "✓", label: "Map & mode votes", title: "Map & mode votes" },
-  events: { icon: "⚑", label: "Events", title: "Optional events" },
-  audit: { icon: "◷", label: "Action history", title: "Action history" },
   settings: { icon: "⚙", label: "Settings", title: "Server settings" },
   permissions: { icon: "◈", label: "Permissions", title: "Staff permissions" },
 } satisfies Record<string, Page>;
@@ -46,6 +39,13 @@ const navigation: { label: string; pages: PageId[] }[] = [
   { label: "Community", pages: ["whitelist", "applications", "bans", "announcements", "supporters"] },
   { label: "Server", pages: ["settings"] },
 ];
+/** Old standalone pages are now views of a hub. The redirect keeps the server and any other parameters. */
+function ViewRedirect({ to, view }: { to: string; view: string }) {
+  const { search } = useLocation();
+  const params = new URLSearchParams(search);
+  params.set("view", view);
+  return <Navigate to={{ pathname: to, search: `?${params}` }} replace />;
+}
 function Brand({ className = "" }: { className?: string }) {
   return (
     <a className={`wordmark ${className}`} href="https://theuncsgaming.com/" aria-label="The UNCs home">
@@ -206,11 +206,6 @@ function Dashboard({
   const location = useLocation();
   const navigate = useNavigate();
   const key = location.pathname.split("/").filter(Boolean)[0] || "overview";
-  const navigationKey = ["votes", "events"].includes(key)
-    ? "match"
-    : ["audit", "combat"].includes(key)
-      ? "activity"
-      : key;
   const page: PageId = Object.hasOwn(pages, key) ? (key as PageId) : "overview";
   const canOpen = (id: PageId) =>
     id === "supporters"
@@ -221,9 +216,7 @@ function Dashboard({
   const groups = navigation
     .map((group) => ({ ...group, pages: group.pages.filter(canOpen) }))
     .filter((group) => group.pages.length);
-  const moreActive =
-    navigationKey === "permissions" ||
-    groups.slice(1).some((group) => (group.pages as string[]).includes(navigationKey));
+  const moreActive = key === "permissions" || groups.slice(1).some((group) => (group.pages as string[]).includes(key));
   const gamePage = ["overview", "players", "whitelist", "bans", "announcements", "match"].includes(key);
   const [overview, setOverview] = useState<Overview | null>(null);
   const [stale, setStale] = useState(true);
@@ -343,8 +336,8 @@ function Dashboard({
     return (
       <NavLink
         to={{ pathname: `/${id}`, search: location.search }}
-        className={({ isActive }) => (isActive || id === navigationKey ? "active" : "")}
-        aria-current={id === navigationKey ? "page" : undefined}
+        className={({ isActive }) => (isActive || id === key ? "active" : "")}
+        aria-current={id === key ? "page" : undefined}
         onClick={(event) => {
           if (locked) event.preventDefault();
           else onNavigate?.();
@@ -482,12 +475,12 @@ function Dashboard({
                 <Route path="bans" element={<BansPage />} />
                 <Route path="announcements" element={<AnnouncementsPage />} />
                 <Route path="match" element={<MatchPage />} />
-                <Route path="votes" element={staffPage(<MapVotesPage />, true)} />
-                <Route path="events" element={staffPage(<EventsPage />, true)} />
-                <Route path="audit" element={<AuditPage />} />
+                <Route path="votes" element={<ViewRedirect to="/match" view="voting" />} />
+                <Route path="events" element={<ViewRedirect to="/match" view="events" />} />
+                <Route path="audit" element={<ViewRedirect to="/activity" view="actions" />} />
+                <Route path="combat" element={<ViewRedirect to="/activity" view="combat" />} />
                 <Route path="settings" element={staffPage(<SettingsPage />, true)} />
                 <Route path="permissions" element={<PermissionsPage />} />
-                <Route path="combat" element={<CombatPage />} />
                 <Route path="applications" element={staffPage(<ApplicationsPage />, true)} />
                 <Route path="supporters" element={staffPage(<SupportersPage />)} />
                 <Route

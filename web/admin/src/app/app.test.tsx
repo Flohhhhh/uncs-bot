@@ -100,6 +100,12 @@ describe("React staff shell", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
+    expect(router.state.location.pathname).toBe("/activity");
+    // Selecting the Action history view again is harmless when the hub already opened it.
+    fireEvent.click(screen.getByText("Action history", { selector: "button" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
     expect(screen.getByText("No recorded staff actions")).toBeInTheDocument();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(20_000);
@@ -109,8 +115,21 @@ describe("React staff shell", () => {
     });
     expect(fetcher.mock.calls.filter(([url]) => url.endsWith("/audit"))).toHaveLength(3);
     expect(fetcher.mock.calls.some(([url]) => url.endsWith("/overview"))).toBe(false);
-    expect(document.title).toBe("Action history · The UNCs Admin");
+    expect(document.title).toBe("Server activity · The UNCs Admin");
     expect(screen.getByRole("heading", { level: 1 })).toHaveFocus();
+  });
+  it.each([
+    ["/audit?server=primary&id=receipt-1", "/activity", { server: "primary", id: "receipt-1", view: "actions" }],
+    ["/combat?server=primary", "/activity", { server: "primary", view: "combat" }],
+    ["/votes?server=primary", "/match", { server: "primary", view: "voting" }],
+    ["/events?server=primary", "/match", { server: "primary", view: "events" }],
+    ["/audit", "/activity", { view: "actions" }],
+  ])("redirects %s to its hub view and keeps the server", async (path, pathname, search) => {
+    mount(path);
+    await waitFor(() => expect(router.state.location.pathname).toBe(pathname));
+    expect(Object.fromEntries(new URLSearchParams(router.state.location.search))).toEqual(search);
+    // The old address is replaced, so Back does not bounce through the redirect.
+    expect(router.state.historyAction).toBe("REPLACE");
   });
   it("requires a fresh server check after returning from a records page", async () => {
     const fetcher = mount();
@@ -310,6 +329,7 @@ describe("React staff shell", () => {
           ),
         ),
     );
+    fireEvent.click(await screen.findByText("Action history", { selector: "button" }));
     await screen.findByText("receipt-unique");
     const search = screen.getByRole("searchbox");
     fireEvent.change(search, { target: { value: "receipt-unique" } });

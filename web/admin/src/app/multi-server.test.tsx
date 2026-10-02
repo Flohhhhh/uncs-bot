@@ -173,7 +173,7 @@ it("does not silently fall back when an unavailable server is in a deep link", a
   await screen.findByText("That server is unavailable or outside your staff access.");
   await waitFor(() => expect(fetcher.mock.calls).toHaveLength(2));
 });
-it("keeps map editing and voting links on the explicitly selected server", async () => {
+it("keeps map editing and the voting view on the explicitly selected server", async () => {
   const { router } = mount("/match?server=primary", async (url) =>
     url.endsWith("/map-votes")
       ? json({ enabled: false, votes: [], serverId: "primary" })
@@ -194,9 +194,16 @@ it("keeps map editing and voting links on the explicitly selected server", async
           ? json({ maps: [], experiences: [], lightings: [] })
           : json(overview("Primary")),
   );
-  const link = await screen.findByRole("link", { name: "Voting controls & history →" });
-  expect(link).toHaveAttribute("href", "/votes?server=primary");
   fireEvent.click(await screen.findByRole("button", { name: "Edit rotation" }));
   expect(screen.getByRole("button", { name: "Edit rotation" })).toHaveAttribute("aria-pressed", "true");
-  expect(router.state.location.search).toBe("?server=primary");
+  expect(new URLSearchParams(router.state.location.search).get("server")).toBe("primary");
+  // Older voting links land on the Match & maps voting view of the same server.
+  await act(async () => {
+    await router.navigate("/votes?server=primary");
+  });
+  await waitFor(() => expect(router.state.location.pathname).toBe("/match"));
+  expect(Object.fromEntries(new URLSearchParams(router.state.location.search))).toEqual({
+    server: "primary",
+    view: "voting",
+  });
 });
