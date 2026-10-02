@@ -1,5 +1,5 @@
 import type { MapSelection } from "../../../../../src/common/server-settings";
-import { mapLabel, modeLabel, lightingLabel, zoneLabel } from "../../../../../src/common/map-labels";
+import { mapLabel, modeLabel, lightingLabel, zoneLabel, isModeModifier } from "../../../../../src/common/map-labels";
 import type { Catalog } from "../../api/types";
 import { useResource } from "../../api/use-resource";
 import { useEffect } from "react";
@@ -19,6 +19,9 @@ export function MapPicker({
   const options = useResource<{ experiences: Catalog["experiences"]; zones: string[] | null }>(
     value.map ? `catalog/maps/${encodeURIComponent(value.map)}` : null,
   );
+  const modes = (options.data?.experiences ?? []).filter((entry) => !isModeModifier(entry.id));
+  const modifiers = (options.data?.experiences ?? []).filter((entry) => isModeModifier(entry.id));
+  const selectedModes = value.experiences.filter((id) => !isModeModifier(id));
   const unavailableModes =
     options.data && !options.loading && !options.error
       ? value.experiences.filter((id) => !options.data!.experiences.some((entry) => entry.id === id))
@@ -31,6 +34,7 @@ export function MapPicker({
     !options.loading &&
     !options.error &&
     !!options.data &&
+    selectedModes.length <= 1 &&
     !unavailableModes.length &&
     !savedZoneMissing &&
     (!value.lighting || catalog.lightings.some((entry) => entry.id === value.lighting));
@@ -77,24 +81,51 @@ export function MapPicker({
           ))}
         </select>
       </label>
+      <label>
+        Game mode
+        <select
+          value={selectedModes.length === 1 ? selectedModes[0] : ""}
+          disabled={disabled || options.loading || !!options.error || !value.map}
+          onChange={(event) =>
+            change({
+              ...value,
+              experiences: [event.target.value, ...value.experiences.filter(isModeModifier)].filter(Boolean),
+            })
+          }
+        >
+          <option value="">Map default</option>
+          {modes.map((entry) => (
+            <option key={entry.id} value={entry.id}>
+              {modeLabel(entry.id, entry.displayName)}
+            </option>
+          ))}
+          {selectedModes
+            .filter((id) => !modes.some((entry) => entry.id === id))
+            .map((id) => (
+              <option key={id} value={id}>
+                Unavailable: {modeLabel(id)}
+              </option>
+            ))}
+        </select>
+        {selectedModes.length > 1 && <small>Choose one game mode. Your saved selection contains more than one.</small>}
+      </label>
       <fieldset className="mode-choices">
-        <legend>Modes & modifiers</legend>
-        {(options.data?.experiences ?? []).map((entry) => (
+        <legend>Rules</legend>
+        {modifiers.map((entry) => (
           <label key={entry.id}>
             <input
               type="checkbox"
               checked={value.experiences.includes(entry.id)}
-              disabled={
-                disabled ||
-                options.loading ||
-                !!options.error ||
-                (!value.experiences.includes(entry.id) && value.experiences.length >= 10)
-              }
+              disabled={disabled || options.loading || !!options.error}
               onChange={(event) =>
                 change({
                   ...value,
                   experiences: event.target.checked
-                    ? [...value.experiences, entry.id]
+                    ? [
+                        ...(!selectedModes.length && modes.length === 1 ? [modes[0].id] : []),
+                        ...value.experiences,
+                        entry.id,
+                      ]
                     : value.experiences.filter((id) => id !== entry.id),
                 })
               }
@@ -102,7 +133,7 @@ export function MapPicker({
             {modeLabel(entry.id, entry.displayName)}
           </label>
         ))}
-        {unavailableModes.map((id) => (
+        {unavailableModes.filter(isModeModifier).map((id) => (
           <label key={id}>
             <input
               type="checkbox"
@@ -113,6 +144,7 @@ export function MapPicker({
             Unavailable: {modeLabel(id)}
           </label>
         ))}
+        <small>Leave both off for normal rules. Infantry only and Hardcore can be combined.</small>
         <small>
           {options.error ||
             (value.map

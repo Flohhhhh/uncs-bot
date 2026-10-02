@@ -89,12 +89,30 @@ it("does not silently fall back when an unavailable server is in a deep link", a
   await screen.findByText("That server is unavailable or outside your staff access.");
   await waitFor(() => expect(fetcher.mock.calls).toHaveLength(2));
 });
-it("preserves the server and opens Rotation from the match shortcut", async () => {
+it("keeps map editing and voting links on the explicitly selected server", async () => {
   const { router } = mount("/match?server=primary", async (url) =>
-    url.endsWith("/rotation") ? json({ mode: "Ordered", enabled: true, entries: [] }) : json(overview("Primary")),
+    url.endsWith("/map-votes")
+      ? json({ enabled: false, votes: [], serverId: "primary" })
+      : url.endsWith("/settings")
+        ? json({
+            revision: "r1",
+            fields: [],
+            rotation: {
+              mode: "Ordered",
+              enabled: true,
+              editable: true,
+              entries: [],
+              currentIndex: null,
+              currentMap: "Harbor",
+            },
+          })
+        : url.endsWith("/catalog")
+          ? json({ maps: [], experiences: [], lightings: [] })
+          : json(overview("Primary")),
   );
-  const link = await screen.findByRole("link", { name: "Edit rotation & queue next map →" });
-  expect(link).toHaveAttribute("href", "/settings?server=primary#rotation");
-  // The target is a real fragment, not a percent-encoded pathname.
+  const link = await screen.findByRole("link", { name: "Voting controls & history →" });
+  expect(link).toHaveAttribute("href", "/votes?server=primary");
+  fireEvent.click(await screen.findByRole("button", { name: "Edit rotation" }));
+  expect(screen.getByRole("button", { name: "Edit rotation" })).toHaveAttribute("aria-pressed", "true");
   expect(router.state.location.search).toBe("?server=primary");
 });

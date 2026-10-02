@@ -481,6 +481,9 @@ describe("launch storage on isolated PostgreSQL", () => {
     const vote = await openBallot();
     await votes.cast(vote.id, staff.id, 0, vote.guildId, vote.channelId, messageId);
     await votes.cast(vote.id, staff.id, 1, vote.guildId, vote.channelId, messageId);
+    expect(await votes.liveCounts([vote.id])).toEqual([{ voteId: vote.id, choice: 1, total: 1 }]);
+    expect(await votes.liveCounts([])).toEqual([]);
+    expect(await votes.liveCounts([randomUUID()])).toEqual([]);
     expect((await client.query("SELECT choice FROM map_vote_ballots")).rows).toEqual([{ choice: 1 }]);
     for (const [guild, channel, message, choice] of [
       ["other", vote.channelId, messageId, 0],

@@ -1,0 +1,49 @@
+import { render, screen } from "@testing-library/react";
+import { expect, it } from "vitest";
+import { VoteResults, type VoteList } from "./vote-status";
+const ballot: VoteList = {
+  enabled: true,
+  serverId: "event",
+  observedAt: "2026-10-02T04:00:00Z",
+  votes: [
+    {
+      id: "test-ballot",
+      serverId: "event",
+      serverName: "Event server",
+      actorName: "Staff",
+      reason: "Community choice",
+      state: "open",
+      winner: null,
+      choices: [
+        { map: "Kavkazi", experiences: ["KOTH_InfantryOnly"] },
+        { map: "Europe", experiences: [] },
+      ],
+      counts: [4, 2],
+      counted: true,
+      createdAt: "2026-10-02T03:55:00Z",
+      closesAt: "2026-10-02T04:05:00Z",
+      message: "Voting open.",
+      cancellation: null,
+      messageUrl: null,
+    },
+  ],
+};
+it("shows live per-choice totals and shares without claiming an open ballot has a winner", () => {
+  render(<VoteResults data={ballot} />);
+  expect(screen.getByText("4 votes")).toBeInTheDocument();
+  expect(screen.getByText("2 votes")).toBeInTheDocument();
+  expect(screen.getByRole("progressbar", { name: "Bakurani · Infantry only votes" })).toHaveAttribute("value", "4");
+  expect(screen.getByRole("progressbar", { name: "Ozeti · Map defaults votes" })).toHaveAttribute("max", "6");
+  expect(screen.queryByText(/Winner/)).not.toBeInTheDocument();
+});
+it("marks stale totals and distinguishes the last result from an active next-round vote", () => {
+  render(
+    <VoteResults
+      data={{ ...ballot, votes: [{ ...ballot.votes[0], state: "queued", winner: 0 }] }}
+      error="Read failed"
+    />,
+  );
+  expect(screen.getByText("Last map vote")).toBeInTheDocument();
+  expect(screen.getByRole("alert")).toHaveTextContent("last successful check");
+  expect(screen.getByText("Status unavailable")).toBeInTheDocument();
+});

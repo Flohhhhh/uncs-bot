@@ -210,7 +210,7 @@ function CombatView({
       {!data.connected && !data.trackingStartedAt && !data.totals.events ? (
         <Empty
           title={!data.enabled ? "Combat tracking is off" : "Waiting for the first combat events"}
-          detail="No statistics are available yet. The live game and xREALM's own killfeed can still be running."
+          detail="Statistics appear after the game delivers events to Gramps."
         />
       ) : (
         <>

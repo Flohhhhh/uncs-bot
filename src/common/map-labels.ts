@@ -5,9 +5,9 @@ import type { MapSelection } from "./server-settings";
 // corroborated by the live map-specific zone namespaces on 2026-10-01.
 const maps: Record<string, string> = { Kavkazi: "Bakurani", Europe: "Ozeti", NorthAmerica: "Zestafona" };
 const modes: Record<string, string> = {
-  Bakurani_KOTH_01: "Standard",
-  Madrid_KOTH_01: "Standard",
-  Detroit_KOTH_01: "Standard",
+  Bakurani_KOTH_01: "King of the Hill",
+  Madrid_KOTH_01: "King of the Hill",
+  Detroit_KOTH_01: "King of the Hill",
   KOTH: "King of the Hill",
   KOTH_InfantryOnly: "Infantry only",
   KOTH_Hardcore: "Hardcore",
@@ -26,6 +26,8 @@ const label = (names: Record<string, string>, id: string, displayName?: string) 
   (Object.hasOwn(names, id) ? names[id] : displayName) || id;
 export const mapLabel = (id: string, displayName?: string) => label(maps, id, displayName);
 export const modeLabel = (id: string, displayName?: string) => label(modes, id, displayName);
+// The official console separates the base game mode from these additive rules.
+export const isModeModifier = (id: string) => id === "KOTH_InfantryOnly" || id === "KOTH_Hardcore";
 export const lightingLabel = (id: string, displayName?: string) => label(lightings, id, displayName);
 export function zoneLabel(id: string) {
   if (id === "None") return "Map default";
