@@ -106,6 +106,7 @@ it("allows a ballot at a confirmed position without demanding an unreported game
   expect(screen.getByRole("button", { name: "Review ballot" })).toBeEnabled();
   expect(screen.queryByText(/Round timing is unavailable/)).not.toBeInTheDocument();
   expect(within(screen.getByRole("list", { name: "Ballot choices" })).getAllByRole("listitem")).toHaveLength(2);
+  expect(screen.queryByRole("link", { name: /Match & maps/ })).not.toBeInTheDocument();
   expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
 });
 it("shows automatic progress and keeps manual publication under staff override", async () => {
@@ -245,7 +246,7 @@ it("does not query settings or catalog when disabled", async () => {
   enabled = false;
   show();
   await screen.findByRole("heading", { name: "Discord map voting is off" });
-  expect(screen.getByRole("link", { name: "Open match & maps" })).toHaveAttribute("href", "/match?server=primary");
+  expect(screen.queryByRole("link")).not.toBeInTheDocument();
   expect(request.mock.calls.map(([path]) => path)).toEqual(["map-votes", "map-votes/controls"]);
 });
 it("recovers an initial voting-status failure with a read-only local retry", async () => {
@@ -407,6 +408,21 @@ it("keeps uncertain requests reviewable without offering an automatic retry", as
   await screen.findByText(/This request will not be sent again/);
   expect(screen.getByRole("button", { name: /Copy ballot receipt/ })).toBeInTheDocument();
   expect(request.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+});
+it("reports drafts to a page that shares them instead of clearing the page's warning", async () => {
+  const report = vi.fn();
+  const state = context();
+  render(
+    <AdminContext.Provider value={state}>
+      <MapVotesPage onUnsavedChange={report} />
+    </AdminContext.Provider>,
+    { wrapper: ({ children }) => <MemoryRouter>{children}</MemoryRouter> },
+  );
+  fireEvent.change(await screen.findByRole("combobox", { name: "Map" }), { target: { value: "Europe" } });
+  await waitFor(() => expect(report).toHaveBeenLastCalledWith(true));
+  fireEvent.click(screen.getByRole("button", { name: "Discard draft" }));
+  await waitFor(() => expect(report).toHaveBeenLastCalledWith(false));
+  expect(state.setUnsavedChanges).not.toHaveBeenCalled();
 });
 it("protects an unfinished selection and discards it explicitly", async () => {
   const { state } = show();

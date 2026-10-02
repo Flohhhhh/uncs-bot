@@ -2359,11 +2359,6 @@ dialog.sheet {
   font-size: 12px;
   margin-bottom: 6px;
 }
-.match-management {
-  display: grid;
-  gap: 24px;
-  margin-bottom: 24px;
-}
 
 .vote-results {
   list-style: none;
@@ -2487,5 +2482,103 @@ dialog fieldset {
 }
 
 /* == A: match & settings == */
+.match-now {
+  margin-bottom: var(--space-5);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+}
+.match-summary {
+  display: flex;
+  margin: 0;
+}
+.match-summary > div {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: var(--space-4);
+}
+.match-summary > div:first-child {
+  flex-grow: 1.6;
+}
+.match-summary > div + div {
+  border-left: 1px solid var(--line);
+}
+.match-summary dt {
+  margin-bottom: var(--space-1);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 650;
+}
+.match-summary dd {
+  margin: 0;
+}
+.match-summary strong {
+  display: block;
+  font-size: var(--text-md);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.match-summary small {
+  display: block;
+  margin-top: var(--space-1);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+.match-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--line);
+}
+.match-controls-divider {
+  align-self: stretch;
+  width: 1px;
+  margin: 0 var(--space-2);
+  background: var(--line);
+}
+.match-controls .danger-outline {
+  color: var(--bad);
+  background: transparent;
+  border-color: var(--bad-line);
+}
+.match-controls .danger-outline:hover:not(:disabled) {
+  background: var(--bad-bg);
+  border-color: var(--bad);
+}
+@media (max-width: 740px) {
+  .match-summary {
+    flex-wrap: wrap;
+  }
+  .match-summary > div {
+    padding: var(--space-3) var(--space-4);
+  }
+  .match-summary > div:first-child {
+    flex-basis: 100%;
+  }
+  .match-summary > div + div {
+    border-left: 0;
+    border-top: 1px solid var(--line);
+  }
+  .match-summary > div + div + div {
+    border-left: 1px solid var(--line);
+  }
+  .match-tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+  }
+  .match-tabs .button {
+    padding-inline: var(--space-3);
+  }
+  .match-controls-divider {
+    flex-basis: 100%;
+    width: auto;
+    height: 0;
+    margin: 0;
+    background: none;
+  }
+}
 
 /* == B: operations == */

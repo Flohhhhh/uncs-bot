@@ -119,6 +119,20 @@ it("rechecks round timing when opening a start review and blocks a missing clock
   await waitFor(() => expect(submit).toBeEnabled());
   expect(within(screen.getByRole("dialog")).queryByRole("textbox")).not.toBeInTheDocument();
 });
+it("reports its draft to a page that shares it instead of clearing the page's warning", async () => {
+  const report = vi.fn();
+  const state = context();
+  render(
+    <AdminContext.Provider value={state}>
+      <EventsPage onUnsavedChange={report} />
+    </AdminContext.Provider>,
+  );
+  await selectTeams();
+  expect(report).toHaveBeenLastCalledWith(true);
+  fireEvent.click(screen.getByRole("button", { name: "Discard draft" }));
+  expect(report).toHaveBeenLastCalledWith(false);
+  expect(state.setUnsavedChanges).not.toHaveBeenCalled();
+});
 it("reviews a frozen start request without typing and waits for the separate confirmation button", async () => {
   const { state } = show();
   await selectTeams();

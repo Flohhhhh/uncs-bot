@@ -18,6 +18,7 @@ import { errorMessage, rejectionState } from "../actions/policy";
 import { MapPicker } from "../actions/map-picker";
 import { ServerIdentityReadout } from "./server-identity";
 import { SavedRotationCheck } from "./rotation-check";
+import { nextRoundSummary } from "./next-round";
 import type { RotationRow } from "./rotation-queue";
 import { mapLabel, selectionLabel, sameMap } from "../../../../../src/common/map-labels";
 const RotationQueue = lazy(() => import("./rotation-queue").then((module) => ({ default: module.RotationQueue })));
@@ -137,6 +138,8 @@ export function RotationEditor({
   active,
   onUnsavedChange,
   initialView = "rotation",
+  view: chosenView,
+  onEditingChange,
 }: {
   snapshot: SettingsSnapshot;
   reload: () => void;
@@ -144,8 +147,14 @@ export function RotationEditor({
   active: boolean;
   onUnsavedChange: (value: boolean) => void;
   initialView?: "next" | "rotation";
+  /** Set when the page switches views itself, as Match & maps does; hides the editor's own switch and summary. */
+  view?: "next" | "rotation";
+  /** Reports an entry edit in progress, which keeps the next-round view closed. */
+  onEditingChange?: (editing: boolean) => void;
 }) {
-  const [view, setView] = useState(initialView);
+  const [ownView, setView] = useState(initialView);
+  const embedded = chosenView !== undefined;
+  const view = chosenView ?? ownView;
   const { data: catalog, error, loading, refresh: refreshCatalog } = useResource<Catalog>(active ? "catalog" : null);
   const savedRows = useMemo(
     () => snapshot.rotation.entries.map((entry, index) => ({ id: snapshot.revision + ":" + index, entry })),
@@ -164,6 +173,7 @@ export function RotationEditor({
   const locked = disabled || !snapshot.rotation.editable || changedElsewhere || !!review;
   const selectionChanged = editIndex !== null && JSON.stringify(selection) !== JSON.stringify(entries[editIndex]);
   useEffect(() => onUnsavedChange(!!draft || selectionChanged), [draft, selectionChanged, onUnsavedChange]);
+  useEffect(() => onEditingChange?.(editIndex !== null), [editIndex, onEditingChange]);
   function update(next: RotationRow[]) {
     if (locked) return;
     setDraft(
@@ -177,17 +187,12 @@ export function RotationEditor({
     );
   }
   const canAdd = !locked && !loading && !error && ready && editIndex === null && rows.length < 100;
-  const { currentIndex, nextIndex } = snapshot.rotation;
+  const { currentIndex } = snapshot.rotation;
   const ordered = snapshot.rotation.enabled && snapshot.rotation.mode === "Ordered";
   const currentMatches =
     currentIndex !== null && sameMap(snapshot.rotation.entries[currentIndex]?.map, snapshot.rotation.currentMap);
   // With no running entry named, the game still reports its own next entry; queuing waits for that round.
-  const gameNext = currentIndex === null && nextIndex !== null ? snapshot.rotation.entries[nextIndex] : undefined;
-  const nextEntry = !ordered
-    ? undefined
-    : currentMatches
-      ? snapshot.rotation.entries[(currentIndex + 1) % snapshot.rotation.entries.length]
-      : gameNext;
+  const nextEntry = nextRoundSummary(snapshot).entry;
   function add(index: number) {
     if (!canAdd) return;
     const next = [...rows];
@@ -196,7 +201,7 @@ export function RotationEditor({
   }
   return (
     <Card
-      title={view === "next" ? "Next round" : "Map rotation"}
+      title={view === "next" ? "Queue the next round" : "Map rotation"}
       subtitle={
         view === "next"
           ? "Choose what plays after this match."
@@ -205,37 +210,41 @@ export function RotationEditor({
       badge={<Badge>{snapshot.rotation.mode || "Unknown"}</Badge>}
     >
       <div className="card-body">
-        <div className="settings-tabs" role="group" aria-label="Map planning">
-          <button
-            type="button"
-            className="button secondary"
-            aria-pressed={view === "next"}
-            disabled={editIndex !== null}
-            onClick={() => setView("next")}
-          >
-            Next round
-          </button>
-          <button
-            type="button"
-            className="button secondary"
-            aria-pressed={view === "rotation"}
-            onClick={() => setView("rotation")}
-          >
-            Edit rotation
-          </button>
-        </div>
-        <div className="map-plan-summary">
-          <div>
-            <span>Playing now</span>
-            <strong>{mapLabel(snapshot.rotation.currentMap) || "Not supplied"}</strong>
-          </div>
-          <div>
-            <span>Saved next round</span>
-            <strong>
-              {nextEntry ? selectionLabel(nextEntry) : ordered ? "Position not confirmed" : "No fixed next round"}
-            </strong>
-          </div>
-        </div>
+        {!embedded && (
+          <>
+            <div className="settings-tabs" role="group" aria-label="Map planning">
+              <button
+                type="button"
+                className="button secondary"
+                aria-pressed={view === "next"}
+                disabled={editIndex !== null}
+                onClick={() => setView("next")}
+              >
+                Next round
+              </button>
+              <button
+                type="button"
+                className="button secondary"
+                aria-pressed={view === "rotation"}
+                onClick={() => setView("rotation")}
+              >
+                Edit rotation
+              </button>
+            </div>
+            <div className="map-plan-summary">
+              <div>
+                <span>Playing now</span>
+                <strong>{mapLabel(snapshot.rotation.currentMap) || "Not supplied"}</strong>
+              </div>
+              <div>
+                <span>Saved next round</span>
+                <strong>
+                  {nextEntry ? selectionLabel(nextEntry) : ordered ? "Position not confirmed" : "No fixed next round"}
+                </strong>
+              </div>
+            </div>
+          </>
+        )}
         {snapshot.rotation.note && <p className="notice warning">{snapshot.rotation.note}</p>}
         {ordered && !currentMatches && (
           <div className="notice warning">

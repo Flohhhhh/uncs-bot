@@ -1,9 +1,7 @@
 import type { mapVoteView } from "../../../../../src/map-votes/map-votes.types";
 import type { AutomaticVoteStatus } from "../../../../../src/common/map-vote-automation";
 import { selectionLabel } from "../../../../../src/common/map-labels";
-import { useResource } from "../../api/use-resource";
 import { Badge, Card, date } from "../../components/ui";
-import { ServerLink as Link } from "../../app/server-link";
 
 export type Vote = ReturnType<typeof mapVoteView>;
 export type VoteList = {
@@ -24,9 +22,30 @@ export const voteStateLabels = {
   needs_review: "Needs review",
 };
 
+const activeStates: readonly string[] = ["publishing", "open", "closing", "needs_review"];
+/** The ballot that still needs attention, if any. */
+export function activeVote(data: VoteList) {
+  return data.votes.find((item) => activeStates.includes(item.state));
+}
+const shortTime = (value: string) => new Date(value).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+/** One short line for summaries: "None", "Off", or "Open · ends 12:52". */
+export function voteSummary(data: VoteList | null | undefined, error = ""): { label: string; kind: string } {
+  if (!data) return { label: error ? "Unavailable" : "Checking…", kind: error ? "warn" : "neutral" };
+  // A failed refresh never presents the last answer as current.
+  if (error) return { label: "Unavailable", kind: "warn" };
+  if (!data.enabled) return { label: "Off", kind: "neutral" };
+  const vote = activeVote(data);
+  if (!vote) return { label: "None", kind: "neutral" };
+  if (vote.state === "open")
+    return {
+      label: vote.automation ? "Open · ends at 95 points" : `Open · ends ${shortTime(vote.closesAt)}`,
+      kind: "good",
+    };
+  return { label: voteStateLabels[vote.state], kind: vote.state === "needs_review" ? "warn" : "neutral" };
+}
+
 export function VoteResults({ data, error = "" }: { data: VoteList; error?: string }) {
-  const vote =
-    data.votes.find((item) => ["publishing", "open", "closing", "needs_review"].includes(item.state)) ?? data.votes[0];
+  const vote = activeVote(data) ?? data.votes[0];
   const total = vote?.counted ? vote.counts.reduce((sum, count) => sum + count, 0) : null;
   const historical = vote && ["queued", "no_votes", "tied", "cancelled"].includes(vote.state);
   return (
@@ -106,28 +125,5 @@ export function VoteResults({ data, error = "" }: { data: VoteList; error?: stri
         )}
       </div>
     </Card>
-  );
-}
-
-export function MapVoteStatus() {
-  const { data, error, loading, refresh } = useResource<VoteList>("map-votes");
-  return (
-    <section aria-label="Voting status">
-      {data ? (
-        <VoteResults data={data} error={error} />
-      ) : (
-        <p role="status">{error ? "Voting status could not be loaded." : "Loading voting status…"}</p>
-      )}
-      <div className="toolbar">
-        <Link className="text-button" to="/votes">
-          Voting controls & history →
-        </Link>
-        {error && (
-          <button className="button secondary small" disabled={loading} onClick={refresh}>
-            Retry votes
-          </button>
-        )}
-      </div>
-    </section>
   );
 }

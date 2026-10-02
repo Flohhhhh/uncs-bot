@@ -190,7 +190,15 @@ function EventReview({
   );
 }
 
-function EventDraft({ review, statusUnavailable }: { review: (draft: Draft) => void; statusUnavailable: boolean }) {
+function EventDraft({
+  review,
+  statusUnavailable,
+  onUnsavedChange,
+}: {
+  review: (draft: Draft) => void;
+  statusUnavailable: boolean;
+  onUnsavedChange: (value: boolean) => void;
+}) {
   const admin = useAdmin();
   const settings = useResource<SettingsSnapshot>("settings"),
     roster = useResource<Overview>("overview");
@@ -203,11 +211,10 @@ function EventDraft({ review, statusUnavailable }: { review: (draft: Draft) => v
   });
   const [options, setOptions] = useState(defaults),
     [revision, setRevision] = useState<string | null>(null);
-  const { setUnsavedChanges } = admin;
   useEffect(() => {
-    setUnsavedChanges(revision !== null);
-    return () => setUnsavedChanges(false);
-  }, [revision, setUnsavedChanges]);
+    onUnsavedChange(revision !== null);
+    return () => onUnsavedChange(false);
+  }, [revision, onUnsavedChange]);
   const change = (update: Partial<EventOptions>) => {
     setRevision(revision ?? settings.data?.revision ?? null);
     setOptions({ ...options, ...update });
@@ -422,7 +429,8 @@ function EventOperations({ event, close }: { event: Event; close: () => void }) 
   );
 }
 
-export function EventsPage() {
+/** Optional 50v50 events. `onUnsavedChange` reports this page's draft when it shares a page. */
+export function EventsPage({ onUnsavedChange }: { onUnsavedChange?: (value: boolean) => void } = {}) {
   const admin = useAdmin();
   const resource = useResource<Events>(admin.me.role === "admin" ? "events" : null);
   const [review, setReview] = useState<Review | null>(null);
@@ -460,6 +468,7 @@ export function EventsPage() {
       {errorNotice}
       {!active && (
         <EventDraft
+          onUnsavedChange={onUnsavedChange ?? admin.setUnsavedChanges}
           statusUnavailable={resource.loading || !!resource.error}
           review={(draft) => setReview({ kind: "start", draft })}
         />

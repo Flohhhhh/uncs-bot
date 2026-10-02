@@ -9,7 +9,6 @@ import { useGameApi } from "../../api/server-client";
 import { useResource } from "../../api/use-resource";
 import type { Catalog } from "../../api/types";
 import { useGameAdmin as useAdmin } from "../../app/context";
-import { ServerLink as Link } from "../../app/server-link";
 import { Badge, Card, Empty, Modal, date } from "../../components/ui";
 import { CopyValue, DataTable } from "../../components/data-table";
 import { MapPicker } from "../actions/map-picker";
@@ -193,11 +192,12 @@ function VotingSetupCheck() {
   );
 }
 
-export function MapVotesPage() {
+/** Ballots, results and voting settings. `onUnsavedChange` reports this page's drafts when it shares a page. */
+export function MapVotesPage({ onUnsavedChange }: { onUnsavedChange?: (value: boolean) => void } = {}) {
   const admin = useAdmin();
   const [policyDirty, setPolicyDirty] = useState(false);
   const [ballotDirty, setBallotDirty] = useState(false);
-  const { setUnsavedChanges } = admin;
+  const setUnsavedChanges = onUnsavedChange ?? admin.setUnsavedChanges;
   useEffect(() => {
     setUnsavedChanges(policyDirty || ballotDirty);
     return () => setUnsavedChanges(false);
@@ -226,15 +226,10 @@ export function MapVotesPage() {
         <>
           <Card
             title={resource.error ? "Voting status unavailable" : "Discord map voting is off"}
-            subtitle="You can still choose maps manually."
+            subtitle="You can still queue the next round yourself."
             badge={<Badge kind={resource.error ? "warn" : "neutral"}>{resource.error ? "Unavailable" : "OFF"}</Badge>}
           >
             <div className="card-body">
-              <p>
-                <Link className="button primary" to="/match">
-                  Open match &amp; maps
-                </Link>
-              </p>
               <details>
                 <summary>How to enable voting</summary>
                 <p>
@@ -313,11 +308,6 @@ function EnabledMapVotes({
   }
   return (
     <>
-      <p>
-        <Link className="text-button" to="/match">
-          ← Match &amp; maps
-        </Link>
-      </p>
       <VoteResults data={data} error={error} />
       <details open={!data.automatic?.enabled}>
         <summary>{data.automatic?.enabled ? "Staff override" : "Manual ballot"}</summary>
