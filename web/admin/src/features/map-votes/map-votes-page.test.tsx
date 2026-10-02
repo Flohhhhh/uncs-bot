@@ -119,7 +119,7 @@ it("shows automatic progress and keeps manual publication under staff override",
   );
   show();
   expect(await screen.findByText("Automatic voting · Waiting for the next position.")).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Review ballot" })).not.toBeVisible();
+  expect(await screen.findByRole("button", { name: "Review ballot" })).not.toBeVisible();
   fireEvent.click(screen.getByText("Staff override"));
   expect(screen.getByRole("button", { name: "Review ballot" })).toBeVisible();
   expect(request.mock.calls.some(([, options]) => options?.method === "POST")).toBe(false);
