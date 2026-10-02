@@ -1,12 +1,22 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { and, desc, eq, gt, lt, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, lt, not, sql } from "drizzle-orm";
 import { DATABASE, type Database } from "../database/database.types";
 import { adminActions, adminSessions } from "../database/schema";
 import type { ActionResult, AdminAction, Staff } from "./admin.types";
 import { LEGACY_SERVER_ID } from "../common/game-server";
 
+/** Audit actor for automatic welcome and round messages. */
+export const COMMUNITY_MESSAGES_ACTOR_ID = "system:server-community";
+
 // Existing deployment records predate server selection and belong to its original server.
 const actionServer = sql<string>`coalesce(${adminActions.details}->>'serverId', ${LEGACY_SERVER_ID})`;
+// An acknowledged automatic message is a delivery receipt, not activity for staff to review.
+// Failed, unknown and unfinished deliveries remain notable.
+const routineDelivery = and(
+  eq(adminActions.actorId, COMMUNITY_MESSAGES_ACTOR_ID),
+  inArray(adminActions.action, ["message", "broadcast"]),
+  inArray(adminActions.state, ["accepted", "applied"]),
+)!;
 
 const auditFields = {
   id: adminActions.id,
@@ -67,11 +77,12 @@ export class AdminStore {
       .where(eq(adminActions.id, id));
   }
 
-  async history(serverId = LEGACY_SERVER_ID) {
+  /** Newest 100 receipts. `notable` excludes routine deliveries before the limit so they cannot crowd out others. */
+  async history(serverId = LEGACY_SERVER_ID, { notable = false } = {}) {
     return this.db
       .select(auditFields)
       .from(adminActions)
-      .where(eq(actionServer, serverId))
+      .where(and(eq(actionServer, serverId), notable ? not(routineDelivery) : undefined))
       .orderBy(desc(adminActions.createdAt))
       .limit(100);
   }

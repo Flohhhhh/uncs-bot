@@ -34,6 +34,7 @@ export class AdminService {
       catalog: () => game().catalog(),
       rotation: () => game().rotation(),
       audit: () => this.store.history(id),
+      "audit-notable": () => this.store.history(id, { notable: true }),
       "game-log": () => game().gameLog(),
       "server-identity": () => game().identity(),
       "rotation-check": () => game().checkRotation(),

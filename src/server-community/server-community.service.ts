@@ -1,7 +1,7 @@
 import { Injectable, Logger, type OnApplicationBootstrap, type OnModuleDestroy } from "@nestjs/common";
 import { Client } from "discord.js";
 import { createHash, randomUUID } from "node:crypto";
-import { AdminStore } from "../admin/admin.store";
+import { AdminStore, COMMUNITY_MESSAGES_ACTOR_ID } from "../admin/admin.store";
 import { actionSchema, type ActionResult, type AdminAction, type Staff } from "../admin/admin.types";
 import { RconError, WardogsClient } from "../admin/wardogs.client";
 import { EnvService } from "../env/env.service";
@@ -11,7 +11,7 @@ import type { CommunityMessagesStatus } from "../common/community-messages";
 import { initialCommunityState, observeCommunity, statusCard, type CommunitySnapshot } from "./community-state";
 
 const SYSTEM_ACTOR: Staff = {
-  id: "system:server-community",
+  id: COMMUNITY_MESSAGES_ACTOR_ID,
   name: "Gramps community messages",
   role: "admin",
   csrf: "",

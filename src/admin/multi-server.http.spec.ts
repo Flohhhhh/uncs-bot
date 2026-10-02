@@ -206,6 +206,10 @@ describe("two-server HTTP isolation", () => {
     expect((await read(`servers/east/audit/${action.id}`)).body.record.details.serverId).toBe("east");
     expect((await read(`servers/central/audit/${action.id}`)).body.record).toBeNull();
     expect((await read("servers/central/audit")).body).toEqual([]);
+    expect((await read("servers/east/audit-notable")).body).toHaveLength(1);
+    expect(store.history).toHaveBeenLastCalledWith("east", { notable: true });
+    expect((await read("servers/central/audit-notable")).body).toEqual([]);
+    expect(store.history).toHaveBeenLastCalledWith("central", { notable: true });
   });
   it("keeps public identity reads and caches server scoped without issuing actions", async () => {
     centralAccess = "viewer";
