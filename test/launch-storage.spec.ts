@@ -733,6 +733,86 @@ describe("launch storage on isolated PostgreSQL", () => {
     ).toMatchObject({ state: "applied", completed_at: expect.any(Date) });
   });
 
+  it("recovers an interrupted approval by readback and retains a later original receipt without overwriting it", async () => {
+    const record = (await applications.create(applicationInput()))!;
+    const actionId = randomUUID();
+    await applications.claim(record.id, { id: actionId, reason: "Original review" }, "approve", staff);
+    const reopened = workers[0].applications;
+    expect(await reopened.get(record.id, "event")).toBeUndefined();
+    const previous = (await reopened.get(record.id, "primary"))!;
+    expect(previous.status).toBe("processing");
+    const recheck = { id: randomUUID(), reason: "Read existing access" };
+    const result = await reopened.finishRecheck(previous, recheck, staff, {
+      state: "applied",
+      message: "Live access confirmed",
+    });
+    expect(result).toMatchObject({ status: "approved", actionId, reviewId: recheck.id, reviewKind: "recheck" });
+    await expect(
+      applications.finishApproval(record.id, actionId, { state: "unknown", message: "Original response lost" }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(await applications.own(record.discordUserId)).toMatchObject({
+      status: "approved",
+      reviewId: recheck.id,
+      lastActionMessage: "Live access confirmed",
+    });
+    const history = await client.query(
+      "SELECT id, state, completed_at FROM whitelist_application_reviews WHERE application_id = $1",
+      [record.id],
+    );
+    expect(history.rows).toEqual(
+      expect.arrayContaining([
+        { id: actionId, state: "unknown", completed_at: expect.any(Date) },
+        { id: recheck.id, state: "applied", completed_at: expect.any(Date) },
+      ]),
+    );
+  });
+
+  it("rejects stale readbacks and rolls back their receipts if approval completed during the check", async () => {
+    const record = (await applications.create(applicationInput()))!;
+    const approvalId = randomUUID();
+    await applications.claim(record.id, { id: approvalId, reason: "Original review" }, "approve", staff);
+    const previous = (await applications.get(record.id, "primary"))!;
+    await applications.finishApproval(record.id, approvalId, { state: "applied", message: "Original confirmation" });
+    const recheck = { id: randomUUID(), reason: "Read existing access" };
+    await expect(
+      workers[0].applications.finishRecheck(previous, recheck, staff, { state: "pending", message: "Older read" }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(await applications.own(record.discordUserId)).toMatchObject({ status: "approved", reviewId: approvalId });
+    expect(
+      (await client.query("SELECT id FROM whitelist_application_reviews WHERE id = $1", [recheck.id])).rowCount,
+    ).toBe(0);
+  });
+
+  it("records one of two concurrent readbacks and leaves no losing receipt or new grant", async () => {
+    const record = (await applications.create(applicationInput()))!;
+    const approvalId = randomUUID();
+    await applications.claim(record.id, { id: approvalId, reason: "Original review" }, "approve", staff);
+    const previous = (await applications.get(record.id, "primary"))!;
+    const first = { id: randomUUID(), reason: "First read" };
+    const second = { id: randomUUID(), reason: "Second read" };
+    const results = await overlap(
+      "whitelist_applications",
+      ({ applications }) =>
+        applications.finishRecheck(previous, first, staff, { state: "pending", message: "Not confirmed" }),
+      ({ applications }) =>
+        applications.finishRecheck(previous, second, staff, { state: "unknown", message: "Read unavailable" }),
+    );
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const current = (await applications.own(record.discordUserId))!;
+    expect(current).toMatchObject({ status: "needs_review", actionId: approvalId });
+    expect([first.id, second.id]).toContain(current.reviewId);
+    const history = await client.query(
+      "SELECT id FROM whitelist_application_reviews WHERE application_id = $1 AND kind = 'recheck'",
+      [record.id],
+    );
+    expect(history.rows).toEqual([{ id: current.reviewId }]);
+    const final = await applications.finishRecheck(current, { id: randomUUID(), reason: "Fresh read" }, staff, {
+      state: "applied",
+      message: "Confirmed",
+    });
+    expect(final).toMatchObject({ status: "approved", actionId: approvalId });
+  });
+
   it("revokes stored sessions and retains durable action receipts across store instances", async () => {
     const tokenHash = "d".repeat(64);
     await admin.createSession({

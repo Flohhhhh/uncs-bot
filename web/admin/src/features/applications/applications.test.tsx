@@ -80,7 +80,7 @@ it("waits for a refreshed list before freezing an application for review", async
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   await act(async () => refreshed.resolve({ applications: [{ ...record, status: "processing" }] }));
   fireEvent.click(screen.getByRole("button", { name: "View request" }));
-  expect(within(screen.getByRole("dialog")).getByText("Processing")).toBeInTheDocument();
+  expect(within(screen.getByRole("dialog")).getByText("Awaiting confirmation")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Review approval" })).not.toBeInTheDocument();
   expect(postCalls()).toHaveLength(0);
 });
@@ -181,7 +181,7 @@ it.each(["pending", "unknown", "applied"] as const)(
   },
 );
 
-it("offers only read-only recheck for an uncertain grant and no actions for processing", async () => {
+it("offers only read-only recheck for uncertain grants, including interrupted processing", async () => {
   request.mockResolvedValue({ applications: [{ ...record, status: "needs_review" }] });
   const view = render(page());
   fireEvent.click(await screen.findByRole("button", { name: "View request" }));
@@ -208,15 +208,22 @@ it("offers only read-only recheck for an uncertain grant and no actions for proc
   view.rerender(page({ ...context, refreshVersion: 1 }));
   await waitFor(() =>
     expect(
-      within(screen.getByRole("table", { name: "Community requests" })).getByText("Processing"),
+      within(screen.getByRole("table", { name: "Community requests" })).getByText("Awaiting confirmation"),
     ).toBeInTheDocument(),
   );
   fireEvent.click(screen.getByRole("button", { name: "View request" }));
   expect(
     within(screen.getByRole("dialog")).queryByRole("button", {
-      name: /Review approval|Decline request|Recheck live whitelist/,
+      name: /Review approval|Decline request/,
     }),
   ).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Recheck live whitelist" }));
+  fireEvent.click(screen.getByRole("button", { name: "Check running whitelist" }));
+  await screen.findByRole("heading", { name: "Application needs review" });
+  expect(postCalls().map(([path]) => path)).toEqual([
+    `applications/${record.id}/recheck`,
+    `applications/${record.id}/recheck`,
+  ]);
 });
 
 it("a failed mutation cannot be submitted again from its review", async () => {
