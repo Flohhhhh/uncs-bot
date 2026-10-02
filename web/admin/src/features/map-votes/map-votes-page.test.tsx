@@ -4,7 +4,7 @@ import { MemoryRouter } from "react-router-dom";
 import { MapVotesPage } from "./map-votes-page";
 import { api } from "../../api/client";
 import { AdminContext } from "../../app/context";
-import { context } from "../players/test-fixtures";
+import { context, overview } from "../players/test-fixtures";
 vi.mock("../../api/client", () => ({ api: vi.fn() }));
 const request = vi.mocked(api);
 const settings = {
@@ -33,15 +33,23 @@ const ballot = {
 };
 let enabled: boolean;
 let votes: (typeof ballot)[];
+let matchSeconds: number | undefined;
 beforeEach(() => {
   vi.clearAllMocks();
   enabled = true;
   votes = [];
+  matchSeconds = 120;
   settings.revision = "r1";
   request.mockImplementation(async (path, init) => {
     if (init?.method === "POST") return { ...ballot, message: "Voting is open." } as never;
     if (path === "map-votes") return { enabled, serverId: "primary", votes } as never;
     if (path === "settings") return structuredClone(settings) as never;
+    if (path === "overview") {
+      const value = overview();
+      value.status.map = "Kavkazi";
+      value.status.matchSeconds = matchSeconds;
+      return value as never;
+    }
     if (path === "catalog")
       return {
         maps: [{ id: "Kavkazi" }, { id: "Europe" }, { id: "Islands" }, { id: "Desert" }],
@@ -68,6 +76,99 @@ async function choose(map: string) {
   await waitFor(() => expect(screen.getByRole("button", { name: "Add map option" })).toBeEnabled());
   fireEvent.click(screen.getByRole("button", { name: "Add map option" }));
 }
+it("keeps ballot choices but blocks review until round timing is available", async () => {
+  matchSeconds = undefined;
+  show();
+  await choose("Europe");
+  await choose("Islands");
+  expect(screen.getByRole("button", { name: "Review ballot" })).toBeDisabled();
+  expect(screen.getByText(/Round timing is unavailable/)).toBeInTheDocument();
+  matchSeconds = 125;
+  fireEvent.click(screen.getByRole("button", { name: "Check round timing" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Review ballot" })).toBeEnabled());
+  expect(within(screen.getByRole("list", { name: "Ballot choices" })).getAllByRole("listitem")).toHaveLength(2);
+  expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+});
+it("checks timing again in review and blocks pending, failed and missing-clock responses", async () => {
+  show();
+  await choose("Europe");
+  await choose("Islands");
+  const fallback = request.getMockImplementation()!;
+  let rejectTiming!: (error: Error) => void;
+  request.mockImplementation((path, init) =>
+    path === "overview"
+      ? new Promise((_, reject) => {
+          rejectTiming = reject;
+        })
+      : fallback(path, init),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Review ballot" }));
+  const dialog = within(screen.getByRole("dialog"));
+  const publish = dialog.getByRole("button", { name: "Publish ballot" });
+  expect(publish).toBeDisabled();
+  fireEvent.submit(publish.closest("form")!);
+  rejectTiming(new Error("Game status could not be read"));
+  await dialog.findByText("Game status could not be read");
+  expect(publish).toBeDisabled();
+  fireEvent.submit(publish.closest("form")!);
+  request.mockImplementation(fallback);
+  matchSeconds = undefined;
+  fireEvent.click(dialog.getByRole("button", { name: "Check round timing" }));
+  await dialog.findByText(/Round timing is unavailable/);
+  expect(publish).toBeDisabled();
+  fireEvent.submit(publish.closest("form")!);
+  matchSeconds = 125;
+  fireEvent.click(dialog.getByRole("button", { name: "Check round timing" }));
+  await waitFor(() => expect(publish).toBeEnabled());
+  expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+  fireEvent.click(dialog.getByRole("button", { name: "Back" }));
+  expect(within(screen.getByRole("list", { name: "Ballot choices" })).getAllByRole("listitem")).toHaveLength(2);
+});
+it("blocks an open publish review when ballot-history refresh fails", async () => {
+  const { state, rerender } = show();
+  await choose("Europe");
+  await choose("Islands");
+  fireEvent.click(screen.getByRole("button", { name: "Review ballot" }));
+  const publish = screen.getByRole("button", { name: "Publish ballot" });
+  await waitFor(() => expect(publish).toBeEnabled());
+  const fallback = request.getMockImplementation()!;
+  request.mockImplementation(async (path, init) => {
+    if (path === "map-votes" && init?.method !== "POST") throw new Error("Ballot history unavailable");
+    return fallback(path, init);
+  });
+  rerender(
+    <AdminContext.Provider value={{ ...state, refreshVersion: 1 }}>
+      <MapVotesPage />
+    </AdminContext.Provider>,
+  );
+  await screen.findByText("Ballot history unavailable");
+  expect(publish).toBeDisabled();
+  expect(within(screen.getByRole("dialog")).getByText(/Refresh ballot history/)).toBeInTheDocument();
+  fireEvent.submit(publish.closest("form")!);
+  expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+});
+it("labels retained ballot history and allows closing it without a game read after a refresh failure", async () => {
+  votes = [ballot];
+  const { state, rerender } = show();
+  await screen.findByRole("button", { name: "Close ballot" });
+  const fallback = request.getMockImplementation()!;
+  request.mockImplementation(async (path, init) => {
+    if (path === "map-votes" && init?.method !== "POST") throw new Error("Ballot history unavailable");
+    return fallback(path, init);
+  });
+  rerender(
+    <AdminContext.Provider value={{ ...state, refreshVersion: 1 }}>
+      <MapVotesPage />
+    </AdminContext.Provider>,
+  );
+  await screen.findByText("Ballot history unavailable");
+  expect(screen.getByText(/Showing last-known ballots/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Close ballot" }));
+  fireEvent.click(screen.getByRole("button", { name: "Confirm close" }));
+  await screen.findByText("Voting is open.");
+  expect(request.mock.calls.some(([path]) => ["overview", "settings", "catalog"].includes(path))).toBe(false);
+  expect(request.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+});
 it("cannot add a ballot choice while its map options are pending or unavailable", async () => {
   const original = request.getMockImplementation()!;
   let reject!: (error: Error) => void;
@@ -119,6 +220,7 @@ it("reviews a frozen ballot without extra typing and sends exactly one request",
   expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
   expect(screen.queryByRole("textbox", { name: "Reason" })).not.toBeInTheDocument();
   const publish = within(dialog).getByRole("button", { name: "Publish ballot" });
+  await waitFor(() => expect(publish).toBeEnabled());
   fireEvent.click(publish);
   fireEvent.click(publish);
   await within(dialog).findByText("Voting is open.");
@@ -144,6 +246,7 @@ it("keeps uncertain requests reviewable without offering an automatic retry", as
   await choose("Islands");
   fireEvent.click(screen.getByRole("button", { name: "Review ballot" }));
   expect(screen.queryByRole("textbox", { name: "Reason" })).not.toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Publish ballot" })).toBeEnabled());
   fireEvent.click(screen.getByRole("button", { name: "Publish ballot" }));
   await screen.findByText(/This request will not be sent again/);
   expect(screen.getByRole("button", { name: /Copy ballot receipt/ })).toBeInTheDocument();

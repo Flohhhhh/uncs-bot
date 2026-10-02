@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import type { eventView, EventOptions } from "../../../../../src/server-events/server-events.types";
 import type { SettingsSnapshot } from "../../../../../src/common/server-settings";
-import { roundStamp } from "../../../../../src/common/game-round";
 import { useGameApi } from "../../api/server-client";
 import { useResource } from "../../api/use-resource";
 import type { Overview } from "../../api/types";
 import { useGameAdmin as useAdmin } from "../../app/context";
 import { Badge, Card, Empty, Modal, date } from "../../components/ui";
 import { CopyValue, DataTable } from "../../components/data-table";
+import { hasRoundTiming, RoundTimingNotice } from "../../components/round-timing";
 import { errorMessage } from "../actions/policy";
 
 type Event = ReturnType<typeof eventView>;
@@ -26,22 +26,7 @@ const labels = {
 const stateLabel = (event: Event) =>
   event.stop && !["complete", "needs_review"].includes(event.state) ? "Stop requested" : labels[event.state];
 
-function hasRoundTiming(overview: Overview | null) {
-  return !!overview && !!roundStamp(overview.status, Date.parse(overview.observedAt));
-}
-
-function RoundTimingNotice({ resource, busy }: { resource: ReturnType<typeof useResource<Overview>>; busy: boolean }) {
-  if (resource.loading) return <p role="status">Checking round timing…</p>;
-  if (!resource.error && hasRoundTiming(resource.data)) return null;
-  return (
-    <div className="notice warning" role="alert">
-      <p>{resource.error || "Round timing is unavailable. 50v50 needs it to start sorting at the right time."}</p>
-      <button type="button" className="button secondary" disabled={busy} onClick={resource.refresh}>
-        Check round timing
-      </button>
-    </div>
-  );
-}
+const timingMessage = "Round timing is unavailable. 50v50 needs it to start sorting at the right time.";
 
 function EventReview({
   review,
@@ -172,7 +157,7 @@ function EventReview({
       ) : (
         <form onSubmit={(event) => void submit(event)}>
           {blocked && <p role="alert">Refresh event history before continuing.</p>}
-          {review.kind === "start" && <RoundTimingNotice resource={roster} busy={busy} />}
+          {review.kind === "start" && <RoundTimingNotice resource={roster} busy={busy} message={timingMessage} />}
           <div className="dialog-actions">
             <button type="button" className="button secondary" disabled={busy} onClick={close}>
               Back
@@ -242,7 +227,7 @@ function EventDraft({ review, statusUnavailable }: { review: (draft: Draft) => v
             {settings.error || "Server settings changed. Discard this draft and refresh."}
           </p>
         )}
-        <RoundTimingNotice resource={roster} busy={admin.busy} />
+        <RoundTimingNotice resource={roster} busy={admin.busy} message={timingMessage} />
         <div className="settings-grid">
           {([0, 1] as const).map((index) => (
             <label key={index}>
