@@ -241,6 +241,32 @@ describe("health inference from RCON reads", () => {
     expect(update.kinds()).toEqual(["game-restart", "game-build"]);
   });
 
+  it("keeps one failed read a hitch when timeouts and a cached read push the good reads over a minute apart", () => {
+    // A cached read 3 s old, the next read 15 s later timing out after 8 s, a 30 s retry and a 4.5 s recovery.
+    const next = { map: "Europe", matchSeconds: 5, roundChanged: true };
+    const slow = harness();
+    slow.read(slow.good({ players: 30 }));
+    slow.read(slow.fail(), 3_000 + 15_000 + 8_000);
+    expect(slow.read(slow.good({ players: 30, ...next }), 30_000 + 4_500).restartLike).toBe(false);
+    slow.read(slow.good({ players: 30, map: "Europe", matchSeconds: 20 }), 15_000);
+    expect(slow.alerts).toEqual([]);
+    expect(slow.state).toMatchObject({ lastRestartAt: null, watch: null, pending: null, outage: null });
+
+    // A failed read after more than a minute without one is a read gap, not a hitch.
+    const quiet = harness();
+    quiet.read(quiet.good({ players: 30 }));
+    quiet.read(quiet.fail(), 5 * 60_000);
+    expect(quiet.read(quiet.good({ players: 30, ...next }), 30_000).restartLike).toBe(true);
+    expect(quiet.kinds()).toEqual(["game-restart"]);
+
+    // So is a failed read followed by more than a minute without a good one.
+    const late = harness();
+    late.read(late.good({ players: 30 }));
+    late.read(late.fail(), 15_000);
+    expect(late.read(late.good({ players: 30, ...next }), 5 * 60_000).restartLike).toBe(true);
+    expect(late.kinds()).toEqual(["game-restart"]);
+  });
+
   it("sends no restart alert after an interruption with no restart signal", () => {
     const h = harness();
     h.read(h.good());
@@ -269,7 +295,36 @@ describe("health inference from RCON reads", () => {
     expect(full.alerts[0].suppressed).toBeUndefined();
   });
 
-  it("raises at most one restart alert per 30 minutes but keeps the latest restart time", () => {
+  it("lets a recorded-only scheduled restart use up no restart limit, and records a restart the limit holds back", () => {
+    const h = harness({ scheduledRestarts: [240] }, "2026-10-02T07:59:30Z");
+    h.read(h.good({ players: 3 }));
+    h.read(h.fail(), 15_000);
+    h.read(h.fail(), 30_000);
+    h.read(h.good({ players: 0, map: "Europe" }), 30_000);
+    expect(h.alerts).toEqual([expect.objectContaining({ suppressed: "scheduled restart, recorded only" })]);
+    for (let read = 0; read < 68; read++) h.read(h.good({ players: 14, map: "Europe" }), 15_000);
+    // A crash 19 minutes later, with 14 players on, still posts.
+    h.read(h.fail(), 60_000);
+    h.read(h.fail(), 30_000);
+    h.read(h.good({ players: 0 }), 30_000);
+    expect(h.alerts).toHaveLength(2);
+    expect(h.alerts[1]).toMatchObject({ severity: "warning", title: "Likely restart with players on" });
+    expect(h.alerts[1].suppressed).toBeUndefined();
+    // Another restart inside 30 minutes of that post is held back, and still recorded.
+    for (let read = 0; read < 8; read++) h.read(h.good({ players: 12 }), 15_000);
+    h.read(h.fail(), 15_000);
+    h.read(h.fail(), 30_000);
+    h.read(h.good({ players: 0, map: "Europe" }), 30_000);
+    expect(h.alerts.map((alert) => alert.suppressed ?? null)).toEqual([
+      "scheduled restart, recorded only",
+      null,
+      "restart limit",
+    ]);
+    // Distinct keys, so the alert service records each one instead of treating it as a repeat.
+    expect(new Set(h.alerts.map((alert) => alert.key)).size).toBe(3);
+  });
+
+  it("posts at most one restart alert per 30 minutes, recording the rest, and keeps the latest restart time", () => {
     const h = harness();
     h.read(h.good());
     h.read(h.fail(), 15_000);
@@ -278,12 +333,35 @@ describe("health inference from RCON reads", () => {
     h.read(h.good({ map: "Europe" }), 15_000);
     h.read(h.fail(), 10 * 60_000);
     h.read(h.good({ map: "Kavkazi" }), 30_000);
-    expect(h.kinds()).toEqual(["game-restart"]);
+    expect(h.alerts.map((alert) => [alert.kind, alert.suppressed ?? null])).toEqual([
+      ["game-restart", null],
+      ["game-restart", "restart limit"],
+    ]);
     expect(h.state.lastRestartAt).toBe(h.now - 30_000);
     h.read(h.good({ map: "Kavkazi" }), 15_000);
     h.read(h.fail(), 30 * 60_000);
     h.read(h.good({ map: "Europe" }), 30_000);
-    expect(h.kinds()).toEqual(["game-restart", "game-restart"]);
+    expect(h.alerts.map((alert) => alert.suppressed ?? null)).toEqual([null, "restart limit", null]);
+  });
+
+  it("records a second posted restart that starts in the same half hour as the first", () => {
+    const h = harness({}, "2026-10-02T08:00:00Z");
+    h.read(h.good());
+    h.read(h.fail(), 15_000);
+    h.read(h.fail(), 30_000);
+    h.read(h.good({ map: "Europe" }), 30_000);
+    // The game fails again at 08:19:45 and is back on another map at 08:33, past the 30-minute limit.
+    for (let read = 0; read < 71; read++) h.read(h.good({ map: "Europe" }), 15_000);
+    h.read(h.fail(), 30_000);
+    h.read(h.fail(), 8 * 60_000);
+    h.read(h.good({ map: "Kavkazi" }), 5 * 60_000 + 15_000);
+    expect(new Date(h.now).toISOString()).toBe("2026-10-02T08:33:00.000Z");
+    expect(h.alerts.map((alert) => [alert.kind, alert.suppressed ?? null])).toEqual([
+      ["game-restart", null],
+      ["game-restart", null],
+    ]);
+    // Distinct keys, so the alert service records the second restart instead of treating it as a repeat.
+    expect(h.alerts[0].key).not.toBe(h.alerts[1].key);
   });
 
   it("alerts once per build change after a silent baseline, and once more on a change back", () => {

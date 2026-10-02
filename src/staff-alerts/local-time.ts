@@ -100,13 +100,17 @@ function shiftDate(date: string, days: number) {
   return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10);
 }
 
-/** The instant of a local wall-clock time on a local date. A time skipped by DST lands just after the jump. */
+/**
+ * The instant of a local wall-clock time on a local date. A time skipped by a DST jump moves
+ * forward by the jump (02:30 on the spring-forward day is 03:30), never to before it.
+ */
 export function localInstant(date: string, minutes: number, timeZone: string) {
   const [year, month, day] = date.split("-").map(Number);
   const wall = Date.UTC(year, month - 1, day, Math.floor(minutes / 60), minutes % 60);
-  let at = wall - offset(wall, timeZone);
-  at = wall - offset(at, timeZone);
-  return at;
+  const first = wall - offset(wall, timeZone);
+  const at = wall - offset(first, timeZone);
+  // A skipped time reads back as another wall time; the later pass is the one after the jump.
+  return localParts(at, timeZone).minutes === minutes ? at : Math.max(first, at);
 }
 
 /** The window occurrence that contains `at`: its start instant and the local date it started on. */
