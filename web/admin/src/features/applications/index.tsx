@@ -13,7 +13,7 @@ import type {
 
 const statuses = {
   pending: "Awaiting review",
-  processing: "Processing",
+  processing: "Awaiting confirmation",
   approved: "Approved",
   declined: "Declined",
   needs_review: "Needs review",
@@ -140,6 +140,10 @@ function ApplicationDetails({ record }: { record: WhitelistApplication }) {
 
 type ReviewResult = { title: string; description: string; message: string; complete: boolean };
 
+function canReview(record: WhitelistApplication, decision: ApplicationDecision) {
+  return decision === "recheck" ? ["processing", "needs_review"].includes(record.status) : record.status === "pending";
+}
+
 function ApplicationReview({
   record: initialRecord,
   unavailable,
@@ -170,27 +174,14 @@ function ApplicationReview({
   }, [setBusy]);
 
   function choose(decision: ApplicationDecision) {
-    if (
-      busy ||
-      unavailable ||
-      submitted.current ||
-      record.status !== (decision === "recheck" ? "needs_review" : "pending")
-    )
-      return;
+    if (busy || unavailable || submitted.current || !canReview(record, decision)) return;
     setReview({ decision, id: crypto.randomUUID() });
     setValidation("");
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (
-      !review ||
-      busy ||
-      unavailable ||
-      submitted.current ||
-      record.status !== (review.decision === "recheck" ? "needs_review" : "pending")
-    )
-      return;
+    if (!review || busy || unavailable || submitted.current || !canReview(record, review.decision)) return;
     const reason = String(new FormData(event.currentTarget).get("reason") ?? "").trim();
     if (
       reason.length < 3 ||
@@ -287,7 +278,7 @@ function ApplicationReview({
             </button>
           </div>
         )}
-        {!review && record.status === "needs_review" && (
+        {!review && canReview(record, "recheck") && (
           <>
             <p className="muted">
               Approval has not been confirmed. Recheck the running whitelist without sending another grant.
@@ -301,11 +292,6 @@ function ApplicationReview({
               Recheck live whitelist
             </button>
           </>
-        )}
-        {!review && record.status === "processing" && (
-          <p className="muted">
-            This request is being reviewed. Check its status and Action history before any further change.
-          </p>
         )}
         {review && selected && !result && (
           <>
@@ -379,7 +365,8 @@ function AdminApplications() {
           <strong>{records.filter((record) => record.status === "pending").length}</strong> awaiting review in this list
         </span>
         <span>
-          <strong>{records.filter((record) => record.status === "needs_review").length}</strong> need follow-up
+          <strong>{records.filter((record) => ["processing", "needs_review"].includes(record.status)).length}</strong>{" "}
+          need follow-up
         </span>
         <span>Up to 100 requests; awaiting review first</span>
       </div>
