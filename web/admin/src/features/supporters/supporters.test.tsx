@@ -1,10 +1,19 @@
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { api } from "../../api/client";
 import { AdminContext, type AdminContextValue } from "../../app/context";
 import { SupportersPage } from "./index";
+import { ago, ahead } from "./patreon-sync";
 import { founderReady, founderWindowLabel, reviewInput } from "./policy";
-import type { FounderPolicy, PaymentEvidence, Supporter, SupporterReviewResponse, SupportersResponse } from "./types";
+import type {
+  FounderPolicy,
+  PatreonSyncResponse,
+  PatreonSyncStatus,
+  PaymentEvidence,
+  Supporter,
+  SupporterReviewResponse,
+  SupportersResponse,
+} from "./types";
 
 vi.mock("../../api/client", () => ({ api: vi.fn() }));
 const request = vi.mocked(api);
@@ -62,7 +71,34 @@ const supporter: Supporter = {
   founderEligiblePayment: payment,
   founder: null,
 };
-function data(record = supporter): SupportersResponse {
+const minute = 60_000;
+const minutesFromNow = (minutes: number) => new Date(Date.now() + minutes * minute).toISOString();
+/** Last synced 5 min ago, next in 25 min. */
+function syncStatus(overrides: Partial<PatreonSyncStatus> = {}): PatreonSyncStatus {
+  return {
+    configured: true,
+    running: false,
+    lastAttemptAt: minutesFromNow(-5.1),
+    lastSuccessAt: minutesFromNow(-5),
+    lastError: null,
+    tokenRejected: false,
+    members: 12,
+    newMembers: 1,
+    updated: 2,
+    payments: 3,
+    discordLinks: 1,
+    conflicts: 0,
+    truncated: 0,
+    revokedPayments: 0,
+    memberListComplete: true,
+    intervalMinutes: 30,
+    nextAttemptAt: minutesFromNow(25),
+    conflictDetails: [],
+    founderReviews: [],
+    ...overrides,
+  };
+}
+function data(record = supporter, sync = syncStatus()): SupportersResponse {
   return {
     enabled: true,
     configured: true,
@@ -70,6 +106,7 @@ function data(record = supporter): SupportersResponse {
     founderPolicy: policy,
     supporters: [record],
     note: "Private records",
+    sync,
   };
 }
 function page(value = context) {
@@ -465,4 +502,245 @@ it("unmounting during a save cannot repopulate private supporter data or start a
   expect(screen.queryByText(supporter.patreonMemberId)).not.toBeInTheDocument();
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   expect(request.mock.calls).toHaveLength(calls);
+});
+
+/** The Patreon import status line. */
+function importLine() {
+  return screen.getByText(/Patreon import:/).closest("p")!;
+}
+function getCalls() {
+  return request.mock.calls.filter(([, options]) => !options?.method);
+}
+
+it("shows the Patreon import as one status line with the last import's details on demand", async () => {
+  request.mockResolvedValue(
+    data(
+      supporter,
+      syncStatus({
+        conflicts: 1,
+        conflictDetails: [{ supporterId: supporter.id, patreonMemberId: "conflict-member", reason: "discord-in-use" }],
+      }),
+    ),
+  );
+  const view = render(page());
+  expect(await screen.findByRole("button", { name: "Sync now" })).toBeEnabled();
+  const line = importLine();
+  expect(line).toHaveClass("status-line", "good");
+  expect(line.querySelector("strong")).toHaveTextContent("last synced 5 min ago");
+  expect(within(line).getByText("12 members")).toBeInTheDocument();
+  expect(within(line).getByText("3 new payments")).toBeInTheDocument();
+  expect(within(line).getByText(/^next/)).toHaveTextContent("next in 25 min");
+  expect(within(line).getByText(/^next/)).toHaveAttribute("title", "Runs every 30 min");
+  expect(within(line).queryByText(/last tried/)).not.toBeInTheDocument();
+  expect(
+    screen.queryByText(/Patreon import needs attention|Patreon rejected the access token/),
+  ).not.toBeInTheDocument();
+  fireEvent.click(screen.getByText("Last import"));
+  expect(screen.getByText("New payments").nextElementSibling).toHaveTextContent("3");
+  expect(screen.getByText("Discord conflicts", { selector: "dt" }).nextElementSibling).toHaveTextContent("1");
+  expect(within(screen.getByRole("list", { name: "Discord conflicts" })).getByText("conflict-member")).toBeVisible();
+  expect(screen.getByText("Patreon's Discord account is already on another supporter record")).toBeVisible();
+  // The page and the sync are for administrators only.
+  view.rerender(page({ ...context, me: { ...context.me, role: "moderator" } }));
+  expect(screen.queryByRole("button", { name: "Sync now" })).not.toBeInTheDocument();
+  expect(screen.queryByText(/Patreon import:/)).not.toBeInTheDocument();
+});
+
+it("says the Patreon import is not configured and offers no sync", async () => {
+  request.mockResolvedValue(
+    data(
+      supporter,
+      syncStatus({
+        configured: false,
+        lastAttemptAt: null,
+        lastSuccessAt: null,
+        nextAttemptAt: null,
+        members: 0,
+        payments: 0,
+      }),
+    ),
+  );
+  render(page());
+  await screen.findByRole("button", { name: "Review supporter" });
+  const line = importLine();
+  expect(line).toHaveClass("quiet");
+  expect(line).toHaveTextContent(/^Patreon import: Not configured$/);
+  expect(line).toHaveAttribute("title", expect.stringContaining("PATREON_CREATOR_ACCESS_TOKEN in Railway"));
+  expect(screen.queryByRole("button", { name: /Sync now|Syncing/ })).not.toBeInTheDocument();
+  expect(screen.queryByText("Last import")).not.toBeInTheDocument();
+  expect(screen.queryByText(/Patreon import needs attention/)).not.toBeInTheDocument();
+});
+
+it("explains a token problem found before any request while the import is not configured", async () => {
+  const malformed =
+    "PATREON_CREATOR_ACCESS_TOKEN does not look like a Patreon access token. Copy the Creator's Access Token again.";
+  request.mockResolvedValue(
+    data(supporter, syncStatus({ configured: false, lastSuccessAt: null, lastAttemptAt: null, lastError: malformed })),
+  );
+  render(page());
+  await screen.findByRole("button", { name: "Review supporter" });
+  expect(importLine()).toHaveClass("attention");
+  expect(importLine()).toHaveTextContent(/^Patreon import: Not configured$/);
+  expect(screen.getByText("Patreon import needs attention.").parentElement).toHaveTextContent(malformed);
+  expect(screen.queryByRole("button", { name: "Sync now" })).not.toBeInTheDocument();
+});
+
+it("tells staff exactly how to renew a rejected token and never shows the token", async () => {
+  const token = "creator-token-PRIVATE-0123456789abcdef";
+  const sync = {
+    ...syncStatus({
+      tokenRejected: true,
+      lastError:
+        "Patreon rejected the Creator's Access Token. Renew it on the Patreon client page (patreon.com/portal/registration/register-clients), update PATREON_CREATOR_ACCESS_TOKEN in Railway, and confirm PATREON_CAMPAIGN_ID belongs to that creator.",
+      lastAttemptAt: minutesFromNow(-2),
+      nextAttemptAt: minutesFromNow(360),
+    }),
+    // A field the status never has: the page renders only the fields it knows.
+    token,
+  };
+  request.mockResolvedValue(data(supporter, sync));
+  render(page());
+  await screen.findByRole("button", { name: "Sync now" });
+  expect(screen.getByText("Patreon rejected the access token.").parentElement).toHaveTextContent(
+    "Patreon rejected the access token. Renew the Creator's Access Token on the Patreon client page and update PATREON_CREATOR_ACCESS_TOKEN in Railway.",
+  );
+  expect(screen.queryByText(/Patreon import needs attention/)).not.toBeInTheDocument();
+  const line = importLine();
+  expect(line).toHaveClass("attention");
+  expect(line.querySelector("strong")).toHaveTextContent("last synced 5 min ago");
+  expect(within(line).getByText(/^last tried/)).toHaveTextContent("last tried 2 min ago");
+  expect(within(line).getByText(/^next/)).toHaveTextContent("next in 6 h");
+  // Staff can retry once Railway has the new token.
+  expect(screen.getByRole("button", { name: "Sync now" })).toBeEnabled();
+  expect(document.body.innerHTML).not.toContain(token);
+});
+
+it("shows other import errors as they were recorded", async () => {
+  const unavailable = "Patreon could not be reached. Existing supporter records were kept; the next sync will retry.";
+  request.mockResolvedValue(data(supporter, syncStatus({ lastError: unavailable, lastAttemptAt: minutesFromNow(-1) })));
+  render(page());
+  await screen.findByRole("button", { name: "Sync now" });
+  expect(screen.getByText("Patreon import needs attention.").parentElement).toHaveTextContent(unavailable);
+  expect(screen.queryByText("Patreon rejected the access token.")).not.toBeInTheDocument();
+  expect(importLine()).toHaveClass("attention");
+  expect(within(importLine()).getByText(/^last tried/)).toHaveTextContent("last tried 1 min ago");
+});
+
+it("disables Sync now while an import is running", async () => {
+  request.mockResolvedValue(data(supporter, syncStatus({ running: true, lastAttemptAt: minutesFromNow(0) })));
+  render(page());
+  expect(await screen.findByRole("button", { name: "Syncing…" })).toBeDisabled();
+  const line = importLine();
+  expect(line.querySelector("strong")).toHaveTextContent("Syncing now…");
+  expect(within(line).getByText(/^last synced/)).toHaveTextContent("last synced 5 min ago");
+  expect(within(line).queryByText(/^next/)).not.toBeInTheDocument();
+  expect(within(line).queryByText(/last tried/)).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Syncing…" }));
+  expect(postCalls()).toHaveLength(0);
+});
+
+it("starts one sync with the CSRF-protected client, then refreshes the page data", async () => {
+  const response = deferred<PatreonSyncResponse>();
+  const synced = data(supporter, syncStatus({ lastAttemptAt: minutesFromNow(-0.1), lastSuccessAt: minutesFromNow(0) }));
+  request.mockImplementation(async (_path, options) =>
+    options?.method === "POST" ? response.promise : getCalls().length > 1 ? synced : data(),
+  );
+  const view = render(page());
+  const button = await screen.findByRole("button", { name: "Sync now" });
+  fireEvent.click(button);
+  fireEvent.click(button);
+  // A body makes the shared client send the session's CSRF header.
+  expect(postCalls()).toEqual([["supporters/sync", { method: "POST", body: "{}" }]]);
+  expect(screen.getByRole("button", { name: "Syncing…" })).toBeDisabled();
+  expect(importLine().querySelector("strong")).toHaveTextContent("Syncing now…");
+  expect(getCalls()).toHaveLength(1);
+  await act(async () => response.resolve({ ok: true, joined: false, sync: synced.sync }));
+  expect(await screen.findByText("Patreon import finished.")).toHaveAttribute("role", "status");
+  await waitFor(() => expect(getCalls()).toHaveLength(2));
+  await waitFor(() => expect(importLine().querySelector("strong")).toHaveTextContent("last synced just now"));
+  expect(screen.getByText("Patreon import finished.")).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Sync now" })).toBeEnabled());
+  // A second press within the cooldown reuses the import that just finished.
+  request.mockImplementation(async (_path, options) =>
+    options?.method === "POST" ? { ok: true, joined: false, recent: true, sync: synced.sync } : synced,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Sync now" }));
+  expect(
+    await screen.findByText("An import finished under 30 seconds ago, so it was not repeated."),
+  ).toBeInTheDocument();
+  expect(screen.queryByText("Patreon import finished.")).not.toBeInTheDocument();
+  expect(postCalls()).toHaveLength(2);
+  // A later scheduled import's status replaces the result.
+  await waitFor(() => expect(getCalls()).toHaveLength(3));
+  request.mockResolvedValue(
+    data(supporter, syncStatus({ lastAttemptAt: minutesFromNow(0), lastSuccessAt: minutesFromNow(0) })),
+  );
+  view.rerender(page({ ...context, refreshVersion: 1 }));
+  await waitFor(() => expect(screen.queryByText(/An import finished under 30 seconds ago/)).not.toBeInTheDocument());
+  expect(postCalls()).toHaveLength(2);
+});
+
+it("leaves a failed import to the refreshed status instead of reporting success", async () => {
+  const rejected = syncStatus({ tokenRejected: true, lastError: "Patreon rejected the Creator's Access Token." });
+  request.mockImplementation(async (_path, options) =>
+    options?.method === "POST"
+      ? { ok: true, joined: true, sync: rejected }
+      : getCalls().length > 1
+        ? data(supporter, rejected)
+        : data(),
+  );
+  render(page());
+  fireEvent.click(await screen.findByRole("button", { name: "Sync now" }));
+  expect(await screen.findByText("Patreon rejected the access token.")).toBeInTheDocument();
+  expect(screen.queryByText(/Patreon import finished|Joined the import/)).not.toBeInTheDocument();
+});
+
+it("keeps an unconfirmed sync request uncertain and still refreshes", async () => {
+  const current = data();
+  request.mockImplementation(async (_path, options) => {
+    if (options?.method === "POST")
+      throw Object.assign(new Error("The request timed out before confirmation."), { status: 0 });
+    return current;
+  });
+  render(page());
+  fireEvent.click(await screen.findByRole("button", { name: "Sync now" }));
+  expect(await screen.findByText(/The import may still be running/)).toHaveClass("notice", "warning");
+  expect(screen.queryByText(/Check Action history/)).not.toBeInTheDocument();
+  await waitFor(() => expect(getCalls()).toHaveLength(2));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Sync now" })).toBeEnabled());
+  request.mockImplementation(async (_path, options) => {
+    if (options?.method === "POST")
+      throw Object.assign(new Error("Patreon sync is not configured. Set PATREON_ENABLED."), { status: 503 });
+    return current;
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Sync now" }));
+  expect(await screen.findByText("Patreon sync is not configured. Set PATREON_ENABLED.")).toBeInTheDocument();
+});
+
+it("does not show the last import status as current after a failed refresh", async () => {
+  request
+    .mockResolvedValueOnce(data(supporter, syncStatus({ tokenRejected: true, lastError: "rejected" })))
+    .mockRejectedValueOnce(new Error("Unavailable"));
+  const view = render(page());
+  await screen.findByText("Patreon rejected the access token.");
+  view.rerender(page({ ...context, refreshVersion: 1 }));
+  await screen.findByText(/Supporter records could not be refreshed/);
+  const line = importLine();
+  expect(line).toHaveTextContent(/^Patreon import: Status unavailable$/);
+  expect(line).toHaveClass("attention");
+  expect(screen.queryByText("Patreon rejected the access token.")).not.toBeInTheDocument();
+  expect(screen.queryByText("Last import")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Sync now" })).toBeDisabled();
+});
+
+it("words import times relative to now", () => {
+  const now = Date.parse("2026-10-02T12:00:00Z");
+  expect(ago("2026-10-02T11:59:45Z", now)).toBe("just now");
+  expect(ago("2026-10-02T11:55:00Z", now)).toBe("5 min ago");
+  expect(ago("2026-10-02T09:55:00Z", now)).toBe("2 h 5 min ago");
+  expect(ago("2026-09-29T12:00:00Z", now)).toBe("3 days ago");
+  expect(ahead("2026-10-02T12:25:00Z", now)).toBe("in 25 min");
+  expect(ahead("2026-10-02T12:00:20Z", now)).toBe("in under a minute");
+  expect(ahead("2026-10-02T18:00:00Z", now)).toBe("in 6 h");
+  expect(ahead("2026-10-02T11:59:00Z", now)).toBe("due now");
 });

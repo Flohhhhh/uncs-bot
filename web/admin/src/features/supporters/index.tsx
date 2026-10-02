@@ -6,6 +6,7 @@ import { Badge, Card, Empty, Modal, ReasonField, date } from "../../components/u
 import { CopyValue, DataTable } from "../../components/data-table";
 import { founderReady, founderWindowLabel, newYork, paymentDescription, reviewInput } from "./policy";
 import { ManualMember } from "./manual-member";
+import { PatreonImport } from "./patreon-sync";
 import type { FounderPolicy, Supporter, SupporterDecision, SupporterReviewResponse, SupportersResponse } from "./types";
 
 const decisions = {
@@ -469,6 +470,14 @@ function AdminSupporters() {
           Patreon webhook {data.webhookConfigured ? "connected" : "not connected"}
         </span>
       </div>
+      {data.sync && (
+        <PatreonImport
+          sync={data.sync}
+          unavailable={Boolean(resource.error)}
+          disabled={busy || resource.loading}
+          onSynced={resource.refresh}
+        />
+      )}
       {resource.error && (
         <p className="notice warning" role="alert">
           Supporter records could not be refreshed. Refresh before recording another review.

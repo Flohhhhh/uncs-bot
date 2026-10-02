@@ -3425,14 +3425,15 @@ tr.audit-more[hidden] {
   color: var(--cream);
   box-shadow: inset 0 -2px 0 var(--accent);
 }
-.combat-status {
+/* A status line: a toned dot and "Name: state", then short facts. Shared by Combat and Supporters. */
+.status-row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2) var(--space-4);
   margin-bottom: var(--space-4);
 }
-.combat-status-line {
+.status-line {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -3441,12 +3442,12 @@ tr.audit-more[hidden] {
   font-size: var(--text-sm);
   color: var(--muted);
 }
-.combat-status-line > span:first-child {
+.status-line > span:first-child {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
 }
-.combat-status-line > span:first-child::before {
+.status-line > span:first-child::before {
   content: "";
   flex-shrink: 0;
   width: 8px;
@@ -3454,29 +3455,29 @@ tr.audit-more[hidden] {
   border-radius: 50%;
   background: var(--muted);
 }
-.combat-status-line.good > span:first-child::before {
+.status-line.good > span:first-child::before {
   background: var(--good);
 }
-.combat-status-line.attention > span:first-child::before {
+.status-line.attention > span:first-child::before {
   background: var(--warn);
 }
-.combat-status-line strong {
+.status-line strong {
   color: var(--cream);
   font-weight: 650;
 }
-.combat-status-line > span + span::before {
+.status-line > span + span::before {
   content: "· ";
 }
-.combat-about {
+.status-about {
   font-size: var(--text-sm);
 }
-.combat-about summary {
+.status-about summary {
   color: var(--accent);
   font-size: var(--text-sm);
   font-weight: 600;
   cursor: pointer;
 }
-.combat-about-panel {
+.status-about-panel {
   max-width: 640px;
   margin-top: var(--space-2);
   padding: var(--space-3) var(--space-4);
@@ -3485,10 +3486,10 @@ tr.audit-more[hidden] {
   border-radius: var(--radius-md);
   line-height: 1.6;
 }
-.combat-about-panel p {
+.status-about-panel p {
   margin: 0 0 var(--space-2);
 }
-.combat-about-panel p:last-child {
+.status-about-panel p:last-child {
   margin-bottom: 0;
 }
 .combat-stats {
@@ -3547,12 +3548,12 @@ tr.audit-more[hidden] {
   }
 }
 @media (max-width: 540px) {
-  .combat-status-line {
+  .status-line {
     flex-direction: column;
     align-items: flex-start;
     gap: 2px;
   }
-  .combat-status-line > span + span::before {
+  .status-line > span + span::before {
     content: none;
   }
 }
@@ -3755,6 +3756,38 @@ tr.audit-more[hidden] {
   margin: 0;
   color: var(--muted);
 }
+.sync-counts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--space-1) var(--space-5);
+  margin: 0 0 var(--space-3);
+}
+.sync-counts > div {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+.sync-counts dt {
+  color: var(--muted);
+}
+.sync-counts dd {
+  margin: 0;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.supporter-sync h4 {
+  margin: var(--space-3) 0 var(--space-1);
+  font-size: var(--text-sm);
+}
+.supporter-sync ul {
+  margin: 0 0 var(--space-3);
+  padding-left: var(--space-4);
+}
+.supporter-sync li small {
+  display: block;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
 .supporter-search {
   display: flex;
   flex: 1 1 420px;
@@ -3777,5 +3810,8 @@ tr.audit-more[hidden] {
   .supporter-search + .button {
     flex: 1 1 auto;
     margin-left: 0;
+  }
+  .supporter-sync > .button {
+    min-height: 44px;
   }
 }

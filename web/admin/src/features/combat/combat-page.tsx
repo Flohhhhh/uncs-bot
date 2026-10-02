@@ -267,8 +267,8 @@ function CombatView({
           </button>
         </div>
       )}
-      <div className="combat-status">
-        <p className={`combat-status-line ${tone}`}>
+      <div className="status-row">
+        <p className={`status-line ${tone}`}>
           <span>
             Combat feed: <strong>{feed}</strong>
           </span>
@@ -278,9 +278,9 @@ function CombatView({
             <span>Tracking since {new Date(data.trackingStartedAt).toLocaleDateString()}</span>
           )}
         </p>
-        <details className="combat-about">
+        <details className="status-about">
           <summary>About these numbers</summary>
-          <div className="combat-about-panel">
+          <div className="status-about-panel">
             <p>{data.coverageNote || "Only recorded combat events are included in this view."}</p>
             <p>The rolling window starts {date(data.windowStartedAt)}. Periods use the time each event was received.</p>
             <p>
