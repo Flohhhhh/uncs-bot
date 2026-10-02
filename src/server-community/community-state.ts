@@ -1,4 +1,5 @@
 import type { WardogsClient } from "../admin/wardogs.client";
+import { mapLabel } from "../common/map-labels";
 
 export type CommunitySnapshot = Awaited<ReturnType<WardogsClient["overview"]>>;
 type Status = CommunitySnapshot["status"];
@@ -119,7 +120,7 @@ export function statusCard(snapshot: CommunitySnapshot | null, online: boolean) 
     const status = snapshot.status;
     lines.push(
       `Server: ${plainLabel(status.serverName)}`,
-      `Map: ${plainLabel(status.map)}`,
+      `Map: ${plainLabel(mapLabel(status.map))}`,
       `Players: ${status.players.current} / ${status.players.max}`,
     );
     for (const faction of status.factionScores.slice(0, 8))
