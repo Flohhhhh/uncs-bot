@@ -1,19 +1,44 @@
-import { BadRequestException, Injectable, ServiceUnavailableException, UnauthorizedException } from "@nestjs/common";
-import { createHash, timingSafeEqual } from "node:crypto";
+import {
+  BadRequestException,
+  HttpException,
+  Injectable,
+  ServiceUnavailableException,
+  UnauthorizedException,
+} from "@nestjs/common";
 import { EnvService } from "../env/env.service";
 import { GameServers } from "../admin/game-servers";
 import { publicGameServer } from "../common/game-server";
+import { feedCredentials, usableFeedToken } from "./telemetry.credentials";
+import { TelemetryDeliveries } from "./telemetry.deliveries";
 import { TelemetryStore } from "./telemetry.store";
 import {
   emptyTotals,
+  FeedRejectedException,
   parseFeed,
   periodMilliseconds,
   periodSchema,
   telemetrySteamId,
   type CombatAggregate,
+  type CombatStats,
+  type ParsedFeed,
+  type PublicCombatStats,
   type TelemetryPeriod,
   type TrackingRecord,
 } from "./telemetry.types";
+
+export const UNNAMED_PLAYER = "Unnamed player";
+
+// Storage falls back to the SteamID when no display name was observed, so a public name
+// replaces any name that is empty, is a SteamID or contains this player's SteamID with a neutral label.
+export function publicName(steamId: string | null | undefined, name: unknown): string {
+  const label = typeof name === "string" ? name.trim() : "";
+  const identifying = !label || /^\d{17}$/.test(label) || (!!steamId && label.includes(steamId));
+  return identifying ? UNNAMED_PLAYER : (name as string);
+}
+
+export function publicStats({ steamId, name, kills, deaths, headshotKills, kd }: CombatStats): PublicCombatStats {
+  return { name: publicName(steamId, name), kills, deaths, headshotKills, kd };
+}
 
 @Injectable()
 export class TelemetryService {
@@ -25,27 +50,84 @@ export class TelemetryService {
     private readonly store: TelemetryStore,
     private readonly env: EnvService,
     private readonly servers: GameServers,
+    private readonly deliveries: TelemetryDeliveries,
   ) {}
   serversList() {
     return this.servers.list().map(publicGameServer);
   }
 
+  /** Why the feed cannot accept deliveries for this server, or null when it can. */
+  private unavailable(serverId: string) {
+    if (!this.env.get("WARDOGS_FEED_ENABLED")) return "feed disabled";
+    return usableFeedToken(this.servers.feedToken(serverId)) ? null : "feed token not configured";
+  }
+
   private configured(serverId: string) {
-    const token = this.servers.feedToken(serverId);
-    return this.env.get("WARDOGS_FEED_ENABLED") && typeof token === "string" && token.length >= 32;
+    return this.unavailable(serverId) === null;
+  }
+
+  /** Whether the game feed can accept deliveries for this server: enabled and a usable token. */
+  feedAvailable(serverId: string) {
+    return this.configured(serverId);
+  }
+
+  // Records a refused delivery for staff (category and status only) and returns the error to throw.
+  // withToken: the request carried the server's feed token, so it is the game's own delivery.
+  private refuse(serverId: string | undefined, reason: string, error: unknown, withToken: boolean) {
+    this.deliveries.rejected(serverId, error instanceof HttpException ? error.getStatus() : 503, reason, withToken);
+    return error;
   }
 
   async ingest(authorization: unknown, body: unknown, id?: string) {
-    const serverId = this.servers.resolve(id);
-    if (!this.configured(serverId)) throw new ServiceUnavailableException("The game event feed is not connected yet.");
-    const match = typeof authorization === "string" && /^Bearer ([^\s]{1,512})(?![\s\S])/i.exec(authorization);
-    const actual = createHash("sha256")
-      .update(match ? match[1] : "")
-      .digest();
-    const expected = createHash("sha256").update(this.servers.feedToken(serverId)!).digest();
-    if (!match || !timingSafeEqual(actual, expected)) throw new UnauthorizedException("Invalid game feed credentials.");
-    const parsed = parseFeed(body);
-    const result = await this.store.ingest(parsed, new Date(), serverId);
+    let serverId: string;
+    try {
+      serverId = this.servers.resolve(id);
+    } catch (error) {
+      const reason = error instanceof BadRequestException ? "server not selected" : "unknown server";
+      throw this.refuse(id, reason, error, false);
+    }
+    // Checked before availability so every refusal is filed by whether it carried the feed token.
+    const credentials = feedCredentials(authorization, this.servers.feedToken(serverId));
+    const withToken = credentials === "valid";
+    const unavailable = this.unavailable(serverId);
+    if (unavailable)
+      throw this.refuse(
+        serverId,
+        unavailable,
+        new ServiceUnavailableException("The game event feed is not connected yet."),
+        withToken,
+      );
+    if (!withToken)
+      throw this.refuse(serverId, credentials, new UnauthorizedException("Invalid game feed credentials."), false);
+    let parsed: ParsedFeed;
+    try {
+      parsed = parseFeed(body);
+    } catch (error) {
+      throw this.refuse(
+        serverId,
+        error instanceof FeedRejectedException ? error.reason : "invalid payload",
+        error,
+        true,
+      );
+    }
+    // Invalid entries and nothing to store: refuse the batch, so the game, staff and logs see a 400
+    // and the feed does not read as receiving while every event is dropped.
+    if (!parsed.events.length && parsed.invalid) {
+      const reason = `invalid payload: ${parsed.firstInvalid ?? "events"}`;
+      throw this.refuse(serverId, reason, new FeedRejectedException("Invalid killed event fields.", reason), true);
+    }
+    let result: Awaited<ReturnType<TelemetryStore["ingest"]>>;
+    try {
+      result = await this.store.ingest(parsed, new Date(), serverId);
+    } catch (error) {
+      throw this.refuse(serverId, "storage unavailable", error, true);
+    }
+    this.deliveries.accepted(serverId, {
+      accepted: parsed.events.length,
+      skipped: parsed.skipped,
+      invalid: parsed.invalid,
+      firstInvalid: parsed.firstInvalid,
+    });
     for (const key of this.snapshots.keys()) if (key.startsWith(`${serverId}:`)) this.snapshots.delete(key);
     return { ok: true, ...result };
   }
@@ -103,7 +185,8 @@ export class TelemetryService {
   }
 
   private summary(aggregate: CombatAggregate): CombatAggregate {
-    // Public output contains only game statistics, even if storage gains fields.
+    // Output contains only game statistics, even if storage gains fields. SteamIDs stay here for
+    // staff; the public leaderboard() strips them.
     return {
       leaderboard: aggregate.leaderboard.slice(0, 100).map(({ steamId, name, kills, deaths, headshotKills, kd }) => ({
         steamId,
@@ -123,7 +206,14 @@ export class TelemetryService {
     };
   }
 
+  /** Public leaderboard: display names and game statistics, never SteamIDs. */
   async leaderboard(input?: unknown, id?: string) {
+    const result = await this.ranking(input, id);
+    return { ...result, leaderboard: result.leaderboard.map(publicStats) };
+  }
+
+  /** Staff ranking with SteamIDs. Shares the snapshot cache with the public leaderboard. */
+  private async ranking(input?: unknown, id?: string) {
     const serverId = this.servers.resolve(id);
     const period = this.period(input);
     if (!this.configured(serverId)) {
@@ -142,11 +232,12 @@ export class TelemetryService {
   }
 
   async combat(input?: unknown, id?: string) {
-    const result = await this.leaderboard(input, id);
+    const result = await this.ranking(input, id);
     const events = result.enabled
       ? await this.store.events(new Date(result.windowStartedAt), new Date(result.asOf), undefined, result.serverId)
       : [];
-    return { ...result, events };
+    // Delivery diagnostics are staff-only; the public leaderboard never includes them.
+    return { ...result, ...this.deliveries.status(result.serverId), events };
   }
 
   async player(id: unknown, input?: unknown, selected?: string) {
@@ -155,7 +246,7 @@ export class TelemetryService {
     if (!playerId.success) throw new BadRequestException("Enter a valid SteamID64.");
     const period = this.period(input);
     if (!this.configured(serverId)) {
-      const { leaderboard: _leaderboard, ...base } = await this.leaderboard(period, serverId);
+      const { leaderboard: _leaderboard, ...base } = await this.ranking(period, serverId);
       return { ...base, steamId: playerId.data, player: null, events: [] };
     }
     const snapshot = await this.snapshot(serverId, period, playerId.data);

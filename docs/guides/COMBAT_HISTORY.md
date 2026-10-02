@@ -1,6 +1,6 @@
 # Combat history and server leaderboard
 
-The optional Wardogs feed stores combat events for this server and exposes rolling 24-hour, 7-day and 30-day views. The public website leaderboard contains game display names, SteamID64, recorded kills/deaths and K/D. Authenticated staff can inspect the recent killfeed and a selected player's events. Application emails, Discord account details and application review notes are never joined into this data.
+The optional Wardogs feed stores combat events for this server and exposes rolling 24-hour, 7-day and 30-day views. The public website leaderboard contains game display names, recorded kills/deaths, headshot kills and K/D, never SteamID64s; a SteamID shown in place of a missing name becomes "Unnamed player". Authenticated staff rankings keep SteamID64s for moderation and player history. Authenticated staff can inspect the recent killfeed and a selected player's events. Application emails, Discord account details and application review notes are never joined into this data.
 
 This is recorded game history for human review, not an anti-cheat verdict. There are no automatic bans, cheat scores, or automatic accusation messages.
 
@@ -22,17 +22,29 @@ Observed killed events include event IDs, game clock, map, killer/victim names a
 
 `WARDOGS_FEED_ENABLED=false` by default. `WARDOGS_FEED_TOKEN` is a separate random feed-only secret, at least 32 characters, and must differ from the RCON password. It is never sent to player browsers.
 
-The game POSTs batches to `POST /api/ingest/events` using `Authorization: Bearer <feed token>`. The configured token determines the authorized server; the incoming `serverId` is only a per-boot instance identifier. Payload size, batch length, numbers and strings are bounded. Unknown event types are skipped; malformed killed events are rejected. Unexpected errors do not return raw payloads, database strings or credentials.
+The game POSTs batches to `POST /api/ingest/events` using `Authorization: Bearer <feed token>`. The configured token determines the authorized server; the incoming `serverId` is only a per-boot instance identifier. Payload size, batch length, numbers and strings are bounded. Unknown event types are skipped. A malformed killed event, an entry without a string `type` or a non-object entry is also skipped and counted, so one odd event cannot discard the batch; a malformed envelope (`serverId`, `serverName`, `events`, the 64 KiB or 200-event cap) still rejects it. A batch with invalid entries and no valid killed event is also rejected with 400 (`invalid payload: <first invalid location>`), so a feed whose every event is malformed never reads as receiving; a batch with nothing invalid, even an empty one, is still accepted. Event, match and server IDs accept any 8-4-4-4-12 hexadecimal GUID, in either case, and are stored lowercase; PostgreSQL `uuid` columns do not require RFC 4122 version bits. Unexpected errors do not return raw payloads, database strings or credentials.
+
+Refused deliveries are recorded in memory per server and shown only in the staff combat response and on the staff combat page. Each refusal keeps `at`, HTTP `status` and a short `reason` such as `feed disabled`, `token mismatch`, `invalid payload: serverId (bad format)`, `too large`, `invalid JSON`, `rate limited` or `storage unavailable`. Refusals of requests that carried the server's feed token, which only the game should have, are `lastRejected` and `rejectedCount`. All others, such as missing or wrong credentials, a feed token that is not configured, or malformed JSON, oversized bodies and rate limiting without the token, are `lastRejectedWithoutToken` and `rejectedWithoutTokenCount`. Anyone can reach the ingest URL, so those prove only that a request arrived and cannot replace the game's own record; repeated `token mismatch` refusals can still mean the game uses the wrong token. `lastBatch` holds the last stored batch: `at`, `accepted` valid killed events including repeats, `skipped`, `invalid` and the schema location of the `firstInvalid` entry. Tokens, headers, bodies and addresses are never kept; the Authorization header is only compared with the feed token. Each refusal, and each batch with invalid entries, also logs a warning. Warnings are limited to one per minute for each server, token state, HTTP status and reason category, with a count of the suppressed ones, so refusals without the token cannot hide the game's. The record resets when Gramps restarts.
 
 Events are stored transactionally with a unique instance/event ID pair so repeat deliveries cannot inflate retained statistics. Aggregation occurs in PostgreSQL. The public leaderboard returns the top 100, while aggregate totals cover all recorded players. Staff event views return the latest 100 events in the selected window; older events within retention remain included in aggregates.
 
 Routes:
 
-- `GET /community/api/leaderboard?period=day|week|month`: public game statistics only.
+- `GET /community/api/leaderboard?period=day|week|month`: public game statistics only, without SteamIDs.
 - `GET /admin/api/combat?period=...`: authenticated staff history.
 - `GET /admin/api/combat/players/:steamId?period=...`: authenticated staff player history.
 
+A weekly Discord post of the same names-only data, with data-backed shout-outs, is described in [Weekly Discord leaderboard post](WEEKLY_LEADERBOARD.md). It is off by default and stays silent without enough data.
+
 The public website uses same-origin `/community/api` rewrites to Gramps. The game ingest endpoint should target Gramps directly, or a separately verified host forwarding service, with its feed-only authorization.
+
+### Release order for names-only public rows
+
+Public leaderboard rows no longer carry `steamId`. As of October 2, the production website's leaderboard page still drops every row without a valid `steamId`. If Gramps ships this change first, the public leaderboard is empty and reads like a quiet period, not an error. The website's names-only leaderboard (its Pages adapter `proxy/gramps.mjs` and `dist/leaderboard.js`) accepts rows with or without `steamId`.
+
+- Do not merge this change to main or deploy it until the names-only website is published and live in production.
+- Once both are live, do not roll the website back to a deployment older than its names-only release.
+- If both must be reverted, roll Gramps back first, then the website.
 
 ## Retention and connection
 
@@ -49,7 +61,7 @@ At 09:35–09:41 EDT on October 2, read-only checks found:
 For the next acceptance check, observe a genuine combat event during ordinary play and then inspect receipt metadata and the matching deployment's HTTP logs:
 
 1. **No request:** investigate the destination actually loaded by the game and host outbound DNS/TLS/connectivity. A saved URL alone cannot identify which failed; do not guess a parser or token fix.
-2. **Request rejected:** use its HTTP status and safe error category to locate authentication, payload or storage failure. Do not publish request headers, tokens or raw player payloads.
+2. **Request rejected:** use its HTTP status and safe error category (staff `lastRejected` and the matching deployment log warning) to locate authentication, payload or storage failure. Do not publish request headers, tokens or raw player payloads.
 3. **Request accepted:** verify that receipt metadata advances and the corresponding real event appears. Only then record native delivery as observed.
 
 Do not manufacture kills, send test ingest requests or restart the live game to obtain this evidence.

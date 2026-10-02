@@ -101,6 +101,38 @@ describe("telemetry persistence contract", () => {
     expect(config.text).not.toContain(playerId);
     expect(params.slice(3)).toEqual([playerId, playerId, playerId]);
   });
+  it("reads weekly highlights over the same bounds as snapshot with one read-only statement", async () => {
+    const { store, query } = fixture();
+    const since = new Date("2026-09-28T00:00:00Z"),
+      until = new Date("2026-10-04T23:59:59.999Z");
+    await expect(store.weeklyHighlights(since, until, "east")).resolves.toEqual({
+      bestKd: null,
+      mostHeadshots: null,
+      longestKill: null,
+      kills: 0,
+      killsWithCause: 0,
+      topCause: null,
+      maps: [],
+    });
+    expect(query).toHaveBeenCalledTimes(1);
+    const [config, params] = query.mock.calls[0];
+    expect(config.text.trim()).toMatch(/^WITH scoped AS/);
+    expect(config.text).toContain("server_id = $1 AND received_at >= $2 AND received_at <= $3");
+    expect(params).toEqual(["east", since, until, 10]);
+    // A kill is a non-suicide event with a linked killer, as in snapshot().
+    expect(config.text).toContain("SELECT * FROM scoped WHERE NOT suicide AND killer_steam_id IS NOT NULL");
+    expect(config.text).toContain("ORDER BY steam_id, received_at DESC, event_id DESC");
+    expect(config.text).toContain("WHERE kills >= $4");
+    expect(config.text).toContain("ORDER BY kills::numeric / greatest(deaths, 1) DESC, kills DESC, steam_id LIMIT 1");
+    expect(config.text).toContain(
+      "ORDER BY kills.distance_centimeters DESC, kills.received_at, kills.event_time, kills.event_id LIMIT 1",
+    );
+    expect(config.text).toContain("LIMIT 50");
+    expect(config.text).not.toMatch(/\b(insert|update|delete)\b/i);
+    expect(config.text).not.toMatch(/email|discord/i);
+    await store.weeklyHighlights(since, until, "east", 25);
+    expect(query.mock.calls[1][1]).toEqual(["east", since, until, 25]);
+  });
   it("bounds individual history and converts centimetres without altering game timestamps", async () => {
     const { store, query } = fixture();
     await store.events(new Date("2026-09-29T00:00:00Z"), new Date("2026-09-30T00:00:00Z"), "76561198000000001");

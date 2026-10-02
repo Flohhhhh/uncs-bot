@@ -157,6 +157,15 @@ describe("server configuration boundaries", () => {
     expect(view.scoreTick).toMatchObject({ min: 20, max: 30 });
     expect(JSON.stringify(view)).not.toMatch(/private-|WDServerFeed|DefaultReservedPlayerIds/);
   });
+  it("shows a saved player minimum below the game's floor so staff can correct it", async () => {
+    const f = fixture();
+    f.document.text = `${original}[MatchState.PreMatch.WaitingForPlayers.PlayerCount]\r\nMinimumRequiredPlayers=6\r\n`;
+    const view = await f.game.configuration();
+    expect(view.fields.find((field) => field.id === "minRequiredPlayers")).toMatchObject({ value: 6, editable: true });
+    await expect(f.game.execute(save({ minRequiredPlayers: 6 }))).rejects.toThrow("at least 20");
+    await f.game.execute(save({ minRequiredPlayers: 20 }));
+    expect(f.saved().text).toContain("MinimumRequiredPlayers=20");
+  });
   it.each(["Europe", "Ozeti"])(
     "uses the running marker with status map %s when status omits its position",
     async (map) => {
@@ -473,6 +482,7 @@ describe("server configuration boundaries", () => {
     { imageUrl: "javascript:alert(1)" },
     { unknown: true },
     { minPlayerCash: 100, maxPlayerCash: 50 },
+    { minRequiredPlayers: 6 },
   ])("refuses invalid settings %j without a write", async (changes) => {
     const { game, request } = fixture();
     await expect(game.execute(save(changes))).rejects.toThrow();

@@ -58,6 +58,10 @@ export class SupportersAdminController {
   list(@Req() req: StaffRequest, @Query("search") search: unknown) {
     return this.service.list(req.staff, search);
   }
+  @Post("sync")
+  sync(@Req() req: StaffRequest) {
+    return this.service.syncNow(req.staff);
+  }
   @Post("manual-member")
   register(@Req() req: StaffRequest, @Body() body: unknown) {
     return this.service.register(req.staff, body);
