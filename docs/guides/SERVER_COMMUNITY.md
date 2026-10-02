@@ -75,12 +75,10 @@ The staff status response adds `welcome.whitelistedVariants` (null when unset) a
 
 Dennis supplied rotating copy on October 2. Neither set below is live until both variables are set in the deployment; until then production keeps the sequence and round message described under [Newcomer wording and launch state](#newcomer-wording-and-launch-state). Every line is single-line and under 200 characters.
 
-Five of its welcome variants and one round message tie the whitelist to a shorter queue ("Get queue priority", "Less queue next time", "Tired of queues?", "Less queue, more crew"). Gramps does not provide queue priority. Approving a whitelist entry only adds the player to the game's reserved-slot list (see [Live whitelist behavior](ADMIN_DASHBOARD.md#live-whitelist-behavior)), seeding and queue benefits are not implemented (see the [release audit](ADMIN_RELEASE_AUDIT.md#launch-work-still-requiring-verified-configuration)), and the newcomer guidance below says not to promise queue tiers. The copy therefore comes in two sets that differ only in those lines:
+Five of its welcome variants and one round message tie the whitelist to a shorter queue ("Get queue priority", "Less queue next time", "Tired of queues?", "Less queue, more crew"). Approving a whitelist entry adds the player to the game's reserved list (see [Live whitelist behavior](ADMIN_DASHBOARD.md#live-whitelist-behavior)). On The UNCs server the game itself moves reserved-list players to the front of the join queue: Dennis observed this in game on October 2, 2026, with **Reserved-slot capacity** at 0. Gramps adds no queue logic of its own, and no seeding rewards or queue tiers exist, so promise only the front-of-queue effect. The copy comes in two sets that differ only in those lines:
 
-- **Ready-now set.** Neutral whitelist or website lines replace the queue lines. Use this set unless both checks below have passed for that server. The neutral lines were written for this guide, not by Dennis; review them like any other copy.
-- **Queue-priority set.** Dennis's original wording, unchanged. Use it on a server only after both checks pass, and switch back to the ready-now set if either stops being true, for example after a reserved-slot change or a game update:
-  1. In the dashboard, **Server settings → Joining → Reserved-slot capacity** for that server is greater than 0 and large enough for the whitelisted players expected online at once. At 0 the whitelist reserves no slots.
-  2. A whitelisted player has been seen joining that server while it was full with a queue, and getting in ahead of the queue.
+- **Queue-priority set.** Dennis's original wording, unchanged. This is the recommended set for The UNCs server. Before using it on another server, confirm that a whitelisted player joining that server while it is full gets in ahead of the queue.
+- **Ready-now set.** Neutral whitelist or website lines replace the queue lines. Use it on a server where front-of-queue behaviour has not been seen, or if a game update changes it. The neutral lines were written for this guide, not by Dennis; review them like any other copy.
 
 Welcome variants (each is a two-message sequence, sent with the usual delay and spacing):
 
@@ -125,7 +123,7 @@ Paste the chosen set's exact single-line values into the deployment (Railway tak
 
 #### Queue-priority set
 
-Only for a server where both reserved-slot checks above have passed.
+Recommended for The UNCs server, where whitelisted players go to the front of the queue.
 
 `SERVER_COMMUNITY_WELCOME_VARIANTS`
 
@@ -143,19 +141,19 @@ Only for a server where both reserved-slot checks above have passed.
 
 Four two-message variants for `SERVER_COMMUNITY_WHITELISTED_WELCOME_VARIANTS`, for use with either standard set above. They welcome regulars back without asking them to get whitelisted, and promise no queue priority, rewards or points. They are not live until the variable is set in the deployment. Before setting it, confirm that the Steam group is still named `UNCs Wardogs` and that theuncsgaming.com still links the Discord.
 
-| #   | First message                                           | Second message                                   |
-| --- | ------------------------------------------------------- | ------------------------------------------------ |
-| 1   | `Welcome back to The UNCs. Knees warmed up?`            | `Find regulars in our Steam group: UNCs Wardogs` |
-| 2   | `Good to see you, unc. Squad up and take the hill.`     | `Discord: theuncsgaming.com`                     |
-| 3   | `Welcome back. Hydrate, use comms, play the objective.` | `Thanks for being part of the crew.`             |
-| 4   | `The UNCs salute you. Reading glasses on, soldier.`     | `Server quiet? Bring a friend and help seed.`    |
+| #   | First message                                           | Second message                                                    |
+| --- | ------------------------------------------------------- | ----------------------------------------------------------------- |
+| 1   | `Welcome back, unc. Knees warmed up?`                   | `Find the regulars in our Steam group: UNCs Wardogs`              |
+| 2   | `Look who is back. Grab a squad and take the hill.`     | `Lost your squad? Discord: theuncsgaming.com`                     |
+| 3   | `Welcome back. Hydrate, use comms, play the objective.` | `Thanks for being part of the crew. Your knees are proud of you.` |
+| 4   | `The UNCs salute you. Reading glasses on, soldier.`     | `Server quiet? Bring a friend and help seed.`                     |
 
 Paste this exact single-line value into the deployment, without surrounding quotes:
 
 `SERVER_COMMUNITY_WHITELISTED_WELCOME_VARIANTS`
 
 ```text
-[["Welcome back to The UNCs. Knees warmed up?","Find regulars in our Steam group: UNCs Wardogs"],["Good to see you, unc. Squad up and take the hill.","Discord: theuncsgaming.com"],["Welcome back. Hydrate, use comms, play the objective.","Thanks for being part of the crew."],["The UNCs salute you. Reading glasses on, soldier.","Server quiet? Bring a friend and help seed."]]
+[["Welcome back, unc. Knees warmed up?","Find the regulars in our Steam group: UNCs Wardogs"],["Look who is back. Grab a squad and take the hill.","Lost your squad? Discord: theuncsgaming.com"],["Welcome back. Hydrate, use comms, play the objective.","Thanks for being part of the crew. Your knees are proud of you."],["The UNCs salute you. Reading glasses on, soldier.","Server quiet? Bring a friend and help seed."]]
 ```
 
 `src/server-community/recommended-copy.spec.ts` also checks that this table, the paste value and `.env.example` agree, pass startup validation and keep every message under 200 characters; that no message mentions the whitelist, queues, priority, rewards, points, bonuses or "free"; and that no variant repeats one from the standard sets.
