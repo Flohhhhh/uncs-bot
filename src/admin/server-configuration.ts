@@ -11,7 +11,7 @@ import {
 import { assertEditable, arrayValue, editConfigKey, scalarValue } from "./config-document";
 import type { WardogsClient } from "./wardogs.client";
 import { RconError } from "./rcon-protocol";
-import { mapLabel, zoneLabel } from "../common/map-labels";
+import { mapLabel, zoneLabel, selectionLabel } from "../common/map-labels";
 import { serves } from "../common/admin-policy";
 import {
   statusSchema,
@@ -142,12 +142,20 @@ async function rotationPosition(
 ): Promise<{ currentIndex: number | null; positionNote: string }> {
   const unavailable = (positionNote: string) => ({ currentIndex: null, positionNote });
   if (!status) return unavailable("The running map could not be read. Refresh to try again.");
-  const mismatch = "The running map and saved rotation do not agree. Refresh to check again.";
+  const mapMismatch = (index: number, map: string) =>
+    unavailable(
+      `Rotation entry ${index + 1} is ${mapLabel(map)}, but ${mapLabel(status.map)} is running. Refresh to check again.`,
+    );
   const index = status.rotation?.nowIndex;
-  if (index !== undefined && index !== null && index !== -1)
-    return Number.isSafeInteger(index) && index >= 0 && entries[index]?.map === status.map
+  if (index !== undefined && index !== null && index !== -1) {
+    if (!Number.isSafeInteger(index) || index < 0 || !entries[index])
+      return unavailable(
+        `The game reports a position outside the ${entries.length} saved rotation entries. Refresh to check again.`,
+      );
+    return entries[index].map === status.map
       ? { currentIndex: index, positionNote: "" }
-      : unavailable(mismatch);
+      : mapMismatch(index, entries[index].map);
+  }
   if (!serves(capabilities, "GET", "/v1/rotation"))
     return unavailable("The game has not supplied its place in the rotation. Refresh after the next round starts.");
   try {
@@ -161,23 +169,33 @@ async function rotationPosition(
       );
     if (
       running.enabled !== (scalarValue(doc.text, ROTATION, "bEnabled")?.toLowerCase() === "true") ||
-      running.mode.toLowerCase() !== scalarValue(doc.text, ROTATION, "RotationMode")?.toLowerCase() ||
-      running.entries.length !== entries.length ||
-      running.entries.some((entry, i) => {
-        const saved = entries[i];
-        return (
-          entry.index !== i ||
-          entry.map !== saved.map ||
-          (saved.experiences.length > 0 &&
-            JSON.stringify([...saved.experiences].sort()) !== JSON.stringify([...(entry.experiences ?? [])].sort())) ||
-          (!!saved.lighting && saved.lighting !== entry.lighting) ||
-          (!!saved.zoneAlternator && saved.zoneAlternator !== "None" && saved.zoneAlternator !== entry.zoneAlternator)
-        );
-      }) ||
-      running.entries[now[0]].map !== status.map ||
-      running.entries[now[0]].denied
+      running.mode.toLowerCase() !== scalarValue(doc.text, ROTATION, "RotationMode")?.toLowerCase()
     )
-      return unavailable(mismatch);
+      return unavailable(
+        "The running rotation's enabled state or order differs from the saved settings. Refresh to check again.",
+      );
+    if (running.entries.length !== entries.length)
+      return unavailable(
+        `The running rotation has ${running.entries.length} entries; the saved rotation has ${entries.length}. Refresh to check again.`,
+      );
+    for (const [i, entry] of running.entries.entries()) {
+      const saved = entries[i];
+      if (entry.index !== i)
+        return unavailable("The game returned inconsistent rotation entry numbers. Refresh to check again.");
+      if (
+        entry.map !== saved.map ||
+        (saved.experiences.length > 0 &&
+          JSON.stringify([...saved.experiences].sort()) !== JSON.stringify([...(entry.experiences ?? [])].sort())) ||
+        (!!saved.lighting && saved.lighting !== entry.lighting) ||
+        (!!saved.zoneAlternator && saved.zoneAlternator !== "None" && saved.zoneAlternator !== entry.zoneAlternator)
+      )
+        return unavailable(
+          `Rotation entry ${i + 1} differs. Running: ${selectionLabel({ ...entry, experiences: entry.experiences ?? [] })}. Saved: ${selectionLabel(saved)}. Refresh to check again.`,
+        );
+    }
+    if (running.entries[now[0]].map !== status.map) return mapMismatch(now[0], running.entries[now[0]].map);
+    if (running.entries[now[0]].denied)
+      return unavailable(`The game marks current rotation entry ${now[0] + 1} unavailable. Refresh to check again.`);
     return { currentIndex: now[0], positionNote: "" };
   } catch {
     return unavailable("The running rotation could not be read. Refresh to try again.");
