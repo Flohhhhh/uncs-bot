@@ -47,20 +47,48 @@ it("requires an explicit selection before any game read and hides inaccessible g
   expect(screen.queryByRole("link", { name: /Server settings/ })).not.toBeInTheDocument();
   expect(screen.queryByRole("link", { name: /Applications/ })).not.toBeInTheDocument();
   expect(screen.getByRole("link", { name: /Supporters/ })).toBeInTheDocument();
-  const sections = within(screen.getByRole("combobox", { name: "Dashboard section" }));
-  expect(sections.queryByRole("option", { name: "Server settings" })).not.toBeInTheDocument();
-  expect(sections.queryByRole("option", { name: "Applications" })).not.toBeInTheDocument();
-  expect(sections.getByRole("option", { name: "Supporters" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "More sections" }));
+  const more = within(screen.getByRole("dialog", { name: "More" }));
+  expect(more.queryByRole("link", { name: /Settings/ })).not.toBeInTheDocument();
+  expect(more.queryByRole("link", { name: /Applications/ })).not.toBeInTheDocument();
+  expect(more.getByRole("link", { name: /Supporters/ })).toBeInTheDocument();
+  expect(more.getByText("Your access: viewer", { exact: false })).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Review move" })).not.toBeInTheDocument();
 });
-it("retains the selected server when using the compact section picker", async () => {
-  const { router } = mount("/players?server=event");
-  fireEvent.change(await screen.findByRole("combobox", { name: "Dashboard section" }), {
-    target: { value: "permissions" },
-  });
+it("retains the selected server when choosing a section from More", async () => {
+  const { router } = mount("/players?server=event", async (url) =>
+    json(url.endsWith("/overview") ? overview("Events") : []),
+  );
+  await screen.findByText("Events player");
+  const more = screen.getByRole("button", { name: "More sections" });
+  expect(more).toHaveAttribute("aria-expanded", "false");
+  fireEvent.click(more);
+  expect(more).toHaveAttribute("aria-expanded", "true");
+  fireEvent.click(within(screen.getByRole("dialog", { name: "More" })).getByRole("link", { name: /Bans/ }));
+  await waitFor(() => expect(router.state.location.pathname).toBe("/bans"));
+  expect(router.state.location.search).toBe("?server=event");
+  expect(screen.queryByRole("dialog", { name: "More" })).not.toBeInTheDocument();
+  // More stands for the section that is open now.
+  expect(more).toHaveClass("active");
+  fireEvent.click(more);
+  fireEvent.click(within(screen.getByRole("dialog", { name: "More" })).getByRole("link", { name: "View permissions" }));
   await waitFor(() => expect(router.state.location.pathname).toBe("/permissions"));
   expect(router.state.location.search).toBe("?server=event");
-  expect(screen.getByRole("combobox", { name: "Dashboard section" })).toHaveValue("permissions");
+  expect(screen.getByRole("heading", { level: 1, name: "Staff permissions" })).toHaveFocus();
+});
+it("switches servers from More only on an explicit choice", async () => {
+  const { router } = mount("/players?server=primary");
+  await screen.findByText("Primary player");
+  fireEvent.click(screen.getByRole("button", { name: "More sections" }));
+  const sheet = within(screen.getByRole("dialog", { name: "More" }));
+  const switcher = sheet.getByRole("combobox", { name: "Game server" });
+  fireEvent.keyDown(switcher, { key: "ArrowDown" });
+  fireEvent.keyDown(switcher, { key: "ArrowDown" });
+  expect(router.state.location.search).toBe("?server=primary");
+  fireEvent.keyDown(switcher, { key: "Enter" });
+  await waitFor(() => expect(router.state.location.search).toBe("?server=event"));
+  await screen.findByText("Events player");
+  expect(screen.queryByRole("dialog", { name: "More" })).not.toBeInTheDocument();
 });
 it("cancels a previous server read and ignores its late response after a switch", async () => {
   let complete!: (response: Response) => void;
@@ -71,7 +99,8 @@ it("cancels a previous server read and ignores its late response after a switch"
     url.includes("/primary/") ? pending : Promise.resolve(json(overview("Events"))),
   );
   expect(await screen.findByText("Connecting…")).toBeInTheDocument();
-  expect(screen.queryByText("Connection needs attention")).not.toBeInTheDocument();
+  expect(screen.queryByText("Not connected")).not.toBeInTheDocument();
+  expect(screen.queryByText("Stale")).not.toBeInTheDocument();
   await screen.findByRole("combobox", { name: "Game server" });
   switchServer("Events");
   await screen.findByText("Events player");
