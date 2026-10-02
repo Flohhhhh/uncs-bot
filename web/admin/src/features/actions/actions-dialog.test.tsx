@@ -235,6 +235,13 @@ describe("server action review", () => {
     expect(screen.queryByRole("button", { name: /Confirm|resubmit/i })).not.toBeInTheDocument();
     expect(admin.invalidateOverview).toHaveBeenCalledOnce();
     expect(request).toHaveBeenCalledTimes(1);
+    request.mockResolvedValueOnce({ record: { id: body.id, state: "applied", message: "Kick recorded." } });
+    fireEvent.click(screen.getByText("Action details"));
+    fireEvent.click(screen.getByRole("button", { name: "Check saved result" }));
+    expect(await screen.findByRole("status", { name: "Saved action result" })).toHaveTextContent("Kick recorded.");
+    expect(request.mock.calls.filter(([, options]) => options?.method === "POST")).toHaveLength(1);
+    expect(request.mock.calls[1][0]).toBe(`audit/${body.id}`);
+    expect(screen.queryByRole("button", { name: "Back to edits" })).not.toBeInTheDocument();
   });
   it.each([
     ["message", "Message player"],

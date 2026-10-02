@@ -4,6 +4,7 @@ import type { ActionResult, Player } from "../../api/types";
 import { useGameAdmin as useAdmin } from "../../app/context";
 import { Badge, Modal, Table } from "../../components/ui";
 import { allowed, errorMessage, rejectionState } from "../actions/policy";
+import { ActionReceipt } from "../actions/action-receipt";
 import { FactionOptions, liveFactions, playerFaction } from "./factions";
 
 type ItemState = ActionResult["state"] | "queued" | "sending" | "skipped";
@@ -54,7 +55,7 @@ export function TeamResults({ items }: { items: TeamItem[] }) {
           </td>
           <td className="audit-detail">
             {item.message}
-            {!["queued", "skipped"].includes(item.state) && <small>Action {item.id}</small>}
+            {!["queued", "skipped", "sending"].includes(item.state) && <ActionReceipt id={item.id} />}
           </td>
         </tr>
       ))}

@@ -13,7 +13,7 @@ import { useResource } from "../../api/use-resource";
 import { useGameApi } from "../../api/server-client";
 import type { ActionResult, Catalog } from "../../api/types";
 import { Badge, Card, Empty, Modal, Table } from "../../components/ui";
-import { CopyValue } from "../../components/data-table";
+import { ActionReceipt } from "../actions/action-receipt";
 import { errorMessage, rejectionState } from "../actions/policy";
 import { MapPicker } from "../actions/map-picker";
 import { ServerIdentityReadout } from "./server-identity";
@@ -104,10 +104,7 @@ function ReviewChanges({
             {result.message}
           </p>
           {result.state === "unknown" && <p>Check this receipt in Action history before trying again.</p>}
-          <details>
-            <summary>Action details</summary>
-            <CopyValue value={id} label="action ID" />
-          </details>
+          <ActionReceipt id={id} />
           <button type="button" onClick={close} className="button secondary">
             {result.state === "failed" ? "Back to edits" : "Close"}
           </button>
