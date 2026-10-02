@@ -3425,7 +3425,7 @@ tr.audit-more[hidden] {
   color: var(--cream);
   box-shadow: inset 0 -2px 0 var(--accent);
 }
-/* A status line: a toned dot and "Name: state", then short facts. Shared by Combat and Supporters. */
+/* A status line: a toned dot and "Name: state", then short facts. Shared by Combat, Supporters and Announcements. */
 .status-row {
   display: flex;
   flex-wrap: wrap;
@@ -3730,6 +3730,25 @@ tr.audit-more[hidden] {
 .message-body ol {
   margin: 0;
   padding-left: var(--space-5);
+}
+.message-body ol:not(:last-child) {
+  margin-bottom: var(--space-2);
+}
+.message-variants > li + li {
+  margin-top: var(--space-2);
+}
+.message-line {
+  display: block;
+}
+.message-set + .message-set {
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--line);
+}
+.message-set h4 {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-sm);
+  font-weight: 650;
 }
 @media (max-width: 540px) {
   .message-list summary,

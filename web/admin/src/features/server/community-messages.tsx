@@ -3,15 +3,151 @@ import type { CommunityMessagesStatus } from "../../../../../src/common/communit
 import { useResource } from "../../api/use-resource";
 import { Badge, Card, Empty, date } from "../../components/ui";
 import { activityLink } from "../players/player-actions";
+import { When } from "./activity-entries";
+
+type Welcome = CommunityMessagesStatus["welcome"];
+const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
+const seconds = (value: number) => (value >= 60 && value % 60 === 0 ? `${value / 60} min` : `${value} s`);
+const time = (value: string | null | undefined) => (value && Number.isFinite(Date.parse(value)) ? value : null);
 
 function State({ on, label }: { on: boolean; label?: string }) {
   return <Badge kind={label ? "warn" : on ? "good" : "neutral"}>{label ?? (on ? "On" : "Off")}</Badge>;
 }
 
+/** Numbered welcome variants. Each line of a variant is its own message, sent in order. */
+function Variants({ label, variants }: { label: string; variants: string[][] }) {
+  return (
+    <ol className="message-variants" aria-label={label}>
+      {variants.map((lines, index) => (
+        <li key={index}>
+          {lines.map((line, part) => (
+            <span key={part} className="message-line">
+              {line}
+            </span>
+          ))}
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+/** How the whitelisted welcome learns who is on the whitelist, and whether that last worked. */
+function WhitelistCheck({ whitelist }: { whitelist: NonNullable<Welcome["whitelist"]> }) {
+  const loaded = time(whitelist.lastLoadedAt);
+  const failed = time(whitelist.lastFailedAt);
+  // A failed read newer than the last good one sends these players the standard welcome for now.
+  const failing = failed !== null && (loaded === null || Date.parse(failed) > Date.parse(loaded));
+  return (
+    <>
+      <p
+        className={`status-line ${failing ? "attention" : loaded ? "good" : "quiet"}`}
+        title="Reads the game's running whitelist (reserved slots), not the saved settings. Whitelist changes made through Gramps refresh it sooner."
+      >
+        <span>
+          Whitelist check: <strong>{failing ? "Last read failed" : loaded ? "Working" : "Not read yet"}</strong>
+        </span>
+        {failing && failed && (
+          <span>
+            Failed <When at={failed} />
+          </span>
+        )}
+        {loaded ? (
+          <span>
+            Last read <When at={loaded} />
+          </span>
+        ) : (
+          !failing && <span>Reads on the next join</span>
+        )}
+        <span>Reused for up to {seconds(whitelist.cacheSeconds)}</span>
+      </p>
+      {failing && <p className="muted">After a failed read, every joiner gets the standard welcome for a minute.</p>}
+    </>
+  );
+}
+
+function WelcomeRow({ welcome }: { welcome: Welcome }) {
+  const variants = welcome.variants?.length ? welcome.variants : [welcome.messages];
+  const whitelisted = welcome.whitelistedVariants?.length ? welcome.whitelistedVariants : null;
+  const spaced = [...variants, ...(whitelisted ?? [])].some((lines) => lines.length > 1);
+  const random = variants.length > 1 || (whitelisted?.length ?? 0) > 1;
+  const count =
+    variants.length === 1 && !whitelisted
+      ? plural(variants[0].length, "message")
+      : `${plural(variants.length, "variant")}${whitelisted ? `, ${whitelisted.length} for whitelisted players` : ""}`;
+  return (
+    <li>
+      <details>
+        <summary>
+          <span className="message-name">Welcome</span>
+          <State on={welcome.enabled} />
+          <span className="message-meta">
+            {count} · {welcome.delaySeconds} s delay
+          </span>
+        </summary>
+        <div className="message-body">
+          <p className="muted">
+            Sent {welcome.delaySeconds} s after an observed join
+            {spaced ? `, at least ${welcome.spacingSeconds} s apart` : ""}.
+            {random ? " Each join gets a random variant, never the player's previous one." : ""}
+          </p>
+          {whitelisted ? (
+            <>
+              <section className="message-set">
+                <h4>Everyone else</h4>
+                <Variants label="Welcome variants for everyone else" variants={variants} />
+              </section>
+              <section className="message-set">
+                <h4>Players already on the whitelist</h4>
+                {welcome.whitelist && <WhitelistCheck whitelist={welcome.whitelist} />}
+                <Variants label="Welcome variants for players already on the whitelist" variants={whitelisted} />
+              </section>
+            </>
+          ) : (
+            <Variants label="Welcome variants" variants={variants} />
+          )}
+        </div>
+      </details>
+    </li>
+  );
+}
+
+function RoundRow({ round }: { round: CommunityMessagesStatus["round"] }) {
+  const messages = round.messages?.length ? round.messages : [round.message];
+  return (
+    <li>
+      <details>
+        <summary>
+          <span className="message-name">Round notice</span>
+          <State on={round.enabled} />
+          <span className="message-meta">
+            {messages.length > 1
+              ? `${plural(messages.length, "message")} · after each observed round change`
+              : "After each observed round change"}
+          </span>
+        </summary>
+        <div className="message-body">
+          {messages.length > 1 ? (
+            <>
+              <p className="muted">Each round gets a random message, never the previous round's.</p>
+              <ol aria-label="Round messages">
+                {messages.map((message, index) => (
+                  <li key={index}>{message}</li>
+                ))}
+              </ol>
+            </>
+          ) : (
+            <p>{messages[0]}</p>
+          )}
+          <p className="muted">A missed round change may skip a notice.</p>
+        </div>
+      </details>
+    </li>
+  );
+}
+
 export function CommunityMessages() {
   const { data, error, loading, refresh } = useResource<CommunityMessagesStatus>("community-messages");
   const location = useLocation();
-  const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
   return (
     <Card
       title="Automatic messages"
@@ -49,41 +185,8 @@ export function CommunityMessages() {
                 </p>
               )}
             <ul className="message-list" aria-label="Automatic messages">
-              <li>
-                <details>
-                  <summary>
-                    <span className="message-name">Welcome</span>
-                    <State on={data.welcome.enabled} />
-                    <span className="message-meta">
-                      {plural(data.welcome.messages.length, "message")} · {data.welcome.delaySeconds} s delay
-                    </span>
-                  </summary>
-                  <div className="message-body">
-                    <p className="muted">
-                      Sent {data.welcome.delaySeconds} s after an observed join
-                      {data.welcome.messages.length > 1 ? `, at least ${data.welcome.spacingSeconds} s apart` : ""}.
-                    </p>
-                    <ol>
-                      {data.welcome.messages.map((message, index) => (
-                        <li key={index}>{message}</li>
-                      ))}
-                    </ol>
-                  </div>
-                </details>
-              </li>
-              <li>
-                <details>
-                  <summary>
-                    <span className="message-name">Round notice</span>
-                    <State on={data.round.enabled} />
-                    <span className="message-meta">After each observed round change</span>
-                  </summary>
-                  <div className="message-body">
-                    <p>{data.round.message}</p>
-                    <p className="muted">A missed round change may skip a notice.</p>
-                  </div>
-                </details>
-              </li>
+              <WelcomeRow welcome={data.welcome} />
+              <RoundRow round={data.round} />
               <li>
                 <div className="message-row">
                   <span className="message-name">Discord card</span>
