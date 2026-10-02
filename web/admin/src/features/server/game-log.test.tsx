@@ -37,7 +37,7 @@ function show(role: "admin" | "viewer" = "admin") {
 }
 it("reads the game log only when selected and separates commands from connections", async () => {
   show();
-  await screen.findByText("No matching staff actions");
+  await screen.findByText("No recorded staff actions");
   expect(request.mock.calls.some(([path]) => path === "game-log")).toBe(false);
   fireEvent.click(screen.getByRole("button", { name: "Game command log" }));
   await screen.findByText("POST /v1/broadcast");

@@ -11,6 +11,7 @@ import { actionDefinitions, allowed } from "../actions/policy";
 import { FactionChip, liveFactions, playerFaction } from "../players/factions";
 import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 import { PlayerActions } from "../players/player-actions";
+import { EmptyRoster } from "../players/empty-roster";
 import { GameLogView } from "./game-log";
 import { CommunityMessages } from "./community-messages";
 import { RotationEditor } from "./settings-page";
@@ -58,7 +59,7 @@ export function OverviewPage() {
               <small> / {status.players.max}</small>
             </>
           }
-          note="Current game population"
+          note={stale ? "Last reported population" : "Current game population"}
         />
         <Metric
           label="CURRENT MAP"
@@ -67,7 +68,7 @@ export function OverviewPage() {
           word
         />
         <Metric label="YOUR ACCESS" value={me.role} note="Verified through Discord" word />
-        <Metric label="SERVER STATUS" value={stale ? "Unavailable" : "Connected"} note="RCON connection" word />
+        <Metric label="SERVER STATUS" value={stale ? "Needs refresh" : "Connected"} note="RCON connection" word />
       </div>
       <div className="overview-grid">
         <Card
@@ -169,7 +170,7 @@ export function OverviewPage() {
             ))}
           </Table>
         ) : (
-          <Empty title="The server is quiet" detail="Players will appear here as they join." />
+          <EmptyRoster overview={overview} stale={stale} />
         )}
       </Card>
       {managedId && <PlayerActions steamId={managedId} onClose={() => setManagedId(null)} />}
@@ -294,7 +295,7 @@ export function WhitelistPage() {
             )}
           />
         ) : (
-          <Empty title="No matching entries" />
+          <Empty title={query.trim() || filter ? "No matching entries" : "No player entries available"} />
         )}
       </Card>
     </>
@@ -373,7 +374,7 @@ export function BansPage() {
             )}
           />
         ) : (
-          <Empty title="No matching bans" />
+          <Empty title={query.trim() ? "No matching bans" : "No server bans recorded"} />
         )}
       </Card>
     </>
@@ -636,7 +637,7 @@ export function DashboardHistory() {
           />
         ) : (
           <Empty
-            title="No matching staff actions"
+            title={query.trim() ? "No matching staff actions" : "No recorded staff actions"}
             detail="Actions performed through this dashboard appear here. Older activity from other tools is not imported."
           />
         )}
