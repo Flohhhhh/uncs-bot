@@ -204,7 +204,9 @@ export function trackRound(previous: RoundTrack | null, observation: RoundObserv
         ended: valid && leading >= DEFAULT_CAP,
         lastSignalAt: boundary ? at : null,
         waitingSince: phase === "waiting" ? at : null,
-        last: valid ? last : { ...last, names: [], scores: [], leading: highest },
+        // An unreadable read keeps the last valid one, so the next valid read is still compared, as a
+        // gap, with the known round's map and rotation entry.
+        last: valid ? last : (previous?.last ?? { ...last, names: [], scores: [], leading: highest }),
         ...(unseeded ? { unseeded: true } : {}),
       },
       boundary,

@@ -215,6 +215,26 @@ describe("round tracking without requiring the match clock", () => {
     ]);
     expect(dropped[1].boundary).toBe(true);
   });
+  it("compares the first valid read after a gap with the known round, even after an unreadable read", () => {
+    const updates = run([
+      observation(t0, { scores: scores(100, 40, 20) }),
+      // No valid read for 70 seconds, then the new map loads with no scores yet.
+      observation(t0 + 70_000, { map: "Europe", nowIndex: 1, scores: [] }),
+      observation(t0 + 85_000, { map: "Europe", nowIndex: 1, scores: scores(5, 0, 0) }),
+    ]);
+    expect(updates[1].track.last).toEqual(updates[0].track.last);
+    expect(updates[2]).toMatchObject({ boundary: true, reason: "gap" });
+    expect(updates[2].track.round).toMatchObject({ map: "Europe", index: 1, exact: false });
+    expect(updates[2].track.round.id).not.toBe(updates[0].track.round.id);
+    // A round that ended low is not mistaken for the new match either.
+    const low = run([
+      observation(t0, { scores: scores(30, 10, 5) }),
+      observation(t0 + 70_000, { map: "Europe", nowIndex: 1, scores: [] }),
+      observation(t0 + 85_000, { map: "Europe", nowIndex: 1, scores: scores(25, 0, 0) }),
+    ]);
+    expect(boundaries(low)).toEqual(["gap"]);
+    expect(low[2].track.round.map).toBe("Europe");
+  });
   it("continues a stored round after a restart and starts a new one when the match moved on", () => {
     const seed = {
       round: {
