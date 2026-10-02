@@ -1,5 +1,6 @@
 import { Logger } from "@nestjs/common";
 import type { EnvService } from "../env/env.service";
+import { RconError } from "../admin/rcon-protocol";
 import { EnvWatchlistSource, withTimeout } from "./network-bans";
 import { snapshot, workerFixture } from "./staff-alerts.fixture";
 
@@ -210,6 +211,99 @@ describe("watch-list joins", () => {
     expect(slow.lookup).toHaveBeenCalledTimes(2);
     expect(late.alerts.list("primary")).toEqual([]);
     expect(late.worker.view().sources[0].error).toContain("3 seconds");
+  });
+
+  it("alerts on a listed join across one failed read, during an outage and in the first read after a map load", async () => {
+    // One failed read at the normal cadence.
+    const blip = workerFixture(values, { sources: [sourceFor()] });
+    await blip.pass(roster(clean), 0);
+    await blip.pass(roster(clean), 15_000);
+    blip.game.overview.mockRejectedValueOnce(
+      new RconError("The game server could not be reached.", false, "unreachable"),
+    );
+    await blip.pass(undefined, 15_000);
+    await blip.pass(roster(clean, listed), 30_000);
+    expect(blip.alerts.list("primary").map((alert) => [alert.player?.steamId, alert.title])).toEqual([
+      [listed, "Watch list: player joined"],
+    ]);
+
+    // Ten minutes of rejected credentials while the game keeps running.
+    const outage = workerFixture(values, { sources: [sourceFor()] });
+    await outage.pass(roster(clean), 0);
+    outage.game.failWith(new RconError("RCON rejected the credentials.", false, "rejected"));
+    for (let read = 0; read < 20; read++) await outage.pass(undefined, 30_000);
+    outage.game.failWith(null);
+    await outage.pass(roster(clean, listed), 30_000);
+    expect(outage.alerts.list("primary").map((alert) => alert.player?.steamId)).toEqual([listed]);
+
+    // A map load: the roster empties, then the listed player is in the first returning read.
+    const load = workerFixture(values, { sources: [sourceFor()] });
+    const next = {
+      map: "Europe",
+      matchSeconds: 5,
+      factionScores: [
+        { name: "Lonestar", score: 0 },
+        { name: "Valkyra", score: 0 },
+      ],
+    };
+    await load.pass(roster(clean), 0);
+    await load.pass(roster(clean));
+    await load.pass(snapshot([], next));
+    await load.pass(snapshot([], next));
+    await load.pass(
+      snapshot(
+        [
+          { steamId: clean, name: "Player" },
+          { steamId: listed, name: "Listed" },
+        ],
+        next,
+      ),
+    );
+    expect(load.alerts.list("primary").map((alert) => alert.player?.steamId)).toEqual([listed]);
+  });
+
+  it("does not re-check players who stay online through an outage or a map load", async () => {
+    const lookup = jest.spyOn(EnvWatchlistSource.prototype, "lookup");
+    const { pass, game } = workerFixture(values, { sources: [sourceFor()] });
+    await pass(roster(clean), 0);
+    game.failWith(new RconError("The game server could not be reached.", false, "unreachable"));
+    for (let read = 0; read < 10; read++) await pass(undefined, 30_000);
+    game.failWith(null);
+    await pass(roster(clean), 30_000);
+    await pass(snapshot([], { map: "Europe", matchSeconds: 5 }), 15_000);
+    for (let read = 0; read < 8; read++) await pass(snapshot([], { map: "Europe", matchSeconds: 5 }), 15_000);
+    await pass(snapshot([{ steamId: clean, name: "Player" }], { map: "Europe", matchSeconds: 5 }), 15_000);
+    expect(lookup.mock.calls.map(([steamIds]) => steamIds)).toEqual([[clean]]);
+  });
+
+  it("records players online when Gramps starts without posting or pinging, and still posts a later join", async () => {
+    const role = "678901234567890123";
+    const { pass, alerts, discord } = workerFixture(
+      { ...values, STAFF_ALERTS_PING_ROLE_ID: role },
+      { sources: [sourceFor()] },
+    );
+    discord.channel.guild.roles.cache.set(role, { id: role });
+    await pass(roster(listed, clean), 0);
+    expect(alerts.list("primary")).toEqual([
+      expect.objectContaining({
+        title: "Watch list: player online",
+        severity: "high",
+        pinged: false,
+        delivery: { state: "suppressed", reason: "online when Gramps started, recorded only" },
+        network: expect.objectContaining({ presentAtStart: true }),
+      }),
+    ]);
+    expect(discord.channel.send).not.toHaveBeenCalled();
+    // Leaving past the 60-second grace and coming back is an observed join: posted, with the ping.
+    for (let read = 0; read < 8; read++) await pass(roster(clean));
+    await pass(roster(clean, listed));
+    expect(alerts.list("primary")[0]).toMatchObject({
+      title: "Watch list: player joined",
+      pinged: true,
+      delivery: { state: "posted" },
+    });
+    expect(discord.channel.send).toHaveBeenCalledTimes(1);
+    expect(discord.channel.send.mock.calls[0][0].content).toBe(`<@&${role}>`);
   });
 
   it("calls no source when the watch list is off", async () => {

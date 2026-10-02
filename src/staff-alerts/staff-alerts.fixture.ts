@@ -80,7 +80,13 @@ export function gameDouble(initial = snapshot([])) {
         observedAt: new Date().toISOString(),
       };
     }),
-    whitelist: jest.fn(async () => ({ entries: [] as { steamId: string; active: boolean }[] })),
+    /** The live reserved slots: the only whitelist read staff alerts make. */
+    reservedSlots: jest.fn(async () => ({
+      ids: new Set<string>() as ReadonlySet<string>,
+      loadedAt: new Date().toISOString(),
+    })),
+    /** Also reads the configuration document; staff alerts must never call it. */
+    whitelist: jest.fn(),
     execute: jest.fn(),
     failWith(error: Error | null) {
       failure = error;

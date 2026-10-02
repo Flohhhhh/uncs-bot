@@ -7,7 +7,8 @@ import type { EnvService } from "../env/env.service";
 const guild = "234567890123456789",
   alerts = "345678901234567890",
   votes = "456789012345678901",
-  community = "567890123456789012";
+  community = "567890123456789012",
+  leaderboard = "567890123456789013";
 const steamId = "76561198000000001";
 type Permission = bigint;
 type Rich = ReturnType<typeof richFixture>;
@@ -48,6 +49,7 @@ function richFixture(environment: Record<string, unknown> = {}) {
     STAFF_ALERTS_CHANNEL_ID: alerts,
     MAP_VOTES_CHANNEL_ID: votes,
     SERVER_COMMUNITY_DISCORD_CHANNEL_ID: community,
+    WEEKLY_LEADERBOARD_CHANNEL_ID: leaderboard,
     STAFF_ALERTS_PING_ROLE_ID: pingRole,
     ...environment,
   };
@@ -154,6 +156,7 @@ describe("alert-only staff alert delivery", () => {
     ["no staff channel", (rich) => delete rich.env.STAFF_ALERTS_CHANNEL_ID, "no staff channel"],
     ["the voting channel", (rich) => (rich.env.STAFF_ALERTS_CHANNEL_ID = votes), "community-channel"],
     ["the community channel", (rich) => (rich.env.STAFF_ALERTS_CHANNEL_ID = community), "community-channel"],
+    ["the weekly leaderboard channel", (rich) => (rich.env.STAFF_ALERTS_CHANNEL_ID = leaderboard), "community-channel"],
     [
       "a server status channel",
       (rich) => (rich.env.WARDOGS_SERVERS = [{ communityStatus: { channelId: alerts, messageId: "1".repeat(18) } }]),
@@ -289,15 +292,14 @@ describe("alert-only staff alert delivery", () => {
     expect(rich.service.list("primary")[0].player!.name).toBe(name);
   });
 
-  it("adds a dashboard link with the alert ID only when the dashboard is enabled", async () => {
+  it("adds no dashboard button until the dashboard can show the alert", async () => {
     const off = richFixture();
     await off.service.raise(input());
     expect(sent(off, 0).components).toBeUndefined();
     const on = richFixture({ ADMIN_ENABLED: true, ADMIN_ORIGIN: "https://admin.example.test/" });
-    const alert = await on.service.raise(input({ player: { steamId, name: "Player" } }));
-    const url = sent(on, 0).components[0].components[0].url as string;
-    expect(url).toBe(`https://admin.example.test/admin/activity?view=alerts&server=primary&id=${alert!.id}`);
-    expect(url).not.toContain(steamId);
+    await on.service.raise(input({ player: { steamId, name: "Player" } }));
+    expect(sent(on, 0).components).toBeUndefined();
+    expect(JSON.stringify(sent(on, 0))).not.toContain("admin.example.test");
   });
 
   it("shows only safe https evidence links, as autolinks", async () => {
@@ -377,5 +379,15 @@ describe("alert-only staff alert delivery", () => {
     expect(amended!.updatedAt).not.toBe(amended!.createdAt);
     expect(rich.service.amend("primary", "perf:missing", { lines: [] })).toBeNull();
     expect(rich.channel.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("takes a later rule's kind and title when amending", async () => {
+    const rich = richFixture();
+    await rich.service.raise(
+      input({ kind: "performance-match", severity: "warning", key: "perf:2:r", title: "Review: unusual round K/D" }),
+    );
+    expect(
+      rich.service.amend("primary", "perf:2:r", { kind: "performance-window", title: "Review: unusual kill rate" }),
+    ).toMatchObject({ kind: "performance-window", category: "performance", title: "Review: unusual kill rate" });
   });
 });

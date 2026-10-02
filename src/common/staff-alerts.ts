@@ -48,9 +48,10 @@ export function needsReview(alert: Pick<StaffAlertView, "kind" | "review">) {
 }
 
 /**
- * posted: in the staff channel. observe: recorded only (performance observe mode or a
- * scheduled restart below the player threshold). suppressed: a limit or cooldown held it back.
- * snoozed: staff snoozed the category. failed: the channel check or Discord refused it.
+ * posted: in the staff channel. observe: recorded only (performance observe mode). suppressed: a
+ * limit or cooldown held it back, or it is recorded only by design (a scheduled restart below the
+ * player threshold, a watch-list player already online when Gramps started). snoozed: staff
+ * snoozed the category. failed: the channel check or Discord refused it.
  */
 export type StaffAlertDeliveryState = "posted" | "observe" | "suppressed" | "snoozed" | "failed";
 export type StaffAlertDelivery = { state: StaffAlertDeliveryState; reason: string | null };

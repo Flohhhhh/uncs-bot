@@ -2,6 +2,7 @@
 // the server browser, so every finding here is inferred and says so.
 import type { RconErrorKind } from "../admin/rcon-protocol";
 import { mapLabel, sameMap } from "../common/map-labels";
+import { ROUND_HOLD_MS } from "../server-community/community-state";
 import { ROUND_GAP_MS } from "./round-state";
 import { formatDuration, formatLocal, scheduledMatch } from "./local-time";
 import type { HealthOptions } from "./staff-alerts.config";
@@ -27,9 +28,12 @@ export type HealthOutage = {
   successes: number;
   firstSuccessAt: number | null;
 };
+/** A restart that a map load could also explain, held until the roster stays near empty. */
+export type PendingRestart = { at: number; playersBefore: number; signals: string[] };
 export type HealthState = {
   lastGood: GoodRead | null;
   outage: HealthOutage | null;
+  pending: PendingRestart | null;
   /** Last non-empty build; null until the first one after boot (the silent baseline). */
   build: string | null;
   lastRestartAt: number | null;
@@ -48,6 +52,8 @@ export type HealthAlert = {
 };
 
 export const RESTART_ALERT_MS = 30 * 60_000;
+/** The community worker's map-load hold: a map load refills the roster sooner than this. */
+export const RESTART_HOLD_MS = ROUND_HOLD_MS;
 const BUILD_AFTER_RESTART_MS = 10 * 60_000;
 const NO_ACTION = "Gramps took no action.";
 const INFERRED = "Inferred from RCON reads.";
@@ -55,6 +61,7 @@ const INFERRED = "Inferred from RCON reads.";
 export const initialHealthState = (): HealthState => ({
   lastGood: null,
   outage: null,
+  pending: null,
   build: null,
   lastRestartAt: null,
   lastRestartAlertAt: null,
@@ -94,8 +101,11 @@ function downText(kind: HealthFailureKind, minutes: number, since: string) {
 /**
  * One RCON read. A failed read that is not `paused` starts or extends an outage: `game-down` after
  * at least two failures spanning the configured minutes, then `game-back` after two good reads.
- * The first good read after any interruption is compared with the last good read for a likely
- * restart. The first good read after boot only sets the baseline.
+ * The first good read after a read gap or an outage is compared with the last good read for a
+ * likely restart. A single failed read inside the normal read gap is a hitch: only a new build
+ * counts at once, and an emptied roster is held like a fast crash. Anything a map load could also
+ * explain is held until the roster stays near empty past RESTART_HOLD_MS. The first good read
+ * after boot only sets the baseline.
  */
 export function observeHealth(previous: HealthState, reading: HealthReading, now: number, options: HealthOptions) {
   const alerts: HealthAlert[] = [];
@@ -147,26 +157,46 @@ export function observeHealth(previous: HealthState, reading: HealthReading, now
   const firstAfterOutage = !!outage && outage.successes === 0;
   let restartLike = false;
   if (last && (firstAfterOutage || (!outage && gap))) {
-    const signals: string[] = [];
-    if (!sameMap(last.map, current.map)) signals.push(`map ${mapLabel(last.map)} to ${mapLabel(current.map)}`);
+    const place: string[] = [];
+    if (!sameMap(last.map, current.map)) place.push(`map ${mapLabel(last.map)} to ${mapLabel(current.map)}`);
     const rolledBack =
       last.matchSeconds !== null && current.matchSeconds !== null && current.matchSeconds < last.matchSeconds - 30;
-    if (rolledBack || reading.roundChanged) signals.push(rolledBack ? "match clock reset" : "new round");
-    if (last.players >= 5 && current.players <= 1) signals.push(`players ${last.players} to ${current.players}`);
-    if (last.build && build && last.build !== build) signals.push(`build ${last.build} to ${build}`);
-    if (signals.length) {
-      restartLike = true;
-      const restartAt = outage ? outage.since : last.at;
-      const lost = outage
-        ? `connection lost ${formatDuration(now - outage.since)}`
-        : `no reads for ${formatDuration(now - last.at)}`;
-      alerts.push(...restartAlert(state, restartAt, last.players, [...signals, lost], now, options));
-    }
+    if (rolledBack || reading.roundChanged) place.push(rolledBack ? "match clock reset" : "new round");
+    const emptied = last.players >= 5 && current.players <= 1 ? `players ${last.players} to ${current.players}` : null;
+    const rebuilt = last.build && build && last.build !== build ? `build ${last.build} to ${build}` : null;
+    const signals = [...place, ...(emptied ? [emptied] : []), ...(rebuilt ? [rebuilt] : [])];
+    const restartAt = outage ? outage.since : last.at;
+    const lost = outage
+      ? `connection lost ${formatDuration(now - outage.since)}`
+      : `no reads for ${formatDuration(now - last.at)}`;
+    // One failed read inside the normal read gap can be a hitch during map travel. A new map, clock
+    // or round then proves nothing, and an empty roster may be the next map loading.
+    const hitch = !!outage && outage.failures < 2 && !gap;
+    if (!hitch || rebuilt) {
+      if (signals.length) {
+        restartLike = true;
+        alerts.push(...restartAlert(state, restartAt, last.players, [...signals, lost], now, options));
+      }
+    } else if (emptied) state.pending ??= { at: restartAt, playersBefore: last.players, signals: [...signals, lost] };
   } else if (last && !outage && last.players >= 10 && current.players === 0 && reading.roundChanged) {
-    // A fast crash can return before a read fails: a full server empties at a round boundary.
-    restartLike = true;
-    const signals = [`players ${last.players} to 0`, "new round", "no failed read"];
-    alerts.push(...restartAlert(state, now, last.players, signals, now, options));
+    // A fast crash can return before a read fails: a full server empties at a round boundary. An
+    // ordinary map load looks the same at first, so wait to see whether the players come back.
+    state.pending ??= {
+      at: now,
+      playersBefore: last.players,
+      signals: [`players ${last.players} to 0`, "new round", "no failed read"],
+    };
+  }
+  const pending = state.pending;
+  if (restartLike) state.pending = null;
+  else if (pending) {
+    if (current.players > 1) state.pending = null;
+    else if (now - pending.at > RESTART_HOLD_MS) {
+      state.pending = null;
+      restartLike = true;
+      const held = `still empty ${formatDuration(now - pending.at)} later`;
+      alerts.push(...restartAlert(state, pending.at, pending.playersBefore, [...pending.signals, held], now, options));
+    }
   }
 
   if (outage) {

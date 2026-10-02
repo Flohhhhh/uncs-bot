@@ -1,9 +1,7 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import {
-  ButtonStyle,
   ChannelType,
   Client,
-  ComponentType,
   escapeMarkdown,
   PermissionFlagsBits,
   type APIEmbed,
@@ -101,8 +99,8 @@ const clip = (value: string, max: number) => (value.length > max ? `${value.slic
 
 /**
  * Tells staff about things that need a person. Alert-only: it never changes the game. Posts to
- * the optional STAFF_ALERTS_CHANNEL_ID only, never to a community, voting or status channel,
- * and refuses a channel that @everyone can view. Delivery is best effort and never throws into a
+ * the optional STAFF_ALERTS_CHANNEL_ID only, never to a community, voting, leaderboard or status
+ * channel, and refuses a channel that @everyone can view. Delivery is best effort and never throws into a
  * worker. Records stay in memory (200 per server, 1,000 in all) and are lost on restart.
  */
 @Injectable()
@@ -120,11 +118,12 @@ export class StaffAlerts {
     private readonly env: EnvService,
   ) {}
 
-  /** The voting, community and server status channels: never a staff alert channel. */
+  /** The voting, community, weekly leaderboard and server status channels: never a staff alert channel. */
   private communityChannel(channelId: string) {
     const community = [
       this.env.get("MAP_VOTES_CHANNEL_ID"),
       this.env.get("SERVER_COMMUNITY_DISCORD_CHANNEL_ID"),
+      this.env.get("WEEKLY_LEADERBOARD_CHANNEL_ID"),
       ...(this.env.get("WARDOGS_SERVERS") ?? []).map((server) => server.communityStatus?.channelId),
     ];
     return community.includes(channelId);
@@ -163,9 +162,18 @@ export class StaffAlerts {
   }
 
   /** Updates an earlier alert's text in memory only (a second rule for the same player and round). */
-  amend(serverId: string, key: string, patch: { lines?: string[]; facts?: Record<string, string | number> }) {
+  amend(
+    serverId: string,
+    key: string,
+    patch: { kind?: StaffAlertKind; title?: string; lines?: string[]; facts?: Record<string, string | number> },
+  ) {
     const record = this.records.find((item) => item.serverId === serverId && item.key === key);
     if (!record) return null;
+    if (patch.kind) {
+      record.kind = patch.kind;
+      record.category = alertCategory(patch.kind);
+    }
+    if (patch.title) record.title = cleanText(patch.title, 80);
     if (patch.lines) record.lines = patch.lines.map((line) => cleanText(line, 600));
     if (patch.facts) record.facts = { ...record.facts, ...patch.facts };
     record.updatedAt = new Date().toISOString();
@@ -268,13 +276,6 @@ export class StaffAlerts {
     };
   }
 
-  private link(record: StoredAlert) {
-    const origin = this.env.get("ADMIN_ORIGIN");
-    if (this.env.get("ADMIN_ENABLED") !== true || !origin) return null;
-    const params = new URLSearchParams({ view: "alerts", server: record.serverId, id: record.id });
-    return `${origin.replace(/\/$/, "")}/admin/activity?${params}`;
-  }
-
   private embed(record: StoredAlert, footerNote?: string): APIEmbed {
     const fields: APIEmbed["fields"] = [];
     if (record.player)
@@ -317,25 +318,13 @@ export class StaffAlerts {
       check.channel.guild.roles.cache.has(role) &&
       now - this.lastPingAt >= PING_INTERVAL_MS;
     const embed = this.embed(record);
-    const link = this.link(record);
+    // No "Open in dashboard" button until the dashboard's Staff alerts tab can show the alert.
     const options: MessageCreateOptions = {
       embeds: [embed],
       allowedMentions: { ...NO_MENTIONS, roles: ping ? [role] : [] },
       nonce: createHash("sha256").update(`gramps-staff-alert:${record.id}`).digest("hex").slice(0, 25),
       enforceNonce: true,
       ...(ping ? { content: `<@&${role}>` } : {}),
-      ...(link
-        ? {
-            components: [
-              {
-                type: ComponentType.ActionRow,
-                components: [
-                  { type: ComponentType.Button, style: ButtonStyle.Link, label: "Open in dashboard", url: link },
-                ],
-              },
-            ],
-          }
-        : {}),
     };
     try {
       const message = await check.channel.send(options);

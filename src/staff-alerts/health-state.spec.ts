@@ -166,15 +166,79 @@ describe("health inference from RCON reads", () => {
     expect(h.alerts[0].lines[0]).toBe("Map Bakurani to Ozeti, no reads for 5 min (unscheduled).");
   });
 
-  it("catches a fast crash: a full server empties at a round boundary without a failed read", () => {
+  it("catches a fast crash: a full server empties at a round boundary and stays empty past a map load", () => {
     const h = harness();
     h.read(h.good({ players: 12 }));
-    expect(h.read(h.good({ players: 0, roundChanged: true }), 10_000).restartLike).toBe(true);
-    expect(h.alerts[0]).toMatchObject({ kind: "game-restart", severity: "warning" });
+    expect(h.read(h.good({ players: 0, roundChanged: true }), 10_000).restartLike).toBe(false);
+    const emptiedAt = h.now;
+    // Three minutes is the community map-load hold; nothing is raised or remembered inside it.
+    for (let read = 0; read < 12; read++) expect(h.read(h.good({ players: 0 }), 15_000).restartLike).toBe(false);
+    expect(h.alerts).toEqual([]);
+    expect(h.state).toMatchObject({ lastRestartAt: null, watch: null });
+    expect(h.read(h.good({ players: 1 }), 15_000).restartLike).toBe(true);
+    expect(h.alerts).toEqual([expect.objectContaining({ kind: "game-restart", severity: "warning" })]);
+    expect(h.alerts[0].lines[0]).toBe(
+      "Players 12 to 0, new round, no failed read, still empty 3 min later (unscheduled).",
+    );
+    expect(h.state).toMatchObject({
+      lastRestartAt: emptiedAt,
+      watch: { at: emptiedAt, kind: "restart" },
+      pending: null,
+    });
     const quiet = harness();
     quiet.read(quiet.good({ players: 12 }));
     expect(quiet.read(quiet.good({ players: 0 }), 10_000).restartLike).toBe(false);
     expect(quiet.read(quiet.good({ players: 0, roundChanged: true }), 10_000).restartLike).toBe(false);
+    expect(quiet.state.pending).toBeNull();
+  });
+
+  it("treats an ordinary map load that empties the roster as nothing once players come back", () => {
+    const h = harness();
+    h.read(h.good({ players: 30 }));
+    h.read(h.good({ players: 0, map: "Europe", matchSeconds: 5, roundChanged: true }), 15_000);
+    h.read(h.good({ players: 0, map: "Europe", matchSeconds: 20 }), 15_000);
+    h.read(h.good({ players: 14, map: "Europe", matchSeconds: 35 }), 15_000);
+    // Hours later the server empties naturally; no restart is remembered, so seeding has nothing to follow.
+    for (let read = 0; read < 40; read++) h.read(h.good({ players: 0, map: "Europe" }), 15_000);
+    expect(h.alerts).toEqual([]);
+    expect(h.state).toMatchObject({ lastRestartAt: null, watch: null, pending: null });
+  });
+
+  it("treats one failed read across a rotation as a hitch unless the server stays empty or the build changes", () => {
+    const next = { map: "Europe", matchSeconds: 5, roundChanged: true };
+    const intact = harness();
+    intact.read(intact.good({ players: 30 }));
+    intact.read(intact.fail(), 15_000);
+    expect(intact.read(intact.good({ players: 30, ...next }), 30_000).restartLike).toBe(false);
+    intact.read(intact.good({ players: 30, map: "Europe", matchSeconds: 20 }), 15_000);
+    expect(intact.alerts).toEqual([]);
+    expect(intact.state).toMatchObject({ lastRestartAt: null, watch: null, pending: null, outage: null });
+
+    const loading = harness();
+    loading.read(loading.good({ players: 30 }));
+    loading.read(loading.fail(), 15_000);
+    expect(loading.read(loading.good({ players: 0, ...next }), 30_000).restartLike).toBe(false);
+    loading.read(loading.good({ players: 18, map: "Europe", matchSeconds: 50 }), 15_000);
+    expect(loading.alerts).toEqual([]);
+    expect(loading.state).toMatchObject({ lastRestartAt: null, watch: null, pending: null });
+
+    const restart = harness();
+    restart.read(restart.good({ players: 30 }));
+    restart.read(restart.fail(), 15_000);
+    const failedAt = restart.now;
+    restart.read(restart.good({ players: 0, ...next }), 30_000);
+    for (let read = 0; read < 12; read++) restart.read(restart.good({ players: 0, map: "Europe" }), 15_000);
+    expect(restart.kinds()).toEqual(["game-restart"]);
+    expect(restart.alerts[0].lines[0]).toBe(
+      "Map Bakurani to Ozeti, match clock reset, players 30 to 0, connection lost under 1 min, still empty 3 min later (unscheduled).",
+    );
+    expect(restart.state.lastRestartAt).toBe(failedAt);
+
+    const update = harness();
+    update.read(update.good({ players: 30 }));
+    update.read(update.fail(), 15_000);
+    expect(update.read(update.good({ players: 30, build: "CL-2" }), 30_000).restartLike).toBe(true);
+    expect(update.kinds()).toEqual(["game-restart", "game-build"]);
   });
 
   it("sends no restart alert after an interruption with no restart signal", () => {
@@ -209,6 +273,7 @@ describe("health inference from RCON reads", () => {
     const h = harness();
     h.read(h.good());
     h.read(h.fail(), 15_000);
+    h.read(h.fail(), 30_000);
     h.read(h.good({ map: "Europe" }), 30_000);
     h.read(h.good({ map: "Europe" }), 15_000);
     h.read(h.fail(), 10 * 60_000);

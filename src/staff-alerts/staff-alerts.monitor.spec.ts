@@ -252,7 +252,7 @@ describe("staff alerts worker", () => {
     expect(alert.lines.at(-1)).toBe("From game counters only. Not proof of cheating. Gramps took no action.");
     expect(alert.lines.join(" ")).not.toMatch(/cheater|suspected cheat/i);
     expect(discord.client.channels.fetch).not.toHaveBeenCalled();
-    expect(game.whitelist).not.toHaveBeenCalled();
+    expect(game.reservedSlots).not.toHaveBeenCalled();
   });
 
   it("posts performance alerts when on, never reading the whitelist unless asked", async () => {
@@ -262,7 +262,7 @@ describe("staff alerts worker", () => {
       await pass(snapshot([{ steamId: ids[0], name: "Ace", kills: step, deaths: 1 }], scores));
     expect(alerts.list("primary")[0].delivery.state).toBe("posted");
     expect(discord.channel.send.mock.calls[0][0].content).toBeUndefined();
-    expect(game.whitelist).not.toHaveBeenCalled();
+    expect(game.reservedSlots).not.toHaveBeenCalled();
     expect(game.execute).not.toHaveBeenCalled();
   });
 
@@ -273,12 +273,12 @@ describe("staff alerts worker", () => {
     expect(worker.view().counters).toBe("unavailable");
   });
 
-  it("skips whitelisted players, reading the whitelist lazily with a 10-minute cache, and notes a failed read", async () => {
+  it("skips whitelisted players, reading the live reserved slots lazily with a 10-minute cache, and notes a failed read", async () => {
     const { pass, alerts, game } = workerFixture({
       STAFF_ALERTS_PERFORMANCE_ENABLED: "true",
       STAFF_ALERTS_PERFORMANCE_SKIP_WHITELISTED: true,
     });
-    game.whitelist.mockResolvedValue({ entries: [{ steamId: ids[0], active: true }] });
+    game.reservedSlots.mockResolvedValue({ ids: new Set([ids[0]]), loadedAt: new Date().toISOString() });
     const roster = (kills: number) =>
       snapshot(
         [
@@ -289,22 +289,50 @@ describe("staff alerts worker", () => {
       );
     await pass(roster(0), 0);
     for (let step = 1; step <= 20; step++) await pass(roster(step));
-    expect(game.whitelist).not.toHaveBeenCalled();
+    expect(game.reservedSlots).not.toHaveBeenCalled();
     for (let step = 21; step <= 31; step++) await pass(roster(step));
-    expect(game.whitelist).toHaveBeenCalledTimes(1);
+    expect(game.reservedSlots).toHaveBeenCalledTimes(1);
     expect(alerts.list("primary").map((alert) => alert.player?.steamId)).toEqual([ids[1]]);
     expect(alerts.list("primary")[0].lines.join(" ")).not.toContain("Whitelist unavailable");
 
     // A new round eleven minutes later reads the whitelist again; this time the read fails.
-    game.whitelist.mockRejectedValue(new RconError("The game server could not be reached.", false, "unreachable"));
+    game.reservedSlots.mockRejectedValue(new RconError("The game server could not be reached.", false, "unreachable"));
     const next = (kills: number) =>
       snapshot([{ steamId: ids[2], name: "Third", kills, deaths: 1 }], { ...scores, map: "Europe" });
     await pass(next(0), 11 * 60_000);
     for (let step = 1; step <= 31; step++) await pass(next(step));
-    expect(game.whitelist).toHaveBeenCalledTimes(2);
+    expect(game.reservedSlots).toHaveBeenCalledTimes(2);
+    expect(game.whitelist).not.toHaveBeenCalled();
     const [latest] = alerts.list("primary");
     expect(latest.player?.steamId).toBe(ids[2]);
     expect(latest.lines).toContain("Whitelist unavailable, so whitelisted players were not skipped.");
+  });
+
+  it("amends a round K/D alert when the kill-rate rule fires later, keeping its title, kind and notes in step", async () => {
+    const { pass, alerts, game } = workerFixture({
+      STAFF_ALERTS_PERFORMANCE_ENABLED: "true",
+      STAFF_ALERTS_PERFORMANCE_SKIP_WHITELISTED: true,
+      STAFF_ALERTS_PERFORMANCE_MATCH_KILLS: 10,
+      STAFF_ALERTS_PERFORMANCE_MATCH_KD: 2,
+      STAFF_ALERTS_PERFORMANCE_WINDOW_MINUTES: 2,
+      STAFF_ALERTS_PERFORMANCE_WINDOW_KILLS: 20,
+    });
+    game.reservedSlots.mockRejectedValue(new RconError("The game server could not be reached.", false, "unreachable"));
+    const roster = (kills: number) => snapshot([{ steamId: ids[0], name: "Ace", kills, deaths: 1 }], scores);
+    let kills = 0;
+    await pass(roster(kills), 0);
+    // One kill every 10 seconds: the round K/D rule fires at 10 kills, the 2-minute rate stays below 20.
+    while (kills < 10) await pass(roster(++kills));
+    expect(alerts.list("primary")).toEqual([
+      expect.objectContaining({ kind: "performance-match", title: "Review: unusual round K/D" }),
+    ]);
+    // Then a burst: three kills every 10 seconds trips the kill-rate rule in the same round.
+    for (let step = 0; step < 12; step++) await pass(roster((kills += 3)));
+    const [amended] = alerts.list("primary");
+    expect(alerts.list("primary")).toHaveLength(1);
+    expect(amended).toMatchObject({ kind: "performance-window", title: "Review: unusual kill rate" });
+    expect(amended.lines[0]).toMatch(/^Ace had \d+ kills in 2 min/);
+    expect(amended.lines).toContain("Whitelist unavailable, so whitelisted players were not skipped.");
   });
 
   it("attaches feed context only from the feed reader, never using it for the rule", async () => {
@@ -368,6 +396,72 @@ describe("staff alerts worker", () => {
     });
     expect(discord.channel.send).toHaveBeenCalledTimes(2);
     expect(game.execute).not.toHaveBeenCalled();
+  });
+
+  const crowd = (count: number) =>
+    Array.from({ length: count }, (_, index) => ({ steamId: `765611980000${10000 + index}`, name: "P" }));
+  const live = {
+    map: "Kavkazi",
+    matchSeconds: 1500,
+    factionScores: [
+      { name: "Lonestar", score: 400 },
+      { name: "Valkyra", score: 350 },
+    ],
+  };
+  const nextMap = {
+    map: "Europe",
+    matchSeconds: 5,
+    factionScores: [
+      { name: "Lonestar", score: 0 },
+      { name: "Valkyra", score: 0 },
+    ],
+  };
+
+  it("does not call an ordinary rotation a restart when the next map loads with an empty roster", async () => {
+    jest.setSystemTime(Date.parse("2026-10-03T02:00:00Z"));
+    const { pass, alerts, worker, discord } = workerFixture({
+      STAFF_ALERTS_HEALTH_ENABLED: true,
+      STAFF_ALERTS_SEEDING_ENABLED: true,
+      STAFF_ALERTS_SEEDING_PRIME_HOURS: "",
+    });
+    const players = crowd(30);
+    await pass(snapshot(players, live), 0);
+    await pass(snapshot(players, live), 15_000);
+    // Map travel: the next map reports an empty roster, reset scores and a new clock, then refills.
+    await pass(snapshot([], nextMap), 15_000);
+    await pass(snapshot([], nextMap), 15_000);
+    await pass(snapshot(players.slice(0, 12), nextMap), 15_000);
+    for (let read = 0; read < 80; read++) await pass(snapshot(players, nextMap), 15_000);
+    expect(alerts.list("primary")).toEqual([]);
+    expect(worker.view().lastRestartAt).toBeNull();
+    // Later the server empties naturally. Nothing restarted, so there is no post-restart seeding alert.
+    await pass(snapshot(players.slice(0, 3), nextMap), 15_000);
+    for (let read = 0; read < 160; read++) await pass(snapshot([], nextMap), 15_000);
+    expect(worker.view().seeding.lowSince).not.toBeNull();
+    expect(alerts.list("primary")).toEqual([]);
+    expect(discord.channel.send).not.toHaveBeenCalled();
+  });
+
+  it("does not call one failed read across an ordinary rotation a restart", async () => {
+    const { pass, alerts, worker, game } = workerFixture({ STAFF_ALERTS_HEALTH_ENABLED: true });
+    const players = crowd(30);
+    const unreachable = () => new RconError("The game server could not be reached.", false, "unreachable");
+    await pass(snapshot(players, live), 0);
+    await pass(snapshot(players, live), 15_000);
+    game.overview.mockRejectedValueOnce(unreachable());
+    await pass(undefined, 15_000);
+    // Everyone is still connected on the next map.
+    await pass(snapshot(players, nextMap), 30_000);
+    for (let read = 0; read < 40; read++) await pass(snapshot(players, nextMap), 15_000);
+    // Again, but the first read on the next map is still loading with an empty roster.
+    game.overview.mockRejectedValueOnce(unreachable());
+    await pass(undefined, 15_000);
+    const back = { ...nextMap, map: "Kavkazi", matchSeconds: 3 };
+    await pass(snapshot([], back), 30_000);
+    await pass(snapshot(players.slice(0, 20), back), 15_000);
+    await pass(snapshot(players, back), 15_000);
+    expect(alerts.list("primary")).toEqual([]);
+    expect(worker.view().lastRestartAt).toBeNull();
   });
 });
 

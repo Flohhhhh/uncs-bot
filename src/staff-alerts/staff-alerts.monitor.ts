@@ -15,7 +15,7 @@ import type { GameServerSummary } from "../common/game-server";
 import { mapLabel } from "../common/map-labels";
 import type { FeedContextView, RoundPeakView, StaffAlertsStatus, StaffAlertsWorkerView } from "../common/staff-alerts";
 import { EnvService } from "../env/env.service";
-import { initialCommunityState, observeCommunity } from "../server-community/community-state";
+import { LEAVE_GRACE_MS, MAX_ROSTER } from "../server-community/community-state";
 import { FEED_CONTEXT, type FeedContextSource } from "./feed-context";
 import { initialHealthState, observeHealth, type HealthAlert } from "./health-state";
 import { formatLocal } from "./local-time";
@@ -35,6 +35,11 @@ export const ACTIVE_DELAY_MS = 10_000;
 export const IDLE_DELAY_MS = 15_000;
 export const FAILED_DELAY_MS = 30_000;
 const WHITELIST_CACHE_MS = 10 * 60_000;
+/** Bounds the watch-list roster memory: current players plus recent leavers. */
+const WATCH_SEEN_MAX = 2 * MAX_ROSTER;
+/** Performance alerts whose extra notes are kept for a later amend. */
+const NOTES_MAX = 100;
+const ONLINE_AT_START = "online when Gramps started, recorded only";
 const SOURCE_TIMEOUT_MS = 3_000;
 const FEED_TIMEOUT_MS = 2_000;
 const NO_ACTION = "Gramps took no action.";
@@ -121,7 +126,8 @@ export class StaffAlertsWorker {
   private health = initialHealthState();
   private seeding = initialSeedingState();
   private performance = initialPerformanceState();
-  private community = initialCommunityState();
+  /** SteamIDs already offered to the network-ban sources, with when a good read last listed each. */
+  private readonly watchSeen = new Map<string, number>();
   private bootChecked = false;
   private lastObservedAt: string | null = null;
   private lastReadAt: string | null = null;
@@ -129,7 +135,9 @@ export class StaffAlertsWorker {
   private players: number | null = null;
   private unlinked = 0;
   private round = initialRoundState();
-  private whitelist: { until: number; ids: Set<string> } | null = null;
+  private whitelist: { until: number; ids: ReadonlySet<string> } | null = null;
+  /** Notes on a raised performance alert (by key), so an amend keeps them. */
+  private readonly performanceNotes = new Map<string, string[]>();
   private readonly sourceErrors = new Map<string, { error: string; at: string } | null>();
 
   constructor(
@@ -282,16 +290,16 @@ export class StaffAlertsWorker {
     });
   }
 
-  /** The live whitelist, read only when an alert is about to fire and cached for 10 minutes. */
+  /**
+   * The live whitelist (the running reserved slots, never the configuration document), read only
+   * when an alert is about to fire and cached for 10 minutes.
+   */
   private async whitelisted(steamId: string): Promise<boolean | null> {
     const now = Date.now();
     if (!this.whitelist || this.whitelist.until <= now) {
       try {
-        const list = await this.game.whitelist();
-        this.whitelist = {
-          until: now + WHITELIST_CACHE_MS,
-          ids: new Set(list.entries.filter((entry) => entry.active).map((entry) => entry.steamId)),
-        };
+        const { ids } = await this.game.reservedSlots();
+        this.whitelist = { until: now + WHITELIST_CACHE_MS, ids };
       } catch {
         this.whitelist = null;
         return null;
@@ -303,8 +311,15 @@ export class StaffAlertsWorker {
   private async raisePerformance(candidate: PerformanceCandidate, options: StaffAlertsOptions, now: number) {
     const key = `perf:${candidate.steamId}:${candidate.roundKey}`;
     if (candidate.amend) {
-      const text = performanceText(candidate, options.timeZone);
-      this.alerts.amend(this.server.id, key, { lines: text.lines, facts: text.facts });
+      // A second rule for the same player and round: the record takes the newer title and kind and
+      // keeps the notes it was raised with.
+      const text = performanceText(candidate, options.timeZone, this.performanceNotes.get(key) ?? []);
+      this.alerts.amend(this.server.id, key, {
+        kind: candidate.kind,
+        title: text.title,
+        lines: text.lines,
+        facts: text.facts,
+      });
       return;
     }
     const notes: string[] = [];
@@ -331,6 +346,13 @@ export class StaffAlertsWorker {
         feed = null;
       }
     }
+    if (notes.length) {
+      this.performanceNotes.set(key, notes);
+      for (const old of this.performanceNotes.keys()) {
+        if (this.performanceNotes.size <= NOTES_MAX) break;
+        this.performanceNotes.delete(old);
+      }
+    }
     const text = performanceText(candidate, options.timeZone, notes);
     const fields: [string, string][] = [];
     if (candidate.kd !== null) fields.push(["Round K/D", one(candidate.kd)]);
@@ -352,16 +374,35 @@ export class StaffAlertsWorker {
     });
   }
 
-  private async checkWatchlist(overview: Overview, options: StaffAlertsOptions, now: number) {
-    const community = observeCommunity(this.community, overview, now);
-    this.community = community.state;
-    let ids = community.joined;
-    let presentAtStart = false;
-    if (community.baseline && !this.bootChecked) {
-      this.bootChecked = true;
-      ids = [...community.state.present.keys()];
-      presentAtStart = true;
+  /**
+   * Players to look up: everyone listed now who was not online in recent reads. Only a populated
+   * roster shows who left, after the 60-second leave grace. A failed read, a read gap or an empty
+   * map-loading roster shows nothing, so players still online are not looked up again and players
+   * who joined meanwhile are. This is separate from the community welcome rules, which skip joins
+   * around baselines and round transitions on purpose.
+   */
+  private watchJoins(overview: Overview, now: number) {
+    const ids = [...new Set(overview.players.map((player) => player.steamId))].slice(0, MAX_ROSTER);
+    const fresh = ids.filter((id) => !this.watchSeen.has(id));
+    for (const id of ids) {
+      this.watchSeen.delete(id);
+      this.watchSeen.set(id, now);
     }
+    if (ids.length)
+      for (const [id, seenAt] of this.watchSeen) if (now - seenAt > LEAVE_GRACE_MS) this.watchSeen.delete(id);
+    for (const id of this.watchSeen.keys()) {
+      if (this.watchSeen.size <= WATCH_SEEN_MAX) break;
+      this.watchSeen.delete(id);
+    }
+    return fresh;
+  }
+
+  private async checkWatchlist(overview: Overview, options: StaffAlertsOptions, now: number) {
+    const ids = this.watchJoins(overview, now);
+    // Players online at the first read may have been reported before a redeploy: record them for
+    // the staff API without posting or pinging. Joins seen after that alert as usual.
+    const presentAtStart = !this.bootChecked;
+    this.bootChecked = true;
     if (!ids.length) return;
     const knownGood = options.performance.knownGood;
     for (const source of this.sources) {
@@ -390,7 +431,7 @@ export class StaffAlertsWorker {
           serverName: this.server.name,
           kind: "watchlist-join",
           severity: highlighted ? "high" : "warning",
-          key: `watch:${steamId}`,
+          key: `${presentAtStart ? "watch-start" : "watch"}:${steamId}`,
           repeatMs: options.watchlist.cooldownMinutes * 60_000,
           title: text.title,
           lines: text.lines,
@@ -402,7 +443,8 @@ export class StaffAlertsWorker {
           },
           fields: entry.communities !== null ? [["Communities", String(entry.communities)]] : [],
           links: entry.evidenceUrls,
-          deliver: true,
+          deliver: !presentAtStart,
+          ...(presentAtStart ? { suppressed: ONLINE_AT_START } : {}),
           network: {
             source: entry.source,
             sourceName: source.name,
@@ -480,7 +522,7 @@ const idleWorker = (state: StaffAlertsWorkerView["state"]): StaffAlertsWorkerVie
 /**
  * Alert-only staff monitoring: one worker per configured server, started only when
  * STAFF_ALERTS_ENABLED and at least one feature are on. It reads the shared, cached overview
- * (and the whitelist only when a performance alert is about to fire). It never sends a game
+ * (and the live reserved slots only when a performance alert is about to fire). It never sends a game
  * action, writes no admin_actions rows and has no WarDogs Server Commands connection. State is
  * in memory; run one replica.
  */
