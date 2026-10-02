@@ -1,4 +1,4 @@
-import { Global, Module, type INestApplication } from "@nestjs/common";
+import { Global, Logger, Module, type INestApplication } from "@nestjs/common";
 import { Test } from "@nestjs/testing";
 import { randomUUID } from "node:crypto";
 import request from "supertest";
@@ -71,6 +71,8 @@ describe("telemetry HTTP boundaries", () => {
         : undefined,
     );
     jest.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ roles: ["viewer"] })));
+    jest.spyOn(Logger.prototype, "warn").mockImplementation();
+    jest.spyOn(Logger.prototype, "error").mockImplementation();
     const module = await Test.createTestingModule({ imports: [TestEnvModule, TelemModule] })
       .overrideProvider(TelemetryStore)
       .useValue(store)
@@ -168,6 +170,69 @@ describe("telemetry HTTP boundaries", () => {
       .send(batch())
       .expect(201);
     expect(store.ingest).toHaveBeenCalledTimes(1);
+  });
+  const staffCombat = async () =>
+    (
+      await request(app.getHttpServer())
+        .get("/admin/api/combat")
+        .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+        .expect(200)
+    ).body;
+  it("shows staff, not the public, why a delivery that reached Gramps was refused", async () => {
+    await expect(staffCombat()).resolves.toMatchObject({ lastRejected: null, rejectedCount: 0 });
+    await request(app.getHttpServer())
+      .post("/api/ingest/events")
+      .set("Authorization", `Bearer ${feedToken}`)
+      .set("Content-Type", "application/json")
+      .send(`{"serverId":"${feedToken}",`)
+      .expect(400);
+    await expect(staffCombat()).resolves.toMatchObject({
+      lastRejected: { status: 400, reason: "invalid JSON" },
+      rejectedCount: 1,
+    });
+    await request(app.getHttpServer())
+      .post("/api/ingest/servers/primary/events")
+      .set("Authorization", `Bearer ${feedToken}`)
+      .send({ ...batch(), padding: "x".repeat(150_000) })
+      .expect(413);
+    await expect(staffCombat()).resolves.toMatchObject({
+      lastRejected: { status: 413, reason: "too large" },
+      rejectedCount: 2,
+    });
+    await request(app.getHttpServer())
+      .post("/api/ingest/events")
+      .set("Authorization", `Bearer ${feedToken}`)
+      .send({ ...batch(), serverId: 12 })
+      .expect(400);
+    const staff = await staffCombat();
+    expect(staff).toMatchObject({
+      lastRejected: { status: 400, reason: "invalid payload: serverId (missing or wrong type)" },
+      rejectedCount: 3,
+    });
+    for (const secret of [feedToken, "Bearer", "127.0.0.1", "::1"]) expect(JSON.stringify(staff)).not.toContain(secret);
+    const publicView = await request(app.getHttpServer()).get("/community/api/leaderboard").expect(200);
+    for (const key of ["lastRejected", "rejectedCount"]) expect(publicView.body).not.toHaveProperty(key);
+    // A refused public read is not a feed delivery.
+    await request(app.getHttpServer())
+      .post("/community/api/leaderboard")
+      .set("Content-Type", "application/json")
+      .send("{")
+      .expect(400);
+    expect((await staffCombat()).rejectedCount).toBe(3);
+  });
+  it("records rate-limited feed deliveries against the server they targeted", async () => {
+    for (let count = 0; count < 300; count++)
+      await request(app.getHttpServer()).post("/api/ingest/servers/primary/events").send(batch()).expect(401);
+    await request(app.getHttpServer())
+      .post("/api/ingest/servers/primary/events")
+      .set("Authorization", `Bearer ${feedToken}`)
+      .send(batch())
+      .expect(429);
+    expect(store.ingest).not.toHaveBeenCalled();
+    await expect(staffCombat()).resolves.toMatchObject({
+      lastRejected: { status: 429, reason: "rate limited" },
+      rejectedCount: 301,
+    });
   });
   it("returns safe errors when the database is unavailable", async () => {
     store.snapshot.mockRejectedValueOnce(new Error("postgres://user:password@private-db applications.email"));

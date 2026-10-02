@@ -1,5 +1,7 @@
+import { Logger } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import type { EnvService } from "../env/env.service";
+import { TelemetryDeliveries } from "./telemetry.deliveries";
 import { TelemetryService, UNNAMED_PLAYER } from "./telemetry.service";
 import type { TelemetryStore } from "./telemetry.store";
 import { emptyTotals, periodMilliseconds } from "./telemetry.types";
@@ -25,10 +27,12 @@ function fixture(enabled = true, secret = token, rcon = "different-rcon-password
   };
   const servers = fixtureServers({});
   servers.feedToken = () => (secret !== rcon ? secret : undefined);
+  const deliveries = new TelemetryDeliveries(servers);
   const service = new TelemetryService(
     store as unknown as TelemetryStore,
     { get: (key: string) => values[key] } as EnvService,
     servers,
+    deliveries,
   );
   const payload = {
     serverId: randomUUID(),
@@ -61,10 +65,12 @@ describe("telemetry authorization and reporting", () => {
       ],
     };
     const env = { get: (key: string) => values[key] } as EnvService;
+    const servers = new GameServers(new AdminSettings(env));
     const service = new TelemetryService(
       f.store as unknown as TelemetryStore,
       env,
-      new GameServers(new AdminSettings(env)),
+      servers,
+      new TelemetryDeliveries(servers),
     );
     expect(service.serversList()).toEqual([
       { id: "east", name: "East", joinId: "11111111-1111-4111-8111-111111111111" },
@@ -83,8 +89,14 @@ describe("telemetry authorization and reporting", () => {
     expect(f.store.snapshot).toHaveBeenCalledTimes(3);
     expect(f.store.snapshot.mock.calls.map((call) => call[3])).toEqual(["east", "event", "east"]);
   });
-  beforeEach(() => jest.useFakeTimers().setSystemTime(now));
-  afterEach(() => jest.useRealTimers());
+  beforeEach(() => {
+    jest.useFakeTimers().setSystemTime(now);
+    jest.spyOn(Logger.prototype, "warn").mockImplementation();
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
   it("stays disconnected with no database reads when disabled", async () => {
     const { service, store, payload } = fixture(false);
     await expect(service.ingest(`Bearer ${token}`, payload)).rejects.toMatchObject({ status: 503 });
@@ -237,5 +249,88 @@ describe("telemetry authorization and reporting", () => {
       steamId,
       "primary",
     );
+  });
+  it.each<{
+    reason: string;
+    status: number;
+    enabled?: boolean;
+    secret?: string;
+    authorization?: unknown;
+    body?: (payload: ReturnType<typeof fixture>["payload"]) => unknown;
+    storageFails?: boolean;
+  }>([
+    { reason: "feed disabled", status: 503, enabled: false },
+    { reason: "feed token not configured", status: 503, secret: "short" },
+    { reason: "missing credentials", status: 401, authorization: undefined },
+    { reason: "malformed credentials", status: 401, authorization: `Basic ${token}` },
+    { reason: "token mismatch", status: 401, authorization: `Bearer ${"x".repeat(40)}` },
+    { reason: "invalid payload: missing JSON body", status: 400, body: () => undefined },
+    { reason: "invalid payload: batch (missing or wrong type)", status: 400, body: () => [token] },
+    {
+      reason: "invalid payload: serverId (bad format)",
+      status: 400,
+      body: (payload) => ({ ...payload, serverId: token }),
+    },
+    {
+      reason: "invalid payload: serverId (missing or wrong type)",
+      status: 400,
+      body: ({ serverName, events }) => ({ serverName, events }),
+    },
+    {
+      reason: "invalid payload: events (missing or wrong type)",
+      status: 400,
+      body: (payload) => ({ ...payload, events: { token } }),
+    },
+    {
+      reason: "invalid payload: events (over the limit)",
+      status: 400,
+      body: (payload) => ({ ...payload, events: Array.from({ length: 201 }, () => payload.events[0]) }),
+    },
+    {
+      reason: "invalid payload: events.0.eventId (bad format)",
+      status: 400,
+      body: (payload) => ({ ...payload, events: [{ ...payload.events[0], eventId: token }] }),
+    },
+    { reason: "too large", status: 400, body: (payload) => ({ ...payload, padding: token.repeat(2_000) }) },
+    { reason: "storage unavailable", status: 503, storageFails: true },
+  ])("records a refused delivery as $status $reason for staff only", async (test) => {
+    const secret = test.secret ?? token;
+    const { service, store, payload } = fixture(test.enabled ?? true, secret);
+    if (test.storageFails) store.ingest.mockRejectedValueOnce(new Error(`postgres://user:${token}@private-db`));
+    const authorization = "authorization" in test ? test.authorization : `Bearer ${secret}`;
+    const rejected = service.ingest(authorization, test.body ? test.body(payload) : payload);
+    if (test.storageFails) await expect(rejected).rejects.toThrow();
+    else await expect(rejected).rejects.toMatchObject({ status: test.status });
+    const staff = await service.combat();
+    expect(staff).toMatchObject({
+      lastRejected: { at: now.toISOString(), status: test.status, reason: test.reason },
+      rejectedCount: 1,
+    });
+    // Only the time, status and category are kept: never the token, header, body or database text.
+    expect(Object.keys(staff.lastRejected!).sort()).toEqual(["at", "reason", "status"]);
+    expect(JSON.stringify(staff)).not.toMatch(new RegExp(`${token}|Bearer|Basic|postgres|private-db`));
+    expect(Logger.prototype.warn).toHaveBeenCalledWith(
+      `Rejected a game feed delivery for server primary: ${test.status} ${test.reason}.`,
+    );
+    const publicView = await service.leaderboard();
+    for (const key of ["lastRejected", "rejectedCount"]) expect(publicView).not.toHaveProperty(key);
+  });
+  it("counts refusals since start and keeps the latest one", async () => {
+    const { service, payload } = fixture();
+    await expect(service.combat()).resolves.toMatchObject({ lastRejected: null, rejectedCount: 0 });
+    await expect(service.ingest(undefined, payload)).rejects.toMatchObject({ status: 401 });
+    jest.advanceTimersByTime(5_000);
+    await expect(service.ingest(`Bearer ${token}`, { ...payload, serverId: "bad" })).rejects.toMatchObject({
+      status: 400,
+    });
+    await service.ingest(`Bearer ${token}`, payload);
+    await expect(service.combat()).resolves.toMatchObject({
+      lastRejected: {
+        at: new Date(now.getTime() + 5_000).toISOString(),
+        status: 400,
+        reason: "invalid payload: serverId (bad format)",
+      },
+      rejectedCount: 2,
+    });
   });
 });

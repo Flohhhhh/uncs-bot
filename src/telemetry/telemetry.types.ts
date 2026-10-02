@@ -3,6 +3,32 @@ import { z } from "zod";
 import { isPublicIndividualSteamId } from "../common/steam-id";
 
 export const MAX_FEED_BYTES = 65_536;
+
+/** A 400 for a refused feed body, with a short category that is safe to show staff and log. */
+export class FeedRejectedException extends BadRequestException {
+  constructor(
+    message: string,
+    readonly reason: string,
+  ) {
+    super(message);
+  }
+}
+const issueHints: Partial<Record<string, string>> = {
+  invalid_type: "missing or wrong type",
+  invalid_format: "bad format",
+  invalid_value: "unexpected value",
+  too_big: "over the limit",
+  too_small: "under the limit",
+};
+// Names only the schema location of the first problem, never the submitted value.
+export function issueLabel(error: z.ZodError, prefix: PropertyKey[] = []) {
+  const [issue] = error.issues;
+  const path = [...prefix, ...(issue?.path ?? [])]
+    .map((part) => (typeof part === "number" || /^[A-Za-z][A-Za-z0-9]{0,39}$/.test(String(part)) ? String(part) : "?"))
+    .join(".");
+  const hint = issue ? issueHints[issue.code] : undefined;
+  return `${path || "batch"}${hint ? ` (${hint})` : ""}`;
+}
 export const periodSchema = z.enum(["day", "week", "month"]);
 export type TelemetryPeriod = z.infer<typeof periodSchema>;
 export const periodMilliseconds: Record<TelemetryPeriod, number> = {
@@ -84,24 +110,32 @@ export function parseFeed(input: unknown): ParsedFeed {
   try {
     bytes = Buffer.byteLength(JSON.stringify(input) ?? "", "utf8");
   } catch {
-    throw new BadRequestException("Invalid feed payload.");
+    throw new FeedRejectedException("Invalid feed payload.", "invalid payload: batch");
   }
-  if (bytes > MAX_FEED_BYTES) throw new BadRequestException("The feed payload exceeds 64 KiB.");
+  if (bytes > MAX_FEED_BYTES) throw new FeedRejectedException("The feed payload exceeds 64 KiB.", "too large");
   const batch = batchSchema.safeParse(input);
-  if (!batch.success) throw new BadRequestException("Invalid feed batch or event count.");
+  if (!batch.success)
+    throw new FeedRejectedException(
+      "Invalid feed batch or event count.",
+      input === undefined ? "invalid payload: missing JSON body" : `invalid payload: ${issueLabel(batch.error)}`,
+    );
   const output: ParsedFeed = {
     serverId: batch.data.serverId,
     serverName: batch.data.serverName,
     skipped: 0,
     events: [],
   };
-  for (const raw of batch.data.events) {
+  for (const [index, raw] of batch.data.events.entries()) {
     if (raw && typeof raw === "object" && "type" in raw && raw.type !== "killed") {
       output.skipped++;
       continue;
     }
     const event = eventSchema.safeParse(raw);
-    if (!event.success) throw new BadRequestException("Invalid killed event fields.");
+    if (!event.success)
+      throw new FeedRejectedException(
+        "Invalid killed event fields.",
+        `invalid payload: ${issueLabel(event.error, ["events", index])}`,
+      );
     const value = event.data;
     const tags = new Set(
       value.contextTags.map((tag) =>

@@ -24,6 +24,8 @@ Observed killed events include event IDs, game clock, map, killer/victim names a
 
 The game POSTs batches to `POST /api/ingest/events` using `Authorization: Bearer <feed token>`. The configured token determines the authorized server; the incoming `serverId` is only a per-boot instance identifier. Payload size, batch length, numbers and strings are bounded. Unknown event types are skipped; malformed killed events are rejected. Unexpected errors do not return raw payloads, database strings or credentials.
 
+Refused deliveries are recorded in memory per server and shown only in the staff combat response: `lastRejected` (`at`, HTTP `status` and a short `reason` such as `feed disabled`, `token mismatch`, `invalid payload: serverId (bad format)`, `too large`, `invalid JSON`, `rate limited` or `storage unavailable`) and `rejectedCount` since Gramps started. Tokens, headers, bodies and addresses are never kept. Each refusal also logs a warning, at most one per server per minute with a count of the suppressed ones. Anyone can reach the ingest URL, so a refusal proves that a request arrived, not that the game sent it. The record resets when Gramps restarts.
+
 Events are stored transactionally with a unique instance/event ID pair so repeat deliveries cannot inflate retained statistics. Aggregation occurs in PostgreSQL. The public leaderboard returns the top 100, while aggregate totals cover all recorded players. Staff event views return the latest 100 events in the selected window; older events within retention remain included in aggregates.
 
 Routes:
@@ -49,7 +51,7 @@ At 09:35–09:41 EDT on October 2, read-only checks found:
 For the next acceptance check, observe a genuine combat event during ordinary play and then inspect receipt metadata and the matching deployment's HTTP logs:
 
 1. **No request:** investigate the destination actually loaded by the game and host outbound DNS/TLS/connectivity. A saved URL alone cannot identify which failed; do not guess a parser or token fix.
-2. **Request rejected:** use its HTTP status and safe error category to locate authentication, payload or storage failure. Do not publish request headers, tokens or raw player payloads.
+2. **Request rejected:** use its HTTP status and safe error category (staff `lastRejected` and the matching deployment log warning) to locate authentication, payload or storage failure. Do not publish request headers, tokens or raw player payloads.
 3. **Request accepted:** verify that receipt metadata advances and the corresponding real event appears. Only then record native delivery as observed.
 
 Do not manufacture kills, send test ingest requests or restart the live game to obtain this evidence.

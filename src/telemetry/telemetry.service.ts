@@ -1,17 +1,26 @@
-import { BadRequestException, Injectable, ServiceUnavailableException, UnauthorizedException } from "@nestjs/common";
+import {
+  BadRequestException,
+  HttpException,
+  Injectable,
+  ServiceUnavailableException,
+  UnauthorizedException,
+} from "@nestjs/common";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { EnvService } from "../env/env.service";
 import { GameServers } from "../admin/game-servers";
 import { publicGameServer } from "../common/game-server";
+import { TelemetryDeliveries } from "./telemetry.deliveries";
 import { TelemetryStore } from "./telemetry.store";
 import {
   emptyTotals,
+  FeedRejectedException,
   parseFeed,
   periodMilliseconds,
   periodSchema,
   telemetrySteamId,
   type CombatAggregate,
   type CombatStats,
+  type ParsedFeed,
   type PublicCombatStats,
   type TelemetryPeriod,
   type TrackingRecord,
@@ -37,27 +46,66 @@ export class TelemetryService {
     private readonly store: TelemetryStore,
     private readonly env: EnvService,
     private readonly servers: GameServers,
+    private readonly deliveries: TelemetryDeliveries,
   ) {}
   serversList() {
     return this.servers.list().map(publicGameServer);
   }
 
-  private configured(serverId: string) {
+  /** Why the feed cannot accept deliveries for this server, or null when it can. */
+  private unavailable(serverId: string) {
+    if (!this.env.get("WARDOGS_FEED_ENABLED")) return "feed disabled";
     const token = this.servers.feedToken(serverId);
-    return this.env.get("WARDOGS_FEED_ENABLED") && typeof token === "string" && token.length >= 32;
+    return typeof token === "string" && token.length >= 32 ? null : "feed token not configured";
+  }
+
+  private configured(serverId: string) {
+    return this.unavailable(serverId) === null;
+  }
+
+  // Records a refused delivery for staff (category and status only) and returns the error to throw.
+  private refuse(serverId: string | undefined, reason: string, error: unknown) {
+    this.deliveries.rejected(serverId, error instanceof HttpException ? error.getStatus() : 503, reason);
+    return error;
   }
 
   async ingest(authorization: unknown, body: unknown, id?: string) {
-    const serverId = this.servers.resolve(id);
-    if (!this.configured(serverId)) throw new ServiceUnavailableException("The game event feed is not connected yet.");
+    let serverId: string;
+    try {
+      serverId = this.servers.resolve(id);
+    } catch (error) {
+      throw this.refuse(id, error instanceof BadRequestException ? "server not selected" : "unknown server", error);
+    }
+    const unavailable = this.unavailable(serverId);
+    if (unavailable)
+      throw this.refuse(
+        serverId,
+        unavailable,
+        new ServiceUnavailableException("The game event feed is not connected yet."),
+      );
     const match = typeof authorization === "string" && /^Bearer ([^\s]{1,512})(?![\s\S])/i.exec(authorization);
     const actual = createHash("sha256")
       .update(match ? match[1] : "")
       .digest();
     const expected = createHash("sha256").update(this.servers.feedToken(serverId)!).digest();
-    if (!match || !timingSafeEqual(actual, expected)) throw new UnauthorizedException("Invalid game feed credentials.");
-    const parsed = parseFeed(body);
-    const result = await this.store.ingest(parsed, new Date(), serverId);
+    if (!match || !timingSafeEqual(actual, expected))
+      throw this.refuse(
+        serverId,
+        match ? "token mismatch" : authorization ? "malformed credentials" : "missing credentials",
+        new UnauthorizedException("Invalid game feed credentials."),
+      );
+    let parsed: ParsedFeed;
+    try {
+      parsed = parseFeed(body);
+    } catch (error) {
+      throw this.refuse(serverId, error instanceof FeedRejectedException ? error.reason : "invalid payload", error);
+    }
+    let result: Awaited<ReturnType<TelemetryStore["ingest"]>>;
+    try {
+      result = await this.store.ingest(parsed, new Date(), serverId);
+    } catch (error) {
+      throw this.refuse(serverId, "storage unavailable", error);
+    }
     for (const key of this.snapshots.keys()) if (key.startsWith(`${serverId}:`)) this.snapshots.delete(key);
     return { ok: true, ...result };
   }
@@ -166,7 +214,8 @@ export class TelemetryService {
     const events = result.enabled
       ? await this.store.events(new Date(result.windowStartedAt), new Date(result.asOf), undefined, result.serverId)
       : [];
-    return { ...result, events };
+    // Delivery diagnostics are staff-only; the public leaderboard never includes them.
+    return { ...result, ...this.deliveries.status(result.serverId), events };
   }
 
   async player(id: unknown, input?: unknown, selected?: string) {
