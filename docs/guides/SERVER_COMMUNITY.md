@@ -14,7 +14,11 @@ The [release audit](ADMIN_RELEASE_AUDIT.md) records the current deployed state a
 
 ## Host restart schedules
 
-[xREALM's general scheduler](https://xrealm.com/en/blog/how-to-add-schedules-to-your-server) separates a schedule's timing from its tasks. In the selected server's host panel, review existing schedules, create the desired cadence, then add a task. Confirm the displayed timezone and next-run timestamp; the public guide does not establish its timezone. No live schedule was inspected or changed here.
+[xREALM's general scheduler](https://xrealm.com/en/blog/how-to-add-schedules-to-your-server) separates a schedule's timing from its tasks. In the selected server's host panel, review existing schedules, create the desired cadence, then add a task. Confirm the displayed timezone and next-run timestamp; the public guide alone does not establish the current server's schedule.
+
+Read-only inspection on October 2 found schedule **Restarts** (`16302`) marked Active with cron `0 3 * * *`, displayed as **daily at 23:00 (UTC-4)**. Its detail page contains **no tasks**, says **Last run at: never**, and shows a stale **Next run at: Sep 30th at 11:00PM**. This does not establish a working restart or after-match routine. No schedule, task, setting or server power state was changed.
+
+The separate **Settings → Wardogs Daily Restart Time** field is blank. Its help says blank keeps the current config value and **does not turn off restarts**; the actual configured time therefore remains unknown. The panel takes local 24-hour time, stores UTC, and applies a change on the next server start. Its saved UTC time stays fixed through daylight-saving changes, so maintaining the same local hour requires adjustment. Do not infer a disabled restart, a particular time, or match-end behavior from the blank input, and reconcile these two mechanisms before configuring either.
 
 For WARDOGS, select **[Wardogs] Restart after match-ending**, as documented in [xREALM's dedicated guide](https://www.xrealm.com/en/blog/wardogs-server-restart-after-match-end). Enable the schedule and online-only option. The scheduled time begins waiting; the restart follows at map loading. Configure initial/near-end announcements and a leading-score threshold (documented default: 90 points). Leave the task offset at zero unless intentional. Ordinary power-restart tasks can interrupt play; review them before adding another schedule.
 
@@ -49,7 +53,9 @@ The approved UNCs welcome sequence is two short messages, starting after the loa
 
 The approved round message is `GG! Get whitelisted at theuncsgaming.com/whitelist. Thanks for playing on The UNCs.` It may arrive as the next round loads; it does not announce a winner or claim an exact match-end trigger. Voting copy stays out of live welcomes while voting is off.
 
-Dennis removed promotional “free” wording and the seeding welcome line. Seeding remains a separate community activity: joining a quiet server to help a match get going. Do not promise points, automatic whitelist rewards, queue tiers or XP/cash bonuses. Existing whitelist grants stay intact. Discord is the identity/community step; applications are completed on the website. The site and sign-in routing are deployed; a genuine applicant submission and staff approval still need acceptance.
+Dennis removed promotional “free” wording and the seeding welcome line. Seeding remains a separate community activity: joining a quiet server to help a match get going. Do not promise points, automatic whitelist rewards, queue tiers or XP/cash bonuses. Existing whitelist grants stay intact. Discord is the identity/community step; applications are completed on the website. October 2 read-only inspection matched one genuine website request and applied staff approval to its active, saved game whitelist entry. The applicant's own returned status screen and actual queue experience remain unobserved.
+
+The separate Discord guild-join welcome also points newcomers to the updated [welcome guide](https://discord.com/channels/82988952587337728/1547153158931877959/1555406360357642390). Natural Gramps messages on October 1 at 23:29 EDT and October 2 at 04:05 EDT used that shorter template. The guide supplies the server join code and website application link. This is observed message delivery, not merely the source-code default; no test welcome was sent.
 
 Import `ServerCommunityModule` in `AppModule`; export `AdminStore` from `AdminModule`. The existing global Necord module supplies its Discord `Client`. No new gateway listener, intent, or slash command is registered.
 
