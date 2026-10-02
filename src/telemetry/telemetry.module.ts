@@ -26,7 +26,9 @@ export class TelemModule implements NestModule, OnModuleInit {
 
   onModuleInit() {
     // Body parsing (malformed JSON, oversized bodies) fails before any route or Nest middleware
-    // runs. This error hook sits ahead of Nest's own handler, which still writes the response.
+    // runs. This error hook sits ahead of Nest's own handler, which still writes the response. The
+    // Authorization header is only compared with the feed token, so the refusal is filed as the
+    // game's or as traffic without the token; it is never kept.
     const adapter = this.adapterHost.httpAdapter;
     if (adapter?.getType() !== "express") return;
     adapter.use((error: unknown, req: Request, _res: Response, next: NextFunction) => {
@@ -45,7 +47,7 @@ export class TelemModule implements NestModule, OnModuleInit {
           : failure.type === "entity.parse.failed" || error instanceof SyntaxError
             ? "invalid JSON"
             : "unreadable request";
-      this.deliveries.rejectedRequest(req.originalUrl, status, reason);
+      this.deliveries.rejectedRequest(req.originalUrl, status, reason, req.headers?.authorization);
       next(error);
     });
   }
@@ -77,7 +79,8 @@ export class TelemModule implements NestModule, OnModuleInit {
           peers.set(key, peer);
         }
         if (!peer || ++peer.count > 300) {
-          if (peers === feeds) this.deliveries.rejectedRequest(req.originalUrl, 429, "rate limited");
+          if (peers === feeds)
+            this.deliveries.rejectedRequest(req.originalUrl, 429, "rate limited", req.headers.authorization);
           res
             .set("Retry-After", "60")
             .status(429)

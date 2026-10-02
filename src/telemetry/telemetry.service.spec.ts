@@ -13,6 +13,13 @@ const token = "dedicated-feed-token-".repeat(3);
 const steamId = "76561198000000001";
 const now = new Date("2026-09-30T12:00:00.000Z");
 const publicKeys = ["deaths", "headshotKills", "kd", "kills", "name"];
+const deliveryKeys = [
+  "lastBatch",
+  "lastRejected",
+  "rejectedCount",
+  "lastRejectedWithoutToken",
+  "rejectedWithoutTokenCount",
+];
 function fixture(enabled = true, secret = token, rcon = "different-rcon-password") {
   const values: Record<string, unknown> = {
     WARDOGS_FEED_ENABLED: enabled,
@@ -253,6 +260,7 @@ describe("telemetry authorization and reporting", () => {
   it.each<{
     reason: string;
     status: number;
+    withoutToken?: boolean;
     enabled?: boolean;
     secret?: string;
     authorization?: unknown;
@@ -260,10 +268,10 @@ describe("telemetry authorization and reporting", () => {
     storageFails?: boolean;
   }>([
     { reason: "feed disabled", status: 503, enabled: false },
-    { reason: "feed token not configured", status: 503, secret: "short" },
-    { reason: "missing credentials", status: 401, authorization: undefined },
-    { reason: "malformed credentials", status: 401, authorization: `Basic ${token}` },
-    { reason: "token mismatch", status: 401, authorization: `Bearer ${"x".repeat(40)}` },
+    { reason: "feed token not configured", status: 503, secret: "short", withoutToken: true },
+    { reason: "missing credentials", status: 401, authorization: undefined, withoutToken: true },
+    { reason: "malformed credentials", status: 401, authorization: `Basic ${token}`, withoutToken: true },
+    { reason: "token mismatch", status: 401, authorization: `Bearer ${"x".repeat(40)}`, withoutToken: true },
     { reason: "invalid payload: missing JSON body", status: 400, body: () => undefined },
     { reason: "invalid payload: batch (missing or wrong type)", status: 400, body: () => [token] },
     {
@@ -302,26 +310,40 @@ describe("telemetry authorization and reporting", () => {
     if (test.storageFails) await expect(rejected).rejects.toThrow();
     else await expect(rejected).rejects.toMatchObject({ status: test.status });
     const staff = await service.combat();
-    expect(staff).toMatchObject({
-      lastRejected: { at: now.toISOString(), status: test.status, reason: test.reason },
-      rejectedCount: 1,
-    });
+    // A refusal is the game's own only when the request carried the server's feed token.
+    const refusal = { at: now.toISOString(), status: test.status, reason: test.reason };
+    expect(staff).toMatchObject(
+      test.withoutToken
+        ? { lastRejected: null, rejectedCount: 0, lastRejectedWithoutToken: refusal, rejectedWithoutTokenCount: 1 }
+        : { lastRejected: refusal, rejectedCount: 1, lastRejectedWithoutToken: null, rejectedWithoutTokenCount: 0 },
+    );
     // Only the time, status and category are kept: never the token, header, body or database text.
-    expect(Object.keys(staff.lastRejected!).sort()).toEqual(["at", "reason", "status"]);
+    const kept = test.withoutToken ? staff.lastRejectedWithoutToken : staff.lastRejected;
+    expect(Object.keys(kept!).sort()).toEqual(["at", "reason", "status"]);
     expect(JSON.stringify(staff)).not.toMatch(new RegExp(`${token}|Bearer|Basic|postgres|private-db`));
     expect(Logger.prototype.warn).toHaveBeenCalledWith(
-      `Rejected a game feed delivery for server primary: ${test.status} ${test.reason}.`,
+      test.withoutToken
+        ? `Rejected a game feed request without the feed token for server primary: ${test.status} ${test.reason}.`
+        : `Rejected a game feed delivery for server primary: ${test.status} ${test.reason}.`,
     );
     expect(staff.lastBatch).toBeNull();
     const publicView = await service.leaderboard();
-    for (const key of ["lastRejected", "rejectedCount", "lastBatch"]) expect(publicView).not.toHaveProperty(key);
+    for (const key of deliveryKeys) expect(publicView).not.toHaveProperty(key);
   });
-  it("counts refusals since start and keeps the latest one", async () => {
+  it("counts refusals since start and keeps the latest one of each kind", async () => {
     const { service, payload } = fixture();
-    await expect(service.combat()).resolves.toMatchObject({ lastRejected: null, rejectedCount: 0 });
+    await expect(service.combat()).resolves.toMatchObject({
+      lastRejected: null,
+      rejectedCount: 0,
+      lastRejectedWithoutToken: null,
+      rejectedWithoutTokenCount: 0,
+    });
     await expect(service.ingest(undefined, payload)).rejects.toMatchObject({ status: 401 });
     jest.advanceTimersByTime(5_000);
     await expect(service.ingest(`Bearer ${token}`, { ...payload, serverId: "bad" })).rejects.toMatchObject({
+      status: 400,
+    });
+    await expect(service.ingest(`Bearer ${token}`, { ...payload, serverId: "worse" })).rejects.toMatchObject({
       status: 400,
     });
     await service.ingest(`Bearer ${token}`, payload);
@@ -332,7 +354,28 @@ describe("telemetry authorization and reporting", () => {
         reason: "invalid payload: serverId (bad format)",
       },
       rejectedCount: 2,
+      lastRejectedWithoutToken: { at: now.toISOString(), status: 401, reason: "missing credentials" },
+      rejectedWithoutTokenCount: 1,
     });
+  });
+  it("still logs and shows the game's storage failure after a refusal without the token", async () => {
+    const { service, store, payload } = fixture();
+    await expect(service.ingest(undefined, payload)).rejects.toMatchObject({ status: 401 });
+    store.ingest.mockRejectedValueOnce(new Error("database error"));
+    jest.advanceTimersByTime(1_000);
+    await expect(service.ingest(`Bearer ${token}`, payload)).rejects.toThrow("database error");
+    await expect(service.ingest(`Bearer ${"x".repeat(40)}`, payload)).rejects.toMatchObject({ status: 401 });
+    await expect(service.combat()).resolves.toMatchObject({
+      lastRejected: { at: new Date(now.getTime() + 1_000).toISOString(), status: 503, reason: "storage unavailable" },
+      rejectedCount: 1,
+      lastRejectedWithoutToken: { status: 401, reason: "token mismatch" },
+      rejectedWithoutTokenCount: 2,
+    });
+    expect(jest.mocked(Logger.prototype.warn).mock.calls.map(([message]) => message)).toEqual([
+      "Rejected a game feed request without the feed token for server primary: 401 missing credentials.",
+      "Rejected a game feed delivery for server primary: 503 storage unavailable.",
+      "Rejected a game feed request without the feed token for server primary: 401 token mismatch.",
+    ]);
   });
   it("stores the valid events of a partly invalid batch and shows staff what was skipped", async () => {
     const { service, store, payload } = fixture();

@@ -13,6 +13,13 @@ import { TelemetryStore } from "./telemetry.store";
 import { emptyTotals } from "./telemetry.types";
 
 const feedToken = "dedicated-test-feed-token-".repeat(2);
+const deliveryKeys = [
+  "lastBatch",
+  "lastRejected",
+  "rejectedCount",
+  "lastRejectedWithoutToken",
+  "rejectedWithoutTokenCount",
+];
 const values: Record<string, unknown> = {
   WARDOGS_FEED_ENABLED: true,
   WARDOGS_FEED_TOKEN: feedToken,
@@ -211,7 +218,7 @@ describe("telemetry HTTP boundaries", () => {
     });
     for (const secret of [feedToken, "Bearer", "127.0.0.1", "::1"]) expect(JSON.stringify(staff)).not.toContain(secret);
     const publicView = await request(app.getHttpServer()).get("/community/api/leaderboard").expect(200);
-    for (const key of ["lastRejected", "rejectedCount", "lastBatch"]) expect(publicView.body).not.toHaveProperty(key);
+    for (const key of deliveryKeys) expect(publicView.body).not.toHaveProperty(key);
     // A refused public read is not a feed delivery.
     await request(app.getHttpServer())
       .post("/community/api/leaderboard")
@@ -219,6 +226,23 @@ describe("telemetry HTTP boundaries", () => {
       .send("{")
       .expect(400);
     expect((await staffCombat()).rejectedCount).toBe(3);
+  });
+  it("files body-parser refusals without the feed token apart from the game's deliveries", async () => {
+    await request(app.getHttpServer())
+      .post("/api/ingest/events")
+      .set("Authorization", `Bearer ${feedToken}`)
+      .send({ ...batch(), serverId: 12 })
+      .expect(400);
+    for (const authorization of [undefined, "Bearer wrong-token"]) {
+      const junk = request(app.getHttpServer()).post("/api/ingest/events").set("Content-Type", "application/json");
+      await (authorization ? junk.set("Authorization", authorization) : junk).send("{").expect(400);
+    }
+    await expect(staffCombat()).resolves.toMatchObject({
+      lastRejected: { status: 400, reason: "invalid payload: serverId (missing or wrong type)" },
+      rejectedCount: 1,
+      lastRejectedWithoutToken: { status: 400, reason: "invalid JSON" },
+      rejectedWithoutTokenCount: 2,
+    });
   });
   it("accepts the valid events of a batch with one odd event and shows staff the skip", async () => {
     const value = batch();
@@ -250,10 +274,14 @@ describe("telemetry HTTP boundaries", () => {
       .set("Authorization", `Bearer ${feedToken}`)
       .send(batch())
       .expect(429);
+    await request(app.getHttpServer()).post("/api/ingest/servers/primary/events").send(batch()).expect(429);
     expect(store.ingest).not.toHaveBeenCalled();
+    // The 300 refusals without the token neither replaced nor counted as the game's refusal.
     await expect(staffCombat()).resolves.toMatchObject({
       lastRejected: { status: 429, reason: "rate limited" },
-      rejectedCount: 301,
+      rejectedCount: 1,
+      lastRejectedWithoutToken: { status: 429, reason: "rate limited" },
+      rejectedWithoutTokenCount: 301,
     });
   });
   it("returns safe errors when the database is unavailable", async () => {

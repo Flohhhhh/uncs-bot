@@ -5,10 +5,10 @@ import {
   ServiceUnavailableException,
   UnauthorizedException,
 } from "@nestjs/common";
-import { createHash, timingSafeEqual } from "node:crypto";
 import { EnvService } from "../env/env.service";
 import { GameServers } from "../admin/game-servers";
 import { publicGameServer } from "../common/game-server";
+import { feedCredentials, usableFeedToken } from "./telemetry.credentials";
 import { TelemetryDeliveries } from "./telemetry.deliveries";
 import { TelemetryStore } from "./telemetry.store";
 import {
@@ -55,8 +55,7 @@ export class TelemetryService {
   /** Why the feed cannot accept deliveries for this server, or null when it can. */
   private unavailable(serverId: string) {
     if (!this.env.get("WARDOGS_FEED_ENABLED")) return "feed disabled";
-    const token = this.servers.feedToken(serverId);
-    return typeof token === "string" && token.length >= 32 ? null : "feed token not configured";
+    return usableFeedToken(this.servers.feedToken(serverId)) ? null : "feed token not configured";
   }
 
   private configured(serverId: string) {
@@ -64,8 +63,9 @@ export class TelemetryService {
   }
 
   // Records a refused delivery for staff (category and status only) and returns the error to throw.
-  private refuse(serverId: string | undefined, reason: string, error: unknown) {
-    this.deliveries.rejected(serverId, error instanceof HttpException ? error.getStatus() : 503, reason);
+  // withToken: the request carried the server's feed token, so it is the game's own delivery.
+  private refuse(serverId: string | undefined, reason: string, error: unknown, withToken: boolean) {
+    this.deliveries.rejected(serverId, error instanceof HttpException ? error.getStatus() : 503, reason, withToken);
     return error;
   }
 
@@ -74,37 +74,38 @@ export class TelemetryService {
     try {
       serverId = this.servers.resolve(id);
     } catch (error) {
-      throw this.refuse(id, error instanceof BadRequestException ? "server not selected" : "unknown server", error);
+      const reason = error instanceof BadRequestException ? "server not selected" : "unknown server";
+      throw this.refuse(id, reason, error, false);
     }
+    // Checked before availability so every refusal is filed by whether it carried the feed token.
+    const credentials = feedCredentials(authorization, this.servers.feedToken(serverId));
+    const withToken = credentials === "valid";
     const unavailable = this.unavailable(serverId);
     if (unavailable)
       throw this.refuse(
         serverId,
         unavailable,
         new ServiceUnavailableException("The game event feed is not connected yet."),
+        withToken,
       );
-    const match = typeof authorization === "string" && /^Bearer ([^\s]{1,512})(?![\s\S])/i.exec(authorization);
-    const actual = createHash("sha256")
-      .update(match ? match[1] : "")
-      .digest();
-    const expected = createHash("sha256").update(this.servers.feedToken(serverId)!).digest();
-    if (!match || !timingSafeEqual(actual, expected))
-      throw this.refuse(
-        serverId,
-        match ? "token mismatch" : authorization ? "malformed credentials" : "missing credentials",
-        new UnauthorizedException("Invalid game feed credentials."),
-      );
+    if (!withToken)
+      throw this.refuse(serverId, credentials, new UnauthorizedException("Invalid game feed credentials."), false);
     let parsed: ParsedFeed;
     try {
       parsed = parseFeed(body);
     } catch (error) {
-      throw this.refuse(serverId, error instanceof FeedRejectedException ? error.reason : "invalid payload", error);
+      throw this.refuse(
+        serverId,
+        error instanceof FeedRejectedException ? error.reason : "invalid payload",
+        error,
+        true,
+      );
     }
     let result: Awaited<ReturnType<TelemetryStore["ingest"]>>;
     try {
       result = await this.store.ingest(parsed, new Date(), serverId);
     } catch (error) {
-      throw this.refuse(serverId, "storage unavailable", error);
+      throw this.refuse(serverId, "storage unavailable", error, true);
     }
     this.deliveries.accepted(serverId, {
       accepted: parsed.events.length,
