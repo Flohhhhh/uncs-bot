@@ -187,9 +187,10 @@ function createPreviewGame(name: string, reportsClock: boolean) {
           map: currentMap,
           ...(reportsClock ? { matchSeconds: (Date.now() - previewRoundStart) / 1000 } : {}),
           lighting,
+          alternator: currentMap === "Kavkazi" ? "ZoneAlternator.Bakurani.Farmland.Circle" : "None",
           experiences: ["KOTH"],
           scoreTick: { current: 24, min: 18, max: 30 },
-          rotation: { nowIndex: 0, nextIndex: 1 },
+          ...(reportsClock ? { rotation: { nowIndex: 0, nextIndex: 1 } } : {}),
           players: { current: players.length, max: 100 },
           factionScores: factions.map(({ name, colorHex, score }) => ({ name, colorHex, score })),
         };
@@ -271,12 +272,12 @@ function createPreviewGame(name: string, reportsClock: boolean) {
       }
       if (path === "/v1/rotation")
         return {
-          enabled: true,
-          mode: "ordered",
+          enabled: scalarValue(text, ROTATION, "bEnabled")?.toLowerCase() === "true",
+          mode: scalarValue(text, ROTATION, "RotationMode") || "Ordered",
           entries: parseRotation(text).map((entry, index) => ({
             ...entry,
             index,
-            lighting: "DayClear",
+            lighting: entry.lighting || "DayClear",
             status: index === 0 ? "now" : index === 1 ? "next" : null,
           })),
         };
@@ -305,7 +306,7 @@ function createPreviewGame(name: string, reportsClock: boolean) {
     players,
   };
 }
-// Exercise both supported status shapes; the live primary currently omits the optional clock.
+// Primary exercises the rotation-marker fallback; Events supplies the optional status index and clock.
 const primaryPreview = createPreviewGame("The UNCs | Primary preview", false);
 const eventPreview = createPreviewGame("The UNCs | Event preview", true);
 const players = primaryPreview.players;

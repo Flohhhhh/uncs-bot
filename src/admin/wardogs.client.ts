@@ -310,22 +310,27 @@ export class WardogsClient {
   }
 
   async rotation() {
-    return z
+    const rotation = z
       .object({
         enabled: z.boolean(),
         mode: z.string(),
         entries: z.array(
           z.object({
-            index: z.number(),
+            index: z.number().int().nonnegative().optional(),
             map: z.string(),
             experiences: z.array(z.string()).optional(),
             lighting: z.string().optional(),
+            zoneAlternator: z.string().optional(),
             status: z.string().nullable().optional(),
             denied: z.boolean().optional(),
           }),
         ),
       })
       .parse(await this.request("GET", "/v1/rotation"));
+    return {
+      ...rotation,
+      entries: rotation.entries.map((entry, index) => ({ ...entry, index: entry.index ?? index })),
+    };
   }
 
   checkRotation() {

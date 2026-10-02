@@ -205,6 +205,32 @@ it("queues a map independently of ending the current match", async () => {
     entry: { map: "Europe" },
   });
 });
+it("explains a missing position and refreshes it without losing the chosen map or sending an action", async () => {
+  let available = false;
+  const fallback = request.getMockImplementation()!;
+  request.mockImplementation(async (path, options) => {
+    if (path !== "settings") return fallback(path, options);
+    const snapshot = structuredClone(sample);
+    if (!available) {
+      snapshot.rotation.currentIndex = null;
+      snapshot.rotation.positionNote = "The running rotation could not be read. Refresh to try again.";
+    }
+    return snapshot as never;
+  });
+  show("admin", "/settings#rotation");
+  fireEvent.click(await screen.findByRole("button", { name: "Next round" }));
+  fireEvent.change(await screen.findByRole("combobox", { name: "Map" }), { target: { value: "Europe" } });
+  fireEvent.click(await screen.findByRole("checkbox", { name: "Infantry only" }));
+  expect(screen.getByText("The running rotation could not be read. Refresh to try again.")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Queue next map" })).toBeDisabled();
+  available = true;
+  fireEvent.click(screen.getByRole("button", { name: "Refresh map position" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Queue next map" })).toBeEnabled());
+  expect(screen.getByRole("combobox", { name: "Map" })).toHaveValue("Europe");
+  expect(screen.getByRole("checkbox", { name: "Infantry only" })).toBeChecked();
+  expect(screen.queryByText("Position not confirmed")).not.toBeInTheDocument();
+  expect(request.mock.calls.some(([path]) => path === "actions")).toBe(false);
+});
 it("shows permissions without reading the live game", () => {
   render(
     <AdminContext.Provider value={context()}>
