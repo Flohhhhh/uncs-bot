@@ -1134,13 +1134,16 @@ async function main() {
             welcome: {
               enabled: id === "primary",
               messages: [
-                "Welcome to The UNCs! Find the crew at theuncsgaming.com.",
-                "Free whitelist details and seeding info are on our website.",
+                "Welcome to The UNCs! Website: theuncsgaming.com",
+                "Get whitelisted: theuncsgaming.com/whitelist. Sign in with Discord and apply on the website.",
               ],
               delaySeconds: 10,
               spacingSeconds: 20,
             },
-            round: { enabled: false, message: "GG! Thanks for playing with The UNCs." },
+            round: {
+              enabled: false,
+              message: "GG! Get whitelisted at theuncsgaming.com/whitelist. Thanks for playing on The UNCs.",
+            },
             discordStatus: { enabled: false, configured: false },
           }),
         },
