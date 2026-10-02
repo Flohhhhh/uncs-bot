@@ -441,6 +441,35 @@ describe("server configuration boundaries", () => {
     expect(parseRotation(f.saved().text)[1]).toMatchObject({ map: "Europe", experiences: ["KOTH_InfantryOnly"] });
     expect(f.request.mock.calls.some(([, path]) => path.startsWith("/v1/match"))).toBe(false);
   });
+  it.each([
+    ["Kavkazi", "Bakurani"],
+    ["Europe", "Ozeti"],
+    ["NorthAmerica", "Zestafona"],
+  ])("keeps a reviewed next-map choice valid when %s is reported as %s", async (id, name) => {
+    const f = fixture();
+    f.document.text = original.replace('Map="Kavkazi"', `Map="${id}"`);
+    f.status.map = id;
+    const reviewed = await f.game.configuration();
+    f.status.map = name;
+    const result = await f.game.execute({
+      id: randomUUID(),
+      reason: "Next round choice",
+      action: "map-next",
+      revision: reviewed.revision,
+      currentIndex: reviewed.rotation.currentIndex!,
+      currentMap: reviewed.rotation.currentMap,
+      entry: { map: "Europe", experiences: ["KOTH", "KOTH_InfantryOnly"], lighting: "DayClear" },
+    });
+    expect(result.state).toBe("pending");
+    expect(parseRotation(f.saved().text)[0].map).toBe(id);
+    expect(parseRotation(f.saved().text)[1]).toEqual({
+      map: "Europe",
+      experiences: ["KOTH", "KOTH_InfantryOnly"],
+      lighting: "DayClear",
+    });
+    expect(f.request.mock.calls.filter(([method]) => method === "PUT")).toHaveLength(1);
+    expect(f.request.mock.calls.some(([, path]) => path.startsWith("/v1/match"))).toBe(false);
+  });
   it("preserves old unavailable rotation entries when queuing a valid Infantry Only round", async () => {
     const f = fixture();
     f.document.text = original.replace('Map="Europe",Experiences="KOTH"', 'Map="Europe",Experiences="RemovedMode"');
