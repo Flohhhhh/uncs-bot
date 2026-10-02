@@ -85,6 +85,41 @@ describe("community message rotation", () => {
     }
   });
 
+  it("keeps each welcome pool's player and previous-joiner history separate", () => {
+    const rotation = new CommunityRotation(() => 0);
+    expect(rotation.welcome(player(1), 3, "whitelisted")).toBe(0);
+    // The standard pool has not seen player 1 or any joiner yet.
+    expect(rotation.welcome(player(1), 3)).toBe(0);
+    expect(rotation.welcome(player(2), 3, "standard")).toBe(1);
+    // Player 1 last got 0 from the whitelisted pool, and that pool's previous choice was also 0.
+    expect(rotation.welcome(player(1), 3, "whitelisted")).toBe(1);
+    expect(rotation.welcome(player(3), 3, "whitelisted")).toBe(0);
+  });
+
+  it.each([3, 8])("never repeats within either pool when joins alternate between pools with %i variants", (count) => {
+    const rotation = new CommunityRotation(seeded(count + 100));
+    const last = { standard: new Map<string, number>(), whitelisted: new Map<string, number>() };
+    const previous: Record<keyof typeof last, number | null> = { standard: null, whitelisted: null };
+    for (let join = 0; join < 2_000; join++) {
+      const pool = join % 3 === 0 ? "whitelisted" : "standard";
+      const steamId = player(join % 11);
+      const index = rotation.welcome(steamId, count, pool);
+      expect(index).not.toBe(last[pool].get(steamId));
+      expect(index).not.toBe(previous[pool]);
+      last[pool].set(steamId, index);
+      previous[pool] = index;
+    }
+  });
+
+  it("bounds each pool's remembered players separately", () => {
+    const rotation = new CommunityRotation(() => 0, 1);
+    expect(rotation.welcome(player(1), 2, "whitelisted")).toBe(0);
+    rotation.welcome(player(2), 2);
+    rotation.welcome(player(3), 2);
+    // Standard-pool joins do not evict player 1 from the whitelisted pool.
+    expect(rotation.welcome(player(1), 2, "whitelisted")).toBe(1);
+  });
+
   it("keeps welcome and round history separate", () => {
     const rotation = new CommunityRotation(() => 0);
     expect(rotation.round(3)).toBe(0);
