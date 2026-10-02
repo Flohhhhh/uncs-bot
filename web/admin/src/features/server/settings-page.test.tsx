@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, within, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import { SettingsPage, PermissionsPage } from "./settings-page";
@@ -174,6 +174,35 @@ it("preserves reordered maps after a rejected rotation save", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Review rotation" }));
   const changes = within(screen.getByRole("dialog")).getAllByRole("listitem");
   expect(changes[0]).toHaveTextContent("Ozeti");
+});
+it("retries failed map choices without discarding the rotation draft or sending changes", async () => {
+  const fallback = request.getMockImplementation()!;
+  request.mockImplementation(async (path, options) => {
+    if (path === "catalog") throw new Error("Catalog read failed");
+    return fallback(path, options);
+  });
+  show("admin", "/settings#rotation");
+  fireEvent.click(await screen.findByRole("button", { name: "Move Ozeti up" }));
+  const retry = await screen.findByRole("button", { name: "Retry map choices" });
+  expect(screen.queryByRole("combobox", { name: "Map" })).not.toBeInTheDocument();
+  let finish!: (value: unknown) => void;
+  request.mockImplementation(
+    async (path, options) =>
+      (path === "catalog"
+        ? new Promise((resolve) => {
+            finish = resolve;
+          })
+        : fallback(path, options)) as never,
+  );
+  fireEvent.click(retry);
+  expect(retry).toBeDisabled();
+  expect(screen.getByText("Catalog read failed")).toBeInTheDocument();
+  await act(async () => finish(await fallback("catalog")));
+  expect(await screen.findByRole("combobox", { name: "Map" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Retry map choices" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Review rotation" }));
+  expect(within(screen.getByRole("dialog")).getAllByRole("listitem")[0]).toHaveTextContent("Ozeti");
+  expect(request.mock.calls.every(([, options]) => !options?.method)).toBe(true);
 });
 it("shows the running scoring interval and server range", async () => {
   show();

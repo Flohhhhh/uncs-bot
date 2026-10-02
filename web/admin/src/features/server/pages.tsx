@@ -403,19 +403,34 @@ export function AnnouncementsPage() {
 }
 function MatchMapControls() {
   const admin = useAdmin();
-  const { data, error, refresh } = useResource<SettingsSnapshot>("settings");
+  const { data, error, loading, refresh } = useResource<SettingsSnapshot>("settings");
   const { setUnsavedChanges } = admin;
   useEffect(() => () => setUnsavedChanges(false), [setUnsavedChanges]);
-  if (!data) return <Empty title={error || "Loading map controls…"} />;
   return (
-    <RotationEditor
-      snapshot={data}
-      reload={refresh}
-      disabled={admin.busy || !!error}
-      active
-      initialView="next"
-      onUnsavedChange={setUnsavedChanges}
-    />
+    <section aria-label="Map controls">
+      {error && (
+        <div className="notice error" role="alert">
+          <p>
+            {error} {data && "Showing values from the last successful check. Refresh to continue editing."}
+          </p>
+          <button type="button" className="button secondary small" disabled={admin.busy || loading} onClick={refresh}>
+            Retry map controls
+          </button>
+        </div>
+      )}
+      {data ? (
+        <RotationEditor
+          snapshot={data}
+          reload={refresh}
+          disabled={admin.busy || !!error}
+          active
+          initialView="next"
+          onUnsavedChange={setUnsavedChanges}
+        />
+      ) : (
+        !error && <Empty title="Loading map controls…" />
+      )}
+    </section>
   );
 }
 export function MatchPage() {
