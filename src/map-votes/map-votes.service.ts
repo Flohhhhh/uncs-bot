@@ -1430,12 +1430,21 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
         if (!(await stillOn())) throw new Error("Voting stopped before the in-game reminder.");
       }
       if (slot.inGame) {
-        const result = await this.admin.act(this.sayActor(actor, vote.serverId), {
-          id,
-          action: "broadcast",
-          reason: `Map vote ${stage} totals`,
-          message,
-        });
+        const result = await this.admin
+          .act(this.sayActor(actor, vote.serverId), {
+            id,
+            action: "broadcast",
+            reason: `Map vote ${stage} totals`,
+            message,
+          })
+          .catch((error: unknown) => {
+            // Every exception act() raises happens before anything is sent to the game.
+            if (!(error instanceof HttpException)) throw error;
+            return {
+              state: "failed" as const,
+              message: `${slot.discord ? "Posted in Discord. " : ""}The in-game reminder was not sent and will not be repeated.`,
+            };
+          });
         await this.store.finishReminder(
           vote.id,
           stage,

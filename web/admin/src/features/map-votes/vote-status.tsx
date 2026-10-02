@@ -110,7 +110,7 @@ export function VoteResults({ data, error = "" }: { data: VoteList; error?: stri
 }
 
 export function MapVoteStatus() {
-  const { data, error, loading, refresh } = useResource<VoteList>("map-votes");
+  const { data, error, loading, refreshing, refresh } = useResource<VoteList>("map-votes");
   return (
     <section aria-label="Voting status">
       {data ? (
@@ -123,7 +123,7 @@ export function MapVoteStatus() {
           Voting controls & history →
         </Link>
         {error && (
-          <button className="button secondary small" disabled={loading} onClick={refresh}>
+          <button className="button secondary small" disabled={loading || refreshing} onClick={refresh}>
             Retry votes
           </button>
         )}

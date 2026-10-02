@@ -504,7 +504,7 @@ function AdminSupporters() {
       <form
         onSubmit={(event) => {
           event.preventDefault();
-          if (busy || resource.loading || query.trim().length > 100) return;
+          if (busy || resource.loading || resource.refreshing || query.trim().length > 100) return;
           if (query.trim() === search) resource.refresh();
           else setSearch(query.trim());
         }}
@@ -520,14 +520,14 @@ function AdminSupporters() {
               placeholder="Patreon name, membership ID, Discord ID, or SteamID"
             />
           </label>
-          <button className="button secondary" disabled={busy || resource.loading}>
+          <button className="button secondary" disabled={busy || resource.loading || resource.refreshing}>
             Search all records
           </button>
           {search && (
             <button
               type="button"
               className="button secondary"
-              disabled={busy || resource.loading}
+              disabled={busy || resource.loading || resource.refreshing}
               onClick={() => {
                 setQuery("");
                 setSearch("");
@@ -565,7 +565,14 @@ function AdminSupporters() {
       </div>
       <button
         className="button secondary"
-        disabled={busy || resource.loading || Boolean(resource.error) || !data.enabled || !data.configured}
+        disabled={
+          busy ||
+          resource.loading ||
+          resource.refreshing ||
+          Boolean(resource.error) ||
+          !data.enabled ||
+          !data.configured
+        }
         onClick={() => setAdding(true)}
       >
         Record existing Patreon member
@@ -612,7 +619,7 @@ function AdminSupporters() {
                 <td>
                   <button
                     className="button secondary small"
-                    disabled={busy || resource.loading}
+                    disabled={busy || resource.loading || resource.refreshing}
                     onClick={() => setSelected(record)}
                   >
                     Review supporter
@@ -636,7 +643,9 @@ function AdminSupporters() {
         <SupporterReview
           record={selected}
           policy={policy}
-          unavailable={!data.enabled || !data.configured || Boolean(resource.error) || resource.loading}
+          unavailable={
+            !data.enabled || !data.configured || Boolean(resource.error) || resource.loading || resource.refreshing
+          }
           onClose={() => setSelected(null)}
           onReviewed={() => {
             void resource.refresh();
@@ -645,7 +654,9 @@ function AdminSupporters() {
       )}
       {adding && (
         <ManualMember
-          unavailable={!data.enabled || !data.configured || Boolean(resource.error) || resource.loading}
+          unavailable={
+            !data.enabled || !data.configured || Boolean(resource.error) || resource.loading || resource.refreshing
+          }
           onClose={() => setAdding(false)}
           onRecorded={resource.refresh}
         />

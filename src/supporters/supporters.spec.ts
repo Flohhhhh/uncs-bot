@@ -74,9 +74,25 @@ describe("Patreon signed observations", () => {
       expect(parsePatreon(raw, signature, "members:update", secret, campaign).displayName).toBeNull();
     },
   );
-  it.each(["a".repeat(121), "Hidden\u0000name", {}])("still rejects invalid member names: %p", (full_name) => {
+  it.each(["a".repeat(121), "Jane\tDoe", "Hidden\u0000name", {}])(
+    "drops an unusable member name like the API import and keeps the rest of the observation: %p",
+    (full_name) => {
+      const { raw, signature } = signed(payload({ full_name }));
+      expect(parsePatreon(raw, signature, "members:update", secret, campaign)).toMatchObject({
+        patreonMemberId: "member-123",
+        displayName: null,
+        patronStatus: "active_patron",
+        lastChargeStatus: "Paid",
+        lastChargeAt: new Date("2026-09-29T12:00:00Z"),
+      });
+    },
+  );
+  it.each([
+    ["  Jane Doe  ", "Jane Doe"],
+    ["a".repeat(120), "a".repeat(120)],
+  ])("trims usable member names like the API import: %p", (full_name, expected) => {
     const { raw, signature } = signed(payload({ full_name }));
-    expect(() => parsePatreon(raw, signature, "members:update", secret, campaign)).toThrow("Invalid Patreon member");
+    expect(parsePatreon(raw, signature, "members:update", secret, campaign).displayName).toBe(expected);
   });
   it("verifies original bytes and persists only the selected private ledger fields", () => {
     const { raw, signature } = signed();

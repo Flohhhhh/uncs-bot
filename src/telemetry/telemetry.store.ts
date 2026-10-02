@@ -178,6 +178,45 @@ export class TelemetryStore {
     return rows.rows[0] ?? emptyHighlights();
   }
 
+  /**
+   * Supporting context for a staff review prompt: this player's most recent kills (at most 500,
+   * suicides excluded) between since and until. Never used to decide anything.
+   */
+  async killContext(serverId: string, steamId: string, since: Date, windowSince: Date, until: Date) {
+    const rows = await this.db.execute<{
+      kills: number;
+      windowKills: number;
+      headshotKills: number;
+      maxDistanceMeters: number | null;
+      topCauses: string[] | null;
+    }>(sql`
+      WITH recent AS (
+        SELECT received_at, cause, headshot, distance_centimeters FROM combat_events
+        WHERE server_id = ${serverId} AND killer_steam_id = ${steamId} AND NOT suicide
+          AND received_at >= ${since} AND received_at <= ${until}
+        ORDER BY received_at DESC LIMIT 500
+      )
+      SELECT count(*)::int AS kills,
+        (count(*) FILTER (WHERE received_at >= ${windowSince}))::int AS "windowKills",
+        (count(*) FILTER (WHERE headshot))::int AS "headshotKills",
+        max(distance_centimeters) / 100.0 AS "maxDistanceMeters",
+        (SELECT json_agg(cause) FROM (
+          SELECT cause FROM recent WHERE cause IS NOT NULL AND cause <> ''
+          GROUP BY cause ORDER BY count(*) DESC, cause LIMIT 2
+        ) top) AS "topCauses"
+      FROM recent
+    `);
+    const row = rows.rows[0];
+    return {
+      kills: Number(row?.kills ?? 0),
+      windowKills: Number(row?.windowKills ?? 0),
+      headshotKills: Number(row?.headshotKills ?? 0),
+      maxDistanceMeters:
+        row?.maxDistanceMeters === null || row?.maxDistanceMeters === undefined ? null : Number(row.maxDistanceMeters),
+      topCauses: Array.isArray(row?.topCauses) ? row.topCauses.filter((cause) => typeof cause === "string") : [],
+    };
+  }
+
   async events(since: Date, until: Date, playerId?: string, serverId = "primary") {
     const rows = await this.db
       .select({

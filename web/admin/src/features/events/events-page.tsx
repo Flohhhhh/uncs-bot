@@ -46,11 +46,13 @@ function EventReview({
   const [result, setResult] = useState<string | null>(null);
   const settings = useResource<SettingsSnapshot>(review.kind === "restore" ? "settings" : null);
   const roster = useResource<Overview>(review.kind === "start" ? "overview" : null);
-  const canStart = review.kind !== "start" || (!roster.loading && !roster.error && hasRoundTiming(roster.data));
+  const canStart =
+    review.kind !== "start" || (!roster.loading && !roster.refreshing && !roster.error && hasRoundTiming(roster.data));
   const confirmation = review.kind === "start" ? "START 50V50" : review.kind === "restore" ? "RESTORE TEAM LOCK" : null;
   const lock = settings.data?.fields.find((field) => field.id === "lockOverpopulated");
   const canRestore =
-    review.kind !== "restore" || (!settings.loading && !settings.error && typeof lock?.value === "boolean");
+    review.kind !== "restore" ||
+    (!settings.loading && !settings.refreshing && !settings.error && typeof lock?.value === "boolean");
   const blocked = review.kind !== "stop" && statusUnavailable;
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -136,7 +138,7 @@ function EventReview({
             <div>
               <p>
                 {settings.error ||
-                  (settings.loading
+                  (settings.loading || settings.refreshing
                     ? "Reading current settings…"
                     : `Population lock: ${lock?.value === true ? "on" : lock?.value === false ? "off" : "unavailable"} → ${review.event.originalLock ? "on" : "off"}.`)}
               </p>
@@ -144,7 +146,7 @@ function EventReview({
                 <button
                   type="button"
                   className="button secondary small"
-                  disabled={busy || settings.loading}
+                  disabled={busy || settings.loading || settings.refreshing}
                   onClick={settings.refresh}
                 >
                   Retry lock settings
@@ -241,7 +243,7 @@ function EventDraft({ review, statusUnavailable }: { review: (draft: Draft) => v
               <button
                 type="button"
                 className="button secondary small"
-                disabled={admin.busy || settings.loading}
+                disabled={admin.busy || settings.loading || settings.refreshing}
                 onClick={settings.refresh}
               >
                 Retry server settings
@@ -411,7 +413,11 @@ function EventOperations({ event, close }: { event: Event; close: () => void }) 
         />
       )}
       <div className="dialog-actions">
-        <button className="button secondary" disabled={resource.loading} onClick={resource.refresh}>
+        <button
+          className="button secondary"
+          disabled={resource.loading || resource.refreshing}
+          onClick={resource.refresh}
+        >
           Refresh actions
         </button>
         <button className="button secondary" onClick={close}>
@@ -438,7 +444,7 @@ export function EventsPage() {
       <button
         type="button"
         className="button secondary small"
-        disabled={admin.busy || resource.loading}
+        disabled={admin.busy || resource.loading || resource.refreshing}
         onClick={resource.refresh}
       >
         Retry event status
@@ -534,7 +540,7 @@ export function EventsPage() {
                     {event.stop && event.state === "needs_review" && (
                       <button
                         className="button secondary small"
-                        disabled={admin.busy || resource.loading || !!resource.error}
+                        disabled={admin.busy || resource.loading || resource.refreshing || !!resource.error}
                         onClick={() => setReview({ kind: "restore", event })}
                       >
                         Review restoration
@@ -549,7 +555,7 @@ export function EventsPage() {
       </Card>
       {review && (
         <EventReview
-          statusUnavailable={resource.loading || !!resource.error}
+          statusUnavailable={resource.loading || resource.refreshing || !!resource.error}
           review={review}
           close={() => setReview(null)}
           finished={resource.refresh}

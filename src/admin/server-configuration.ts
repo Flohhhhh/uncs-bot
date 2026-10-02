@@ -45,7 +45,7 @@ function readValue(doc: ConfigDocument, field: SettingField): SettingValue | nul
     if (!/^(true|false)$/i.test(raw)) throw new Error("The configured value is not a boolean.");
     return raw.toLowerCase() === "true";
   }
-  return settingValue(field, raw);
+  return settingValue(field, raw, true);
 }
 export function parseRotation(text: string): MapSelection[] {
   return arrayValue(text, ROTATION, "RotationEntries").map((raw) => {

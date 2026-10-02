@@ -5,6 +5,7 @@ import { MapVotesStore } from "./map-votes.store";
 import { MapVotesDiscord } from "./map-votes.discord";
 import { fixtureServers } from "../admin/game-server-fixture";
 import { AdminService } from "../admin/admin.service";
+import type { AdminStore } from "../admin/admin.store";
 import { AdminAuth } from "../admin/admin.auth";
 import { GameRounds } from "../admin/game-rounds";
 import { EnvService } from "../env/env.service";
@@ -1126,6 +1127,31 @@ describe("score-based voting controls and reminders", () => {
     }
     expect(f.store.claimClose).not.toHaveBeenCalled();
   });
+  it("broadcasts reminders as the voting system and records a refused broadcast as not sent", async () => {
+    const f = scored();
+    f.admin.act.mockRejectedValue(new HttpException("Wait a moment before sending another action.", 429));
+    for (let index = 0; index < 3; index++) await f.service.tick();
+    expect(f.discord.remind).toHaveBeenCalledTimes(1);
+    expect(f.admin.act).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "system:map-vote-say:primary", role: "admin" }),
+      expect.objectContaining({ action: "broadcast" }),
+    );
+    expect(f.store.finishReminder).toHaveBeenCalledWith(
+      f.record.id,
+      "midpoint",
+      "failed",
+      expect.stringContaining("not sent"),
+    );
+    const unconfirmed = scored();
+    unconfirmed.admin.act.mockRejectedValue(new Error("socket closed"));
+    for (let index = 0; index < 3; index++) await unconfirmed.service.tick();
+    expect(unconfirmed.store.finishReminder).toHaveBeenCalledWith(
+      unconfirmed.record.id,
+      "midpoint",
+      "unknown",
+      expect.stringContaining("not confirmed"),
+    );
+  });
   it("skips the earlier reminder when scores jump to the final milestone", async () => {
     const f = scored();
     f.score(90);
@@ -1516,6 +1542,29 @@ describe("automatic ballots that follow the round, not the clock", () => {
     expect(f.admin.act).toHaveBeenCalledWith(
       expect.objectContaining({ id: "system:map-vote:primary", role: "admin" }),
       expect.objectContaining({ action: "map-next", revision: "r2", entry: { map: "Islands", experiences: [] } }),
+    );
+    expect(f.store.finish).toHaveBeenCalledWith(f.record.id, "queued", expect.any(String));
+  });
+  it("queues as the voting system, so the saving administrator's last dashboard action cannot throttle it", async () => {
+    const f = await openBallot();
+    const adminStore = { begin: jest.fn().mockResolvedValue({ created: true }), finish: jest.fn() };
+    const admin = new AdminService(
+      fixtureServers({ ...f.game, execute: jest.fn().mockResolvedValue({ state: "pending", message: "Saved" }) }),
+      adminStore as unknown as AdminStore,
+    );
+    f.admin.act.mockImplementation((actor: Staff, action: unknown) => admin.act(actor, action));
+    await f.service.tick();
+    later();
+    f.score(95);
+    await admin.act(
+      { ...staff, serverId: "primary" },
+      { id: randomUUID(), action: "broadcast", reason: "Staff notice", message: "Hello" },
+    );
+    await f.service.tick();
+    expect(adminStore.begin).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: "system:map-vote:primary" }),
+      expect.objectContaining({ id: f.record.id, action: "map-next" }),
+      expect.any(String),
     );
     expect(f.store.finish).toHaveBeenCalledWith(f.record.id, "queued", expect.any(String));
   });

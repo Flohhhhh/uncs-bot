@@ -862,3 +862,55 @@ describe("live faction assignment", () => {
     await expect(client.execute(teamAction)).resolves.toMatchObject({ state: "applied" });
   });
 });
+
+describe("read failure classification for staff alerts", () => {
+  afterEach(() => jest.restoreAllMocks());
+  const fail = async (client: WardogsClient) => {
+    try {
+      await client.request("GET", "/v1/status");
+    } catch (error) {
+      return error as RconError;
+    }
+    throw new Error("The request unexpectedly succeeded.");
+  };
+  it("labels an unanswered request unreachable without forwarding the transport error", async () => {
+    jest.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED with Authorization: secret"));
+    const error = await fail(new WardogsClient(settings));
+    expect(error).toBeInstanceOf(RconError);
+    expect(error).toMatchObject({ kind: "unreachable", unknownResult: false });
+    expect(error.message).not.toContain("secret");
+  });
+  it.each([
+    [429, "paused"],
+    [401, "rejected"],
+    [403, "rejected"],
+    [404, "error"],
+    [500, "error"],
+  ] as const)("labels HTTP %i as %s", async (status, kind) => {
+    jest
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify({ error: { message: "password=secret" } }), { status }));
+    const error = await fail(new WardogsClient(settings));
+    expect(error.kind).toBe(kind);
+    expect(error.message).not.toContain("secret");
+  });
+  it("labels a held request paused without contacting the game again", async () => {
+    const transport = jest
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("{}", { status: 429, headers: { "Retry-After": "30" } }));
+    const client = new WardogsClient(settings);
+    await fail(client);
+    expect((await fail(client)).kind).toBe("paused");
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it("labels an answer that is not JSON unreadable", async () => {
+    jest.spyOn(globalThis, "fetch").mockResolvedValue(new Response("<html>secret</html>", { status: 200 }));
+    const error = await fail(new WardogsClient(settings));
+    expect(error.kind).toBe("unreadable");
+    expect(error.message).not.toContain("secret");
+  });
+  it("keeps the kind optional for callers that construct their own errors", () => {
+    expect(new RconError("Refused").kind).toBeUndefined();
+    expect(new RconError("Lost", true).unknownResult).toBe(true);
+  });
+});

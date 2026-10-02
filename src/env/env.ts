@@ -3,6 +3,8 @@ import { z } from "zod";
 import { jsonSetting } from "./json-setting";
 import { gameServerConnections, gameServerJoinId } from "../common/game-server";
 import { DST_HOURS, SLOT_TIME, WEEKDAYS } from "../weekly-leaderboard/weekly-schedule";
+import { isPublicIndividualSteamId } from "../common/steam-id";
+import { parseClockList, parseWindows, validTimeZone } from "../staff-alerts/local-time";
 
 const discordId = z.string().regex(/^\d{17,20}$/, "Use a Discord numeric ID.");
 const communityMessage = z
@@ -23,6 +25,52 @@ const welcomeVariants = jsonSetting(
   z.array(welcomeSequence).min(1).max(20).refine(distinct, "Use different welcome variants."),
   WELCOME_VARIANTS_MAX_LENGTH,
 ).optional();
+const flag = (fallback: "true" | "false" = "false") =>
+  z
+    .enum(["true", "false"])
+    .default(fallback)
+    .transform((value) => value === "true");
+const count = (min: number, max: number, fallback: number) =>
+  z.coerce.number().int().min(min).max(max).default(fallback);
+const singleLine = (value: string) =>
+  [...value].every((character) => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127);
+/** The personal SteamID64 shape that staff actions accept. */
+const personalSteamId = z
+  .string()
+  .refine(isPublicIndividualSteamId, "Use a 17-digit SteamID64 for a personal Steam account.");
+const uniqueSteamIds = (entries: (string | { steamId: string })[]) =>
+  new Set(entries.map((entry) => (typeof entry === "string" ? entry : entry.steamId))).size === entries.length;
+const knownGoodEntry = z.union([
+  personalSteamId,
+  z
+    .object({
+      steamId: personalSteamId,
+      note: z.string().trim().max(80).refine(singleLine, "Use a single-line note.").optional(),
+    })
+    .strict(),
+]);
+const evidenceUrl = z
+  .string()
+  .max(500)
+  .refine((value) => {
+    try {
+      const url = new URL(value);
+      return url.protocol === "https:" && !url.username && !url.password;
+    } catch {
+      return false;
+    }
+  }, "Use an https:// evidence link without credentials.");
+const watchlistEntry = z
+  .object({
+    steamId: personalSteamId,
+    reason: z.string().trim().min(1).max(200).refine(singleLine, "Use a single-line reason."),
+    evidenceUrl: evidenceUrl.optional(),
+    communities: z.number().int().min(1).max(999).optional(),
+    recordedAt: z.iso.date().optional(),
+    addedBy: z.string().trim().max(64).refine(singleLine, "Use a single-line name.").optional(),
+    source: z.enum(["wardogs-network", "staff"]).optional(),
+  })
+  .strict();
 const discordIds = z
   .string()
   .default("")
@@ -73,8 +121,60 @@ export const Env = z.object({
     .default("false")
     .transform((value) => value === "true"),
   MAP_VOTES_CHANNEL_ID: discordId.optional(),
-  /** Optional staff-only text channel in ADMIN_GUILD_ID for automation alerts. Never a community channel. */
+  /**
+   * Optional private staff-only text channel in ADMIN_GUILD_ID for staff alerts, including the map-vote
+   * and 50v50 automation alerts. Never a community channel.
+   */
   STAFF_ALERTS_CHANNEL_ID: discordId.optional(),
+  /** Alert-only staff alerts: Gramps never kicks, bans or edits the whitelist because of one. */
+  STAFF_ALERTS_ENABLED: flag(),
+  /** Optional role pinged for high-severity alerts only; never the @everyone role. */
+  STAFF_ALERTS_PING_ROLE_ID: discordId.optional(),
+  STAFF_ALERTS_TIME_ZONE: z
+    .string()
+    .trim()
+    .default("America/New_York")
+    .refine(validTimeZone, "Use an IANA time zone such as America/New_York."),
+  STAFF_ALERTS_HEALTH_ENABLED: flag(),
+  STAFF_ALERTS_HEALTH_DOWN_MINUTES: count(2, 120, 10),
+  STAFF_ALERTS_HEALTH_RESTART_PLAYERS: count(0, 200, 10),
+  /** Local HH:MM list (at most 6); restarts within 20 minutes of one are labelled scheduled. */
+  STAFF_ALERTS_HEALTH_SCHEDULED_RESTARTS: z
+    .string()
+    .default("")
+    .refine((value) => parseClockList(value, 6) !== null, "Use up to 6 different local times such as 04:00,16:00."),
+  STAFF_ALERTS_SEEDING_ENABLED: flag(),
+  STAFF_ALERTS_SEEDING_BELOW: count(1, 100, 1),
+  STAFF_ALERTS_SEEDING_MINUTES: count(5, 360, 30),
+  /** 0 turns the post-restart trigger off. */
+  STAFF_ALERTS_SEEDING_AFTER_RESTART_HOURS: count(0, 48, 12),
+  /** Local HH:MM-HH:MM windows (at most 4, may cross midnight); "" turns prime-time alerts off. */
+  STAFF_ALERTS_SEEDING_PRIME_HOURS: z
+    .string()
+    .default("17:00-23:00")
+    .refine((value) => parseWindows(value, 4) !== null, "Use up to 4 local windows such as 17:00-23:00."),
+  /** false, observe (dashboard only, nothing posted) or true. */
+  STAFF_ALERTS_PERFORMANCE_ENABLED: z.enum(["false", "observe", "true"]).default("false"),
+  STAFF_ALERTS_PERFORMANCE_WINDOW_MINUTES: count(2, 15, 5),
+  STAFF_ALERTS_PERFORMANCE_WINDOW_KILLS: count(10, 500, 30),
+  STAFF_ALERTS_PERFORMANCE_MATCH_KILLS: count(10, 1000, 40),
+  STAFF_ALERTS_PERFORMANCE_MATCH_KD: z.coerce.number().finite().min(2).max(1000).default(20),
+  STAFF_ALERTS_PERFORMANCE_PLAYER_COOLDOWN_MINUTES: count(0, 10_080, 360),
+  STAFF_ALERTS_PERFORMANCE_MAX_PER_HOUR: count(1, 30, 3),
+  STAFF_ALERTS_PERFORMANCE_SKIP_WHITELISTED: flag(),
+  /** Never flagged: SteamID64 strings or {"steamId","note"} objects. */
+  STAFF_ALERTS_PERFORMANCE_KNOWN_GOOD: jsonSetting(
+    z.array(knownGoodEntry).max(500).refine(uniqueSteamIds, "List each SteamID once."),
+    32_768,
+  ).optional(),
+  STAFF_ALERTS_WATCHLIST_ENABLED: flag(),
+  /** Copied by staff from WarDogs network alerts. Monitoring only; never an automatic ban. */
+  STAFF_ALERTS_WATCHLIST: jsonSetting(
+    z.array(watchlistEntry).max(200).refine(uniqueSteamIds, "List each SteamID once."),
+    65_536,
+  ).optional(),
+  STAFF_ALERTS_WATCHLIST_HIGHLIGHT_COMMUNITIES: count(1, 100, 3),
+  STAFF_ALERTS_WATCHLIST_COOLDOWN_MINUTES: count(0, 10_080, 360),
   /** Optional event automation; requires a human-reviewed schema and controlled game rehearsal. */
   SERVER_EVENTS_ENABLED: z
     .enum(["true", "false"])

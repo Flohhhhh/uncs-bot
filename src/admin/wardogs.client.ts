@@ -57,7 +57,8 @@ export class WardogsClient {
   constructor(private readonly settings: RconConnectionSource) {}
 
   async request(method: string, path: string, body?: unknown, revision?: string): Promise<any> {
-    if (Date.now() < this.holdUntil) throw new RconError("The game requested a short pause. Wait before trying again.");
+    if (Date.now() < this.holdUntil)
+      throw new RconError("The game requested a short pause. Wait before trying again.", false, "paused");
     let config: ReturnType<AdminSettings["rcon"]>;
     try {
       config = this.settings.rcon();
@@ -90,6 +91,7 @@ export class WardogsClient {
           ? "The game server could not be reached."
           : "The connection ended before confirmation. Check the server before repeating this action.",
         mutates,
+        "unreachable",
       );
     } finally {
       // Discard observations started during an action, including uncertain ones.
@@ -129,6 +131,7 @@ export class WardogsClient {
           messages[response.status] ??
           "The game returned an error. Check its state before repeating the action.",
         mutates && response.status >= 500,
+        response.status === 429 ? "paused" : response.status === 401 || response.status === 403 ? "rejected" : "error",
       );
     }
     if (response.status === 204) return {};
@@ -138,6 +141,7 @@ export class WardogsClient {
       throw new RconError(
         "The game returned an unreadable response. Check its state before repeating the action.",
         mutates,
+        "unreadable",
       );
     }
   }
