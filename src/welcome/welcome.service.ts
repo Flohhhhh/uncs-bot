@@ -1,16 +1,26 @@
-import { Inject, Injectable } from "@nestjs/common";
+import { Inject, Injectable, Optional } from "@nestjs/common";
 import { EmbedBuilder, type GuildMember } from "discord.js";
 import { eq } from "drizzle-orm";
-import { config } from "src/config";
-import { InteractionError } from "src/common/errors/interaction-error";
-import { DATABASE, type Database } from "src/database/database.module";
-import { guildWelcomeSettings } from "src/database/schema";
+import { InteractionError } from "../common/errors/interaction-error";
+import { config } from "../config";
+import { DATABASE, type Database } from "../database/database.types";
+import { guildWelcomeSettings } from "../database/schema";
+import {
+  DEFAULT_WELCOME_MESSAGE,
+  MAX_WELCOME_DESCRIPTION_LENGTH,
+  parseWelcomeVersions,
+  pickWelcomeVersion,
+  welcomeVersions,
+  type RandomSource,
+} from "./welcome-template";
+
+export { DEFAULT_WELCOME_MESSAGE, MAX_WELCOME_DESCRIPTION_LENGTH } from "./welcome-template";
 
 /** Defaults used when a guild has not configured its welcome settings yet. */
 export const WELCOME_ENABLED = true;
-export const MAX_WELCOME_DESCRIPTION_LENGTH = 4096;
-export const DEFAULT_WELCOME_MESSAGE =
-  "{user}, good to have you. Say hey in {general}, check {squad-up}, or jump into **The Lobby**.\n\nPick your games and roles in **Channels & Roles**. Get on when you can.";
+
+/** Optional provider for the random source that picks a welcome version; `Math.random` when absent. */
+export const WELCOME_RANDOM = Symbol("WELCOME_RANDOM");
 
 export interface WelcomeSettings {
   enabled: boolean;
@@ -19,7 +29,16 @@ export interface WelcomeSettings {
 
 @Injectable()
 export class WelcomeService {
-  constructor(@Inject(DATABASE) private readonly db: Database) {}
+  /** The version each guild was sent last, so it is not sent twice in a row. In memory; resets on restart. */
+  private readonly lastVersionByGuild = new Map<string, string>();
+  private readonly random: RandomSource;
+
+  constructor(
+    @Inject(DATABASE) private readonly db: Database,
+    @Optional() @Inject(WELCOME_RANDOM) random?: RandomSource,
+  ) {
+    this.random = random ?? Math.random;
+  }
 
   async getSettings(guildId: string): Promise<WelcomeSettings> {
     const [settings] = await this.db
@@ -49,6 +68,9 @@ export class WelcomeService {
     if (!trimmedMessage) {
       throw new InteractionError("❌ Welcome message cannot be empty.");
     }
+    if (!parseWelcomeVersions(trimmedMessage).length) {
+      throw new InteractionError("❌ Welcome message needs text between the `---` separators.");
+    }
 
     const [settings] = await this.db
       .insert(guildWelcomeSettings)
@@ -62,8 +84,19 @@ export class WelcomeService {
     return toWelcomeSettings(settings);
   }
 
+  /**
+   * Builds the welcome embed from one of the template's versions, picked at random and never the version this
+   * guild was sent last when another is available. Call it once per join: it records the pick.
+   */
   createEmbed(member: GuildMember, settings: WelcomeSettings): EmbedBuilder {
-    const description = this.renderMessage(settings.message, member).slice(0, MAX_WELCOME_DESCRIPTION_LENGTH);
+    const guildId = member.guild.id;
+    const version = pickWelcomeVersion(
+      welcomeVersions(settings.message),
+      this.lastVersionByGuild.get(guildId),
+      this.random,
+    );
+    this.lastVersionByGuild.set(guildId, version);
+    const description = this.renderMessage(version, member).slice(0, MAX_WELCOME_DESCRIPTION_LENGTH);
 
     return new EmbedBuilder()
       .setColor(0xff6b35)

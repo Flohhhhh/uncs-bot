@@ -9,14 +9,15 @@ import {
   Subcommand,
   type SlashCommandContext,
 } from "necord";
-import { RequiredMemberPermission } from "src/common/guards/require-member-permission.guard";
-import { config } from "src/config";
-import { WelcomeService } from "src/welcome/welcome.service";
+import { RequiredMemberPermission } from "../../common/guards/require-member-permission.guard";
+import { config } from "../../config";
+import { describeWelcomeTemplate, welcomeVersions } from "../../welcome/welcome-template";
+import { WelcomeService } from "../../welcome/welcome.service";
 
 class WelcomeMessageOptions {
   @StringOption({
     name: "message",
-    description: "Message template, or omit this option to view the current message",
+    description: "Template; separate versions with ' --- '. Omit to view the current message",
     required: false,
     min_length: 1,
     max_length: 4000,
@@ -48,7 +49,7 @@ export class WelcomeCommandHandler {
 
   @Subcommand({
     name: "message",
-    description: "Set or view the welcome message",
+    description: "Set or view the welcome message and its versions",
   })
   async handleMessage(@Context() [interaction]: SlashCommandContext, @Options() { message }: WelcomeMessageOptions) {
     if (!interaction.guild) return;
@@ -58,14 +59,18 @@ export class WelcomeCommandHandler {
     if (!message) {
       const current = await this.welcomeService.getSettings(interaction.guild.id);
       return interaction.editReply({
-        content: ["**Current welcome message:**", current.message, "", "Stored in Neon PostgreSQL."].join("\n"),
+        content: describeWelcomeTemplate(current.message),
         allowedMentions: { parse: [] },
       });
     }
 
-    await this.welcomeService.setMessage(interaction.guild.id, message);
+    const saved = await this.welcomeService.setMessage(interaction.guild.id, message);
+    const versions = welcomeVersions(saved.message).length;
     return interaction.editReply({
-      content: "✅ Welcome message updated and saved.",
+      content:
+        versions === 1
+          ? "✅ Welcome message updated and saved."
+          : `✅ Welcome message updated and saved with ${versions} versions. Each new member gets one at random, never the same one twice in a row.`,
     });
   }
 
@@ -94,6 +99,12 @@ export class WelcomeCommandHandler {
         "Welcome settings are stored in Neon PostgreSQL.",
         "Use `/welcome message` to view the current message or `/welcome message message:<text>` to update it.",
         "Use `/welcome enable enabled:true` or `enabled:false` to toggle welcome messages.",
+        "",
+        "**Versions**",
+        "Separate versions with ` --- ` (three dashes with a space on each side), all on one line. Each new member gets one at random, never the same one twice in a row.",
+        "Saving replaces every version, so include all of them each time.",
+        "Example: `{user} just pulled up. --- Look who made it, {user}.`",
+        "",
         "Templates are replaced when a member joins:",
         "`{user}` → mentions the new member",
         "`{user.id}` or `{user_id}` → inserts the new member's ID",

@@ -139,9 +139,13 @@ Migrations are generated and committed locally, then applied by Railway before t
 These commands require the **Manage Server** permission:
 
 - `/welcome help` — show all template placeholders and channel-ID examples.
-- `/welcome message` — view the current welcome message.
+- `/welcome message` — view the current welcome message, how many versions it has and each version.
 - `/welcome message message:<text>` — save a new welcome message template.
 - `/welcome enable enabled:true` or `/welcome enable enabled:false` — enable or disable welcome messages.
+
+A template can hold several versions. Each new member gets one at random, and a server never gets the same version twice in a row (remembered in memory, so a restart forgets the last one). Separate versions with three dashes that have a space on each side, for example `Hi {user}, grab a chair. --- Look who made it, {user}.` Slash-command text stays on one line, so write every version on that line; line breaks pasted into the option become spaces. A stored template may also put `---` alone on its own line, which is how the built-in default is written. Saving replaces every version, so include all of them each time. A template without a separator is sent exactly as written. `||` is not a separator because Discord uses it for spoilers.
+
+Servers without saved settings use the built-in default: five short versions in the website's voice. A server that already has saved settings keeps its stored template until an admin saves a new one, including a server whose row was created by `/welcome enable` with an earlier default.
 
 Supported template placeholders include:
 
