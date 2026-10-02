@@ -68,10 +68,18 @@ it("stays quiet while a newer saved rotation is checked again", async () => {
         finish = resolve;
       }) as never,
   );
+  // Records every node committed to the page, including one that a later render removes again.
+  const added: Node[] = [];
+  const shown = new MutationObserver((records) => added.push(...records.flatMap((record) => [...record.addedNodes])));
+  shown.observe(view.container, { childList: true, subtree: true });
   view.rerender(page("r2"));
   await waitFor(() => expect(request).toHaveBeenCalledTimes(2));
   // The earlier answer stays loaded during the re-check, which must not read as a changed rotation.
   expect(view.container).toBeEmptyDOMElement();
   await act(async () => finish({ revision: "r2", total: 3, issues: [] }));
   expect(view.container).toBeEmptyDOMElement();
+  // Not even for the render between asking for the re-check and the read starting.
+  added.push(...shown.takeRecords().flatMap((record) => [...record.addedNodes]));
+  shown.disconnect();
+  expect(added.map((node) => node.textContent)).toEqual([]);
 });
