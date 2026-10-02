@@ -39,11 +39,20 @@ export function useResource<T>(path: string | null) {
       });
     return () => controller.abort();
   }, [path, refreshVersion, version, gameApi]);
-  const refresh = useCallback(() => setVersion((value) => value + 1), []);
+  const refresh = useCallback(() => {
+    // Report the read as in flight from this call, not from the effect that starts it a render later,
+    // so a caller never sees one render with the old answer and nothing pending.
+    setResult((previous) => (previous.path === null || previous.loading ? previous : { ...previous, loading: true }));
+    setVersion((value) => value + 1);
+  }, []);
+  const current = result.path === path;
   return {
-    data: result.path === path ? result.data : null,
-    loading: result.path !== path || result.loading,
-    error: result.path === path ? result.error : "",
+    data: current ? result.data : null,
+    // A first load has nothing to show yet. A background refresh keeps the last data on screen,
+    // so edit controls stay usable; anything that must wait for the new read checks `refreshing`.
+    loading: !current || (result.loading && result.data === null),
+    refreshing: current && result.loading && result.data !== null,
+    error: current ? result.error : "",
     refresh,
   };
 }

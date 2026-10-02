@@ -7,6 +7,7 @@ const normalized = (value: string) =>
     .toLowerCase();
 export function assertEditable(document: ConfigDocument, sectionName: string, key: string) {
   if (!document.writable) throw new Error("The server configuration is read-only.");
+  // settingValue refuses to save these sentinels; keep the two patterns in step.
   if (
     document.redacted ||
     /^\s*[^;#\r\n][^=\r\n]*=\s*"?(?:\*{3,}|<redacted>|\[redacted\]|redacted)"?\s*(?:(?:[;#]|\/\/).*)?$/im.test(

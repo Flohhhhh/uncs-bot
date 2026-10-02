@@ -232,6 +232,14 @@ it("rejects exact scoring values outside the server's range", async () => {
   expect(screen.getByRole("alert")).toHaveTextContent("18 to 30 seconds");
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });
+it("rejects a join password the game would read back as redacted", async () => {
+  show();
+  fireEvent.click(await screen.findByRole("tab", { name: "Joining" }));
+  fireEvent.change(screen.getByLabelText("Join password"), { target: { value: "****" } });
+  fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
+  expect(screen.getByRole("alert")).toHaveTextContent("That join password is reserved; choose another.");
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
 it("clearing a replacement leaves the password unchanged; removing it is explicit", async () => {
   show();
   fireEvent.click(await screen.findByRole("tab", { name: "Joining" }));
