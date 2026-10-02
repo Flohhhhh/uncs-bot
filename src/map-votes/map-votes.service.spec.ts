@@ -1541,24 +1541,36 @@ describe("automatic ballots that follow the round, not the clock", () => {
     expect(f.admin.act).not.toHaveBeenCalled();
   });
   it.each([
-    ["the score reaches 100", { factionScores: leadingScores(100) }],
-    ["the map changes", { map: "Europe", rotation: { nowIndex: 0, nextIndex: 1 } }],
-    ["the scores reset", { factionScores: leadingScores(0) }],
-  ])("cancels without queueing when %s before the close", async (_, patch) => {
-    const f = await openBallot({ leading: 60 });
-    await f.service.tick();
-    later();
-    f.status(patch);
-    await f.service.tick();
-    expect(f.store.cancel).toHaveBeenCalledWith(
-      f.record.id,
-      expect.any(String),
-      expect.anything(),
-      "The match ended before voting closed. The rotation continues.",
-      expect.any(String),
-    );
-    expect(f.admin.act).not.toHaveBeenCalled();
-  });
+    ["the score reaches 100", { factionScores: leadingScores(100) }, 60],
+    // The game moves on to the next entry; the configuration's position follows the live status.
+    ["the map changes", { map: "Europe", rotation: { nowIndex: 1, nextIndex: 2 } }, 60],
+    ["the next map shows the old final scores", { map: "Europe", rotation: { nowIndex: 1, nextIndex: 2 } }, 92],
+    ["the scores reset", { factionScores: leadingScores(0) }, 60],
+  ] as [string, StatusPatch, number][])(
+    "cancels without queueing when %s before the close",
+    async (_, patch, leading) => {
+      const f = await openBallot({ leading });
+      await f.service.tick();
+      later();
+      f.status(patch);
+      if (patch.map) {
+        const settings = await f.game.configuration();
+        f.game.configuration.mockResolvedValue({
+          ...settings,
+          rotation: { ...settings.rotation, currentIndex: 1, currentMap: "Europe" },
+        });
+      }
+      await f.service.tick();
+      expect(f.store.cancel).toHaveBeenCalledWith(
+        f.record.id,
+        expect.any(String),
+        expect.anything(),
+        "The match ended before voting closed. The rotation continues.",
+        expect.any(String),
+      );
+      expect(f.admin.act).not.toHaveBeenCalled();
+    },
+  );
   it("keeps an open ballot after a restart that reads the same round", async () => {
     const f = await openBallot({ leading: 30 });
     const restarted = f.make().service;

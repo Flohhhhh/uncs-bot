@@ -1306,12 +1306,16 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
     let track: RoundTrack | null = null;
     if (automation.rotation && automation.round) {
       // Only the rotation itself matters: settings or whitelist saves change the revision, not the vote.
-      if (
-        rotationFingerprint(config.rotation) !== automation.rotation.fingerprint ||
-        (config.rotation.currentIndex !== null &&
-          (config.rotation.currentIndex !== vote.currentIndex || !sameMap(config.rotation.currentMap, vote.currentMap)))
-      ) {
+      if (rotationFingerprint(config.rotation) !== automation.rotation.fingerprint) {
         await this.cancelAutomatic(vote, "Staff changed the rotation. Votes were not applied.");
+        return;
+      }
+      // The position comes from the live status, so a new entry with the same rotation is the game moving on.
+      if (
+        config.rotation.currentIndex !== null &&
+        (config.rotation.currentIndex !== vote.currentIndex || !sameMap(config.rotation.currentMap, vote.currentMap))
+      ) {
+        await this.cancelAutomatic(vote, "The match ended before voting closed. The rotation continues.");
         return;
       }
       if (Number.isFinite(observedAt)) {
