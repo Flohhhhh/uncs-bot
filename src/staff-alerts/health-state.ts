@@ -262,16 +262,20 @@ function restartAlert(
 ): HealthAlert[] {
   state.lastRestartAt = restartAt;
   state.watch = { at: restartAt, kind: "restart" };
-  if (state.lastRestartAlertAt !== null && now - state.lastRestartAlertAt < RESTART_ALERT_MS) return [];
-  state.lastRestartAlertAt = now;
   const scheduled = scheduledMatch(restartAt, options.scheduledRestarts, options.timeZone) !== null;
   const withPlayers = playersBefore >= options.restartPlayers;
+  // A scheduled restart below the threshold is recorded only, so it uses up no restart limit. A
+  // restart the limit holds back is recorded too. Each gets its own key, so neither repeats a post.
+  const recordOnly = scheduled && !withPlayers;
+  const held = !recordOnly && state.lastRestartAlertAt !== null && now - state.lastRestartAlertAt < RESTART_ALERT_MS;
+  if (!recordOnly && !held) state.lastRestartAlertAt = now;
+  const bucket = Math.floor(restartAt / RESTART_ALERT_MS);
   const text = signals.join(", ");
   return [
     {
       kind: "game-restart",
       severity: withPlayers ? "warning" : "info",
-      key: `restart:${Math.floor(restartAt / RESTART_ALERT_MS)}`,
+      key: recordOnly ? `restart-scheduled:${bucket}` : held ? `restart-held:${restartAt}` : `restart:${bucket}`,
       title: withPlayers ? "Likely restart with players on" : "Likely restart",
       lines: [
         `${text.charAt(0).toUpperCase()}${text.slice(1)} (${scheduled ? "scheduled" : "unscheduled"}).`,
@@ -283,7 +287,11 @@ function restartAlert(
         playersBefore,
         scheduled: scheduled ? "yes" : "no",
       },
-      ...(scheduled && !withPlayers ? { suppressed: "scheduled restart, recorded only" } : {}),
+      ...(recordOnly
+        ? { suppressed: "scheduled restart, recorded only" }
+        : held
+          ? { suppressed: "restart limit" }
+          : {}),
     },
   ];
 }
