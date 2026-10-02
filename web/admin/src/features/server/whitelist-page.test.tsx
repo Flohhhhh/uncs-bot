@@ -22,7 +22,7 @@ it("shows valid saved status and a config warning without blocking supported liv
     </AdminContext.Provider>,
   );
   await screen.findByText("1 active entries");
-  expect(screen.getByText(/3 saved whitelist entries have invalid SteamIDs/)).toBeInTheDocument();
+  expect(screen.getByText("Invalid SteamIDs: 3 in the running game; 3 in saved configuration.")).toBeInTheDocument();
   expect(screen.queryByText(/saved configuration could not be checked/)).not.toBeInTheDocument();
   const row = screen.getByText("76561198000000001").closest("tr")!;
   expect(within(row).getByText("Saved")).toBeInTheDocument();

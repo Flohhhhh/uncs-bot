@@ -414,15 +414,20 @@ function Dashboard({
             </div>
           )}
           <header className="topbar">
-            <div>
-              <a className="breadcrumb" href="https://theuncsgaming.com/">
-                The UNCs
-              </a>
-              <span className="divider">/</span>
-              <span className="breadcrumb">Admin</span>
-              <span className="divider">/</span>
-              <span>{pages[page][1]}</span>
-            </div>
+            <label className="server-selection">
+              Game server
+              <select
+                value={server.id}
+                disabled={busy || dialogOpen}
+                onChange={(event) => navigate({ pathname: location.pathname, search: `?server=${event.target.value}` })}
+              >
+                {servers.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.name} · {option.role}
+                  </option>
+                ))}
+              </select>
+            </label>
             <div className="topbar-right">
               {gamePage && (
                 <Badge kind={stale ? "warn" : "good"}>
@@ -442,24 +447,6 @@ function Dashboard({
             </div>
           </header>
           <div className="content">
-            <div className="server-selection">
-              <label>
-                Game server
-                <select
-                  value={server.id}
-                  disabled={busy || dialogOpen}
-                  onChange={(event) =>
-                    navigate({ pathname: location.pathname, search: `?server=${event.target.value}` })
-                  }
-                >
-                  {servers.map((option) => (
-                    <option key={option.id} value={option.id}>
-                      {option.name} · {option.role}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
             <div className="page-heading">
               <div>
                 <p className="eyebrow">✳ WARDOGS / COMMUNITY SERVER</p>
