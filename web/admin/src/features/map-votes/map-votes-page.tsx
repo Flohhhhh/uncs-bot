@@ -165,6 +165,7 @@ function EnabledMapVotes({
   const settings = useResource<SettingsSnapshot>(active ? null : "settings");
   const catalog = useResource<Catalog>(active ? null : "catalog");
   const [selection, setSelection] = useState<MapSelection>({ map: "", experiences: [] });
+  const [selectionReady, setSelectionReady] = useState(false);
   const [choices, setChoices] = useState<MapSelection[]>([]);
   const [revision, setRevision] = useState<string | null>(null);
   const [minutes, setMinutes] = useState(5);
@@ -217,6 +218,7 @@ function EnabledMapVotes({
               <MapPicker
                 value={selection}
                 change={setSelection}
+                onReadyChange={setSelectionReady}
                 disabled={!canStart}
                 catalog={{
                   ...catalog.data,
@@ -231,7 +233,7 @@ function EnabledMapVotes({
                   className="button secondary"
                   disabled={
                     !canStart ||
-                    !selection.map ||
+                    !selectionReady ||
                     choices.length >= 5 ||
                     selection.map === rotation?.currentMap ||
                     choices.some((choice) => choice.map === selection.map)
