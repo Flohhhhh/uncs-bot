@@ -372,17 +372,25 @@ function CombatView({
   );
 }
 
-export function CombatPage() {
+/**
+ * Combat history. Pass `playerId` and `onPlayerChange` to keep the chosen player outside the page,
+ * such as in the Activity hub's URL; otherwise the page holds it.
+ */
+export function CombatPage({
+  playerId: chosenPlayer,
+  onPlayerChange,
+}: { playerId?: string; onPlayerChange?: (id: string) => void } = {}) {
   const { me, busy, dialogOpen } = useAdmin();
   const [period, setPeriod] = useState<CombatPeriod>("week");
-  const [playerId, setPlayerId] = useState("");
+  const [ownPlayer, setOwnPlayer] = useState("");
+  const playerId = chosenPlayer ?? ownPlayer;
   const [query, setQuery] = useState("");
   const [cause, setCause] = useState("");
   const [eventKind, setEventKind] = useState<CombatEventKind>("all");
   const disabled = busy || dialogOpen;
   const selectPlayer = (id: string) => {
     if (disabled || (id && !validSteamId(id))) return;
-    setPlayerId(id);
+    (onPlayerChange ?? setOwnPlayer)(id);
     setQuery("");
     setCause("");
     setEventKind("all");

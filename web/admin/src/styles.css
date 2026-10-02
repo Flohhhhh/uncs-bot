@@ -2607,3 +2607,99 @@ dialog fieldset {
     gap: var(--space-2);
   }
 }
+/* Activity */
+.activity-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-4);
+}
+.activity-head > .button {
+  margin-left: auto;
+}
+.activity-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--muted);
+}
+.activity-status::before {
+  content: "";
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--good);
+}
+.activity-status.attention::before {
+  background: var(--warn);
+}
+.activity-help {
+  position: relative;
+}
+.activity-help summary {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--muted);
+  font-weight: 700;
+  list-style: none;
+  cursor: pointer;
+}
+.activity-help summary::-webkit-details-marker {
+  display: none;
+}
+.activity-help[open] summary,
+.activity-help summary:hover {
+  border-color: var(--accent);
+  color: var(--cream);
+}
+.activity-help-panel {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + var(--space-2));
+  left: 0;
+  width: min(380px, calc(100vw - 32px));
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  box-shadow: 0 12px 40px #0008;
+  color: var(--cream);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+.activity-help-panel p {
+  margin: 0 0 var(--space-2);
+}
+.activity-help-panel p:last-child {
+  margin-bottom: 0;
+}
+.activity-feed td {
+  white-space: normal;
+}
+.activity-feed .activity-when {
+  width: 1%;
+  white-space: nowrap;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.activity-line {
+  overflow-wrap: anywhere;
+}
+.activity-line strong {
+  font-weight: 600;
+}
+.activity-line .pill {
+  margin-left: var(--space-2);
+  vertical-align: middle;
+}
+.activity-detail {
+  color: var(--muted);
+}

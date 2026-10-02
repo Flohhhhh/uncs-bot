@@ -11,7 +11,6 @@ import { FactionChip, liveFactions, playerFaction } from "../players/factions";
 import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 import { PlayerSheet } from "../players/player-actions";
 import { EmptyRoster } from "../players/empty-roster";
-import { GameLogView } from "./game-log";
 import { CommunityMessages } from "./community-messages";
 export function OverviewPage() {
   const { overview, me, stale, busy, openAction } = useAdmin();
@@ -367,31 +366,12 @@ export function AnnouncementsPage() {
     </div>
   );
 }
+/** Dashboard action receipts. Also shown as the Activity hub's "Action history" view. */
 export function AuditPage() {
-  const { me } = useAdmin();
-  const [source, setSource] = useState("dashboard");
-  return (
-    <>
-      {me.role === "admin" && (
-        <div className="settings-tabs" role="group" aria-label="History source">
-          <button
-            className="button secondary"
-            aria-pressed={source === "dashboard"}
-            onClick={() => setSource("dashboard")}
-          >
-            Dashboard actions
-          </button>
-          <button className="button secondary" aria-pressed={source === "game"} onClick={() => setSource("game")}>
-            Game command log
-          </button>
-        </div>
-      )}
-      {source === "game" && me.role === "admin" ? <GameLogView /> : <DashboardHistory />}
-    </>
-  );
+  return <DashboardHistory />;
 }
-export function DashboardHistory() {
-  const [query, setQuery] = useState("");
+export function DashboardHistory({ initialQuery = "" }: { initialQuery?: string } = {}) {
+  const [query, setQuery] = useState(initialQuery);
   const lookupId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(query.trim())
     ? query.trim().toLowerCase()
     : "";
