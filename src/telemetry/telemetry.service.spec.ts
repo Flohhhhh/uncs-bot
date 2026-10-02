@@ -377,6 +377,38 @@ describe("telemetry authorization and reporting", () => {
       "Rejected a game feed request without the feed token for server primary: 401 token mismatch.",
     ]);
   });
+  it("refuses a batch whose entries are all invalid instead of reporting the feed as receiving", async () => {
+    const { service, store, payload } = fixture();
+    const event = payload.events[0];
+    const invalid = {
+      ...payload,
+      events: [1, 2, 3].map(() => ({ ...event, eventId: randomUUID(), eventTime: "12.5" })),
+    };
+    await expect(service.ingest(`Bearer ${token}`, invalid)).rejects.toMatchObject({ status: 400 });
+    await expect(
+      service.ingest(`Bearer ${token}`, {
+        ...payload,
+        events: [{ eventId: randomUUID(), type: "player-joined" }, null],
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+    // Nothing reached storage, so receipt tracking did not advance.
+    expect(store.ingest).not.toHaveBeenCalled();
+    await expect(service.combat()).resolves.toMatchObject({
+      connected: false,
+      feedStatus: "waiting",
+      lastBatch: null,
+      lastRejected: { status: 400, reason: "invalid payload: events.1 (not an object)" },
+      rejectedCount: 2,
+    });
+    expect(Logger.prototype.warn).toHaveBeenCalledWith(
+      "Rejected a game feed delivery for server primary: 400 invalid payload: events.0.eventTime (missing or wrong type).",
+    );
+    // Batches with nothing invalid still count as deliveries, even with no killed event to store.
+    store.ingest.mockResolvedValue({ inserted: 0, duplicates: 0, skipped: 1 });
+    for (const events of [[], [{ eventId: randomUUID(), type: "player-joined" }]])
+      await expect(service.ingest(`Bearer ${token}`, { ...payload, events })).resolves.toMatchObject({ ok: true });
+    expect(store.ingest).toHaveBeenCalledTimes(2);
+  });
   it("stores the valid events of a partly invalid batch and shows staff what was skipped", async () => {
     const { service, store, payload } = fixture();
     await expect(service.combat()).resolves.toMatchObject({ lastBatch: null });

@@ -101,6 +101,12 @@ export class TelemetryService {
         true,
       );
     }
+    // Invalid entries and nothing to store: refuse the batch, so the game, staff and logs see a 400
+    // and the feed does not read as receiving while every event is dropped.
+    if (!parsed.events.length && parsed.invalid) {
+      const reason = `invalid payload: ${parsed.firstInvalid ?? "events"}`;
+      throw this.refuse(serverId, reason, new FeedRejectedException("Invalid killed event fields.", reason), true);
+    }
     let result: Awaited<ReturnType<TelemetryStore["ingest"]>>;
     try {
       result = await this.store.ingest(parsed, new Date(), serverId);

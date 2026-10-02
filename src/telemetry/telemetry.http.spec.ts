@@ -159,6 +159,13 @@ describe("telemetry HTTP boundaries", () => {
       .set("Authorization", `Bearer ${feedToken}`)
       .send({ invalid: true })
       .expect(400);
+    // A batch with nothing storable and only malformed killed events is refused, not stored empty.
+    const allInvalid = batch();
+    await request(app.getHttpServer())
+      .post("/api/ingest/events")
+      .set("Authorization", `Bearer ${feedToken}`)
+      .send({ ...allInvalid, events: [{ ...allInvalid.events[0], eventTime: "5" }] })
+      .expect(400);
     expect(store.ingest).not.toHaveBeenCalled();
     await request(app.getHttpServer())
       .post("/api/ingest/events")
