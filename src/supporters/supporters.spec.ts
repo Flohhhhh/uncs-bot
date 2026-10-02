@@ -3,7 +3,7 @@ import type { Staff } from "../admin/admin.types";
 import type { EnvService } from "../env/env.service";
 import { SupportersService } from "./supporters.service";
 import type { SupportersStore } from "./supporters.store";
-import { linkSchema, parsePatreon } from "./supporters.types";
+import { founderBlocker, linkSchema, parsePatreon, type FounderPolicy } from "./supporters.types";
 
 const secret = "dedicated-patreon-webhook-secret";
 const campaign = "123456";
@@ -49,9 +49,11 @@ function fixture(overrides: Record<string, unknown> = {}) {
     ingest: jest.fn().mockResolvedValue({ duplicate: false }),
     mutate: jest.fn().mockResolvedValue({ ok: true }),
     register: jest.fn().mockResolvedValue({ ok: true }),
+    recordPaypal: jest.fn().mockResolvedValue({ ok: true }),
   };
   return {
     store,
+    values,
     service: new SupportersService(
       store as unknown as SupportersStore,
       { get: (key: string) => values[key] } as EnvService,
@@ -131,6 +133,10 @@ describe("supporter reviews", () => {
       expect(linkSchema.safeParse({ ...input, steamId }).success).toBe(true);
     for (const steamId of ["76561190000000001", "76561197960265728", "76561202255233024"])
       expect(linkSchema.safeParse({ ...input, steamId }).success).toBe(false);
+    // Either identity may be linked alone; at least one is required.
+    expect(linkSchema.safeParse(input).success).toBe(true);
+    expect(linkSchema.safeParse({ ...input, discordId: undefined, steamId: "76561197960265729" }).success).toBe(true);
+    expect(linkSchema.safeParse({ ...input, discordId: undefined }).success).toBe(false);
   });
   it("bounds all-record searches and never treats invalid query shapes as an unfiltered list", async () => {
     const { service, store } = fixture();
@@ -138,7 +144,7 @@ describe("supporter reviews", () => {
       search: "earlier%_member",
       limit: 100,
     });
-    expect(store.list).toHaveBeenCalledWith(campaign, expect.any(Object), undefined, "earlier%_member");
+    expect(store.list).toHaveBeenCalledWith(campaign, expect.any(Object), undefined, "earlier%_member", undefined);
     store.list.mockClear();
     for (const query of ["x".repeat(101), ["one", "two"], {}, null])
       await expect(service.list(admin, query)).rejects.toMatchObject({ status: 400 });
@@ -260,5 +266,172 @@ describe("supporter reviews", () => {
     await expect(
       service.mutate(admin, randomUUID(), "payment", { ...input, completedPaymentVerified: true, role: "admin" }),
     ).rejects.toMatchObject({ status: 400 });
+  });
+});
+describe("provider-neutral founder window", () => {
+  const start = "2026-09-30T00:00:00-04:00",
+    end = "2026-10-15T00:00:00-04:00";
+  it("uses a complete SUPPORTER_FOUNDER pair, or a complete PATREON_FOUNDER pair when it is the only one", () => {
+    expect(
+      fixture({ SUPPORTER_FOUNDER_START_AT: start, SUPPORTER_FOUNDER_END_AT: end }).service.policy(),
+    ).toMatchObject({
+      configured: true,
+      source: "SUPPORTER_FOUNDER",
+      startsAt: "2026-09-30T04:00:00.000Z",
+      endsAt: "2026-10-15T04:00:00.000Z",
+    });
+    expect(fixture({ PATREON_FOUNDER_START_AT: start, PATREON_FOUNDER_END_AT: end }).service.policy()).toMatchObject({
+      configured: true,
+      source: "PATREON_FOUNDER",
+    });
+    // Two complete pairs naming the same instants in different offsets are the same window.
+    expect(
+      fixture({
+        SUPPORTER_FOUNDER_START_AT: "2026-09-30T04:00:00Z",
+        SUPPORTER_FOUNDER_END_AT: "2026-10-15T04:00:00Z",
+        PATREON_FOUNDER_START_AT: start,
+        PATREON_FOUNDER_END_AT: end,
+      }).service.policy(),
+    ).toMatchObject({ configured: true, source: "SUPPORTER_FOUNDER" });
+  });
+  it.each([
+    [
+      "a half-set supporter pair",
+      { SUPPORTER_FOUNDER_START_AT: start, PATREON_FOUNDER_START_AT: start, PATREON_FOUNDER_END_AT: end },
+    ],
+    [
+      "a half-set Patreon pair",
+      { SUPPORTER_FOUNDER_START_AT: start, SUPPORTER_FOUNDER_END_AT: end, PATREON_FOUNDER_END_AT: end },
+    ],
+    [
+      "two pairs naming different windows",
+      {
+        SUPPORTER_FOUNDER_START_AT: start,
+        SUPPORTER_FOUNDER_END_AT: end,
+        PATREON_FOUNDER_START_AT: "2026-10-01T00:00:00-04:00",
+        PATREON_FOUNDER_END_AT: "2026-10-16T00:00:00-04:00",
+      },
+    ],
+    [
+      "an inclusive 23:59:59 end",
+      { SUPPORTER_FOUNDER_START_AT: start, SUPPORTER_FOUNDER_END_AT: "2026-10-14T23:59:59-04:00" },
+    ],
+  ])("leaves the window unconfigured for %s", (_label, overrides) => {
+    expect(fixture(overrides).service.policy()).toMatchObject({ configured: false, source: null, startsAt: null });
+  });
+  const policy: FounderPolicy = {
+    configured: true,
+    amountCents: 500,
+    currency: "USD",
+    startsAt: "2026-09-30T04:00:00.000Z",
+    endsAt: "2026-10-15T04:00:00.000Z",
+    source: "SUPPORTER_FOUNDER",
+  };
+  const payment = {
+    source: "paypal",
+    verificationState: "verified",
+    firstSuccessfulPaymentVerified: true,
+    paidAt: "2026-09-30T04:00:00.000Z",
+    amountCents: 500,
+    currency: "USD",
+    minimumConfirmed: false,
+  };
+  const context = { earlierPayment: false, hasIdentity: true, otherFounder: false };
+  it.each([
+    [{}, {}, null],
+    [{ paidAt: "2026-10-15T03:59:59.999Z" }, {}, null],
+    [{ paidAt: "2026-10-15T04:00:00.000Z" }, {}, "outside_window"],
+    [{ paidAt: "2026-09-30T03:59:59.999Z" }, {}, "outside_window"],
+    [{ source: "signed_status" }, {}, "source_not_qualifying"],
+    [{ source: "patreon_api" }, {}, null],
+    [{ source: "manual_receipt" }, {}, null],
+    [{ amountCents: 499 }, {}, "below_minimum"],
+    [{ currency: "GBP", amountCents: 400 }, {}, "below_minimum"],
+    [{ currency: "GBP", amountCents: 400, minimumConfirmed: true }, {}, null],
+    [{ amountCents: null, currency: null, minimumConfirmed: true }, {}, "below_minimum"],
+    [{ verificationState: "unverified" }, {}, "not_verified"],
+    [{ firstSuccessfulPaymentVerified: false }, {}, "not_first_payment"],
+    [{}, { earlierPayment: true }, "earlier_payment"],
+    [{}, { hasIdentity: false }, "no_identity"],
+    [{}, { otherFounder: true }, "already_founder"],
+  ])("applies one founder rule to every provider: %p %p", (change, contextChange, reason) => {
+    expect(founderBlocker({ ...payment, ...change }, policy, { ...context, ...contextChange })).toBe(reason);
+  });
+  it("reports an unconfigured window before any payment detail", () => {
+    expect(founderBlocker({ ...payment, source: "signed_status" }, { ...policy, configured: false }, context)).toBe(
+      "window_not_configured",
+    );
+  });
+});
+describe("PayPal supporter records", () => {
+  const body = {
+    id: randomUUID(),
+    displayName: "PayPal donor",
+    discordId: "123456789012345678",
+    paidAt: "2026-10-01T12:00:00-04:00",
+    amountCents: 1000,
+    currency: "USD",
+    transactionId: "8ab12345cd678901e",
+    completedPaymentVerified: true,
+    firstSuccessfulPaymentVerified: true,
+    awardFounder: true,
+    reason: "Checked the completed PayPal payment",
+  };
+  it("lists PayPal records and accepts PayPal entries while Patreon is not configured", async () => {
+    const { service, store } = fixture({ PATREON_ENABLED: false, PATREON_CAMPAIGN_ID: undefined });
+    store.list.mockResolvedValue([{ id: "paypal-record" }]);
+    await expect(service.list(admin)).resolves.toMatchObject({
+      configured: false,
+      paypal: { available: true },
+      supporters: [{ id: "paypal-record" }],
+    });
+    expect(store.list).toHaveBeenCalledWith(null, expect.any(Object), undefined, "", undefined);
+    await service.list(admin, "", "paypal");
+    expect(store.list).toHaveBeenLastCalledWith(null, expect.any(Object), undefined, "", "paypal");
+    await expect(service.list(admin, "", "stripe")).rejects.toMatchObject({ status: 400 });
+    await expect(service.paypal(admin, body)).resolves.toEqual({ ok: true });
+    expect(store.recordPaypal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        transactionId: "8AB12345CD678901E",
+        paidAt: new Date(body.paidAt),
+        minimumConfirmed: false,
+        awardFounder: true,
+      }),
+      admin,
+      null,
+      expect.objectContaining({ amountCents: 500 }),
+    );
+    // A Patreon-only action still needs the Patreon connection.
+    await service.mutate(admin, randomUUID(), "review", { id: randomUUID(), version: 1, confirm: "a", reason: "Okay" });
+    expect(store.mutate).toHaveBeenCalledWith(expect.any(String), expect.anything(), admin, null, expect.any(Object));
+  });
+  it.each([
+    ["no completed-payment check", { completedPaymentVerified: undefined }],
+    ["a record ID without its version", { memberId: randomUUID() }],
+    ["a version without a record ID", { version: 1 }],
+    ["a malformed transaction ID", { transactionId: "abc-123" }],
+    ["a short transaction ID", { transactionId: "ABC123" }],
+    ["a lowercase currency", { currency: "usd" }],
+    ["a payer email", { email: "donor@example.test" }],
+    ["an invalid SteamID", { steamId: "76561190000000001" }],
+    ["no display name", { displayName: " " }],
+    ["a zero amount", { amountCents: 0 }],
+  ])("rejects a PayPal entry with %s", async (_label, change) => {
+    const { service, store } = fixture();
+    await expect(service.paypal(admin, { ...body, ...change })).rejects.toMatchObject({ status: 400 });
+    expect(store.recordPaypal).not.toHaveBeenCalled();
+  });
+  it("rejects future payments and non-admin staff before recording anything", async () => {
+    const { service, store } = fixture();
+    await expect(service.paypal(admin, { ...body, paidAt: "2099-01-01T00:00:00Z" })).rejects.toMatchObject({
+      status: 400,
+    });
+    await expect(service.paypal({ ...admin, role: "moderator" }, body)).rejects.toMatchObject({ status: 403 });
+    expect(store.recordPaypal).not.toHaveBeenCalled();
+  });
+  it("translates a concurrent duplicate into a conflict", async () => {
+    const { service, store } = fixture();
+    store.recordPaypal.mockRejectedValueOnce({ message: "duplicate", cause: { code: "23505" } });
+    await expect(service.paypal(admin, body)).rejects.toMatchObject({ status: 409 });
   });
 });

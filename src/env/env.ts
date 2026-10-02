@@ -113,6 +113,9 @@ export const Env = z.object({
   PATREON_WEBHOOK_SECRET: z.string().min(16).max(512).optional(),
   PATREON_FOUNDER_START_AT: z.iso.datetime({ offset: true }).optional(),
   PATREON_FOUNDER_END_AT: z.iso.datetime({ offset: true }).optional(),
+  /** Provider-neutral founder window (Patreon and PayPal). A complete pair wins over PATREON_FOUNDER_*. */
+  SUPPORTER_FOUNDER_START_AT: z.iso.datetime({ offset: true }).optional(),
+  SUPPORTER_FOUNDER_END_AT: z.iso.datetime({ offset: true }).optional(),
 
   /** Website requests remain disabled until the reviewed schema is deployed. */
   WHITELIST_APPLICATIONS_ENABLED: z

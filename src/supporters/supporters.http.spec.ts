@@ -1,5 +1,6 @@
 import { Global, Module, type INestApplication } from "@nestjs/common";
 import { Test } from "@nestjs/testing";
+import { ConflictException, ServiceUnavailableException } from "@nestjs/common";
 import { createHmac, randomUUID } from "node:crypto";
 import request from "supertest";
 import { EnvService } from "../env/env.service";
@@ -25,7 +26,7 @@ class TestEnvModule {}
 describe("private supporters HTTP boundary", () => {
   let app: INestApplication;
   const sessionToken = "c".repeat(64);
-  const store = { ingest: jest.fn(), list: jest.fn(), mutate: jest.fn(), register: jest.fn() };
+  const store = { ingest: jest.fn(), list: jest.fn(), mutate: jest.fn(), register: jest.fn(), recordPaypal: jest.fn() };
   const adminStore = { session: jest.fn() };
   const game = { execute: jest.fn() };
   const config = {
@@ -47,6 +48,7 @@ describe("private supporters HTTP boundary", () => {
     store.list.mockResolvedValue([]);
     store.mutate.mockResolvedValue({ ok: true, replayed: false });
     store.register.mockResolvedValue({ ok: true, replayed: false });
+    store.recordPaypal.mockResolvedValue({ ok: true, replayed: false });
     adminStore.session.mockImplementation(async (key) =>
       key === hash(sessionToken)
         ? { userId: "123456789012345678", displayName: "Admin", csrf: "csrf", expiresAt: new Date(Date.now() + 60_000) }
@@ -194,7 +196,7 @@ describe("private supporters HTTP boundary", () => {
       .query({ search: "old%_member" })
       .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
       .expect(200);
-    expect(store.list).toHaveBeenCalledWith("123", expect.any(Object), undefined, "old%_member");
+    expect(store.list).toHaveBeenCalledWith("123", expect.any(Object), undefined, "old%_member", undefined);
     expect(result.body).toMatchObject({ search: "old%_member", limit: 100 });
   });
   it("requires admin, same-origin CSRF and campaign attestation for manual donor entry", async () => {
@@ -252,5 +254,81 @@ describe("private supporters HTTP boundary", () => {
     expect(store.mutate).not.toHaveBeenCalled();
     expect(store.ingest).not.toHaveBeenCalled();
     expect(game.execute).not.toHaveBeenCalled();
+  });
+  it("requires admin, same-origin CSRF and the payment check for PayPal entries, and explains founder refusals", async () => {
+    const endpoint = "/admin/api/supporters/paypal";
+    const body = {
+      id: randomUUID(),
+      displayName: "PayPal donor",
+      discordId: "123456789012345678",
+      paidAt: "2026-10-01T12:00:00-04:00",
+      amountCents: 500,
+      currency: "USD",
+      transactionId: "8AB12345CD678901E",
+      completedPaymentVerified: true,
+      firstSuccessfulPaymentVerified: true,
+      awardFounder: true,
+      reason: "Checked the completed PayPal payment",
+    };
+    await request(app.getHttpServer()).post(endpoint).send(body).expect(401);
+    await request(app.getHttpServer())
+      .post(endpoint)
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .set("Origin", "https://other.example")
+      .set("X-CSRF-Token", "csrf")
+      .send(body)
+      .expect(403);
+    jest.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ roles: ["moderator"] })));
+    await request(app.getHttpServer())
+      .post(endpoint)
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .set("Origin", config.origin)
+      .set("X-CSRF-Token", "csrf")
+      .send(body)
+      .expect(403);
+    expect(store.recordPaypal).not.toHaveBeenCalled();
+    jest.mocked(fetch).mockImplementation(async () => new Response(JSON.stringify({ roles: ["staff"] })));
+    const send = (payload: object) =>
+      request(app.getHttpServer())
+        .post(endpoint)
+        .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+        .set("Origin", config.origin)
+        .set("X-CSRF-Token", "csrf")
+        .send(payload);
+    await send({ ...body, completedPaymentVerified: false }).expect(400);
+    await send(body).expect(201);
+    expect(store.recordPaypal).toHaveBeenCalledWith(
+      expect.objectContaining({ transactionId: body.transactionId }),
+      expect.objectContaining({ role: "admin" }),
+      "123",
+      expect.any(Object),
+    );
+    store.recordPaypal.mockRejectedValueOnce(
+      new ConflictException({
+        message: "This payment was not made inside the founder window. Nothing was recorded.",
+        blockedReason: "outside_window",
+      }),
+    );
+    const refused = await send({ ...body, id: randomUUID() }).expect(409);
+    expect(refused.body).toEqual({
+      message: "This payment was not made inside the founder window. Nothing was recorded.",
+      blockedReason: "outside_window",
+    });
+    store.recordPaypal.mockRejectedValueOnce(new ServiceUnavailableException("Unavailable"));
+    expect((await send({ ...body, id: randomUUID() }).expect(503)).body).toEqual({ message: "Unavailable" });
+    expect(game.execute).not.toHaveBeenCalled();
+  });
+  it("filters the ledger by provider", async () => {
+    await request(app.getHttpServer())
+      .get("/admin/api/supporters")
+      .query({ provider: "paypal" })
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .expect(200);
+    expect(store.list).toHaveBeenCalledWith("123", expect.any(Object), undefined, "", "paypal");
+    await request(app.getHttpServer())
+      .get("/admin/api/supporters")
+      .query({ provider: "venmo" })
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .expect(400);
   });
 });

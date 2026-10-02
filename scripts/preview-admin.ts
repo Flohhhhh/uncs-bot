@@ -660,11 +660,15 @@ for (const [index, displayName] of ["Demo · Steady Supporter", "Demo · Foundin
     reference: `DEMO-RECEIPT-${index + 1}`,
     verificationState: index === 2 ? "unverified" : "verified",
     firstSuccessfulPaymentVerified: index !== 2,
+    minimumConfirmed: false,
+    recordedBy: index === 2 ? null : "999999999999999991",
   };
   demoPaymentReferences.add(payment.reference.toLowerCase());
   demoSupporters.set(id, {
     id,
+    provider: "patreon",
     patreonMemberId: `preview-member-${index + 1}`,
+    confirmKey: `preview-member-${index + 1}`,
     displayName,
     patronStatus: index === 1 ? "former_patron" : "active_patron",
     lastChargeStatus: "Paid",
@@ -676,8 +680,11 @@ for (const [index, displayName] of ["Demo · Steady Supporter", "Demo · Foundin
     identityState: index === 2 ? "unlinked" : "staff_linked",
     version: 1,
     latestPayment: payment,
+    payments: [payment],
     founderEligiblePayment: null,
-    founder: index === 1 ? { awardedAt: paidAt, paymentId: payment.id } : null,
+    founder: index === 1 ? { awardedAt: paidAt, paymentId: payment.id, source: payment.source } : null,
+    founderBlockedReason: null,
+    needsDiscordLink: false,
   });
 }
 const supporterStore = {
@@ -695,7 +702,9 @@ const supporterStore = {
     if (existing) throw new ConflictException("This preview membership is already recorded. Search its membership ID.");
     const record: SupporterView = {
       id: randomUUID(),
+      provider: "patreon",
       patreonMemberId: input.patreonMemberId,
+      confirmKey: input.patreonMemberId,
       displayName: input.displayName,
       patronStatus: null,
       lastChargeStatus: null,
@@ -707,15 +716,21 @@ const supporterStore = {
       identityState: "unlinked",
       version: 1,
       latestPayment: null,
+      payments: [],
       founderEligiblePayment: null,
       founder: null,
+      founderBlockedReason: "no_payment",
+      needsDiscordLink: false,
     };
     demoSupporters.set(record.id, record);
     demoSupporterActions.set(input.id, fingerprint);
     const [supporter] = await this.list(campaignId, policy, record.id);
     return { ok: true, replayed: false, supporter };
   },
-  async list(_campaignId: string, _policy: FounderPolicy, memberId?: string, search = "") {
+  async recordPaypal() {
+    throw new ConflictException("Recording PayPal supporters is unavailable in the simulated preview.");
+  },
+  async list(_campaignId: string | null, _policy: FounderPolicy, memberId?: string, search = "") {
     const needle = search.toLocaleLowerCase();
     return structuredClone(
       [...demoSupporters.values()]
@@ -745,7 +760,13 @@ const supporterStore = {
         }),
     );
   },
-  async mutate(memberId: string, input: SupporterMutation, staff: Staff, campaignId: string, policy: FounderPolicy) {
+  async mutate(
+    memberId: string,
+    input: SupporterMutation,
+    staff: Staff,
+    campaignId: string | null,
+    policy: FounderPolicy,
+  ) {
     const record = demoSupporters.get(memberId);
     if (!record) throw new ConflictException("Preview supporter not found.");
     const fingerprint = JSON.stringify({ memberId, input, staff: staff.id });
@@ -754,7 +775,7 @@ const supporterStore = {
       if (previous !== fingerprint) throw new ConflictException("Preview review ID was already used.");
       return { ok: true, replayed: true, supporter: structuredClone(record) };
     }
-    if (record.version !== input.version || record.patreonMemberId !== input.confirm)
+    if (record.version !== input.version || record.confirmKey !== input.confirm)
       throw new ConflictException("Preview record changed. Refresh before reviewing.");
     if (input.kind === "founder") {
       const [view] = await this.list(campaignId, policy, memberId);
@@ -768,7 +789,11 @@ const supporterStore = {
         throw new ConflictException(
           "This preview record needs a matched identity and qualifying checked first payment.",
         );
-      record.founder = { awardedAt: new Date().toISOString(), paymentId: input.paymentId };
+      record.founder = {
+        awardedAt: new Date().toISOString(),
+        paymentId: input.paymentId,
+        source: view.founderEligiblePayment.source,
+      };
     }
     if (input.kind === "link") {
       if (
@@ -777,9 +802,9 @@ const supporterStore = {
         )
       )
         throw new ConflictException("This preview account is already linked.");
-      record.discordId = input.discordId;
-      record.steamId = input.steamId;
-      record.identityState = "staff_linked";
+      record.discordId = input.discordId ?? record.discordId;
+      record.steamId = input.steamId ?? record.steamId;
+      record.identityState = record.discordId && record.steamId ? "staff_linked" : "unlinked";
     }
     if (input.kind === "payment") {
       const reference = input.reference.toLowerCase();
@@ -795,7 +820,10 @@ const supporterStore = {
         source: "manual_receipt",
         verificationState: "verified",
         firstSuccessfulPaymentVerified: input.firstSuccessfulPaymentVerified,
+        minimumConfirmed: false,
+        recordedBy: staff.id,
       };
+      record.payments = [record.latestPayment, ...record.payments];
     }
     if (input.kind === "review") record.reviewState = "verified";
     record.version++;

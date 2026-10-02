@@ -15,7 +15,9 @@ import {
   manualMemberSchema,
   parsePatreon,
   paymentSchema,
+  paypalSchema,
   policyDays,
+  providerFilter,
   reviewSchema,
   type FounderPolicy,
   type SupporterMutation,
@@ -42,21 +44,51 @@ export class SupportersService {
       secret !== this.env.get("ADMIN_SESSION_SECRET"),
     );
   }
+  /** The configured Patreon campaign, or null when Patreon is off. PayPal records never need it. */
+  private campaign() {
+    return this.configured() ? this.env.get("PATREON_CAMPAIGN_ID")! : null;
+  }
+  /**
+   * The provider-neutral founder window. A complete SUPPORTER_FOUNDER_* pair wins; otherwise a
+   * complete PATREON_FOUNDER_* pair is used. A half-set pair, or two complete pairs naming different
+   * instants, leaves the window unconfigured rather than guessing.
+   */
   policy(): FounderPolicy {
-    const start = this.env.get("PATREON_FOUNDER_START_AT"),
-      end = this.env.get("PATREON_FOUNDER_END_AT");
-    const valid = Boolean(
-      start &&
-      end &&
-      Number.isFinite(Date.parse(start)) &&
-      Date.parse(end) - Date.parse(start) === policyDays * 86_400_000,
-    );
-    return {
+    const unconfigured: FounderPolicy = {
       amountCents: 500,
       currency: "USD",
-      startsAt: valid ? new Date(start!).toISOString() : null,
-      endsAt: valid ? new Date(end!).toISOString() : null,
-      configured: valid,
+      startsAt: null,
+      endsAt: null,
+      configured: false,
+      source: null,
+    };
+    const pairs = [
+      {
+        source: "SUPPORTER_FOUNDER" as const,
+        start: this.env.get("SUPPORTER_FOUNDER_START_AT"),
+        end: this.env.get("SUPPORTER_FOUNDER_END_AT"),
+      },
+      {
+        source: "PATREON_FOUNDER" as const,
+        start: this.env.get("PATREON_FOUNDER_START_AT"),
+        end: this.env.get("PATREON_FOUNDER_END_AT"),
+      },
+    ];
+    if (pairs.some((pair) => Boolean(pair.start) !== Boolean(pair.end))) return unconfigured;
+    const complete = pairs.flatMap(({ source, start, end }) =>
+      start && end ? [{ source, start: Date.parse(start), end: Date.parse(end) }] : [],
+    );
+    if (complete.length === 2 && (complete[0].start !== complete[1].start || complete[0].end !== complete[1].end))
+      return unconfigured;
+    const chosen = complete[0];
+    if (!chosen || !Number.isFinite(chosen.start) || chosen.end - chosen.start !== policyDays * 86_400_000)
+      return unconfigured;
+    return {
+      ...unconfigured,
+      startsAt: new Date(chosen.start).toISOString(),
+      endsAt: new Date(chosen.end).toISOString(),
+      configured: true,
+      source: chosen.source,
     };
   }
   private admin(staff: Staff) {
@@ -73,10 +105,12 @@ export class SupportersService {
     );
     return { ok: true, ...(await this.store.ingest(observation)) };
   }
-  async list(staff: Staff, search: unknown = "") {
+  async list(staff: Staff, search: unknown = "", provider: unknown = undefined) {
     this.admin(staff);
     const parsedSearch = z.string().trim().max(100).safeParse(search);
     if (!parsedSearch.success) throw new BadRequestException("Use a search of at most 100 characters.");
+    const parsedProvider = providerFilter.safeParse(provider === "" ? undefined : provider);
+    if (!parsedProvider.success) throw new BadRequestException("Filter by the patreon or paypal provider.");
     const configured = this.configured(),
       founderPolicy = this.policy();
     return {
@@ -84,12 +118,19 @@ export class SupportersService {
       configured,
       webhookConfigured: this.webhookConfigured(),
       founderPolicy,
-      supporters: configured
-        ? await this.store.list(this.env.get("PATREON_CAMPAIGN_ID")!, founderPolicy, undefined, parsedSearch.data)
-        : [],
+      // The PayPal ledger needs no provider connection and stays available when Patreon is not configured.
+      paypal: { available: true },
+      supporters: await this.store.list(
+        this.campaign(),
+        founderPolicy,
+        undefined,
+        parsedSearch.data,
+        parsedProvider.data,
+      ),
       search: parsedSearch.data,
+      provider: parsedProvider.data ?? null,
       limit: 100,
-      note: "Private Patreon records. Membership changes need review; a tier or active membership is not proof of a completed payment. Founder records are permanent promises for future standard whitelist access. No game or Discord access is changed here.",
+      note: "Private supporter records for Patreon and PayPal. Membership changes need review; a tier or active membership is not proof of a completed payment. Founder records are permanent promises for future standard whitelist access. No game access is changed here.",
     };
   }
   async register(staff: Staff, body: unknown) {
@@ -105,7 +146,6 @@ export class SupportersService {
   }
   async mutate(staff: Staff, memberId: string, kind: SupporterMutation["kind"], body: unknown) {
     this.admin(staff);
-    if (!this.configured()) throw new ServiceUnavailableException("Patreon integration is not configured.");
     if (!z.uuid().safeParse(memberId).success) throw new BadRequestException("Invalid supporter record.");
     const schema = { link: linkSchema, payment: paymentSchema, founder: founderSchema, review: reviewSchema }[kind];
     const parsed = schema.safeParse(body);
@@ -115,11 +155,25 @@ export class SupportersService {
       throw new BadRequestException("A completed payment cannot be in the future.");
     const policy = this.policy();
     if (kind === "founder" && !policy.configured)
-      throw new ServiceUnavailableException(
-        "Set the 15-day founder window when the Patreon page launches before recording founder promises.",
-      );
+      throw new ServiceUnavailableException("Set the 15-day founder window before recording founder promises.");
     try {
-      return await this.store.mutate(memberId, input, staff, this.env.get("PATREON_CAMPAIGN_ID")!, policy);
+      // The store applies the Patreon configuration check to Patreon records only.
+      return await this.store.mutate(memberId, input, staff, this.campaign(), policy);
+    } catch (error) {
+      this.translateConflict(error);
+    }
+  }
+  async paypal(staff: Staff, body: unknown) {
+    this.admin(staff);
+    const parsed = paypalSchema.safeParse(body);
+    if (!parsed.success)
+      throw new BadRequestException(
+        "Check the PayPal transaction ID, amount, currency, accounts, confirmations and reason.",
+      );
+    if (parsed.data.paidAt.getTime() > Date.now() + 300_000)
+      throw new BadRequestException("A completed payment cannot be in the future.");
+    try {
+      return await this.store.recordPaypal(parsed.data, staff, this.campaign(), this.policy());
     } catch (error) {
       this.translateConflict(error);
     }
