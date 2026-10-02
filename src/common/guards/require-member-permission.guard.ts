@@ -7,7 +7,7 @@ import {
   type ExecutionContext,
 } from "@nestjs/common";
 import { Reflector } from "@nestjs/core";
-import { BaseInteraction, GuildChannel, PermissionResolvable } from "discord.js";
+import { BaseInteraction, PermissionResolvable } from "discord.js";
 import { NecordExecutionContext } from "necord";
 import { formatPermissions, replyPermissionError } from "../utils/permission.utils";
 
@@ -31,11 +31,10 @@ export class RequireMemberPermissionGuard implements CanActivate {
     }
 
     const [interaction] = NecordExecutionContext.create(context).getContext();
-    if (!interaction || !(interaction instanceof BaseInteraction) || !interaction.guild) return true;
+    if (!interaction || !(interaction instanceof BaseInteraction) || !interaction.guildId) return true;
 
-    const channel = interaction.channel;
-    if (!channel || !(channel instanceof GuildChannel)) return true;
-
+    // Discord resolves these for the channel the command ran in, threads and uncached channels included.
+    // Unknown permissions inside a server are treated as missing.
     const permissions = interaction.memberPermissions;
     if (!permissions || !permissions.has(requiredPermissions)) {
       const missing = permissions?.missing(requiredPermissions) ?? requiredPermissions;
