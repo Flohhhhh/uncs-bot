@@ -91,6 +91,14 @@ it("reviews changed values and records the save without extra typing", async () 
     reason: "Staff reviewed server changes.",
   });
   expect(within(dialog).queryByRole("button", { name: "Save settings" })).not.toBeInTheDocument();
+  const id = JSON.parse(String(sent[0][1]?.body)).id;
+  request.mockResolvedValueOnce({ record: { id, state: "pending", message: "Still awaiting the next match." } });
+  fireEvent.click(within(dialog).getByText("Action details"));
+  fireEvent.click(within(dialog).getByRole("button", { name: "Check saved result" }));
+  expect(await within(dialog).findByRole("status", { name: "Saved action result" })).toHaveTextContent(
+    "Still awaiting the next match.",
+  );
+  expect(request.mock.calls.filter(([path]) => path === "actions")).toHaveLength(1);
 });
 it.each(["viewer", "moderator"] as const)("does not request private settings for %s", (role) => {
   show(role);
