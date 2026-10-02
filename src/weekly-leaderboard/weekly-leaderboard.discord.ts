@@ -68,11 +68,11 @@ export class WeeklyLeaderboardDiscord {
   }
 
   /**
-   * Whether the bot already posted this week's marker since the slot. Reads up to five pages forward; more
-   * history than that, or a failed read, is "posted check unavailable", and the caller must not post.
-   * The bot can read its own messages' content without the privileged message content intent.
+   * Whether the bot already posted this week's marker for this server ID since the slot. Reads up to five
+   * pages forward; more history than that, or a failed read, is "posted check unavailable", and the caller
+   * must not post. The bot can read its own messages' content without the privileged message content intent.
    */
-  async posted(channel: WeeklyChannel, slot: number, marker: string) {
+  async posted(channel: WeeklyChannel, slot: number, weekKey: string, serverId: string) {
     const self = this.discord.user?.id;
     if (!self) throw new WeeklyDiscordError("Discord not ready");
     let after = firstSnowflakeAt(slot);
@@ -84,7 +84,7 @@ export class WeeklyLeaderboardDiscord {
         throw new WeeklyDiscordError("posted check unavailable");
       }
       for (const message of batch.values())
-        if (message.author?.id === self && hasWeeklyMarker(message.content, marker)) return true;
+        if (message.author?.id === self && hasWeeklyMarker(message.content, weekKey, serverId)) return true;
       if (batch.size < 100) return false;
       after = [...batch.keys()].reduce((newest, id) => (BigInt(id) > BigInt(newest) ? id : newest), after);
     }

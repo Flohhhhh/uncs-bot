@@ -73,7 +73,7 @@ Old faithful: M1 Garand, 304 kills
 Where the knees hurt most: Zestafona, 512 kills
 
 Stretch, hydrate, run it back. Full board: https://theuncsgaming.com/leaderboard
--# Counted from game events Gramps received <t:…:f> – <t:…:f>; delayed or missing deliveries aren't included. Weekly board 2026-W40 · The UNCs
+-# Counted from game events Gramps received <t:…:f> – <t:…:f>; delayed or missing deliveries aren't included. Weekly board 2026-W40 · The UNCs [primary]
 ```
 
 (Invented example data.) With more than one configured server the heading also names the server. If tracking started partway through the week, a `-# Counting since <t:…:f>` line is added above the last line.
@@ -96,12 +96,12 @@ A weapon or cause that looks like an internal identifier (containing `/`, `.` or
 
 **Copy rules.** Banter only. The post never mentions rewards, prizes, points, the whitelist or queue priority, and the word "free" is not used. Nothing is offered for placing, so a place on the board can never read as earning whitelist access. A test (`weekly-render.spec.ts`) enforces this on the template text.
 
-**Delivery.** No pings: `allowedMentions` is empty. Link previews are suppressed. The content is at most 2,000 characters, and the last line carries the marker `Weekly board <week key> · <server name>`.
+**Delivery.** No pings: `allowedMentions` is empty. Link previews are suppressed. The content is at most 2,000 characters, and the last line carries the marker `Weekly board <week key> · <server name> [<server id>]`. The name is for readers; the posted check matches the week and the server ID, because server names need not be unique and two names can read the same once shortened for Discord.
 
 ## Posting once
 
 - **Channel check:** a text or announcement channel (never crossposted) in `ADMIN_GUILD_ID` with View Channel, Send Messages and Read Message History. Otherwise `channel unusable`, or `Discord not ready` before the bot connects; both are checked again on the next pass.
-- **Posted check:** the bot reads the channel from the slot forward, up to five pages of 100 messages. The week counts as posted if one of the bot's own messages ends with this week's marker for this server (`already posted`). With more history than that, or a failed read, the answer is `posted check unavailable` and nothing is sent: when in doubt, Gramps does not post. The bot can read its own messages without the privileged message content intent.
+- **Posted check:** the bot reads the channel from the slot forward, up to five pages of 100 messages. The week counts as posted if one of the bot's own messages ends with this week's marker for this server ID (`already posted`), whatever server name it shows. With more history than that, or a failed read, the answer is `posted check unavailable` and nothing is sent: when in doubt, Gramps does not post. The bot can read its own messages without the privileged message content intent.
 - **Claim and send:** the week is claimed in memory immediately before the single send. The send uses a deterministic nonce (`sha256("weekly-leaderboard:<serverId>:<weekKey>")`, first 24 hex characters) with `enforceNonce`, so a second process sending the same week within Discord's nonce window gets the first message back.
 - **Outcomes:** `posted` with the message ID; `failed` when Discord definitely refused it (a 4xx such as 50013 Missing Permissions); `unknown` after a timeout or network error. An unknown or failed send is never retried in that process. A threshold skip also settles the week.
 
@@ -110,7 +110,7 @@ Why no database claim: after a restart inside the window the channel scan finds 
 Remaining risks:
 
 - Two long-running instances could each post outside Discord's nonce window.
-- Renaming a server's display name during a week defeats the marker match for that week.
+- Changing a server's `id` during a week defeats the marker match for that week. Renaming its display name does not.
 - Deleting the bot's post by hand and restarting Gramps inside the window posts it again.
 - After a `failed` or `unknown` send, that process never tries the week again, including post-now. After a restart the channel scan decides: within the window the worker posts only if no earlier post is found; after it, an administrator can post-now.
 

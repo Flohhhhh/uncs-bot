@@ -119,17 +119,27 @@ export function shoutOuts(highlights: WeeklyHighlights): ShoutOut[] {
   return result;
 }
 
-/** Last-line marker that identifies an existing post for this week and server. */
-export function weeklyMarker(weekKey: string, serverName: string) {
-  return `Weekly board ${weekKey} · ${plainLabel(serverName)}`;
+/**
+ * Last-line marker that identifies an existing post for this week and server. The name is for readers;
+ * the posted check matches the server's unique, stable ID in brackets, because names need not be unique,
+ * plainLabel can make two of them read the same, and a server can be renamed.
+ */
+export function weeklyMarker(weekKey: string, serverId: string, serverName: string) {
+  return `Weekly board ${weekKey} · ${plainLabel(serverName)} [${serverId}]`;
 }
 
-export function hasWeeklyMarker(content: string | null | undefined, marker: string) {
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** Whether the last line ends with this week's marker for this server ID, whatever name it showed. */
+export function hasWeeklyMarker(content: string | null | undefined, weekKey: string, serverId: string) {
   const last = (content ?? "").trimEnd().split("\n").at(-1) ?? "";
-  return last === marker || last.endsWith(` ${marker}`);
+  const marker = `(?:^| )Weekly board ${escapeRegExp(weekKey)} · .+ \\[${escapeRegExp(serverId)}\\]$`;
+  return new RegExp(marker).test(last);
 }
 
 export type WeeklyBoardInput = {
+  /** Unique, stable server ID; the posted check matches on it. */
+  serverId: string;
   serverName: string;
   /** Name the server in the heading when more than one is configured. */
   showServerName: boolean;
@@ -172,7 +182,7 @@ export function renderWeeklyBoard(input: WeeklyBoardInput): WeeklyBoardMessage {
   if (input.trackingStartedAt && input.trackingStartedAt.getTime() > start.getTime())
     lines.push(`-# Counting since <t:${seconds(input.trackingStartedAt)}:f>`);
   lines.push(
-    `-# Counted from game events Gramps received <t:${seconds(start)}:f> – <t:${seconds(end)}:f>; delayed or missing deliveries aren't included. ${weeklyMarker(weekKey, input.serverName)}`,
+    `-# Counted from game events Gramps received <t:${seconds(start)}:f> – <t:${seconds(end)}:f>; delayed or missing deliveries aren't included. ${weeklyMarker(weekKey, input.serverId, input.serverName)}`,
   );
   return { content: lines.join("\n"), allowedMentions: NO_MENTIONS, flags: MessageFlags.SuppressEmbeds };
 }

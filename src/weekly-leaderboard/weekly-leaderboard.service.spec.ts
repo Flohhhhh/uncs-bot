@@ -7,6 +7,7 @@ import type { GameServerSummary } from "../common/game-server";
 import type { EnvService } from "../env/env.service";
 import type { TelemetryService } from "../telemetry/telemetry.service";
 import type { TelemetryStore } from "../telemetry/telemetry.store";
+import { plainLabel } from "../server-community/community-state";
 import type { CombatAggregate } from "../telemetry/telemetry.types";
 import { FIXTURE_IDS, FIXTURE_SLOT, fixtureAggregate, fixtureHighlights, fixtureRows } from "./weekly-fixtures";
 import { WeeklyLeaderboardDiscord, firstSnowflakeAt, weeklyNonce } from "./weekly-leaderboard.discord";
@@ -140,7 +141,7 @@ describe("weekly board worker", () => {
     expect(payload.nonce).toBe(weeklyNonce("primary", "2026-W40"));
     expect(payload.content.length).toBeLessThanOrEqual(2_000);
     expect(payload.content).not.toMatch(/\d{17}/);
-    expect(payload.content.split("\n").at(-1)).toMatch(/ Weekly board 2026-W40 · The UNCs$/);
+    expect(payload.content.split("\n").at(-1)).toMatch(/ Weekly board 2026-W40 · The UNCs \[primary\]$/);
     expect(payload.content).toContain("3. Unnamed player — 61 kills · K/D 1.22");
     const status = service.status(admin);
     expect(status.lastRun).toEqual({
@@ -286,12 +287,25 @@ describe("weekly board worker", () => {
     await expect(restarted.preview(admin, undefined)).resolves.toMatchObject({ alreadyPosted: true, postable: false });
   });
 
+  it("still finds its own post after the server's display name changes", async () => {
+    const server = { ...primary };
+    const first = fixture({}, [server]);
+    await first.service.tick();
+    expect(first.channel.send).toHaveBeenCalledTimes(1);
+    server.name = "The UNCs Classic";
+    const restarted = first.make();
+    await restarted.tick();
+    expect(first.channel.send).toHaveBeenCalledTimes(1);
+    expect(restarted.status(admin).lastRun).toMatchObject({ outcome: "skipped", reason: "already posted" });
+  });
+
   it("counts only the bot's own message with this week's and this server's marker", async () => {
     const { service, history, channel } = fixture();
-    const marker = weeklyMarker("2026-W40", "The UNCs");
+    const marker = weeklyMarker("2026-W40", "primary", "The UNCs");
     other(history, 1, `Quoting the bot: ${marker}`);
-    other(history, 1, `-# Earlier board. ${weeklyMarker("2026-W39", "The UNCs")}`, BOT);
-    other(history, 1, `-# Another server. ${weeklyMarker("2026-W40", "The UNCs East")}`, BOT);
+    other(history, 1, `-# Earlier board. ${weeklyMarker("2026-W39", "primary", "The UNCs")}`, BOT);
+    other(history, 1, `-# Another server. ${weeklyMarker("2026-W40", "east", "The UNCs East")}`, BOT);
+    other(history, 1, `-# Same name, other server. ${weeklyMarker("2026-W40", "primary-2", "The UNCs")}`, BOT);
     other(history, 1, `${marker}\nedited`, BOT);
     await service.tick();
     expect(channel.send).toHaveBeenCalledTimes(1);
@@ -300,7 +314,7 @@ describe("weekly board worker", () => {
   it("pages forward through channel history to find the marker", async () => {
     const { service, history, channel } = fixture();
     other(history, 150);
-    other(history, 1, `-# Board. ${weeklyMarker("2026-W40", "The UNCs")}`, BOT);
+    other(history, 1, `-# Board. ${weeklyMarker("2026-W40", "primary", "The UNCs")}`, BOT);
     await service.tick();
     expect(channel.send).not.toHaveBeenCalled();
     expect(channel.messages.fetch).toHaveBeenCalledTimes(2);
@@ -443,10 +457,48 @@ describe("weekly board worker", () => {
     ]);
     expect(new Set(payloads.map((payload) => payload.nonce)).size).toBe(2);
     expect(payloads[0].content.split("\n")[0]).toBe("**The UNCs · Weekly board · UNCs East** · week ending Sun, Oct 4");
-    expect(payloads[1].content.endsWith(weeklyMarker("2026-W40", "UNCs Central"))).toBe(true);
+    expect(payloads[1].content.endsWith(weeklyMarker("2026-W40", "central", "UNCs Central"))).toBe(true);
     expect(store.snapshot.mock.calls.map((call) => call[3])).toEqual(["east", "central"]);
     expect(() => service.status({ ...admin, serverId: undefined })).toThrow("Select a game server");
     expect(service.status({ ...admin, serverId: "central" }).lastRun?.outcome).toBe("posted");
+  });
+
+  it.each([
+    ["punctuation", "The UNCs | KOTH", "The UNCs (KOTH)"],
+    ["a shared first 60 characters", `${"The UNCs ".repeat(7)}East`, `${"The UNCs ".repeat(7)}West`],
+  ])("posts both servers when their names differ only by %s", async (_case, eastName, westName) => {
+    // Both names read the same once shortened for Discord, so only the server ID tells the posts apart.
+    expect(plainLabel(eastName)).toBe(plainLabel(westName));
+    const east = { id: "east", name: eastName, version: "1".repeat(64) },
+      west = { id: "west", name: westName, version: "2".repeat(64) };
+    const f = fixture({}, [east, west]);
+    await f.service.tick();
+    expect(f.channel.send).toHaveBeenCalledTimes(2);
+    for (const serverId of ["east", "west"])
+      expect(f.service.status({ ...admin, serverId }).lastRun).toMatchObject({ outcome: "posted" });
+    // After a restart each server finds its own post.
+    const restarted = f.make();
+    await restarted.tick();
+    expect(f.channel.send).toHaveBeenCalledTimes(2);
+    for (const serverId of ["east", "west"])
+      expect(restarted.status({ ...admin, serverId }).lastRun).toMatchObject({ reason: "already posted" });
+  });
+
+  it("lets an administrator post a server whose name collides with one already posted", async () => {
+    at(Date.parse("2026-10-06T12:00:00Z"));
+    const east = { id: "east", name: "The UNCs | KOTH", version: "1".repeat(64) },
+      west = { id: "west", name: "The UNCs (KOTH)", version: "2".repeat(64) };
+    const f = fixture({}, [east, west]);
+    const eastAdmin = { ...admin, serverId: "east" },
+      westAdmin = { ...admin, serverId: "west" };
+    const eastPreview = await f.service.preview(eastAdmin, "last");
+    await f.service.post(eastAdmin, { weekKey: "2026-W40", previewHash: eastPreview.previewHash, confirm: true });
+    const westPreview = await f.service.preview(westAdmin, "last");
+    expect(westPreview).toMatchObject({ alreadyPosted: false, postable: true });
+    await expect(
+      f.service.post(westAdmin, { weekKey: "2026-W40", previewHash: westPreview.previewHash, confirm: true }),
+    ).resolves.toMatchObject({ outcome: "posted" });
+    expect(f.channel.send).toHaveBeenCalledTimes(2);
   });
 
   it("starts only when switched on, checks shortly after startup and every five minutes, and stops cleanly", async () => {
@@ -609,7 +661,7 @@ describe("weekly board staff status, preview and post-now", () => {
   it("refuses post-now when the board is already in the channel", async () => {
     at(Date.parse("2026-10-06T12:00:00Z"));
     const { service, history, channel } = fixture();
-    other(history, 1, `-# Board. ${weeklyMarker("2026-W40", "The UNCs")}`, BOT);
+    other(history, 1, `-# Board. ${weeklyMarker("2026-W40", "primary", "The UNCs")}`, BOT);
     const preview = await service.preview(admin, "last");
     expect(preview).toMatchObject({ alreadyPosted: true, postable: false });
     await expect(

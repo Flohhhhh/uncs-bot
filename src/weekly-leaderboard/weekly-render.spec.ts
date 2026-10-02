@@ -17,6 +17,7 @@ import { weekEndingAt } from "./weekly-schedule";
 
 const window = weekEndingAt(FIXTURE_SLOT, { day: "sunday", time: "20:00" });
 const input = (overrides: Partial<WeeklyBoardInput> = {}): WeeklyBoardInput => ({
+  serverId: "primary",
   serverName: "The UNCs",
   showServerName: false,
   slot: FIXTURE_SLOT,
@@ -61,30 +62,49 @@ describe("weekly board renderer", () => {
         "Where the knees hurt most: Zestafona, 512 kills",
         "",
         "Stretch, hydrate, run it back. Full board: https://theuncsgaming.com/leaderboard",
-        "-# Counted from game events Gramps received <t:1790553600:f> – <t:1791158400:f>; delayed or missing deliveries aren't included. Weekly board 2026-W40 · The UNCs",
+        "-# Counted from game events Gramps received <t:1790553600:f> – <t:1791158400:f>; delayed or missing deliveries aren't included. Weekly board 2026-W40 · The UNCs [primary]",
       ].join("\n"),
     );
     expect(message.allowedMentions).toEqual({ parse: [], users: [], roles: [], repliedUser: false });
     expect(message.flags).toBe(MessageFlags.SuppressEmbeds);
     expect(message.content.length).toBeLessThanOrEqual(DISCORD_CONTENT_LIMIT);
     expect(message.content).not.toMatch(STEAM_ID_RUN);
-    expect(hasWeeklyMarker(message.content, weeklyMarker("2026-W40", "The UNCs"))).toBe(true);
+    expect(hasWeeklyMarker(message.content, "2026-W40", "primary")).toBe(true);
   });
 
   it("notes partial coverage, names the server when several are configured and keeps the marker last", () => {
     const message = renderWeeklyBoard(
-      input({ serverName: "The UNCs East", showServerName: true, trackingStartedAt: new Date("2026-10-01T15:00:00Z") }),
+      input({
+        serverId: "east",
+        serverName: "The UNCs East",
+        showServerName: true,
+        trackingStartedAt: new Date("2026-10-01T15:00:00Z"),
+      }),
     );
     const lines = message.content.split("\n");
     expect(lines[0]).toBe("**The UNCs · Weekly board · The UNCs East** · week ending Sun, Oct 4");
     expect(lines.at(-2)).toBe("-# Counting since <t:1790866800:f>");
-    const marker = weeklyMarker("2026-W40", "The UNCs East");
+    const marker = weeklyMarker("2026-W40", "east", "The UNCs East");
+    expect(marker).toBe("Weekly board 2026-W40 · The UNCs East [east]");
     expect(lines.at(-1)!.endsWith(` ${marker}`)).toBe(true);
-    expect(hasWeeklyMarker(message.content, marker)).toBe(true);
-    // A server whose name extends another's never matches the shorter marker, and the week must match.
-    expect(hasWeeklyMarker(message.content, weeklyMarker("2026-W40", "The UNCs"))).toBe(false);
-    expect(hasWeeklyMarker(message.content, weeklyMarker("2026-W41", "The UNCs East"))).toBe(false);
-    expect(hasWeeklyMarker(`${message.content}\nEdited later`, marker)).toBe(false);
+    expect(hasWeeklyMarker(message.content, "2026-W40", "east")).toBe(true);
+    // The server ID and the week must match; an ID that extends another's never matches the shorter one.
+    expect(hasWeeklyMarker(message.content, "2026-W40", "eas")).toBe(false);
+    expect(hasWeeklyMarker(message.content, "2026-W40", "east-2")).toBe(false);
+    expect(hasWeeklyMarker(message.content, "2026-W41", "east")).toBe(false);
+    expect(hasWeeklyMarker(`${message.content}\nEdited later`, "2026-W40", "east")).toBe(false);
+    expect(hasWeeklyMarker(`Weekly board 2026-W40 · [east]`, "2026-W40", "east")).toBe(false);
+    expect(hasWeeklyMarker(`xWeekly board 2026-W40 · The UNCs East [east]`, "2026-W40", "east")).toBe(false);
+  });
+
+  it("tells servers apart by ID when plainLabel makes their names read the same", () => {
+    const east = renderWeeklyBoard(input({ serverId: "east", serverName: "The UNCs | KOTH" })).content;
+    const west = renderWeeklyBoard(input({ serverId: "west", serverName: "The UNCs (KOTH)" })).content;
+    expect(east.split("\n").at(-1)).toMatch(/ Weekly board 2026-W40 · The UNCs KOTH \[east\]$/);
+    expect(west.split("\n").at(-1)).toMatch(/ Weekly board 2026-W40 · The UNCs KOTH \[west\]$/);
+    expect(hasWeeklyMarker(east, "2026-W40", "east")).toBe(true);
+    expect(hasWeeklyMarker(east, "2026-W40", "west")).toBe(false);
+    expect(hasWeeklyMarker(west, "2026-W40", "east")).toBe(false);
   });
 
   it("never prints a SteamID: fallbacks, embedded IDs, other 17-digit runs and names that sanitise away", () => {
@@ -179,6 +199,7 @@ describe("weekly board renderer", () => {
     );
     const message = renderWeeklyBoard(
       input({
+        serverId: "s".repeat(40),
         serverName: "S".repeat(80),
         showServerName: true,
         trackingStartedAt: new Date(window.start.getTime() + 1),

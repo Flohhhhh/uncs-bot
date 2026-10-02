@@ -23,7 +23,7 @@ import {
   weeklyNonce,
   type WeeklyChannel,
 } from "./weekly-leaderboard.discord";
-import { MIN_RANKED_PLAYERS, renderWeeklyBoard, weeklyMarker, type WeeklyBoardMessage } from "./weekly-render";
+import { MIN_RANKED_PLAYERS, renderWeeklyBoard, type WeeklyBoardMessage } from "./weekly-render";
 import {
   CATCH_UP_HOURS,
   CATCH_UP_MS,
@@ -231,6 +231,7 @@ export class WeeklyLeaderboardService implements OnApplicationBootstrap, OnModul
       reasons.push(`below minimum players (${totals.players}/${options.minPlayers})`);
     if (totals.rankedPlayers < MIN_RANKED_PLAYERS) reasons.push(`fewer than ${MIN_RANKED_PLAYERS} players with kills`);
     const message = renderWeeklyBoard({
+      serverId: server.id,
       serverName: server.name,
       showServerName,
       slot,
@@ -253,7 +254,7 @@ export class WeeklyLeaderboardService implements OnApplicationBootstrap, OnModul
     let channel: WeeklyChannel;
     try {
       channel = await this.discord.channel(options.guildId!, options.channelId!);
-      if (await this.discord.posted(channel, window.end.getTime(), weeklyMarker(window.weekKey, server.name))) {
+      if (await this.discord.posted(channel, window.end.getTime(), window.weekKey, server.id)) {
         this.decided.add(key);
         return this.record(server.id, window, trigger, "skipped", "already posted", totals, undefined, staff);
       }
@@ -377,7 +378,7 @@ export class WeeklyLeaderboardService implements OnApplicationBootstrap, OnModul
     else if (options.guildId && options.channelId)
       try {
         const channel = await this.discord.channel(options.guildId, options.channelId);
-        alreadyPosted = await this.discord.posted(channel, slot, weeklyMarker(window.weekKey, server.name));
+        alreadyPosted = await this.discord.posted(channel, slot, window.weekKey, server.id);
       } catch {
         alreadyPosted = null;
       }
