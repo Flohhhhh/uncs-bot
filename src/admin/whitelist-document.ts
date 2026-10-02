@@ -53,7 +53,7 @@ export function configuredWhitelist(text: string) {
   return locate(text).ids;
 }
 
-/** Display valid saved entries without making a malformed document eligible for writes. */
+/** Display valid saved entries and count malformed numeric IDs separately. */
 export function inspectConfiguredWhitelist(text: string) {
   const { ids } = locate(text, false);
   const valid = ids.filter(isPublicIndividualSteamId);
@@ -84,7 +84,10 @@ export function editWhitelist(document: ConfigDocument, steamId: string, add: bo
   ) {
     throw new Error("The host has locked whitelist changes.");
   }
-  const { lines, newline, end, indices, ids } = locate(document.text);
+  // Validate the requested target above, not unrelated numeric IDs already stored
+  // by the host. Preserve those values exactly; never guess or drop an old ID.
+  // Unsupported syntax still fails closed before any document can be written.
+  const { lines, newline, end, indices, ids } = locate(document.text, false);
   if (ids.includes(steamId) === add) return document.text;
   const next = add ? [...ids, steamId] : ids.filter((id) => id !== steamId);
   const insertion = indices[0] ?? end;

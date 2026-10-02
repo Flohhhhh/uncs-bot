@@ -24,14 +24,20 @@ const unrelatedLines = (text: string) =>
   text.split(/\r?\n/).filter((line) => !/^\s*[+.!-]?DefaultReservedPlayerIds\s*=/i.test(line));
 
 describe("targeted whitelist edits", () => {
-  it("reads valid saved IDs beside a short numeric ID but still refuses to rewrite that document", () => {
+  it("adds and removes valid targets while preserving unrelated malformed numeric IDs", () => {
     const text = document.text.replace(
       `+DefaultReservedPlayerIds=${existing}`,
       `!DefaultReservedPlayerIds=ClearArray\r\n.DefaultReservedPlayerIds=7656119800000000\r\n.DefaultReservedPlayerIds=${existing}`,
     );
     expect(inspectConfiguredWhitelist(text)).toEqual({ ids: [existing], invalidEntryCount: 1 });
     expect(() => configuredWhitelist(text)).toThrow("unsupported");
-    expect(() => editWhitelist({ ...document, text }, added, true)).toThrow("unsupported");
+    const updated = editWhitelist({ ...document, text }, added, true);
+    expect(inspectConfiguredWhitelist(updated)).toEqual({ ids: [existing, added], invalidEntryCount: 1 });
+    expect(updated).toContain(".DefaultReservedPlayerIds=7656119800000000");
+    expect(unrelatedLines(updated)).toEqual(unrelatedLines(text));
+    const removed = editWhitelist({ ...document, text: updated }, existing, false);
+    expect(inspectConfiguredWhitelist(removed)).toEqual({ ids: [added], invalidEntryCount: 1 });
+    expect(removed).toContain(".DefaultReservedPlayerIds=7656119800000000");
     expect(() => inspectConfiguredWhitelist(text + "\r\n[/Script/WDGame.WDGameSession]")).toThrow("ambiguous");
     const cleared = text.replace(
       `.DefaultReservedPlayerIds=${existing}`,
@@ -47,11 +53,13 @@ describe("targeted whitelist edits", () => {
     expect(configuredWhitelist(editWhitelist({ ...document, text: updated }, existing, false))).toEqual([nextId]);
   });
   it.each(["76561197960265728", "76561202255233024", "76561190000000001"])(
-    "refuses out-of-range existing values before rewriting: %s",
+    "preserves an out-of-range stored value but refuses it as a new target: %s",
     (value) => {
       const text = document.text.replace(existing, value);
       expect(() => configuredWhitelist(text)).toThrow("unsupported");
-      expect(() => editWhitelist({ ...document, text }, added, true)).toThrow("unsupported");
+      const updated = editWhitelist({ ...document, text }, added, true);
+      expect(updated).toContain(`.DefaultReservedPlayerIds=${value}`);
+      expect(inspectConfiguredWhitelist(updated)).toEqual({ ids: [added], invalidEntryCount: 1 });
       expect(() => editWhitelist(document, value, true)).toThrow("Invalid SteamID64");
     },
   );
