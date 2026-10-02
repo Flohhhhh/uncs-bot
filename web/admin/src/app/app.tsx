@@ -486,7 +486,7 @@ function Dashboard({
               </div>
             )}
             {gamePage && overview && stale && !error && (
-              <div className="notice" role="status">
+              <div className="notice warning" role="status">
                 Server details need a fresh check. Close any open dialog and refresh before making changes.
               </div>
             )}
