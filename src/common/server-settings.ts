@@ -184,6 +184,8 @@ export type SettingsSnapshot = {
     editable: boolean;
     note: string;
     currentIndex: number | null;
+    /** Where a next-round choice is inserted; set without `currentIndex` when the game names only its next entry. */
+    nextIndex: number | null;
     positionNote?: string;
     currentMap: string;
     enabled: boolean;

@@ -20,6 +20,7 @@ const snapshot: SettingsSnapshot = {
     editable: true,
     note: "",
     currentIndex: 0,
+    nextIndex: 1,
     currentMap: "Kavkazi",
     enabled: true,
     mode: "Ordered",

@@ -310,19 +310,23 @@ export class WardogsClient {
   }
 
   async rotation() {
+    // The official console reads every entry detail except the map as optional
+    // (`e.lighting || ""`, `e.zoneAlternator || "None"`). Entries saved without
+    // lighting or a zone layout are normal, so null means unset, not malformed.
+    const unset = <T extends z.ZodType>(schema: T) => schema.nullish().transform((value) => value ?? undefined);
     const rotation = z
       .object({
         enabled: z.boolean(),
         mode: z.string(),
         entries: z.array(
           z.object({
-            index: z.number().int().nonnegative().optional(),
+            index: unset(z.number().int().nonnegative()),
             map: z.string(),
-            experiences: z.array(z.string()).optional(),
-            lighting: z.string().optional(),
-            zoneAlternator: z.string().optional(),
-            status: z.string().nullable().optional(),
-            denied: z.boolean().optional(),
+            experiences: unset(z.array(z.string())),
+            lighting: unset(z.string()),
+            zoneAlternator: unset(z.string()),
+            status: unset(z.string()),
+            denied: unset(z.boolean()),
           }),
         ),
       })

@@ -36,7 +36,14 @@ const saveLabels = { "settings-save": "Save settings", "rotation-save": "Save ro
 type DraftAction =
   | { action: "settings-save"; revision: string; changes: Record<string, SettingValue> }
   | { action: "rotation-save"; revision: string; entries: MapSelection[] }
-  | { action: "map-next"; revision: string; currentIndex: number; currentMap: string; entry: MapSelection };
+  | {
+      action: "map-next";
+      revision: string;
+      currentIndex: number | null;
+      nextIndex?: number;
+      currentMap: string;
+      entry: MapSelection;
+    };
 function ReviewChanges({
   action,
   summary,
@@ -171,14 +178,20 @@ export function RotationEditor({
     );
   }
   const canAdd = !locked && !loading && !error && ready && editIndex === null && rows.length < 100;
-  const currentIndex = snapshot.rotation.currentIndex;
+  const { currentIndex, nextIndex } = snapshot.rotation;
   const ordered = snapshot.rotation.enabled && snapshot.rotation.mode === "Ordered";
   const currentMatches =
     currentIndex !== null && sameMap(snapshot.rotation.entries[currentIndex]?.map, snapshot.rotation.currentMap);
-  const nextEntry =
-    ordered && currentMatches
+  // With no running entry named, the game can still confirm the entry it plays next.
+  const nextOnly = currentIndex === null && nextIndex !== null && !!snapshot.rotation.entries[nextIndex];
+  const positionConfirmed = currentMatches || nextOnly;
+  const nextEntry = !ordered
+    ? undefined
+    : currentMatches
       ? snapshot.rotation.entries[(currentIndex + 1) % snapshot.rotation.entries.length]
-      : undefined;
+      : nextOnly
+        ? snapshot.rotation.entries[nextIndex]
+        : undefined;
   function add(index: number) {
     if (!canAdd) return;
     const next = [...rows];
@@ -228,7 +241,7 @@ export function RotationEditor({
           </div>
         </div>
         {snapshot.rotation.note && <p className="notice warning">{snapshot.rotation.note}</p>}
-        {ordered && !currentMatches && (
+        {ordered && !positionConfirmed && (
           <div className="notice warning">
             <p>
               {snapshot.rotation.positionNote ||
@@ -369,19 +382,22 @@ export function RotationEditor({
                         editIndex !== null ||
                         !snapshot.rotation.enabled ||
                         snapshot.rotation.mode !== "Ordered" ||
-                        !currentMatches
+                        !positionConfirmed
                       }
                       onClick={() =>
                         setReview({
                           action: {
                             action: "map-next",
                             revision: snapshot.revision,
-                            currentIndex: snapshot.rotation.currentIndex!,
+                            ...(currentMatches ? { currentIndex } : { currentIndex: null, nextIndex: nextIndex! }),
                             currentMap: snapshot.rotation.currentMap,
                             entry: structuredClone(selection),
                           },
                           summary: [
                             "Next round: " + selectionLabel(selection),
+                            ...(currentMatches
+                              ? []
+                              : [`Placed at rotation entry ${nextIndex! + 1}, which the game reports it plays next.`]),
                             "Updates the saved ordered rotation. The current match continues.",
                           ],
                         })
