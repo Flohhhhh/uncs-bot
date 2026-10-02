@@ -8,7 +8,7 @@ The feature is **disabled by default in code and enabled on production**. The we
 
 Discord sign-in supplies the account ID and display name. The bot checks membership in the configured Discord server; applicants do not need a staff role or Discord two-factor authentication. Staff reviewers still use the separate staff sign-in and its role/MFA requirements.
 
-Applicants enter a SteamID64, email, and relationship (`unc_member`, `friend_regular`, or `new_player`), and acknowledge the community rules. Email is required by default. Consent covers contact about this application and server access, not a newsletter. **Email delivery and email ownership verification are not implemented.** The SteamID is a claim, not verified Steam ownership. Relationship is self-reported and never grants a Discord role, proves UNC membership, or automatically approves access.
+Applicants enter a SteamID64, email, and relationship (`unc_member`, `friend_regular`, or `new_player`), and acknowledge the community rules. Email is required by default. Consent covers contact about this application and server access, not a newsletter. **Email delivery and email ownership verification are not implemented.** The SteamID is a claim, not verified Steam ownership. Relationship is self-reported: it never proves UNC membership or approves access by itself. When [automatic Discord roles](DISCORD_ROLES.md) are switched on, a staff-approved `unc_member` application adds the UNC role; `friend_regular` and `new_player` never receive it automatically.
 
 The database keeps the submitted values, consent version and time, rules acknowledgment, status, submission/update times, and private staff review records. Discord IDs and SteamIDs each have a unique constraint per game server, allowing the same member to apply separately to different configured servers. Duplicate errors do not reveal another applicant's information. There is no self-service correction or deletion endpoint yet; contact staff for corrections. Application records currently have no automatic retention/deletion job.
 
@@ -23,12 +23,13 @@ The website serves the page; Gramps serves these routes through the same website
 | `POST /apply/auth/logout`                  | Clears the applicant cookie after session, Origin, and CSRF validation.                                          |
 | `GET /apply/api/me`                        | Returns `{userId, displayName, csrf, emailRequired, application}` for the signed-in account only.                |
 | `POST /apply/api/request`                  | Accepts `{steamId, email, relationship, contactConsent: true, rulesAccepted: true}` and returns `{application}`. |
-| `GET /admin/api/applications`              | Admin-only private review list: `{applications}`.                                                                |
+| `GET /admin/api/applications`              | Admin-only private review list: `{applications}`. Unresolved rows include `whitelistState`.                      |
 | `POST /admin/api/applications/:id/approve` | Reviews a pending application and requests its stored SteamID be added.                                          |
 | `POST /admin/api/applications/:id/decline` | Declines a pending application without contacting the game.                                                      |
 | `POST /admin/api/applications/:id/recheck` | Rechecks a `processing` or `needs_review` application's running whitelist membership without changing the game.  |
+| `POST /admin/api/applications/:id/revoke`  | Removes an approved application's SteamID from the whitelist and marks it `revoked`.                             |
 
-Staff decisions accept `{id: <new review UUID>, reason: <3–200 characters>}` and return `{application, outcome: {id, state, message}}`. The URL ID identifies the application; the body ID identifies that review attempt. The private list includes email and review notes; moderator/viewer roles cannot read it. It returns at most 100 records: unresolved requests first, oldest first, followed by recent resolved records. Counts describe this returned batch, not the entire database. Refresh after processing a batch to advance the queue.
+Staff decisions accept `{id: <new review UUID>, reason: <3–200 characters>}` and return `{application, outcome: {id, state, message}}`. Approval also accepts `existingAccessConfirmed: true` (see below). The URL ID identifies the application; the body ID identifies that review attempt. The private list includes email and review notes; moderator/viewer roles cannot read it. It returns at most 100 records: unresolved requests first, oldest first, followed by recent resolved records. Counts describe this returned batch, not the entire database. Refresh after processing a batch to advance the queue.
 
 The dashboard uses the server-scoped staff routes under `/admin/api/servers/:serverId/applications`; the table also lists legacy paths. Applicant login and `GET /apply/api/me` accept a `server` query parameter, and submissions carry `serverId`. Profile responses include the selected `serverId`, configured public server names and optional joining codes. Each server has its own application and grant. The signed login flow preserves the selected server; joining instructions must follow it rather than redirecting another server's applicant to primary.
 
@@ -45,6 +46,30 @@ For `processing` or `needs_review`, **Recheck live whitelist** reads fresh runni
 A crash or database completion failure can leave `processing`. Staff can recover with the same read-only recheck instead of editing the database or granting access again. A recheck does not create another processing claim: its result and receipt save together only if the inspected review and status still match. Concurrent checks or an intervening approval cannot overwrite each other's decisions. If the original approval finishes after a recheck, its original receipt is retained without replacing the newer status. Failed saves remain recoverable by another read; absent access during an in-flight approval remains unconfirmed until a later check. There is no automatic retry or reset.
 
 Declining an application never removes an existing whitelist entry. Existing manual whitelist membership remains unchanged by merely submitting or declining a request.
+
+## Statuses
+
+`pending` → `processing` → `approved` or `needs_review`; `declined`; and, for revocation, `revoking` → `revoked`. Applicants see `revoking` as `processing` and see `revoked` as their status; the website needs its own copy for `revoked`. Each application also records `accessIntent` (`grant` or `revoke`, which a recheck uses), `whitelistGrant` (`granted` for a real grant, `existing` for a registered existing entry, or null when not recorded) and `revokedAt`. The applicant view never includes these fields or any whitelist membership.
+
+For `pending`, `processing` and `needs_review` rows the staff list adds `whitelistState`: `active` (on the running whitelist), `saved` (saved but not live), `absent`, or `unknown` when the whitelist could not be read (the list still loads). It uses the dashboard's 10-second whitelist cache. Resolved rows have `null`.
+
+## Existing whitelist members
+
+People who are already whitelisted can submit a request too, so staff can match their Discord account to their game access. Submitting never changes access and never triggers an approval.
+
+When staff approve a `pending` request, Gramps first reads the running whitelist. If the SteamID is already active, the approval is refused with 409 and nothing is claimed: "This SteamID is already on the running whitelist. Confirm this Discord member owns it, then approve again to record the registration. No whitelist change will be sent." After confirming ownership, staff approve again with `existingAccessConfirmed: true`. The application becomes `approved` with `whitelistGrant: "existing"` and the message "Registered an existing whitelist entry; it was already active. No whitelist change was sent." No game action is sent and no `admin_actions` row is written; the application review record is the audit. If the SteamID is not active, or the whitelist cannot be read, approval uses the normal grant and records `whitelistGrant: "granted"` when it applies.
+
+## Revoking access
+
+`POST …/applications/:id/revoke` with `{id, reason}` (administrators only) claims an `approved` application, or a `needs_review` one whose earlier revocation was uncertain, as `revoking` and saves its review record before contacting the game. It then sends the audited `whitelist-remove` action with a fixed reason, "Website whitelist application <id> revoked."
+
+- An applied or saved removal makes the application `revoked`.
+- If the game refuses, the application returns to `approved`: "The game refused the revocation; access unchanged."
+- An unknown result leaves it `needs_review`. **Recheck live whitelist** then marks it `revoked` when the entry is no longer live, or keeps it for review ("Still active; revoke again or check the host panel"). Staff can also revoke again. A `revoking` application left by a crash can be rechecked the same way.
+
+Removing a SteamID on the **Whitelist** page also revokes the `approved` application for that SteamID on that server, with a review record naming the staff member and the action ("Removed from the Whitelist page (action <id>)."). Applications already being revoked are left alone. With automatic Discord roles switched on, a revocation removes the UNC role only if Gramps added it and no other approved UNC application remains; see [Discord roles](DISCORD_ROLES.md).
+
+Reinstating a revoked application is not available yet. A declined or revoked application still blocks a new request for the same Discord account or SteamID on that server.
 
 ## Deployment prerequisites
 

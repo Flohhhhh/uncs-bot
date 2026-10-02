@@ -21,6 +21,7 @@ import { ServerEventsStore } from "../src/server-events/server-events.store";
 import { eventFixture, eventStaff } from "../src/server-events/event-fixtures";
 import { operation } from "../src/server-events/event-planner";
 import { TelemetryStore } from "../src/telemetry/telemetry.store";
+import { DiscordRolesStore } from "../src/discord-roles/discord-roles.store";
 import { parseFeed } from "../src/telemetry/telemetry.types";
 import { defaultVotingPolicy } from "../src/common/voting-policy";
 
@@ -35,6 +36,8 @@ describe("launch storage on isolated PostgreSQL", () => {
   let admin: AdminStore;
   let votes: MapVotesStore;
   let events: ServerEventsStore;
+  let roles: DiscordRolesStore;
+  let migratedApplicationAccess: unknown[] | undefined;
   let migratedLegacyData: Record<string, unknown[]>;
   let migratedSupporterData: unknown[] | undefined;
   const legacySupporterId = randomUUID();
@@ -206,6 +209,12 @@ describe("launch storage on isolated PostgreSQL", () => {
       }
       await client.query(await readFile(join(directory, file), "utf8"));
     }
+    migratedApplicationAccess = (
+      await client.query(
+        "SELECT status, access_intent, whitelist_grant, revoked_at FROM whitelist_applications WHERE id = $1",
+        [legacyApplicationId],
+      )
+    ).rows;
     migratedSupporterData = (
       await client.query(
         `SELECT m.provider, m.campaign_id, m.patreon_member_id, p.source, p.minimum_confirmed,
@@ -227,6 +236,7 @@ describe("launch storage on isolated PostgreSQL", () => {
     admin = new AdminStore(db);
     votes = new MapVotesStore(db);
     events = new ServerEventsStore(db);
+    roles = new DiscordRolesStore(db);
     workers = ["a", "b"].map((name) =>
       worker(new Pool({ ...connection, max: 1, application_name: `uncs_launch_worker_${name}` })),
     );
@@ -235,7 +245,7 @@ describe("launch storage on isolated PostgreSQL", () => {
   beforeEach(async () => {
     if (!initialized) return;
     await client.query(
-      "TRUNCATE combat_events, combat_tracking, server_event_operations, server_events, map_vote_ballots, map_votes, map_vote_policies, supporter_actions, supporter_founders, supporter_payments, supporter_observations, supporter_members, whitelist_application_reviews, whitelist_applications, admin_actions, admin_sessions CASCADE",
+      "TRUNCATE combat_events, combat_tracking, server_event_operations, server_events, map_vote_ballots, map_votes, map_vote_policies, discord_role_actions, supporter_actions, supporter_founders, supporter_payments, supporter_observations, supporter_members, whitelist_application_reviews, whitelist_applications, admin_actions, admin_sessions CASCADE",
     );
   });
   afterAll(async () => {
@@ -271,6 +281,12 @@ describe("launch storage on isolated PostgreSQL", () => {
         },
       ],
     });
+  });
+
+  it("keeps applications from before revocation support as granted, unrevoked records", () => {
+    expect(migratedApplicationAccess).toEqual([
+      { status: "approved", access_intent: "grant", whitelist_grant: null, revoked_at: null },
+    ]);
   });
 
   it("keeps supporter records from before the provider-neutral ledger as Patreon records", () => {
@@ -1169,6 +1185,198 @@ describe("launch storage on isolated PostgreSQL", () => {
       reason: { cause: { code: "23505" } },
     });
     expect((await supporters.list(null, policy)).filter((record) => record.steamId !== null)).toHaveLength(1);
+  });
+
+  const uncApplication = (serverId: string, discordUserId = "345678901234567890", steamId = "76561198000000011") => ({
+    ...applicationInput(discordUserId, steamId),
+    serverId,
+    relationship: "unc_member" as const,
+  });
+  async function approve(id: string, serverId: string, grant: "granted" | "existing" = "granted") {
+    const review = { id: randomUUID(), reason: "Reviewed fictional member" };
+    expect((await applications.claim(id, review, "approve", { ...staff, serverId })).claimed).toBe(true);
+    return applications.finishApproval(id, review.id, { state: "applied", message: "Confirmed" }, grant);
+  }
+
+  it("registers an existing whitelist entry, revokes it once and records each step", async () => {
+    const created = (await applications.create(uncApplication("primary")))!;
+    expect(await approve(created.id, "primary", "existing")).toMatchObject({
+      status: "approved",
+      whitelistGrant: "existing",
+      accessIntent: "grant",
+    });
+    const actor = { ...staff, serverId: "primary" };
+    const review = { id: randomUUID(), reason: "Left the fictional community" };
+    const claim = await applications.claimRevoke(created.id, review, actor);
+    expect(claim).toMatchObject({ claimed: true, application: { status: "revoking", accessIntent: "revoke" } });
+    expect(
+      (await applications.claimRevoke(created.id, { id: randomUUID(), reason: "Second reviewer" }, actor)).claimed,
+    ).toBe(false);
+    const revoked = await applications.finishRevoke(created.id, review.id, { state: "applied", message: "Removed" });
+    expect(revoked).toMatchObject({ status: "revoked", accessIntent: "revoke", revokedAt: expect.any(Date) });
+    await expect(
+      applications.finishRevoke(created.id, review.id, { state: "applied", message: "Removed again" }),
+    ).rejects.toThrow("no longer matches its original claim");
+    expect(
+      (
+        await client.query(
+          "SELECT kind, state FROM whitelist_application_reviews WHERE application_id = $1 ORDER BY created_at, kind",
+          [created.id],
+        )
+      ).rows,
+    ).toEqual([
+      { kind: "approve", state: "applied" },
+      { kind: "revoke", state: "applied" },
+    ]);
+  });
+
+  it("restores approved access when the game refuses a revocation and allows a retry after an uncertain one", async () => {
+    const created = (await applications.create(uncApplication("primary")))!;
+    await approve(created.id, "primary");
+    const actor = { ...staff, serverId: "primary" };
+    const refused = { id: randomUUID(), reason: "First attempt" };
+    await applications.claimRevoke(created.id, refused, actor);
+    expect(
+      await applications.finishRevoke(created.id, refused.id, { state: "failed", message: "Refused" }),
+    ).toMatchObject({ status: "approved", accessIntent: "grant" });
+    const uncertain = { id: randomUUID(), reason: "Second attempt" };
+    await applications.claimRevoke(created.id, uncertain, actor);
+    expect(
+      await applications.finishRevoke(created.id, uncertain.id, { state: "unknown", message: "Lost response" }),
+    ).toMatchObject({ status: "needs_review", accessIntent: "revoke" });
+    expect((await applications.claimRevoke(created.id, { id: randomUUID(), reason: "Retry" }, actor)).claimed).toBe(
+      true,
+    );
+  });
+
+  it("revokes the approved application when its SteamID is removed on the Whitelist page, on that server only", async () => {
+    const east = (await applications.create(uncApplication("east")))!;
+    const central = (await applications.create(uncApplication("central")))!;
+    await approve(east.id, "east");
+    await approve(central.id, "central");
+    const actionId = randomUUID();
+    const revoked = await applications.recordExternalRevoke({
+      serverId: "east",
+      steamId: "76561198000000011",
+      actionId,
+      actorId: staff.id,
+      actorName: staff.name,
+      state: "applied",
+    });
+    expect(revoked.map((application) => application.id)).toEqual([east.id]);
+    expect((await applications.get(central.id, "central"))?.status).toBe("approved");
+    expect(
+      (await client.query("SELECT actor_id, reason, state FROM whitelist_application_reviews WHERE kind = 'revoke'"))
+        .rows,
+    ).toEqual([
+      { actor_id: staff.id, reason: `Removed from the Whitelist page (action ${actionId}).`, state: "applied" },
+    ]);
+    // The UNC role stays while another approved UNC application remains.
+    expect((await roles.desired()).member.get("345678901234567890")).toBe(central.id);
+    expect(await roles.revokedBasis()).toEqual(new Map());
+    await applications.recordExternalRevoke({
+      serverId: "central",
+      steamId: "76561198000000011",
+      actionId: randomUUID(),
+      actorId: staff.id,
+      actorName: staff.name,
+      state: "pending",
+    });
+    expect((await roles.desired()).member.size).toBe(0);
+    expect((await roles.revokedBasis()).has("345678901234567890")).toBe(true);
+  });
+
+  it("reads who should hold each role and keeps an ordered role ledger", async () => {
+    const member = (await applications.create(uncApplication("primary")))!;
+    await approve(member.id, "primary");
+    const friend = (await applications.create({
+      ...applicationInput("456789012345678901", "76561198000000012"),
+      relationship: "friend_regular" as const,
+    }))!;
+    await approve(friend.id, "primary");
+    const founder = await supporters.recordPaypal(
+      {
+        id: randomUUID(),
+        displayName: "Fictional founder",
+        discordId: "567890123456789012",
+        paidAt: new Date("2026-10-01T16:00:00.000Z"),
+        amountCents: 500,
+        currency: "USD",
+        transactionId: "8AB12345CD678901E",
+        completedPaymentVerified: true,
+        firstSuccessfulPaymentVerified: true,
+        minimumConfirmed: false,
+        awardFounder: true,
+        reason: "Checked a fictional completed PayPal payment",
+      },
+      staff,
+      null,
+      policy,
+    );
+    await supporters.recordPaypal(
+      {
+        id: randomUUID(),
+        displayName: "Fictional unlinked founder",
+        steamId: "76561198000000013",
+        paidAt: new Date("2026-10-02T16:00:00.000Z"),
+        amountCents: 500,
+        currency: "USD",
+        transactionId: "9ZY98765XW432101V",
+        completedPaymentVerified: true,
+        firstSuccessfulPaymentVerified: true,
+        minimumConfirmed: false,
+        awardFounder: true,
+        reason: "Checked a fictional completed PayPal payment",
+      },
+      staff,
+      null,
+      policy,
+    );
+    const desired = await roles.desired();
+    expect(desired.member).toEqual(new Map([["345678901234567890", member.id]]));
+    expect(desired.founder).toEqual(new Map([["567890123456789012", founder.supporter.id]]));
+    expect((await roles.desired(["567890123456789012"])).member.size).toBe(0);
+    expect(await roles.foundersWithoutDiscord()).toMatchObject([
+      { displayName: "Fictional unlinked founder", provider: "paypal" },
+    ]);
+    expect(await roles.summary()).toEqual({ memberEligible: 1, founders: 2, foundersWithoutDiscord: 1 });
+    const base = {
+      trigger: "event" as const,
+      requestedBy: null,
+      guildId: "678901234567890123",
+      discordUserId: "345678901234567890",
+      roleKind: "member" as const,
+      roleId: "789012345678901234",
+      basisType: "application" as const,
+      basisId: member.id,
+    };
+    const added = await roles.begin({ ...base, operation: "add" });
+    expect(await roles.lastEffective(base.guildId, base.discordUserId, "member")).toMatchObject({
+      id: added,
+      state: "started",
+    });
+    await roles.finish(added, "unknown", false, "Lost response");
+    await roles.confirm(added);
+    expect(await roles.lastEffective(base.guildId, base.discordUserId, "member")).toMatchObject({
+      id: added,
+      state: "applied",
+      changed: true,
+    });
+    const failed = await roles.begin({ ...base, operation: "remove" });
+    await roles.finish(failed, "failed", false, "Refused");
+    // A failed attempt never replaces the latest effective change.
+    expect((await roles.lastEffective(base.guildId, base.discordUserId, "member"))?.id).toBe(added);
+    await roles.note({ ...base, roleKind: "founder" });
+    expect(await roles.lastEffective(base.guildId, base.discordUserId, "founder")).toMatchObject({
+      operation: "note",
+      changed: false,
+      state: "applied",
+    });
+    expect((await roles.recent(25)).map((row) => row.actorId)).toEqual([
+      "system:discord-roles",
+      "system:discord-roles",
+      "system:discord-roles",
+    ]);
   });
 
   it("keeps duplicate applicant identities and SteamIDs from creating additional requests", async () => {

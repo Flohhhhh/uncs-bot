@@ -6,6 +6,7 @@ import {
   ServiceUnavailableException,
 } from "@nestjs/common";
 import { z } from "zod";
+import { DiscordRolesService } from "../discord-roles/discord-roles.service";
 import { EnvService } from "../env/env.service";
 import type { Staff } from "../admin/admin.types";
 import { SupportersStore } from "./supporters.store";
@@ -28,7 +29,16 @@ export class SupportersService {
   constructor(
     private readonly store: SupportersStore,
     private readonly env: EnvService,
+    private readonly roles: DiscordRolesService,
   ) {}
+  /** Lets the role service re-check this member. Fire-and-forget: a role problem never fails the request. */
+  private notifyRoles(discordId: string | null | undefined) {
+    try {
+      this.roles.supporterChanged(discordId);
+    } catch {
+      /* The role service logs its own problems. */
+    }
+  }
   private configured() {
     return Boolean(this.env.get("PATREON_ENABLED") && this.env.get("PATREON_CAMPAIGN_ID"));
   }
@@ -130,7 +140,7 @@ export class SupportersService {
       search: parsedSearch.data,
       provider: parsedProvider.data ?? null,
       limit: 100,
-      note: "Private supporter records for Patreon and PayPal. Membership changes need review; a tier or active membership is not proof of a completed payment. Founder records are permanent promises for future standard whitelist access. No game access is changed here.",
+      note: "Private supporter records for Patreon and PayPal. Membership changes need review; a tier or active membership is not proof of a completed payment. Founder records are permanent promises for future standard whitelist access. No game access is changed here. When Discord roles are switched on, founders with a linked Discord account receive the Founder role.",
     };
   }
   async register(staff: Staff, body: unknown) {
@@ -158,7 +168,11 @@ export class SupportersService {
       throw new ServiceUnavailableException("Set the 15-day founder window before recording founder promises.");
     try {
       // The store applies the Patreon configuration check to Patreon records only.
-      return await this.store.mutate(memberId, input, staff, this.campaign(), policy);
+      const result = await this.store.mutate(memberId, input, staff, this.campaign(), policy);
+      // A founder award or a changed Discord link can change who should hold the Founder role.
+      if (!result.replayed && (input.kind === "founder" || input.kind === "link"))
+        this.notifyRoles(result.supporter?.discordId);
+      return result;
     } catch (error) {
       this.translateConflict(error);
     }
@@ -173,7 +187,9 @@ export class SupportersService {
     if (parsed.data.paidAt.getTime() > Date.now() + 300_000)
       throw new BadRequestException("A completed payment cannot be in the future.");
     try {
-      return await this.store.recordPaypal(parsed.data, staff, this.campaign(), this.policy());
+      const result = await this.store.recordPaypal(parsed.data, staff, this.campaign(), this.policy());
+      if (!result.replayed) this.notifyRoles(result.supporter?.discordId);
+      return result;
     } catch (error) {
       this.translateConflict(error);
     }

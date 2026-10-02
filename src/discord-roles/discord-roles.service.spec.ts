@@ -1,0 +1,549 @@
+import { Logger } from "@nestjs/common";
+import { randomUUID } from "node:crypto";
+import type { Staff } from "../admin/admin.types";
+import type { EnvService } from "../env/env.service";
+import type { DiscordRolesDiscord, RoleMember } from "./discord-roles.discord";
+import { DiscordRolesService } from "./discord-roles.service";
+import type { DiscordRolesStore, RoleActionStart } from "./discord-roles.store";
+import type { RoleCheckView } from "./discord-roles.types";
+
+const GUILD = "100000000000000001";
+const UNC = "200000000000000001";
+const FOUNDER = "200000000000000002";
+const A = "300000000000000001";
+const B = "300000000000000002";
+const admin: Staff = { id: "400000000000000001", name: "Admin", role: "admin", csrf: "csrf" };
+
+class TestRolesService extends DiscordRolesService {
+  readonly sleeps: number[] = [];
+  protected sleep(ms: number) {
+    this.sleeps.push(ms);
+    return Promise.resolve();
+  }
+}
+type LedgerRow = RoleActionStart & {
+  id: string;
+  state: string;
+  changed: boolean;
+  message: string;
+  createdAt: Date;
+};
+type FakeMember = RoleMember & { roles: Set<string>; add: jest.Mock; remove: jest.Mock };
+const assignable = (id: string, name: string): RoleCheckView => ({
+  id,
+  name,
+  exists: true,
+  position: 1,
+  managed: false,
+  privileged: false,
+  staffRole: false,
+  assignable: true,
+  problem: null,
+});
+
+const services: DiscordRolesService[] = [];
+afterEach(() => {
+  for (const service of services.splice(0)) service.onModuleDestroy();
+  jest.restoreAllMocks();
+});
+
+function fixture(env: Record<string, unknown> = {}) {
+  const values: Record<string, unknown> = {
+    DISCORD_ROLES_ENABLED: true,
+    ADMIN_GUILD_ID: GUILD,
+    DISCORD_MEMBER_ROLE_ID: UNC,
+    DISCORD_FOUNDER_ROLE_ID: FOUNDER,
+    ADMIN_ADMIN_ROLE_IDS: "",
+    ...env,
+  };
+  const ledger: LedgerRow[] = [];
+  const state = {
+    member: new Map<string, string>(),
+    founder: new Map<string, string>(),
+    revoked: new Map<string, string>(),
+  };
+  const order: string[] = [];
+  const only = (map: Map<string, string>, users?: string[]) =>
+    new Map([...map].filter(([user]) => !users || users.includes(user)));
+  const store = {
+    desired: jest.fn(async (users?: string[]) => ({
+      member: only(state.member, users),
+      founder: only(state.founder, users),
+    })),
+    revokedBasis: jest.fn(async (users?: string[]) => only(state.revoked, users)),
+    lastEffective: jest.fn(async (guildId: string, userId: string, kind: string) => {
+      const rows = ledger.filter(
+        (row) =>
+          row.guildId === guildId &&
+          row.discordUserId === userId &&
+          row.roleKind === kind &&
+          ["applied", "unknown", "started"].includes(row.state),
+      );
+      const row = rows.at(-1);
+      return row
+        ? { id: row.id, operation: row.operation, state: row.state, changed: row.changed, createdAt: row.createdAt }
+        : null;
+    }),
+    begin: jest.fn(async (input: RoleActionStart) => {
+      const id = randomUUID();
+      order.push(`begin:${input.operation}:${input.discordUserId}:${input.roleKind}`);
+      ledger.push({ ...input, id, state: "started", changed: false, message: "Recorded", createdAt: new Date() });
+      return id;
+    }),
+    finish: jest.fn(async (id: string, rowState: string, changed: boolean, message: string) => {
+      Object.assign(ledger.find((row) => row.id === id)!, { state: rowState, changed, message });
+    }),
+    note: jest.fn(async (input: Omit<RoleActionStart, "operation">) => {
+      ledger.push({
+        ...input,
+        operation: "note",
+        id: randomUUID(),
+        state: "applied",
+        changed: false,
+        message: "Noted",
+        createdAt: new Date(),
+      });
+    }),
+    confirm: jest.fn(async (id: string) => {
+      Object.assign(ledger.find((row) => row.id === id)!, { state: "applied", changed: true });
+    }),
+    summary: jest.fn(async () => ({ memberEligible: state.member.size, founders: 2, foundersWithoutDiscord: 1 })),
+    foundersWithoutDiscord: jest.fn(async () => [
+      {
+        supporterId: "supporter-1",
+        displayName: "PayPal donor",
+        provider: "paypal",
+        awardedAt: "2026-10-01T00:00:00Z",
+      },
+    ]),
+    recent: jest.fn(async () => ledger.slice(-25).reverse()),
+  };
+  const members = new Map<string, FakeMember>();
+  const discord = {
+    ready: jest.fn(() => true),
+    check: jest.fn(async () => ({
+      manageRoles: true,
+      highestRolePosition: 9,
+      roles: { member: assignable(UNC, "UNC"), founder: assignable(FOUNDER, "Founder") },
+    })),
+    member: jest.fn(
+      async (_guildId: string, userId: string): Promise<RoleMember | null> => members.get(userId) ?? null,
+    ),
+  };
+  const addMember = (id: string, roles: string[] = [], joinedAt = new Date(Date.now() - 86_400_000)) => {
+    const set = new Set(roles);
+    const member: FakeMember = {
+      id,
+      joinedAt,
+      roles: set,
+      has: (roleId) => set.has(roleId),
+      add: jest.fn(async (roleId: string) => {
+        order.push(`discord:add:${id}:${roleId}`);
+        set.add(roleId);
+      }),
+      remove: jest.fn(async (roleId: string) => {
+        order.push(`discord:remove:${id}:${roleId}`);
+        set.delete(roleId);
+      }),
+    };
+    members.set(id, member);
+    return member;
+  };
+  const service = new TestRolesService(
+    store as unknown as DiscordRolesStore,
+    discord as unknown as DiscordRolesDiscord,
+    { get: (key: string) => values[key] } as unknown as EnvService,
+  );
+  services.push(service);
+  const status = () => service.status(admin);
+  return { service, store, discord, ledger, state, order, addMember, members, values, status };
+}
+const reconcile = (overrides: Record<string, unknown> = {}) => ({
+  id: randomUUID(),
+  reason: "Checked the role setup",
+  ...overrides,
+});
+
+describe("Discord role passes", () => {
+  it("adds earned roles, records each change before Discord and spaces the writes", async () => {
+    const { service, state, addMember, ledger, order, status } = fixture();
+    state.member.set(A, "application-a");
+    state.founder.set(A, "supporter-a");
+    const member = addMember(A);
+    service.applicationChanged(A);
+    await service.tick();
+    expect(member.add).toHaveBeenCalledWith(UNC, "Gramps: UNC member application approved");
+    expect(member.add).toHaveBeenCalledWith(FOUNDER, "Gramps: founding supporter");
+    expect(order).toEqual([
+      `begin:add:${A}:member`,
+      `discord:add:${A}:${UNC}`,
+      `begin:add:${A}:founder`,
+      `discord:add:${A}:${FOUNDER}`,
+    ]);
+    expect(ledger).toMatchObject([
+      {
+        roleKind: "member",
+        operation: "add",
+        state: "applied",
+        changed: true,
+        basisType: "application",
+        basisId: "application-a",
+        trigger: "event",
+      },
+      {
+        roleKind: "founder",
+        operation: "add",
+        state: "applied",
+        changed: true,
+        basisType: "founder",
+        basisId: "supporter-a",
+      },
+    ]);
+    expect(ledger.every((row) => row.guildId === GUILD && row.roleId)).toBe(true);
+    expect(service.sleeps).toEqual([1100]);
+    expect((await status()).lastPass).toMatchObject({ trigger: "event", added: 2, failed: 0, users: 1 });
+  });
+
+  it("notes a role that was already present and never removes it after revocation", async () => {
+    const { service, state, addMember, ledger } = fixture();
+    state.member.set(A, "application-a");
+    const member = addMember(A, [UNC]);
+    service.applicationChanged(A);
+    await service.tick();
+    expect(member.add).not.toHaveBeenCalled();
+    expect(ledger).toMatchObject([{ operation: "note", changed: false, state: "applied" }]);
+    state.member.delete(A);
+    state.revoked.set(A, "application-a");
+    service.applicationChanged(A);
+    await service.tick();
+    expect(member.remove).not.toHaveBeenCalled();
+    expect(member.roles.has(UNC)).toBe(true);
+  });
+
+  it("removes only the UNC role it added after the application is revoked, and keeps the Founder role", async () => {
+    const { service, state, addMember, ledger } = fixture();
+    state.member.set(A, "application-a");
+    state.founder.set(A, "supporter-a");
+    const member = addMember(A);
+    service.applicationChanged(A);
+    await service.tick();
+    state.member.delete(A);
+    state.revoked.set(A, "application-a");
+    service.applicationChanged(A);
+    await service.tick();
+    expect(member.remove).toHaveBeenCalledTimes(1);
+    expect(member.remove).toHaveBeenCalledWith(UNC, "Gramps: UNC application revoked");
+    expect(member.roles.has(FOUNDER)).toBe(true);
+    expect(ledger.at(-1)).toMatchObject({
+      operation: "remove",
+      state: "applied",
+      changed: true,
+      basisId: "application-a",
+    });
+  });
+
+  it("respects a manual removal for the current membership and restores the role after rejoining", async () => {
+    const { service, state, addMember, ledger, status } = fixture();
+    state.member.set(A, "application-a");
+    const member = addMember(A);
+    service.applicationChanged(A);
+    await service.tick();
+    member.roles.delete(UNC);
+    service.applicationChanged(A);
+    await service.tick();
+    expect(member.add).toHaveBeenCalledTimes(1);
+    expect((await status()).attention).toContainEqual(
+      expect.objectContaining({ kind: "removed_in_discord", discordUserId: A, roleKind: "member" }),
+    );
+    const rejoined = addMember(A, [], new Date(Date.now() + 1_000));
+    service.memberJoined(GUILD, A);
+    await service.tick();
+    expect(rejoined.add).toHaveBeenCalledWith(UNC, "Gramps: UNC member application approved");
+    expect(ledger.at(-1)).toMatchObject({ trigger: "member-join", operation: "add", state: "applied" });
+  });
+
+  it("ignores joins to other servers and anything queued while switched off", async () => {
+    const { service, state, addMember, store } = fixture();
+    state.member.set(A, "application-a");
+    addMember(A);
+    service.memberJoined("999999999999999999", A);
+    service.applicationChanged("not-a-snowflake");
+    await service.tick();
+    expect(store.desired).not.toHaveBeenCalled();
+    const off = fixture({ DISCORD_ROLES_ENABLED: false });
+    off.state.member.set(A, "application-a");
+    off.addMember(A);
+    off.service.applicationChanged(A);
+    off.service.onApplicationBootstrap();
+    await off.service.tick();
+    expect(off.store.desired).not.toHaveBeenCalled();
+  });
+
+  it("confirms an unknown add when the role is found present instead of adding again", async () => {
+    const { service, state, addMember, ledger } = fixture();
+    state.member.set(A, "application-a");
+    const member = addMember(A, [UNC]);
+    ledger.push({
+      id: "unknown-add",
+      trigger: "event",
+      requestedBy: null,
+      guildId: GUILD,
+      discordUserId: A,
+      roleKind: "member",
+      roleId: UNC,
+      operation: "add",
+      basisType: "application",
+      basisId: "application-a",
+      state: "unknown",
+      changed: false,
+      message: "Unknown",
+      createdAt: new Date(),
+    });
+    service.applicationChanged(A);
+    await service.tick();
+    expect(member.add).not.toHaveBeenCalled();
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0]).toMatchObject({ state: "applied", changed: true });
+  });
+
+  it("blocks a role for the rest of the pass after a permission error, keeps the other role and warns once", async () => {
+    const warn = jest.spyOn(Logger.prototype, "warn").mockImplementation(() => undefined);
+    const { service, state, addMember, ledger } = fixture();
+    for (const user of [A, B]) {
+      state.member.set(user, `application-${user}`);
+      state.founder.set(user, `supporter-${user}`);
+    }
+    const first = addMember(A);
+    const second = addMember(B);
+    first.add.mockImplementation(async (roleId: string) => {
+      if (roleId === UNC) throw Object.assign(new Error("Missing Permissions"), { code: 50013, status: 403 });
+    });
+    await service.reconcile(admin, reconcile());
+    expect(second.add).not.toHaveBeenCalledWith(UNC, expect.any(String));
+    expect(second.add).toHaveBeenCalledWith(FOUNDER, "Gramps: founding supporter");
+    expect(ledger.find((row) => row.discordUserId === A && row.roleKind === "member")).toMatchObject({
+      state: "failed",
+      message: expect.stringContaining("cannot manage this role"),
+    });
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("records a member who left mid-pass as failed without a retry", async () => {
+    const { service, state, addMember, ledger, status } = fixture();
+    state.member.set(A, "application-a");
+    addMember(A).add.mockRejectedValue(Object.assign(new Error("Unknown Member"), { code: 10007, status: 404 }));
+    service.applicationChanged(A);
+    await service.tick();
+    expect(ledger).toMatchObject([{ state: "failed", message: expect.stringContaining("left the server") }]);
+    expect((await status()).nextRetryAt).toBeNull();
+  });
+
+  it("reports people who are not in the server without writing a ledger row", async () => {
+    const { service, state, ledger, status } = fixture();
+    state.founder.set(B, "supporter-b");
+    service.supporterChanged(B);
+    await service.tick();
+    expect(ledger).toHaveLength(0);
+    expect((await status()).attention).toContainEqual(
+      expect.objectContaining({ kind: "not_in_server", discordUserId: B }),
+    );
+  });
+
+  it("makes at most 50 role writes per pass and queues the rest for a follow-up in a minute", async () => {
+    const { service, state, addMember, ledger, status } = fixture();
+    const users = Array.from({ length: 52 }, (_, index) => `3000000000000001${String(index).padStart(2, "0")}`);
+    for (const user of users) {
+      state.member.set(user, `application-${user}`);
+      addMember(user);
+    }
+    const before = Date.now();
+    const result = await service.reconcile(admin, reconcile());
+    expect(result.summary).toMatchObject({ added: 50, deferred: 2 });
+    expect(ledger).toHaveLength(50);
+    expect(service.sleeps).toHaveLength(49);
+    const view = await status();
+    expect(view.queued).toBe(2);
+    expect(Date.parse(view.nextRetryAt!)).toBeGreaterThanOrEqual(before + 60_000);
+  });
+
+  it("leaves an unconfirmed change unknown and backs off that member for 1 minute, then 5 minutes", async () => {
+    const { service, state, addMember, ledger, status } = fixture();
+    state.member.set(A, "application-a");
+    const member = addMember(A);
+    member.add.mockRejectedValue(Object.assign(new Error("Service Unavailable"), { status: 503 }));
+    let now = Date.parse("2026-10-02T12:00:00Z");
+    jest.spyOn(Date, "now").mockImplementation(() => now);
+    service.applicationChanged(A);
+    await service.tick();
+    expect(ledger).toMatchObject([{ operation: "add", state: "unknown" }]);
+    expect((await status()).nextRetryAt).toBe(new Date(now + 60_000).toISOString());
+    // Still backing off: a new event does not contact Discord again.
+    service.applicationChanged(A);
+    await service.tick();
+    expect(member.add).toHaveBeenCalledTimes(1);
+    now += 61_000;
+    await service.tick();
+    expect(member.add).toHaveBeenCalledTimes(2);
+    expect((await status()).nextRetryAt).toBe(new Date(now + 300_000).toISOString());
+  });
+
+  it("processes a role whose setup passes while another role is refused by the checks", async () => {
+    const { service, state, addMember, discord } = fixture();
+    discord.check.mockResolvedValue({
+      manageRoles: true,
+      highestRolePosition: 9,
+      roles: {
+        member: { ...assignable(UNC, "UNC"), assignable: false, privileged: true, problem: "Privileged" },
+        founder: assignable(FOUNDER, "Founder"),
+      },
+    });
+    state.member.set(A, "application-a");
+    state.founder.set(A, "supporter-a");
+    const member = addMember(A);
+    const { summary } = await service.reconcile(admin, reconcile());
+    expect(member.add).toHaveBeenCalledTimes(1);
+    expect(member.add).toHaveBeenCalledWith(FOUNDER, expect.any(String));
+    expect(summary).toMatchObject({ added: 1, blocked: 1 });
+  });
+
+  it("waits for Discord before a pass", async () => {
+    const { service, state, addMember, discord, store } = fixture();
+    discord.ready.mockReturnValue(false);
+    state.member.set(A, "application-a");
+    addMember(A);
+    service.applicationChanged(A);
+    await service.tick();
+    expect(store.desired).not.toHaveBeenCalled();
+    await expect(service.reconcile(admin, reconcile())).rejects.toMatchObject({ status: 503 });
+  });
+});
+
+describe("staff role controls", () => {
+  it("previews changes while switched off and refuses a real run", async () => {
+    const { service, state, addMember, store } = fixture({ DISCORD_ROLES_ENABLED: false });
+    state.member.set(A, "application-a");
+    state.founder.set(B, "supporter-b");
+    const member = addMember(A);
+    await expect(service.reconcile(admin, reconcile())).rejects.toMatchObject({
+      status: 503,
+      message: "Discord roles are switched off (DISCORD_ROLES_ENABLED=false).",
+    });
+    const preview = await service.reconcile(admin, reconcile({ dryRun: true }));
+    expect(preview.summary.plan).toEqual([
+      { discordUserId: A, roleKind: "member", op: "add", why: "desired" },
+      { discordUserId: B, roleKind: null, op: "none", why: "not-in-server" },
+    ]);
+    expect(store.begin).not.toHaveBeenCalled();
+    expect(store.note).not.toHaveBeenCalled();
+    expect(member.add).not.toHaveBeenCalled();
+    // A dry run is not the last real pass.
+    expect((await service.status(admin)).lastPass).toBeNull();
+  });
+
+  it("limits a preview to 100 entries and a targeted preview to one person", async () => {
+    const { service, state, addMember } = fixture();
+    for (let index = 0; index < 120; index++) {
+      const user = `3000000000000002${String(index).padStart(2, "0")}`;
+      state.member.set(user, `application-${index}`);
+      addMember(user);
+    }
+    expect((await service.reconcile(admin, reconcile({ dryRun: true }))).summary.plan).toHaveLength(100);
+    const second = fixture();
+    second.state.member.set(A, "application-a");
+    second.addMember(A);
+    expect((await second.service.reconcile(admin, reconcile({ dryRun: true, discordUserId: B }))).summary.plan).toEqual(
+      [{ discordUserId: B, roleKind: null, op: "none", why: "no-basis" }],
+    );
+  });
+
+  it("records who asked for a run, replays the same action ID and enforces the 30 second spacing", async () => {
+    const { service, state, addMember, ledger } = fixture();
+    state.member.set(A, "application-a");
+    addMember(A);
+    const body = reconcile({ discordUserId: A });
+    const first = await service.reconcile(admin, body);
+    expect(first).toMatchObject({
+      ok: true,
+      replayed: false,
+      summary: { trigger: "admin", requestedBy: admin.id, added: 1 },
+    });
+    expect(ledger).toMatchObject([{ trigger: "admin", requestedBy: admin.id }]);
+    expect(await service.reconcile(admin, body)).toEqual({ ...first, replayed: true });
+    await expect(service.reconcile(admin, { ...body, reason: "A different reason" })).rejects.toMatchObject({
+      status: 409,
+    });
+    await expect(service.reconcile({ ...admin, id: "400000000000000002" }, body)).rejects.toMatchObject({
+      status: 409,
+    });
+    await expect(service.reconcile(admin, reconcile())).rejects.toMatchObject({ status: 429 });
+  });
+
+  it("refuses a run while another pass is running", async () => {
+    const { service, state, addMember, discord } = fixture();
+    state.member.set(A, "application-a");
+    addMember(A);
+    let release!: () => void;
+    discord.member.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve(null);
+        }),
+    );
+    service.applicationChanged(A);
+    const running = service.tick();
+    await new Promise((resolve) => setImmediate(resolve));
+    await expect(service.reconcile(admin, reconcile())).rejects.toMatchObject({ status: 409 });
+    release();
+    await running;
+  });
+
+  it.each(["moderator", "viewer"] as const)("refuses %s staff", async (role) => {
+    const { service, store } = fixture();
+    await expect(service.status({ ...admin, role })).rejects.toMatchObject({ status: 403 });
+    await expect(service.reconcile({ ...admin, role }, reconcile())).rejects.toMatchObject({ status: 403 });
+    expect(store.summary).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ reason: "x" }],
+    [{ id: "not-a-uuid" }],
+    [{ discordUserId: "123" }],
+    [{ dryRun: "yes" }],
+    [{ extra: true }],
+  ])("rejects an invalid run request %p", async (change) => {
+    const { service } = fixture();
+    await expect(service.reconcile(admin, reconcile(change))).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("reports setup, readiness, counts and founders without a linked Discord account", async () => {
+    const { service, discord } = fixture({ DISCORD_ROLES_ENABLED: false });
+    await expect(service.status(admin)).resolves.toMatchObject({
+      enabled: false,
+      configured: { guild: true, memberRole: true, founderRole: true },
+      discordReady: true,
+      bot: { manageRoles: true, highestRolePosition: 9 },
+      roles: { member: { id: UNC, assignable: true }, founder: { id: FOUNDER, assignable: true } },
+      ready: true,
+      lastPass: null,
+      queued: 0,
+      summary: { founders: 2, foundersWithoutDiscord: 1 },
+      attention: [{ kind: "founder_without_discord", supporterId: "supporter-1", provider: "paypal" }],
+      recent: [],
+    });
+    discord.check.mockRejectedValueOnce(new Error("Missing Access"));
+    await expect(service.status(admin)).resolves.toMatchObject({
+      ready: false,
+      roles: { member: { assignable: false, problem: expect.stringContaining("could not be read") } },
+    });
+    const unset = fixture({
+      DISCORD_MEMBER_ROLE_ID: undefined,
+      DISCORD_FOUNDER_ROLE_ID: undefined,
+      ADMIN_GUILD_ID: undefined,
+    });
+    await expect(unset.service.status(admin)).resolves.toMatchObject({
+      configured: { guild: false, memberRole: false, founderRole: false },
+      ready: false,
+      roles: { member: { problem: expect.stringContaining("ADMIN_GUILD_ID") } },
+    });
+  });
+});

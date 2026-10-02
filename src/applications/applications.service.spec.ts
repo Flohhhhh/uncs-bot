@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { ConflictException } from "@nestjs/common";
+import { Subject } from "rxjs";
 import { ApplicationsService } from "./applications.service";
 import type { ApplicationsStore } from "./applications.store";
-import type { AdminService } from "../admin/admin.service";
+import type { AdminService, WhitelistRemoval } from "../admin/admin.service";
 import type { EnvService } from "../env/env.service";
 import type { ActionResult, Staff } from "../admin/admin.types";
 import { fixtureServers } from "../admin/game-server-fixture";
-import type { ApplicantIdentity, WhitelistApplication } from "./applications.types";
+import type { DiscordRolesService } from "../discord-roles/discord-roles.service";
+import { ownApplication, type ApplicantIdentity, type WhitelistApplication } from "./applications.types";
 
 const applicant: ApplicantIdentity = {
   userId: "123456789012345678",
@@ -47,6 +49,9 @@ const record = (overrides: Partial<WhitelistApplication> = {}): WhitelistApplica
   reviewKind: null,
   lastActionState: null,
   lastActionMessage: null,
+  accessIntent: "grant",
+  whitelistGrant: null,
+  revokedAt: null,
   ...overrides,
 });
 
@@ -56,9 +61,12 @@ function fixture(
     emailRequired?: boolean;
     initial?: WhitelistApplication | null;
     result?: ActionResult;
+    /** SteamIDs active on the running whitelist. A pending request is not live unless a test says so. */
+    live?: string[];
   } = {},
 ) {
   let current = options.initial === undefined ? record() : options.initial;
+  const live = new Set(options.live ?? (current && current.status !== "pending" ? [current.steamId] : []));
   const store = {
     create: jest.fn(async (values) => record(values)),
     own: jest.fn(async () => current ?? undefined),
@@ -67,9 +75,11 @@ function fixture(
     finishRecheck: jest.fn(async (previous, review, actor, outcome) => {
       if (!current || current.status !== previous.status || current.reviewId !== previous.reviewId)
         throw new ConflictException("Application changed during the check");
+      const revoke = current.accessIntent === "revoke";
       current = record({
         ...current,
-        status: outcome.state === "applied" ? "approved" : "needs_review",
+        status: outcome.state === "applied" ? (revoke ? "revoked" : "approved") : "needs_review",
+        revokedAt: revoke && outcome.state === "applied" ? new Date() : current.revokedAt,
         reviewId: review.id,
         reviewKind: "recheck",
         reviewedAt: new Date(),
@@ -97,23 +107,71 @@ function fixture(
       });
       return { claimed: true, application: { ...current } };
     }),
-    finishApproval: jest.fn(async (_id, actionId, outcome) => {
+    finishApproval: jest.fn(async (_id, actionId, outcome, grant?: "granted" | "existing" | null) => {
       if (current?.status !== "processing" || current.reviewId !== actionId) throw new Error("Application changed");
       current = record({
         ...current!,
         status: outcome.state === "applied" ? "approved" : "needs_review",
+        whitelistGrant: outcome.state === "applied" ? (grant ?? null) : null,
         lastActionState: outcome.state,
         lastActionMessage: outcome.message,
       });
       return current;
     }),
+    claimRevoke: jest.fn(async (_id, review, actor) => {
+      if (
+        !current ||
+        !(current.status === "approved" || (current.status === "needs_review" && current.accessIntent === "revoke"))
+      )
+        return { claimed: false, application: current ?? undefined };
+      current = record({
+        ...current,
+        status: "revoking",
+        accessIntent: "revoke",
+        reviewedBy: actor.id,
+        reviewReason: review.reason,
+        reviewId: review.id,
+        reviewKind: "revoke",
+        lastActionState: "started",
+        lastActionMessage: "Revocation started.",
+      });
+      return { claimed: true, application: { ...current } };
+    }),
+    finishRevoke: jest.fn(async (_id, actionId, outcome: ActionResult) => {
+      if (current?.status !== "revoking" || current.reviewId !== actionId) throw new Error("Application changed");
+      const removed = outcome.state === "applied" || outcome.state === "pending";
+      current = record({
+        ...current,
+        status: removed ? "revoked" : outcome.state === "failed" ? "approved" : "needs_review",
+        accessIntent: outcome.state === "failed" ? "grant" : "revoke",
+        revokedAt: removed ? new Date() : null,
+        lastActionState: outcome.state,
+        lastActionMessage: outcome.message,
+      });
+      return current;
+    }),
+    recordExternalRevoke: jest.fn(async (_removal: WhitelistRemoval) =>
+      current?.status === "approved" ? [record({ ...current, status: "revoked", accessIntent: "revoke" })] : [],
+    ),
   };
   const admin = {
-    act: jest.fn(async () => ({
-      id: randomUUID(),
-      ...(options.result ?? { state: "applied", message: "Whitelist access is active in the running game." }),
-    })),
+    whitelistRemovals: new Subject<WhitelistRemoval>(),
+    read: jest.fn(
+      async (_resource: string, _serverId?: string): Promise<unknown> => ({
+        entries: [...live].map((steamId) => ({ steamId, active: true, configured: true })),
+        configurationAvailable: true,
+      }),
+    ),
+    act: jest.fn(async (_actor: Staff, action: { action: string; steamId: string }) => {
+      const result = options.result ?? { state: "applied", message: "Whitelist access is active in the running game." };
+      if (result.state === "applied") {
+        if (action.action === "whitelist-add") live.add(action.steamId);
+        else live.delete(action.steamId);
+      }
+      return { id: randomUUID(), ...result };
+    }),
   };
+  const roles = { applicationChanged: jest.fn() };
   const env = {
     get: jest.fn((key: string) =>
       key === "WHITELIST_APPLICATIONS_ENABLED" ? options.enabled !== false : options.emailRequired !== false,
@@ -121,7 +179,7 @@ function fixture(
   };
   const game = {
     whitelist: jest.fn(async () => ({
-      entries: [{ steamId: input.steamId, active: true, configured: true }],
+      entries: [...live].map((steamId) => ({ steamId, active: true, configured: true as boolean | null })),
       configurationAvailable: true,
     })),
   };
@@ -132,11 +190,14 @@ function fixture(
       admin as unknown as AdminService,
       env as unknown as EnvService,
       servers,
+      roles as unknown as DiscordRolesService,
     ),
     store,
     admin,
     game,
     servers,
+    roles,
+    live,
     current: () => current,
   };
 }
@@ -325,7 +386,8 @@ describe("durable application decisions", () => {
       reason: "Check live result",
     });
     expect(result.application).toMatchObject({ status: "approved", actionId: approvalId, reviewKind: "recheck" });
-    expect(game.whitelist).toHaveBeenCalledTimes(1);
+    // One read before approving, one for the recheck.
+    expect(game.whitelist).toHaveBeenCalledTimes(2);
     expect(admin.act).toHaveBeenCalledTimes(1);
   });
   it("records a thrown game-service error for manual review without retrying", async () => {
@@ -418,7 +480,8 @@ describe("durable application decisions", () => {
     const request = { id: randomUUID(), reason: "Reviewed request" };
     await service.review(staff, applicationId, "approve", request);
     await expect(service.review(staff, applicationId, "recheck", request)).rejects.toMatchObject({ status: 409 });
-    expect(game.whitelist).not.toHaveBeenCalled();
+    // Only the pre-approval read; the refused recheck reads nothing.
+    expect(game.whitelist).toHaveBeenCalledTimes(1);
   });
   it("leaves a failed recheck save recoverable and replays a saved recheck without another game read", async () => {
     const { service, store, game, admin, current } = fixture({ initial: record({ status: "processing" }) });
@@ -461,5 +524,166 @@ describe("durable application decisions", () => {
     expect(store.get).toHaveBeenCalledWith(applicationId, "primary");
     expect(game.whitelist).not.toHaveBeenCalled();
     expect(admin.act).not.toHaveBeenCalled();
+  });
+});
+
+describe("existing whitelist members", () => {
+  it("refuses to approve an already whitelisted SteamID until staff confirm ownership, and sends no grant", async () => {
+    const { service, store, admin, roles } = fixture({ live: [input.steamId] });
+    const review = { id: randomUUID(), reason: "Registering existing member" };
+    await expect(service.review(staff, applicationId, "approve", review)).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining("already on the running whitelist"),
+    });
+    expect(store.claim).not.toHaveBeenCalled();
+    const result = await service.review(staff, applicationId, "approve", { ...review, existingAccessConfirmed: true });
+    expect(result.application).toMatchObject({ status: "approved", whitelistGrant: "existing" });
+    expect(result.outcome).toMatchObject({ state: "applied", message: expect.stringContaining("No whitelist change") });
+    expect(store.finishApproval).toHaveBeenCalledWith(applicationId, review.id, expect.any(Object), "existing");
+    expect(admin.act).not.toHaveBeenCalled();
+    expect(roles.applicationChanged).toHaveBeenCalledWith(applicant.userId);
+  });
+  it("grants normally when the SteamID is not live, recording the grant", async () => {
+    const { service, admin, roles } = fixture();
+    const result = await service.review(staff, applicationId, "approve", { id: randomUUID(), reason: "Approve" });
+    expect(result.application).toMatchObject({ status: "approved", whitelistGrant: "granted" });
+    expect(admin.act).toHaveBeenCalledTimes(1);
+    expect(roles.applicationChanged).toHaveBeenCalledWith(applicant.userId);
+  });
+  it("falls back to the normal grant when the running whitelist cannot be read", async () => {
+    const { service, admin, game } = fixture({ live: [input.steamId] });
+    game.whitelist.mockRejectedValueOnce(new Error("offline"));
+    await service.review(staff, applicationId, "approve", { id: randomUUID(), reason: "Approve" });
+    expect(admin.act).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "whitelist-add" }));
+  });
+  it("never lets the confirmation approve a request automatically or reveal access to the applicant", async () => {
+    const { service, admin, store } = fixture({ live: [input.steamId] });
+    await expect(service.me(applicant)).resolves.toMatchObject({ application: { status: "pending" } });
+    const view = await service.me(applicant);
+    expect(view.application).not.toHaveProperty("whitelistGrant");
+    expect(view.application).not.toHaveProperty("whitelistState");
+    expect(store.claim).not.toHaveBeenCalled();
+    expect(admin.act).not.toHaveBeenCalled();
+  });
+  it("annotates unresolved requests with their live whitelist state and survives a failed read", async () => {
+    const { service, admin, store } = fixture({ live: [input.steamId] });
+    await expect(service.list(staff)).resolves.toMatchObject({ applications: [{ whitelistState: "active" }] });
+    admin.read.mockResolvedValueOnce({ entries: [{ steamId: input.steamId, active: false, configured: true }] });
+    await expect(service.list(staff)).resolves.toMatchObject({ applications: [{ whitelistState: "saved" }] });
+    admin.read.mockResolvedValueOnce({ entries: [] });
+    await expect(service.list(staff)).resolves.toMatchObject({ applications: [{ whitelistState: "absent" }] });
+    admin.read.mockRejectedValueOnce(new Error("offline"));
+    await expect(service.list(staff)).resolves.toMatchObject({ applications: [{ whitelistState: "unknown" }] });
+    admin.read.mockResolvedValueOnce({ unexpected: true });
+    await expect(service.list(staff)).resolves.toMatchObject({ applications: [{ whitelistState: "unknown" }] });
+    expect(admin.read).toHaveBeenCalledWith("whitelist", "primary");
+    store.list.mockResolvedValueOnce([record({ status: "approved" })]);
+    admin.read.mockClear();
+    await expect(service.list(staff)).resolves.toMatchObject({ applications: [{ whitelistState: null }] });
+    expect(admin.read).not.toHaveBeenCalled();
+  });
+});
+
+describe("revoking whitelist access", () => {
+  const approved = () => record({ status: "approved", actionId: randomUUID(), reviewId: randomUUID() });
+  it.each([
+    ["applied", "revoked"],
+    ["pending", "revoked"],
+    ["failed", "approved"],
+    ["unknown", "needs_review"],
+  ] as const)("records a %s removal as %s", async (state, status) => {
+    const { service, admin, store, roles } = fixture({
+      initial: approved(),
+      result: { state, message: `Game: ${state}` },
+    });
+    const request = { id: randomUUID(), reason: "Left the community" };
+    const result = await service.review(staff, applicationId, "revoke", request);
+    expect(result.application.status).toBe(status);
+    expect(store.claimRevoke.mock.invocationCallOrder[0]).toBeLessThan(admin.act.mock.invocationCallOrder[0]);
+    expect(admin.act).toHaveBeenCalledWith(
+      { ...staff, serverId: "primary" },
+      {
+        id: request.id,
+        serverId: "primary",
+        action: "whitelist-remove",
+        steamId: input.steamId,
+        confirm: input.steamId,
+        reason: `Website whitelist application ${applicationId} revoked.`,
+      },
+    );
+    if (state === "failed") {
+      expect(result.application.accessIntent).toBe("grant");
+      expect(result.outcome.message).toContain("The game refused the revocation; access unchanged.");
+    }
+    expect(JSON.stringify(admin.act.mock.calls)).not.toContain(request.reason);
+    expect(roles.applicationChanged).toHaveBeenCalledWith(applicant.userId);
+  });
+  it("keeps an uncertain revocation for review after a thrown game error, without retrying", async () => {
+    const { service, admin } = fixture({ initial: approved() });
+    admin.act.mockRejectedValueOnce(new Error("secret upstream detail"));
+    const result = await service.review(staff, applicationId, "revoke", { id: randomUUID(), reason: "Left" });
+    expect(result.application).toMatchObject({ status: "needs_review", accessIntent: "revoke" });
+    expect(JSON.stringify(result)).not.toContain("secret upstream detail");
+    expect(admin.act).toHaveBeenCalledTimes(1);
+  });
+  it.each(["pending", "declined", "processing"] as const)("does not revoke a %s application", async (status) => {
+    const { service, admin } = fixture({ initial: record({ status }) });
+    await expect(
+      service.review(staff, applicationId, "revoke", { id: randomUUID(), reason: "Revoke" }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(admin.act).not.toHaveBeenCalled();
+  });
+  it("rechecks an uncertain revocation by reading the running whitelist only", async () => {
+    const { service, admin, game, live } = fixture({
+      initial: record({ status: "needs_review", accessIntent: "revoke", reviewId: randomUUID() }),
+      live: [input.steamId],
+    });
+    const still = await service.review(staff, applicationId, "recheck", { id: randomUUID(), reason: "Check" });
+    expect(still.application.status).toBe("needs_review");
+    expect(still.outcome.message).toContain("Still active; revoke again or check the host panel");
+    live.clear();
+    const gone = await service.review(staff, applicationId, "recheck", { id: randomUUID(), reason: "Check" });
+    expect(gone.application.status).toBe("revoked");
+    expect(game.whitelist).toHaveBeenCalledTimes(2);
+    expect(admin.act).not.toHaveBeenCalled();
+  });
+  it("allows revoking again after an uncertain revocation", async () => {
+    const { service, admin } = fixture({
+      initial: record({ status: "needs_review", accessIntent: "revoke", reviewId: randomUUID() }),
+    });
+    const result = await service.review(staff, applicationId, "revoke", { id: randomUUID(), reason: "Retry" });
+    expect(result.application.status).toBe("revoked");
+    expect(admin.act).toHaveBeenCalledTimes(1);
+  });
+  it("revokes the matching approved application when staff remove its SteamID on the Whitelist page", async () => {
+    const { service, admin, store, roles } = fixture({ initial: approved() });
+    service.onModuleInit();
+    const removal: WhitelistRemoval = {
+      serverId: "primary",
+      steamId: input.steamId,
+      actionId: randomUUID(),
+      actorId: staff.id,
+      actorName: staff.name,
+      state: "applied",
+    };
+    admin.whitelistRemovals.next(removal);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(store.recordExternalRevoke).toHaveBeenCalledWith(removal);
+    expect(roles.applicationChanged).toHaveBeenCalledWith(applicant.userId);
+    // A storage failure is logged, never thrown back into the whitelist action.
+    store.recordExternalRevoke.mockRejectedValueOnce(new Error("Database unavailable"));
+    expect(() => admin.whitelistRemovals.next(removal)).not.toThrow();
+    await new Promise((resolve) => setImmediate(resolve));
+    service.onModuleDestroy();
+    admin.whitelistRemovals.next(removal);
+    expect(store.recordExternalRevoke).toHaveBeenCalledTimes(2);
+  });
+  it("shows a revocation in progress to the applicant as processing, and a finished one as revoked", () => {
+    expect(ownApplication(record({ status: "revoking" }))?.status).toBe("processing");
+    expect(ownApplication(record({ status: "revoked", whitelistGrant: "existing" }))).toMatchObject({
+      status: "revoked",
+    });
+    expect(ownApplication(record({ whitelistGrant: "existing" }))).not.toHaveProperty("whitelistGrant");
+    expect(ownApplication(record({ accessIntent: "revoke" }))).not.toHaveProperty("accessIntent");
   });
 });

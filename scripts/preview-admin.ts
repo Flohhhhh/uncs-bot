@@ -29,6 +29,8 @@ import { TelemetryStore } from "../src/telemetry/telemetry.store";
 import type { CombatStats } from "../src/telemetry/telemetry.types";
 import { SupportersModule } from "../src/supporters/supporters.module";
 import { SupportersStore } from "../src/supporters/supporters.store";
+import { DiscordRolesDiscord } from "../src/discord-roles/discord-roles.discord";
+import { DiscordRolesStore } from "../src/discord-roles/discord-roles.store";
 import { MapVotesModule } from "../src/map-votes/map-votes.module";
 import { MapVotesStore } from "../src/map-votes/map-votes.store";
 import { MapVotesDiscord } from "../src/map-votes/map-votes.discord";
@@ -465,6 +467,9 @@ const applicationStore = {
       reviewKind: null,
       lastActionState: null,
       lastActionMessage: null,
+      accessIntent: "grant",
+      whitelistGrant: null,
+      revokedAt: null,
       ...input,
     } as WhitelistApplication;
     applications.set(entry.id, entry);
@@ -489,8 +494,10 @@ const applicationStore = {
       entry.reviewId !== previous.reviewId
     )
       throw new ConflictException("Preview application changed during the check");
+    const revoke = entry.accessIntent === "revoke";
     Object.assign(entry, {
-      status: result.state === "applied" ? "approved" : "needs_review",
+      status: result.state === "applied" ? (revoke ? "revoked" : "approved") : "needs_review",
+      ...(revoke && result.state === "applied" ? { revokedAt: new Date() } : {}),
       reviewedAt: new Date(),
       reviewedBy: staff.id,
       reviewReason: review.reason,
@@ -520,17 +527,75 @@ const applicationStore = {
     });
     return { claimed: true, application: entry };
   },
-  async finishApproval(id: string, actionId: string, result: ActionResult) {
+  async finishApproval(
+    id: string,
+    actionId: string,
+    result: ActionResult,
+    grant: "granted" | "existing" | null = null,
+  ) {
     const entry = applications.get(id);
     if (!entry || entry.status !== "processing" || entry.reviewId !== actionId)
       throw new Error("Preview application changed");
     Object.assign(entry, {
       status: result.state === "applied" ? "approved" : "needs_review",
+      ...(result.state === "applied" && grant ? { whitelistGrant: grant } : {}),
       lastActionState: result.state,
       lastActionMessage: result.message,
       updatedAt: new Date(),
     });
     return entry;
+  },
+  async claimRevoke(id: string, review: ApplicationReview, staff: Staff) {
+    const entry = applications.get(id);
+    if (!entry || entry.serverId !== staff.serverId) return { claimed: false, application: undefined };
+    if (!(entry.status === "approved" || (entry.status === "needs_review" && entry.accessIntent === "revoke")))
+      return { claimed: false, application: entry };
+    Object.assign(entry, {
+      status: "revoking",
+      accessIntent: "revoke",
+      reviewedAt: new Date(),
+      reviewedBy: staff.id,
+      reviewReason: review.reason,
+      reviewId: review.id,
+      reviewKind: "revoke",
+      lastActionState: "started",
+      lastActionMessage: "Revocation started.",
+      updatedAt: new Date(),
+    });
+    return { claimed: true, application: entry };
+  },
+  async finishRevoke(id: string, actionId: string, result: ActionResult) {
+    const entry = applications.get(id);
+    if (!entry || entry.status !== "revoking" || entry.reviewId !== actionId)
+      throw new Error("Preview application changed");
+    const removed = result.state === "applied" || result.state === "pending";
+    Object.assign(entry, {
+      status: removed ? "revoked" : result.state === "failed" ? "approved" : "needs_review",
+      ...(removed ? { revokedAt: new Date() } : {}),
+      ...(result.state === "failed" ? { accessIntent: "grant" } : {}),
+      lastActionState: result.state,
+      lastActionMessage: result.message,
+      updatedAt: new Date(),
+    });
+    return entry;
+  },
+  async recordExternalRevoke(removal: { serverId: string; steamId: string; actorId: string; state: string }) {
+    const revoked = [...applications.values()].filter(
+      (entry) =>
+        entry.serverId === removal.serverId && entry.steamId === removal.steamId && entry.status === "approved",
+    );
+    for (const entry of revoked)
+      Object.assign(entry, {
+        status: "revoked",
+        accessIntent: "revoke",
+        revokedAt: new Date(),
+        reviewedBy: removal.actorId,
+        reviewKind: "revoke",
+        lastActionState: removal.state,
+        lastActionMessage: "Removed on the Whitelist page.",
+        updatedAt: new Date(),
+      });
+    return revoked;
   },
 };
 const applicantAuth = {
@@ -1209,6 +1274,15 @@ async function main() {
     .useValue(voteStore)
     .overrideProvider(ServerEventsStore)
     .useValue(eventStore)
+    // No Discord client or database: the roles page reports Discord as not connected.
+    .overrideProvider(DiscordRolesDiscord)
+    .useValue({ ready: () => false })
+    .overrideProvider(DiscordRolesStore)
+    .useValue({
+      summary: async () => ({ memberEligible: 0, founders: 1, foundersWithoutDiscord: 0 }),
+      foundersWithoutDiscord: async () => [],
+      recent: async () => [],
+    })
     .overrideProvider(MapVotesDiscord)
     .useValue({
       check: async () => ({ name: "simulated-voting" }),

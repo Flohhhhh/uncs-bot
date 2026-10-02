@@ -1,6 +1,7 @@
 import { type MiddlewareConsumer, Module, type NestModule } from "@nestjs/common";
 import type { NextFunction, Request, Response } from "express";
 import { AdminModule } from "../admin/admin.module";
+import { DiscordRolesModule } from "../discord-roles/discord-roles.module";
 import { ApplicantAuth } from "./applicant.auth";
 import {
   ApplicantApiController,
@@ -14,7 +15,7 @@ import { ApplicationsService } from "./applications.service";
 import { ApplicationsStore } from "./applications.store";
 
 @Module({
-  imports: [AdminModule],
+  imports: [AdminModule, DiscordRolesModule],
   providers: [
     ApplicantAuth,
     ApplicantGuard,

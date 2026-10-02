@@ -10,6 +10,8 @@ import { WardogsClient } from "../admin/wardogs.client";
 import { hash } from "../admin/admin.auth";
 import { SupportersModule } from "./supporters.module";
 import { SupportersStore } from "./supporters.store";
+import { DiscordRolesDiscord } from "../discord-roles/discord-roles.discord";
+import { DiscordRolesStore } from "../discord-roles/discord-roles.store";
 
 const secret = "separate-patreon-webhook-secret";
 const values: Record<string, unknown> = {
@@ -64,6 +66,10 @@ describe("private supporters HTTP boundary", () => {
       .useValue(adminStore)
       .overrideProvider(WardogsClient)
       .useValue(game)
+      .overrideProvider(DiscordRolesStore)
+      .useValue({})
+      .overrideProvider(DiscordRolesDiscord)
+      .useValue({ ready: () => false })
       .compile();
     app = module.createNestApplication({ rawBody: true });
     await app.init();

@@ -1,6 +1,7 @@
 import { createHmac, randomUUID } from "node:crypto";
 import type { Staff } from "../admin/admin.types";
 import type { EnvService } from "../env/env.service";
+import type { DiscordRolesService } from "../discord-roles/discord-roles.service";
 import { SupportersService } from "./supporters.service";
 import type { SupportersStore } from "./supporters.store";
 import { founderBlocker, linkSchema, parsePatreon, type FounderPolicy } from "./supporters.types";
@@ -51,12 +52,15 @@ function fixture(overrides: Record<string, unknown> = {}) {
     register: jest.fn().mockResolvedValue({ ok: true }),
     recordPaypal: jest.fn().mockResolvedValue({ ok: true }),
   };
+  const roles = { supporterChanged: jest.fn() };
   return {
     store,
     values,
+    roles,
     service: new SupportersService(
       store as unknown as SupportersStore,
       { get: (key: string) => values[key] } as EnvService,
+      roles as unknown as DiscordRolesService,
     ),
   };
 }
@@ -433,5 +437,49 @@ describe("PayPal supporter records", () => {
     const { service, store } = fixture();
     store.recordPaypal.mockRejectedValueOnce({ message: "duplicate", cause: { code: "23505" } });
     await expect(service.paypal(admin, body)).rejects.toMatchObject({ status: 409 });
+  });
+});
+describe("Founder role notifications", () => {
+  const supporter = { discordId: "123456789012345678" };
+  const review = { id: randomUUID(), version: 1, confirm: "member-123", reason: "Checked" };
+  const founder = { ...review, paymentId: randomUUID() };
+  it("asks for a role check after a founder award, a Discord link or a new PayPal record, never on a replay", async () => {
+    const { service, store, roles } = fixture({
+      PATREON_FOUNDER_START_AT: "2026-09-30T00:00:00-04:00",
+      PATREON_FOUNDER_END_AT: "2026-10-15T00:00:00-04:00",
+    });
+    store.mutate.mockResolvedValue({ ok: true, replayed: false, supporter });
+    await service.mutate(admin, randomUUID(), "founder", founder);
+    await service.mutate(admin, randomUUID(), "link", { ...review, discordId: supporter.discordId });
+    await service.mutate(admin, randomUUID(), "review", review);
+    expect(roles.supporterChanged.mock.calls).toEqual([[supporter.discordId], [supporter.discordId]]);
+    store.mutate.mockResolvedValue({ ok: true, replayed: true, supporter });
+    await service.mutate(admin, randomUUID(), "founder", founder);
+    expect(roles.supporterChanged).toHaveBeenCalledTimes(2);
+    store.recordPaypal.mockResolvedValue({ ok: true, replayed: false, supporter });
+    await service.paypal(admin, {
+      id: randomUUID(),
+      displayName: "PayPal donor",
+      discordId: supporter.discordId,
+      paidAt: "2026-10-01T12:00:00-04:00",
+      amountCents: 500,
+      currency: "USD",
+      transactionId: "8AB12345CD678901E",
+      completedPaymentVerified: true,
+      firstSuccessfulPaymentVerified: true,
+      reason: "Checked the completed PayPal payment",
+    });
+    expect(roles.supporterChanged).toHaveBeenCalledTimes(3);
+  });
+  it("never fails a supporter request because the role service throws", async () => {
+    const { service, store, roles } = fixture({
+      PATREON_FOUNDER_START_AT: "2026-09-30T00:00:00-04:00",
+      PATREON_FOUNDER_END_AT: "2026-10-15T00:00:00-04:00",
+    });
+    store.mutate.mockResolvedValue({ ok: true, replayed: false, supporter });
+    roles.supporterChanged.mockImplementation(() => {
+      throw new Error("Role service unavailable");
+    });
+    await expect(service.mutate(admin, randomUUID(), "founder", founder)).resolves.toMatchObject({ ok: true });
   });
 });

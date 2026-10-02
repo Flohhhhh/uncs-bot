@@ -1,6 +1,7 @@
 import { ForbiddenException, UnauthorizedException, type INestApplication } from "@nestjs/common";
 import { Test } from "@nestjs/testing";
 import request from "supertest";
+import { Subject } from "rxjs";
 import { AdminApiController, AdminGameController, AdminExceptionFilter } from "../admin/admin.controller";
 import { AdminAuth, AdminGuard, AdminServerGuard } from "../admin/admin.auth";
 import { AdminService } from "../admin/admin.service";
@@ -19,6 +20,7 @@ import {
 } from "./applications.controller";
 import { ApplicationsService } from "./applications.service";
 import { ApplicationsStore } from "./applications.store";
+import { DiscordRolesService } from "../discord-roles/discord-roles.service";
 
 describe("application HTTP routing and privacy", () => {
   let app: INestApplication;
@@ -40,8 +42,13 @@ describe("application HTTP routing and privacy", () => {
     create: jest.fn(),
     claim: jest.fn(),
     finishApproval: jest.fn(),
+    claimRevoke: jest.fn(async () => ({ claimed: false, application: undefined })),
   };
-  const admin = { read: jest.fn(async (resource: string) => ({ resource })), act: jest.fn() };
+  const admin = {
+    read: jest.fn(async (resource: string) => ({ resource })),
+    act: jest.fn(),
+    whitelistRemovals: new Subject(),
+  };
   const applicantAuth = { authenticate: async () => identity, login: jest.fn(), callback: jest.fn() };
 
   beforeAll(async () => {
@@ -70,6 +77,7 @@ describe("application HTTP routing and privacy", () => {
           useValue: { get: (key: string) => (key === "WHITELIST_APPLICATIONS_ENABLED" ? enabled : true) },
         },
         { provide: GameServers, useValue: fixtureServers({}) },
+        { provide: DiscordRolesService, useValue: { applicationChanged: jest.fn() } },
         {
           provide: AdminAuth,
           useValue: {
@@ -139,9 +147,33 @@ describe("application HTTP routing and privacy", () => {
 
   it("routes the administrator applications list separately from existing resources", async () => {
     const response = await request(app.getHttpServer()).get("/admin/api/applications").expect(200);
-    expect(response.body).toEqual({ serverId: "primary", applications: [privateRow] });
-    expect(admin.read).not.toHaveBeenCalled();
+    // The unreadable test whitelist leaves the live state unknown instead of failing the list.
+    expect(response.body).toEqual({
+      serverId: "primary",
+      applications: [{ ...privateRow, whitelistState: "unknown" }],
+    });
+    expect(admin.read).toHaveBeenCalledWith("whitelist", "primary");
+    expect(admin.read).not.toHaveBeenCalledWith("applications", expect.anything());
     expect(store.list).toHaveBeenCalledTimes(1);
+  });
+  it("routes revocation to the staff application review without contacting the game for an unknown record", async () => {
+    const id = "d96766a5-7bda-4920-9623-8b26908e5116";
+    const response = await request(app.getHttpServer())
+      .post(`/admin/api/servers/primary/applications/${id}/revoke`)
+      .send({ id: "5d6f6b8e-6f8a-4f43-9a37-3a4f0d2f2b10", reason: "Left the community" })
+      .expect(404);
+    expect(response.body.message).toBe("Application not found on this server.");
+    expect(store.claimRevoke).toHaveBeenCalledWith(
+      id,
+      expect.objectContaining({ reason: "Left the community" }),
+      expect.objectContaining({ serverId: "primary" }),
+    );
+    expect(admin.act).not.toHaveBeenCalled();
+    staff.role = "moderator";
+    await request(app.getHttpServer())
+      .post(`/admin/api/applications/${id}/revoke`)
+      .send({ id: "5d6f6b8e-6f8a-4f43-9a37-3a4f0d2f2b11", reason: "Left the community" })
+      .expect(403);
   });
   it.each(["overview", "bans", "whitelist", "catalog", "rotation", "audit"])(
     "preserves the explicit existing %s route",

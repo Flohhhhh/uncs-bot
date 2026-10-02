@@ -1,6 +1,7 @@
 import { type MiddlewareConsumer, Module, type NestModule } from "@nestjs/common";
 import type { NextFunction, Request, Response } from "express";
 import { AdminModule } from "../admin/admin.module";
+import { DiscordRolesModule } from "../discord-roles/discord-roles.module";
 import {
   PatreonWebhookController,
   SupportersAdminController,
@@ -10,7 +11,7 @@ import { SupportersService } from "./supporters.service";
 import { SupportersStore } from "./supporters.store";
 
 @Module({
-  imports: [AdminModule],
+  imports: [AdminModule, DiscordRolesModule],
   providers: [SupportersService, SupportersStore, SupportersExceptionFilter],
   controllers: [PatreonWebhookController, SupportersAdminController],
   exports: [SupportersService, SupportersStore],

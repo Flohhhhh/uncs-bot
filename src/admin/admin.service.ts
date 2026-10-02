@@ -7,6 +7,7 @@ import {
   ServiceUnavailableException,
 } from "@nestjs/common";
 import { createHash } from "node:crypto";
+import { Subject } from "rxjs";
 import { z } from "zod";
 import { AdminStore } from "./admin.store";
 import { actionSchema, canAct, type ActionResult, type Staff } from "./admin.types";
@@ -14,10 +15,22 @@ import { RconError } from "./wardogs.client";
 import { GameServers } from "./game-servers";
 import { auditAction } from "./server-configuration";
 
+/** A whitelist removal the game applied or saved, from any staff tool. */
+export type WhitelistRemoval = {
+  serverId: string;
+  steamId: string;
+  actionId: string;
+  actorId: string;
+  actorName: string;
+  state: "applied" | "pending";
+};
+
 @Injectable()
 export class AdminService {
   private readonly reads = new Map<string, { until: number; promise: Promise<unknown> }>();
   private readonly lastActions = new Map<string, number>();
+  /** Emitted after the audit receipt of a successful whitelist removal is saved. */
+  readonly whitelistRemovals = new Subject<WhitelistRemoval>();
   constructor(
     private readonly servers: GameServers,
     private readonly store: AdminStore,
@@ -152,6 +165,15 @@ export class AdminService {
           "The game request finished, but its final audit record could not be saved. Check the game and this action ID before repeating it.",
       };
     }
+    if (action.action === "whitelist-remove" && (result.state === "applied" || result.state === "pending"))
+      this.whitelistRemovals.next({
+        serverId,
+        steamId: action.steamId,
+        actionId: action.id,
+        actorId: staff.id,
+        actorName: staff.name,
+        state: result.state,
+      });
     return { id: action.id, ...result };
   }
 

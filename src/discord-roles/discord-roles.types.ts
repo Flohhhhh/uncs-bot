@@ -1,0 +1,183 @@
+import { z } from "zod";
+import type {
+  DiscordRoleActionState,
+  DiscordRoleKind,
+  DiscordRoleOperation,
+  DiscordRoleTrigger,
+} from "../database/discord-roles.schema";
+
+export const ROLES_ACTOR_ID = "system:discord-roles";
+export const ROLES_ACTOR_NAME = "Gramps Discord roles";
+export const ROLE_KINDS = ["member", "founder"] as const satisfies readonly DiscordRoleKind[];
+/** Audit-log reasons shown in Discord. They name the rule, never private data. */
+export const ROLE_REASONS = {
+  member: { add: "Gramps: UNC member application approved", remove: "Gramps: UNC application revoked" },
+  founder: { add: "Gramps: founding supporter" },
+} as const;
+
+export type { DiscordRoleKind, DiscordRoleTrigger };
+/** The newest ledger row for a person and role that is applied, unknown or still started. */
+export type LedgerEntry = {
+  id: string;
+  operation: DiscordRoleOperation;
+  state: DiscordRoleActionState;
+  changed: boolean;
+  createdAt: Date;
+};
+export type RoleFacts = {
+  kind: DiscordRoleKind;
+  /** The application or supporter record that makes the role desired, or null. */
+  desiredBasis: string | null;
+  /** A revoked UNC application with no approved one remaining (member role only), or null. */
+  revokedBasis: string | null;
+  hasRole: boolean;
+  /** When the person joined the server this time; null when Discord does not report it. */
+  joinedAt: Date | null;
+  lastEffective: LedgerEntry | null;
+};
+export type RoleDecision =
+  | { op: "add"; basisId: string; why: "desired" | "retry-unknown-add" }
+  | { op: "remove"; basisId: string; why: "application-revoked" }
+  | { op: "note"; basisId: string; why: "already-present" }
+  | { op: "confirm"; entryId: string; why: "unknown-add-present" }
+  | {
+      op: "none";
+      why: "already-recorded" | "removed-in-discord" | "not-ours" | "not-present" | "no-basis" | "founder-kept";
+    };
+
+const uncertain = (entry: LedgerEntry) => entry.state === "unknown" || entry.state === "started";
+
+/**
+ * Decides one role for one member. Manual Discord changes win: a role that was already present is only
+ * noted, a role staff removed is not re-added during the same membership, and only a role Gramps added
+ * during the current membership can be removed, and only the UNC role after its application is revoked.
+ */
+export function decide(facts: RoleFacts): RoleDecision {
+  // Ledger history from an earlier membership no longer applies after the person left and rejoined.
+  const current =
+    facts.lastEffective && (!facts.joinedAt || facts.lastEffective.createdAt.getTime() >= facts.joinedAt.getTime())
+      ? facts.lastEffective
+      : null;
+  if (facts.desiredBasis) {
+    if (facts.hasRole) {
+      if (current?.operation === "add" && uncertain(current))
+        return { op: "confirm", entryId: current.id, why: "unknown-add-present" };
+      if (current && current.operation !== "remove") return { op: "none", why: "already-recorded" };
+      return { op: "note", basisId: facts.desiredBasis, why: "already-present" };
+    }
+    if (current && current.operation !== "remove" && !(current.operation === "add" && uncertain(current)))
+      return { op: "none", why: "removed-in-discord" };
+    return {
+      op: "add",
+      basisId: facts.desiredBasis,
+      why: current?.operation === "add" ? "retry-unknown-add" : "desired",
+    };
+  }
+  if (facts.kind === "founder") return { op: "none", why: "founder-kept" };
+  if (!facts.revokedBasis) return { op: "none", why: "no-basis" };
+  if (!facts.hasRole) return { op: "none", why: "not-present" };
+  if (current?.operation === "add" && (current.changed || uncertain(current)))
+    return { op: "remove", basisId: facts.revokedBasis, why: "application-revoked" };
+  return { op: "none", why: "not-ours" };
+}
+
+export type DiscordFailure = "permission" | "unknown-role" | "left" | "rejected" | "transient";
+/**
+ * 50013/50001 and other 403s mean the bot cannot manage the role; 10011 means the role no longer exists;
+ * 10007/10013 mean the member is gone. Other 4xx responses are refusals. Anything else (5xx after
+ * discord.js retries, timeouts, network errors) leaves the result unknown.
+ */
+export function classifyDiscordError(error: unknown): DiscordFailure {
+  const value = (error && typeof error === "object" ? error : {}) as { code?: unknown; status?: unknown };
+  const status = typeof value.status === "number" ? value.status : null;
+  if (value.code === 50013 || value.code === 50001 || status === 403) return "permission";
+  if (value.code === 10011) return "unknown-role";
+  if (value.code === 10007 || value.code === 10013) return "left";
+  if (status !== null && status >= 400 && status < 500 && status !== 408 && status !== 429) return "rejected";
+  return "transient";
+}
+/** Per-user backoff after an unknown result: 1 minute, 5 minutes, 30 minutes, 2 hours, then 6 hours. */
+export const BACKOFF_MS = [60_000, 300_000, 1_800_000, 7_200_000, 21_600_000] as const;
+export const WRITE_SPACING_MS = 1_100;
+export const MAX_WRITES_PER_PASS = 50;
+export const FOLLOW_UP_MS = 60_000;
+export const EVENT_DEBOUNCE_MS = 2_000;
+export const READY_POLL_MS = 5_000;
+export const SAFETY_PASS_MS = 6 * 3_600_000;
+export const ADMIN_COOLDOWN_MS = 30_000;
+export const MAX_PLAN_ENTRIES = 100;
+
+const line = z
+  .string()
+  .trim()
+  .min(3)
+  .max(200)
+  .refine(
+    (value) => [...value].every((character) => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127),
+    "Use a single-line reason.",
+  );
+export const reconcileSchema = z
+  .object({
+    id: z.uuid(),
+    reason: line,
+    discordUserId: z
+      .string()
+      .regex(/^\d{17,20}$/)
+      .optional(),
+    dryRun: z.boolean().optional(),
+  })
+  .strict();
+export type ReconcileInput = z.infer<typeof reconcileSchema>;
+
+export type RoleCheckView = {
+  id: string | null;
+  name: string | null;
+  exists: boolean;
+  position: number | null;
+  managed: boolean;
+  privileged: boolean;
+  staffRole: boolean;
+  assignable: boolean;
+  /** A plain-English fix, or null when the role can be assigned. */
+  problem: string | null;
+  /** Roles named exactly "UNC" or "Founder", listed only while the role ID is not configured. */
+  candidates?: { id: string; name: string }[];
+};
+export type RolesCheck = {
+  manageRoles: boolean;
+  highestRolePosition: number;
+  roles: Record<DiscordRoleKind, RoleCheckView>;
+};
+export type AttentionItem = {
+  kind: "founder_without_discord" | "not_in_server" | "removed_in_discord" | "failed";
+  discordUserId?: string;
+  supporterId?: string;
+  displayName?: string | null;
+  provider?: string;
+  roleKind?: DiscordRoleKind;
+  basisId?: string;
+  at?: string;
+};
+export type PlanEntry = { discordUserId: string; roleKind: DiscordRoleKind | null; op: string; why: string };
+export type PassSummary = {
+  trigger: DiscordRoleTrigger;
+  requestedBy: string | null;
+  /** The staff reason for an admin-triggered pass. Kept with the in-memory result only. */
+  reason?: string;
+  dryRun: boolean;
+  startedAt: string;
+  finishedAt: string;
+  users: number;
+  added: number;
+  removed: number;
+  noted: number;
+  confirmed: number;
+  failed: number;
+  /** Role kinds that could not be processed because a setup check or Discord refused them. */
+  blocked: number;
+  /** People left for a follow-up pass because this pass reached its write budget. */
+  deferred: number;
+  error: string | null;
+  attention: AttentionItem[];
+  plan?: PlanEntry[];
+};

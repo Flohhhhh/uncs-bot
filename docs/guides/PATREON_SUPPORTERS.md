@@ -1,6 +1,6 @@
 # Supporter records (Patreon and PayPal)
 
-This feature keeps a private supporter ledger in the UNC dashboard. It records signed Patreon membership observations, checked Patreon receipts, staff-checked PayPal payments, staff identity links, and permanent founder promises. It sends no RCON commands and grants no Discord roles. Existing legacy and seeding access are separate and are never changed by this integration.
+This feature keeps a private supporter ledger in the UNC dashboard. It records signed Patreon membership observations, checked Patreon receipts, staff-checked PayPal payments, staff identity links, and permanent founder promises. It sends no RCON commands. When [automatic Discord roles](DISCORD_ROLES.md) are switched on, founders with a linked Discord account receive the Founder role. Existing legacy and seeding access are separate and are never changed by this integration.
 
 ## Why the Supporters page can show 0 records
 
