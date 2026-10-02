@@ -13,6 +13,7 @@ import { FactionChip, liveFactions, playerFaction } from "../players/factions";
 import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 import { PlayerButton, PlayerSheet, type SheetPlayer } from "../players/player-actions";
 import { EmptyRoster } from "../players/empty-roster";
+import { PlayerPicker } from "../players/player-picker";
 import { nextRoundSummary } from "./next-round";
 import { ActivityLine, When, useActivityEntries } from "./activity-entries";
 import { CommunityMessages } from "./community-messages";
@@ -269,24 +270,40 @@ export function OverviewPage() {
     </>
   );
 }
+/** One status per entry that still tells the running game apart from the saved configuration. */
+function whitelistStatus(entry: Whitelist["entries"][number]): { label: string; kind: string; note?: string } {
+  if (entry.active && entry.configured) return { label: "Active", kind: "good" };
+  if (entry.active && entry.configured === null)
+    return { label: "Active", kind: "good", note: "Saved configuration unavailable" };
+  if (entry.active)
+    return { label: "Removal pending", kind: "warn", note: "In the running game, not in the saved list" };
+  if (entry.configured) return { label: "Addition pending", kind: "warn", note: "Saved, not in the running game yet" };
+  return { label: "Not active", kind: "warn", note: "Not in the running game" };
+}
 export function WhitelistPage() {
+  const { overview } = useAdmin();
   const { data, error } = useResource<Whitelist>("whitelist");
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("");
+  const [managed, setManaged] = useState<SheetPlayer | null>(null);
   if (!data)
     return <Empty title={error ? "Whitelist could not be loaded" : "Loading whitelist…"} detail={error || ""} />;
+  // Names only for players in the latest roster; offline entries stay SteamIDs.
+  const online = new Map((overview?.players ?? []).map((player) => [player.steamId, player]));
+  const search = query.trim().toLowerCase();
   const invalidIds = [
     data.invalidEntryCount > 0 ? `${data.invalidEntryCount} in the running game` : "",
     (data.configuredInvalidEntryCount ?? 0) > 0 ? `${data.configuredInvalidEntryCount} in saved configuration` : "",
   ].filter(Boolean);
   const rows = data.entries.filter(
     (entry) =>
-      entry.steamId.includes(query.trim()) &&
+      [entry.steamId, online.get(entry.steamId)?.name].some((value) => value?.toLowerCase().includes(search)) &&
       (!filter ||
         (filter === "active" && entry.active) ||
         (filter === "pending" && entry.configured !== null && entry.configured !== entry.active) ||
         (filter === "unknown" && entry.configured === null)),
   );
+  const active = data.entries.filter((entry) => entry.active).length;
   return (
     <>
       {error && (
@@ -305,7 +322,7 @@ export function WhitelistPage() {
           The running whitelist is available, but the saved configuration could not be checked.
         </div>
       )}
-      <Search value={query} onChange={setQuery} placeholder="Search SteamID64">
+      <Search value={query} onChange={setQuery} placeholder="Search name or SteamID64">
         <select aria-label="Whitelist status" value={filter} onChange={(event) => setFilter(event.target.value)}>
           <option value="">All entries</option>
           <option value="active">Active in game</option>
@@ -329,7 +346,7 @@ export function WhitelistPage() {
         </ActionButton>
       </Search>
       <Card
-        title={`${data.entries.filter((entry) => entry.active).length} active entries`}
+        title={`${active} active ${active === 1 ? "entry" : "entries"}`}
         subtitle={`${rows.length} shown of ${data.entries.length} entries`}
         badge={<Badge>SERVER WHITELIST</Badge>}
       >
@@ -338,57 +355,55 @@ export function WhitelistPage() {
             label="Community whitelist"
             rows={rows}
             columns={[
-              { label: "SteamID64", value: (entry) => entry.steamId },
-              { label: "Running game", value: (entry) => entry.active },
-              { label: "Saved configuration", value: (entry) => entry.configured },
+              { label: "Player", value: (entry) => online.get(entry.steamId)?.name ?? entry.steamId },
+              { label: "Status", value: (entry) => whitelistStatus(entry).label },
               { label: "Actions" },
             ]}
-            renderRow={(entry) => (
-              <tr key={entry.steamId}>
-                <td>
-                  <strong>
-                    <CopyValue value={entry.steamId} />
-                  </strong>
-                </td>
-                <td>
-                  <Badge kind={entry.active ? "good" : "warn"}>{entry.active ? "Active" : "Not active"}</Badge>
-                </td>
-                <td>
-                  <Badge kind={entry.configured === entry.active ? "neutral" : "warn"}>
-                    {entry.configured === null
-                      ? "Unavailable"
-                      : entry.configured
-                        ? entry.active
-                          ? "Saved"
-                          : "Addition pending"
-                        : entry.active
-                          ? "Removal pending"
-                          : "Removed"}
-                  </Badge>
-                </td>
-                <td>
-                  <ActionButton
-                    action="whitelist-remove"
-                    steamId={entry.steamId}
-                    kind="danger small"
-                    disabled={!!error}
-                  >
-                    Remove
-                  </ActionButton>
-                </td>
-              </tr>
-            )}
+            renderRow={(entry) => {
+              const player = online.get(entry.steamId);
+              const status = whitelistStatus(entry);
+              return (
+                <tr key={entry.steamId}>
+                  <td>
+                    {player ? (
+                      <>
+                        <PlayerButton player={player} onOpen={setManaged} />
+                        <small>
+                          <CopyValue value={entry.steamId} />
+                        </small>
+                      </>
+                    ) : (
+                      <strong>
+                        <CopyValue value={entry.steamId} />
+                      </strong>
+                    )}
+                  </td>
+                  <td>
+                    <Badge kind={status.kind}>{status.label}</Badge>
+                    {status.note && <span className="whitelist-note">{status.note}</span>}
+                  </td>
+                  <td>
+                    <ActionButton action="whitelist-remove" steamId={entry.steamId} disabled={!!error}>
+                      Remove
+                    </ActionButton>
+                  </td>
+                </tr>
+              );
+            }}
           />
         ) : (
           <Empty title={query.trim() || filter ? "No matching entries" : "No player entries available"} />
         )}
       </Card>
+      {managed && <PlayerSheet player={managed} onClose={() => setManaged(null)} />}
     </>
   );
 }
 export function BansPage() {
+  const { me, overview, stale, busy, openAction } = useAdmin();
   const { data, error } = useResource<Ban[]>("bans");
   const [query, setQuery] = useState("");
+  const [picking, setPicking] = useState(false);
   if (!data) return <Empty title={error ? "Bans could not be loaded" : "Loading bans…"} detail={error} />;
   const invalidCount = data.filter((ban) => !isPublicIndividualSteamId(ban.steamId)).length;
   const rows = data.filter((ban) =>
@@ -408,12 +423,18 @@ export function BansPage() {
         </div>
       )}
       <Search value={query} onChange={setQuery} placeholder="Search SteamID or reason">
-        <ActionButton action="ban" kind="danger" disabled={!!error}>
+        <button
+          type="button"
+          className="button danger"
+          aria-haspopup="dialog"
+          disabled={!!error || !allowed("ban", me, overview, stale, busy)}
+          onClick={() => setPicking(true)}
+        >
           + Ban player
-        </ActionButton>
+        </button>
       </Search>
       <Card
-        title={`${data.length} server bans`}
+        title={`${data.length} server ${data.length === 1 ? "ban" : "bans"}`}
         subtitle={`${rows.length} shown`}
         badge={<Badge>PERMANENT UNTIL REMOVED</Badge>}
       >
@@ -439,7 +460,7 @@ export function BansPage() {
                   <strong>
                     <CopyValue value={ban.steamId} />
                   </strong>
-                  {!isPublicIndividualSteamId(ban.steamId) && <Badge kind="warning">Invalid SteamID</Badge>}
+                  {!isPublicIndividualSteamId(ban.steamId) && <Badge kind="warn">Invalid SteamID</Badge>}
                 </td>
                 <td>
                   {ban.bannedAtUtc && !ban.bannedAtUtc.startsWith("0001") ? date(ban.bannedAtUtc) : "Date not provided"}
@@ -462,6 +483,16 @@ export function BansPage() {
           <Empty title={query.trim() ? "No matching bans" : "No server bans recorded"} />
         )}
       </Card>
+      {picking && (
+        <PlayerPicker
+          title="Ban player"
+          onClose={() => setPicking(false)}
+          onPick={(steamId) => {
+            setPicking(false);
+            openAction("ban", steamId);
+          }}
+        />
+      )}
     </>
   );
 }
