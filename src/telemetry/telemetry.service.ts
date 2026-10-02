@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, ServiceUnavailableException, Unauthori
 import { createHash, timingSafeEqual } from "node:crypto";
 import { EnvService } from "../env/env.service";
 import { GameServers } from "../admin/game-servers";
+import { publicGameServer } from "../common/game-server";
 import { TelemetryStore } from "./telemetry.store";
 import {
   emptyTotals,
@@ -26,7 +27,7 @@ export class TelemetryService {
     private readonly servers: GameServers,
   ) {}
   serversList() {
-    return this.servers.list().map(({ id, name }) => ({ id, name }));
+    return this.servers.list().map(publicGameServer);
   }
 
   private configured(serverId: string) {

@@ -42,7 +42,14 @@ describe("telemetry authorization and reporting", () => {
     const values: Record<string, unknown> = {
       WARDOGS_FEED_ENABLED: true,
       WARDOGS_SERVERS: [
-        { id: "east", name: "East", rconUrl: "https://east.example.test", password: "east-rcon", feedToken: token },
+        {
+          id: "east",
+          name: "East",
+          rconUrl: "https://east.example.test",
+          password: "east-rcon",
+          feedToken: token,
+          joinId: "11111111-1111-4111-8111-111111111111",
+        },
         {
           id: "event",
           name: "Events",
@@ -58,6 +65,10 @@ describe("telemetry authorization and reporting", () => {
       env,
       new GameServers(new AdminSettings(env)),
     );
+    expect(service.serversList()).toEqual([
+      { id: "east", name: "East", joinId: "11111111-1111-4111-8111-111111111111" },
+      { id: "event", name: "Events" },
+    ]);
     await expect(service.ingest(`Bearer ${token}`, f.payload)).rejects.toMatchObject({ status: 400 });
     await expect(service.ingest(`Bearer ${token}`, f.payload, "event")).rejects.toMatchObject({ status: 401 });
     expect(f.store.ingest).not.toHaveBeenCalled();

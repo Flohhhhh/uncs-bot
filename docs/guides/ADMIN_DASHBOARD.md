@@ -76,6 +76,8 @@ The current game selector targets the selected server's clients, reads, actions,
 
 For another server, add its permanent ID, display name and separate RCON connection to `WARDOGS_SERVERS` in the deployment secret store, following `.env.example`. Preserve the existing server as `primary`; do not recycle an ID for a different server. Give each feed a distinct feed-only token and each Discord status card a distinct destination. Optional `staffRoles` may narrow community staff access but cannot elevate it; configured owners retain owner access. Present-but-empty role lists deny non-owners. Whitelist grants remain separate per server.
 
+Each registry entry may also set `joinId` to that server's public WARDOGS **Join by ID** code. For the legacy single-server configuration, use `WARDOGS_SERVER_JOIN_ID` instead. Verify the code against **Server settings → Identity** before publishing it; never put an RCON password or endpoint in this field. Applicant profiles and public server discovery expose only the server ID, name and optional join code, without reading the game. Missing secondary-server codes stay unavailable instead of using the primary code. These optional metadata fields need no database migration and do not change action connection versions. The website joining card requires the corresponding website release.
+
 Use one Gramps replica initially. Read caches and courtesy action limits are per process, while sessions, action deduplication and stored voting/event operations use the database. The community-message worker has no cross-process leader election; multiple replicas or overlapping third-party schedulers can duplicate messages.
 
 ## Live whitelist behavior
