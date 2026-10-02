@@ -48,3 +48,11 @@ it("marks stale totals and distinguishes the last result from an active next-rou
   expect(screen.getByRole("alert")).toHaveTextContent("last successful check");
   expect(screen.getByText("Status unavailable")).toBeInTheDocument();
 });
+it("qualifies a previously disabled status when its next read fails", () => {
+  render(<VoteResults data={{ enabled: false, serverId: "primary", votes: [] }} error="Read failed" />);
+  expect(screen.getByText("Status unavailable")).toBeInTheDocument();
+  expect(screen.getByText("Voting was off at the last successful check.")).toBeInTheDocument();
+  expect(
+    screen.queryByText("Community voting is not enabled. The saved rotation chooses the next map."),
+  ).not.toBeInTheDocument();
+});

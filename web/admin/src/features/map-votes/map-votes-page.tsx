@@ -204,51 +204,68 @@ export function MapVotesPage() {
   }, [policyDirty, ballotDirty, setUnsavedChanges]);
   const resource = useResource<VoteList>(admin.me.role === "admin" ? "map-votes" : null);
   if (admin.me.role !== "admin") return <Empty title="Administrator access required" />;
-  if (!resource.data) return <Empty title={resource.error || "Loading map votes…"} />;
-  if (!resource.data.enabled)
-    return (
-      <>
-        <Card
-          title="Discord map voting is off"
-          subtitle="You can still choose maps manually."
-          badge={<Badge>OFF</Badge>}
-        >
-          <div className="card-body">
-            <p>
-              <Link className="button primary" to="/match">
-                Open match &amp; maps
-              </Link>
-            </p>
-            <details>
-              <summary>How to enable voting</summary>
-              <p>
-                Choose a Discord voting channel in Gramps and check its permissions. Prepare the switches below, then
-                enable live voting only after a controlled test.
-              </p>
-              <VotingSetupCheck />
-            </details>
-          </div>
-        </Card>
-        <Card title="Voting settings">
-          <div className="card-body">
-            <VotingControlsPanel onDirty={setPolicyDirty} />
-          </div>
-        </Card>
-      </>
-    );
   return (
     <>
-      <EnabledMapVotes
-        data={resource.data}
-        error={resource.error}
-        loading={resource.loading}
-        refresh={resource.refresh}
-        onDirty={setBallotDirty}
-      />
-      <details>
-        <summary>Voting settings</summary>
-        <VotingControlsPanel onDirty={setPolicyDirty} />
-      </details>
+      {resource.error && (
+        <div className="notice error" role="alert">
+          <p>{resource.error}</p>
+          {resource.data && <p>Showing last-known ballots and settings. Refresh before making voting changes.</p>}
+          <button
+            type="button"
+            className="button secondary"
+            disabled={admin.busy || resource.loading}
+            onClick={resource.refresh}
+          >
+            Refresh ballot history
+          </button>
+        </div>
+      )}
+      {!resource.data ? (
+        !resource.error && <Empty title="Loading map votes…" />
+      ) : !resource.data.enabled ? (
+        <>
+          <Card
+            title={resource.error ? "Voting status unavailable" : "Discord map voting is off"}
+            subtitle="You can still choose maps manually."
+            badge={<Badge kind={resource.error ? "warn" : "neutral"}>{resource.error ? "Unavailable" : "OFF"}</Badge>}
+          >
+            <div className="card-body">
+              <p>
+                <Link className="button primary" to="/match">
+                  Open match &amp; maps
+                </Link>
+              </p>
+              <details>
+                <summary>How to enable voting</summary>
+                <p>
+                  Choose a Discord voting channel in Gramps and check its permissions. Prepare the switches below, then
+                  enable live voting only after a controlled test.
+                </p>
+                <VotingSetupCheck />
+              </details>
+            </div>
+          </Card>
+          <Card title="Voting settings">
+            <div className="card-body">
+              <VotingControlsPanel onDirty={setPolicyDirty} />
+            </div>
+          </Card>
+        </>
+      ) : (
+        <>
+          <EnabledMapVotes
+            data={resource.data}
+            error={resource.error}
+            loading={resource.loading}
+            refresh={resource.refresh}
+            onDirty={setBallotDirty}
+          />
+          <details>
+            <summary>Voting settings</summary>
+            <VotingControlsPanel onDirty={setPolicyDirty} />
+          </details>
+        </>
+      )}
     </>
   );
 }
@@ -296,15 +313,6 @@ function EnabledMapVotes({
   }
   return (
     <>
-      {error && (
-        <div className="notice error" role="alert">
-          <p>{error}</p>
-          <p>Showing last-known ballots. Check history before publishing another vote.</p>
-          <button type="button" className="button secondary" disabled={admin.busy || loading} onClick={refresh}>
-            Refresh ballot history
-          </button>
-        </div>
-      )}
       <p>
         <Link className="text-button" to="/match">
           ← Match &amp; maps

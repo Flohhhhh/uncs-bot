@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, within, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import { MapVotesPage } from "./map-votes-page";
@@ -247,6 +247,56 @@ it("does not query settings or catalog when disabled", async () => {
   await screen.findByRole("heading", { name: "Discord map voting is off" });
   expect(screen.getByRole("link", { name: "Open match & maps" })).toHaveAttribute("href", "/match?server=primary");
   expect(request.mock.calls.map(([path]) => path)).toEqual(["map-votes", "map-votes/controls"]);
+});
+it("recovers an initial voting-status failure with a read-only local retry", async () => {
+  enabled = false;
+  const fallback = request.getMockImplementation()!;
+  request.mockRejectedValueOnce(new Error("Voting status read failed"));
+  show();
+  expect(await screen.findByRole("alert")).toHaveTextContent("Voting status read failed");
+  request.mockImplementation(fallback);
+  fireEvent.click(screen.getByRole("button", { name: "Refresh ballot history" }));
+  await screen.findByRole("heading", { name: "Discord map voting is off" });
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(
+    request.mock.calls.every(([path, init]) => ["map-votes", "map-votes/controls"].includes(path) && !init?.method),
+  ).toBe(true);
+});
+it("does not present retained disabled voting as current after a failed or pending retry", async () => {
+  enabled = false;
+  const { state, rerender } = show();
+  await screen.findByRole("heading", { name: "Discord map voting is off" });
+  const fallback = request.getMockImplementation()!;
+  request.mockImplementation(async (path, init) => {
+    if (path === "map-votes") throw new Error("Voting status read failed");
+    return fallback(path, init);
+  });
+  rerender(
+    <AdminContext.Provider value={{ ...state, refreshVersion: 1 }}>
+      <MapVotesPage />
+    </AdminContext.Provider>,
+  );
+  expect(await screen.findByRole("alert")).toHaveTextContent("Voting status read failed");
+  expect(screen.queryByRole("heading", { name: "Discord map voting is off" })).not.toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Voting status unavailable" })).toBeInTheDocument();
+  let finish!: (value: unknown) => void;
+  request.mockImplementation((path, init) =>
+    path === "map-votes"
+      ? new Promise((resolve) => {
+          finish = resolve;
+        })
+      : fallback(path, init),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Refresh ballot history" }));
+  expect(screen.getByRole("button", { name: "Refresh ballot history" })).toBeDisabled();
+  expect(screen.getByRole("alert")).toHaveTextContent("Voting status read failed");
+  expect(screen.queryByRole("heading", { name: "Discord map voting is off" })).not.toBeInTheDocument();
+  await act(async () => finish({ enabled: false, serverId: "primary", votes: [] }));
+  expect(screen.getByRole("heading", { name: "Discord map voting is off" })).toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(
+    request.mock.calls.every(([path, init]) => ["map-votes", "map-votes/controls"].includes(path) && !init?.method),
+  ).toBe(true);
 });
 it("checks voting setup only on request, clears stale results on retry, and never sends a mutation", async () => {
   enabled = false;
