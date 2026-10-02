@@ -4,6 +4,7 @@ import { plainLabel } from "../server-community/community-state";
 import { createHash } from "node:crypto";
 import { hasVoteCounts, type MapVoteRecord } from "./map-votes.types";
 import { mapLabel, selectionDetails } from "../common/map-labels";
+import { voteChoiceTitle, type VoteReminder } from "../common/voting-policy";
 
 export function ballotMessage(vote: MapVoteRecord) {
   const open = vote.state === "open";
@@ -13,11 +14,11 @@ export function ballotMessage(vote: MapVoteRecord) {
       `${index + 1}. ${plainLabel(mapLabel(choice.map), 80)}${counted ? ` — ${vote.counts[index] ?? 0} votes` : ""}\n   ${plainLabel(selectionDetails(choice), 150)}`,
   );
   const winner =
-    vote.winner === null ? "" : `\nWinner: ${plainLabel(mapLabel(vote.choices[vote.winner]?.map ?? "Unknown"), 80)}.`;
+    vote.winner === null ? "" : `\nWinner: ${plainLabel(voteChoiceTitle(vote.choices[vote.winner]), 150)}.`;
   return {
     content: `**Next map · ${plainLabel(vote.serverName)}**\n${choices.join("\n")}\n\n${
       open
-        ? `Closes <t:${Math.floor(vote.closesAt.getTime() / 1000)}:R>. One vote per Discord member; choosing again changes your vote. A tie or no votes keeps the rotation.\nThe winner queues only if the rotation position and settings still match. Staff can override the choice.`
+        ? `${vote.automation ? "Closes when the leading team reaches 95 points (100-point match)." : `Closes <t:${Math.floor(vote.closesAt.getTime() / 1000)}:R>.`} One vote per Discord member; choosing again changes your vote. A tie or no votes keeps the rotation.\nThe winning map and mode queue only if the match and settings still match. Staff can override the choice.`
         : `${winner}\n${plainLabel(vote.message, 350)}`
     }`,
     components: [
@@ -25,7 +26,7 @@ export function ballotMessage(vote: MapVoteRecord) {
         vote.choices.map((choice, index) =>
           new ButtonBuilder()
             .setCustomId(`uncs-map-vote/${vote.id}/${index}`)
-            .setLabel(`${index + 1}. ${mapLabel(choice.map)}`.slice(0, 80))
+            .setLabel(`${index + 1}. ${voteChoiceTitle(choice)}`.slice(0, 80))
             .setStyle(ButtonStyle.Secondary)
             .setDisabled(!open),
         ),
@@ -71,6 +72,19 @@ export class MapVotesDiscord {
       enforceNonce: true,
     });
     return message.id;
+  }
+  async remind(vote: MapVoteRecord, stage: VoteReminder) {
+    const channel = await this.channel(vote);
+    const choices = vote.choices.map(
+      (choice, index) => `${index + 1}. ${plainLabel(voteChoiceTitle(choice), 120)} — ${vote.counts[index] ?? 0} votes`,
+    );
+    const total = vote.counts.reduce((sum, count) => sum + count, 0);
+    await channel.send({
+      content: `**${stage === "final" ? "Last chance to vote" : "Next round vote update"} · ${plainLabel(vote.serverName)}**\n${choices.join("\n")}\n\n${total} votes so far. You can change your vote. Closes at 95 points.\nhttps://discord.com/channels/${vote.guildId}/${vote.channelId}/${vote.messageId}`,
+      allowedMentions: { parse: [], users: [], roles: [], repliedUser: false },
+      nonce: createHash("sha256").update(`${vote.id}:${stage}`).digest("hex").slice(0, 24),
+      enforceNonce: true,
+    });
   }
   async update(vote: MapVoteRecord) {
     if (!vote.messageId) return;

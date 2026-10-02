@@ -1,6 +1,20 @@
 import { z } from "zod";
 import { gameServerId } from "../common/game-server";
 import { mapSelectionSchema } from "../admin/admin.types";
+import { voteChoiceKey, type VoteAutomation } from "../common/voting-policy";
+
+export const votingPolicySchema = z
+  .object({
+    enabled: z.boolean(),
+    mapChoices: z.boolean(),
+    modeChoices: z.boolean(),
+    midpointReminder: z.boolean(),
+    finalReminder: z.boolean(),
+  })
+  .strict()
+  .refine((policy) => !policy.enabled || policy.mapChoices || policy.modeChoices, {
+    message: "Choose maps, modes, or both before enabling voting.",
+  });
 
 export const startMapVoteSchema = z
   .object({
@@ -22,8 +36,11 @@ export const startMapVoteSchema = z
   })
   .strict()
   .superRefine(({ choices }, context) => {
-    if (new Set(choices.map((choice) => choice.map)).size !== choices.length)
-      context.addIssue({ code: "custom", message: "Choose different maps for each option." });
+    if (new Set(choices.map(voteChoiceKey)).size !== choices.length)
+      context.addIssue({
+        code: "custom",
+        message: "Choose different map, mode or layout combinations for each option.",
+      });
   });
 export const cancelMapVoteSchema = z
   .object({
@@ -81,6 +98,7 @@ export type MapVoteRecord = {
   counts: number[];
   message: string;
   cancellation: MapVoteCancellation | null;
+  automation?: VoteAutomation | null;
 };
 
 /** A tie or no votes keeps the saved rotation. */
@@ -108,6 +126,7 @@ export function mapVoteView(vote: MapVoteRecord) {
     closesAt: vote.closesAt.toISOString(),
     message: vote.message,
     cancellation: vote.cancellation,
+    automation: vote.automation ?? null,
     messageUrl: vote.messageId
       ? `https://discord.com/channels/${vote.guildId}/${vote.channelId}/${vote.messageId}`
       : null,
