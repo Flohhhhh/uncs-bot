@@ -131,7 +131,7 @@ export class StaffAlertsWorker {
   /** SteamIDs already offered to the network-ban sources, with when a good read last listed each. */
   private readonly watchSeen = new Map<string, number>();
   private bootChecked = false;
-  /** The first good read: the start window stays open past an empty roster until ROUND_HOLD_MS after it. */
+  /** The first good read: when its roster is empty, the start window stays open until ROUND_HOLD_MS after it. */
   private bootAt: number | null = null;
   private lastObservedAt: string | null = null;
   private lastReadAt: string | null = null;
@@ -409,11 +409,12 @@ export class StaffAlertsWorker {
     const ids = this.watchJoins(overview, now);
     // Players online at the first read may have been reported before a redeploy: record them for
     // the staff API without posting or pinging. Joins seen after that alert as usual. A start during
-    // a map load reads an empty roster first, so the window stays open until a populated read or
-    // until the roster stays empty past a map load.
+    // a map load reads an empty roster first, and the roster then refills over several reads, so
+    // after an empty first read the window stays open until a map load's time has passed.
+    const first = this.bootAt === null;
     this.bootAt ??= now;
     const presentAtStart = !this.bootChecked && now - this.bootAt < ROUND_HOLD_MS;
-    if (overview.players.length || !presentAtStart) this.bootChecked = true;
+    if (!presentAtStart || (first && overview.players.length)) this.bootChecked = true;
     if (!ids.length) return;
     const knownGood = options.performance.knownGood;
     for (const source of this.sources) {

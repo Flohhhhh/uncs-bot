@@ -316,9 +316,10 @@ describe("watch-list joins", () => {
       { sources: [sourceFor()] },
     );
     discord.channel.guild.roles.cache.set(role, { id: role, mentionable: true });
-    // The first read after a redeploy lands while the next map loads, with nobody listed yet.
+    // The first read after a redeploy lands while the next map loads, and the roster refills over several reads.
     await pass(snapshot([], { map: "Europe", matchSeconds: 5 }), 0);
-    await pass(roster(listed, clean), 15_000);
+    await pass(roster(clean), 15_000);
+    await pass(roster(clean, listed), 15_000);
     expect(alerts.list("primary")).toEqual([
       expect.objectContaining({
         title: "Watch list: player online",
@@ -327,7 +328,9 @@ describe("watch-list joins", () => {
       }),
     ]);
     expect(discord.channel.send).not.toHaveBeenCalled();
-    await pass(roster(listed, clean, noted));
+    // Once the roster has had a map load's time to refill, a join posts as usual.
+    for (let read = 0; read < 10; read++) await pass(roster(clean, listed), 15_000);
+    await pass(roster(listed, clean, noted), 15_000);
     expect(alerts.list("primary")[0]).toMatchObject({
       title: "Watch list: player joined",
       player: { steamId: noted },
