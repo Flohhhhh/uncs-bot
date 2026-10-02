@@ -150,7 +150,7 @@ export type PaymentView = {
   paidAt: string;
   amountCents: number | null;
   currency: string | null;
-  source: "signed_status" | "manual_receipt";
+  source: "signed_status" | "manual_receipt" | "patreon_api";
   reference: string;
   verificationState: "verified" | "unverified";
   firstSuccessfulPaymentVerified: boolean;

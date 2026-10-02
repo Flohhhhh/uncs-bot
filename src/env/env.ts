@@ -128,6 +128,16 @@ export const Env = z.object({
   PATREON_WEBHOOK_SECRET: z.string().min(16).max(512).optional(),
   PATREON_FOUNDER_START_AT: z.iso.datetime({ offset: true }).optional(),
   PATREON_FOUNDER_END_AT: z.iso.datetime({ offset: true }).optional(),
+  /**
+   * Creator's Access Token for the read-only member import. Never logged or returned. A malformed value
+   * leaves the import unconfigured (shown on the Supporters page) instead of stopping the bot.
+   */
+  PATREON_CREATOR_ACCESS_TOKEN: z
+    .string()
+    .trim()
+    .optional()
+    .transform((value) => value || undefined),
+  PATREON_SYNC_INTERVAL_MINUTES: z.coerce.number().int().min(10).max(1440).default(30),
 
   /** Website requests remain disabled until the reviewed schema is deployed. */
   WHITELIST_APPLICATIONS_ENABLED: z
