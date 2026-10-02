@@ -77,6 +77,11 @@ export type RoundTrack = {
     leading: number;
     matchSeconds: number | null;
   };
+  /**
+   * True while the round was first seen already running with no stored round matching it (after a
+   * restart or read gap). A matching stored round may still be adopted; see GameRounds.
+   */
+  unseeded?: boolean;
 };
 /** A round known from stored work, such as an open ballot, used after a restart or read gap. */
 export type RoundSeed = { round: TrackedRound; highest: number };
@@ -148,6 +153,7 @@ export function trackRound(previous: RoundTrack | null, observation: RoundObserv
     let round: TrackedRound;
     let highest = leading;
     let boundary = false;
+    let unseeded = false;
     if (known && (valid || !previous)) {
       const samePlace =
         sameMap(known.round.map, observation.map) &&
@@ -175,16 +181,19 @@ export function trackRound(previous: RoundTrack | null, observation: RoundObserv
             ? newRound(observation.map, index, at, "baseline", false)
             : newRound(observation.map, index, clockStart, "clock", true);
         boundary = true;
+        unseeded = true;
       }
     } else if (known) {
       // Invalid scores after a gap: keep the known round without deciding anything.
       round = { ...known.round, exact: false };
       highest = known.highest;
-    } else
+    } else {
       round =
         clockStart === null
           ? newRound(observation.map, index, at, "baseline", false)
           : newRound(observation.map, index, clockStart, "clock", true);
+      unseeded = true;
+    }
     return {
       track: {
         round,
@@ -196,6 +205,7 @@ export function trackRound(previous: RoundTrack | null, observation: RoundObserv
         lastSignalAt: boundary ? at : null,
         waitingSince: phase === "waiting" ? at : null,
         last: valid ? last : { ...last, names: [], scores: [], leading: highest },
+        ...(unseeded ? { unseeded: true } : {}),
       },
       boundary,
       reason: boundary ? "gap" : null,
@@ -265,8 +275,20 @@ export function trackRound(previous: RoundTrack | null, observation: RoundObserv
       playingSince = at;
     waitingSince = null;
   }
+  const unseeded = !boundary && previous.unseeded;
   return {
-    track: { round, phase, firstSeenAt, playingSince, highest, ended, lastSignalAt, waitingSince, last },
+    track: {
+      round,
+      phase,
+      firstSeenAt,
+      playingSince,
+      highest,
+      ended,
+      lastSignalAt,
+      waitingSince,
+      last,
+      ...(unseeded ? { unseeded: true } : {}),
+    },
     boundary,
     reason: boundary ? reason : null,
   } satisfies RoundUpdate;

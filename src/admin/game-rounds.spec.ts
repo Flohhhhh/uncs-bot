@@ -73,6 +73,80 @@ describe("shared game round state", () => {
     expect(rounds.observe("primary", overview(t0 + 15_000), { seed: other }).track.round.id).toBe("observed:42");
     expect(rounds.observe("primary", overview(t0 + 120_000), { seed: other }).track.round.id).toBe("observed:99");
   });
+  it("adopts the other worker's matching stored round after a restart, even from a repeated read", () => {
+    const { rounds } = fixture();
+    const stale = {
+      round: {
+        id: "observed:7",
+        map: "Europe",
+        index: 2,
+        startedAt: t0 - 3600_000,
+        source: "observed" as const,
+        exact: true,
+      },
+      highest: 90,
+    };
+    // The voting worker's older ballot does not match the running round: a baseline round, start unknown.
+    const first = rounds.observe("primary", overview(t0), { seed: stale }).track;
+    expect(first).toMatchObject({ unseeded: true, round: { source: "baseline" } });
+    const event = {
+      round: {
+        id: "observed:42",
+        map: "Kavkazi",
+        index: 0,
+        startedAt: t0 - 300_000,
+        source: "observed" as const,
+        exact: true,
+      },
+      highest: 35,
+    };
+    // The event worker reads the same cached status with its own stored round.
+    const adopted = rounds.observe("primary", overview(t0), { seed: event }).track;
+    expect(adopted.round).toMatchObject({ id: "observed:42", startedAt: t0 - 300_000, exact: false });
+    expect(adopted.unseeded).toBeUndefined();
+    expect(rounds.current("primary")?.round.id).toBe("observed:42");
+    expect(rounds.observe("primary", overview(t0 + 15_000), { seed: stale }).track.round.id).toBe("observed:42");
+  });
+  it.each([
+    ["another map", { map: "Europe" }, 35],
+    ["another rotation entry", { index: 3 }, 35],
+    ["a later start", { startedAt: t0 + 120_000 }, 35],
+    ["a score reset since", {}, 60],
+  ])("does not adopt a stored round from %s", (_, patch, highest) => {
+    const { rounds } = fixture();
+    rounds.observe("primary", overview(t0));
+    const seed = {
+      round: {
+        id: "observed:42",
+        map: "Kavkazi",
+        index: 0,
+        startedAt: t0 - 300_000,
+        source: "observed" as const,
+        exact: true,
+        ...patch,
+      },
+      highest,
+    };
+    expect(rounds.observe("primary", overview(t0 + 15_000), { seed }).track.round.source).toBe("baseline");
+  });
+  it("adopts a stored round only for a clock round first seen already running, with a matching start", () => {
+    const { rounds } = fixture();
+    const clocked = (at: number) => overview(at, { matchSeconds: (at - (t0 - 300_000)) / 1000 });
+    expect(rounds.observe("primary", clocked(t0)).track).toMatchObject({ unseeded: true, round: { source: "clock" } });
+    const seed = {
+      round: {
+        id: "observed:42",
+        map: "Kavkazi",
+        index: 0,
+        startedAt: t0 - 290_000,
+        source: "observed" as const,
+        exact: true,
+      },
+      highest: 35,
+    };
+    const adopted = rounds.observe("primary", clocked(t0 + 5_000), { seed }).track;
+    expect(adopted.round).toMatchObject({ id: "observed:42", source: "clock", exact: true, startedAt: t0 - 300_000 });
+  });
   it("previews without recording", () => {
     const { rounds } = fixture();
     expect(rounds.peek("primary", overview(t0)).track.round.source).toBe("baseline");

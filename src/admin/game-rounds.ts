@@ -2,6 +2,7 @@ import { Injectable } from "@nestjs/common";
 import { GameServers } from "./game-servers";
 import type { Overview } from "./wardogs.client";
 import type { SettingsSnapshot } from "../common/server-settings";
+import { sameMap } from "../common/map-labels";
 import {
   roundObservation,
   trackRound,
@@ -13,6 +14,39 @@ import {
 /** Observed live on 2 October 2026 ("Players to start a match"); used when the setting cannot be read. */
 export const DEFAULT_START_THRESHOLD = 20;
 const THRESHOLD_CACHE_MS = 300_000;
+const CLOCK_JITTER_MS = 30_000;
+const SCORE_DROP = 10;
+
+/**
+ * Whether a round first seen already running (after a restart or gap) is the stored `seed` round:
+ * the same map and rotation entry, no score reset since, and compatible start times.
+ */
+export function adoptableSeed(track: RoundTrack, seed: RoundSeed) {
+  const round = track.round;
+  if (!track.unseeded || seed.round.id === round.id || !sameMap(seed.round.map, round.map)) return false;
+  if (seed.round.index !== null && round.index !== null && seed.round.index !== round.index) return false;
+  if (track.highest < seed.highest - SCORE_DROP) return false;
+  if (round.source === "clock")
+    return seed.round.source === "clock"
+      ? Math.abs(seed.round.startedAt - round.startedAt) <= CLOCK_JITTER_MS
+      : seed.round.startedAt >= round.startedAt - CLOCK_JITTER_MS;
+  // A round without a clock is dated from when it was first seen; the stored round began earlier.
+  return seed.round.startedAt <= round.startedAt + CLOCK_JITTER_MS;
+}
+function adopt(track: RoundTrack, seed: RoundSeed): RoundTrack {
+  const { unseeded: _unseeded, ...rest } = track;
+  const clock = track.round.source === "clock";
+  return {
+    ...rest,
+    round: {
+      ...seed.round,
+      map: track.round.map,
+      index: track.round.index ?? seed.round.index,
+      ...(clock ? { startedAt: track.round.startedAt, source: "clock" as const, exact: true } : { exact: false }),
+    },
+    highest: Math.max(track.highest, seed.highest),
+  };
+}
 
 export type RoundObserved = RoundUpdate & { threshold: number };
 
@@ -52,15 +86,23 @@ export class GameRounds {
     const threshold = this.threshold(serverId, options.fields);
     const at = Date.parse(overview.observedAt);
     if (!Number.isFinite(at)) throw new Error("The observation time is unreadable.");
+    let previous = state?.update.track ?? null;
+    // A process that restarted may first see a round without the stored work that names it. The
+    // other worker's matching stored round (an open ballot or a running event) is adopted, so both
+    // workers keep the same round identity.
+    const adopted = !!previous && !!options.seed && adoptableSeed(previous, options.seed);
+    if (adopted) previous = adopt(previous!, options.seed!);
     // Repeated or out-of-order reads of a shared overview do not decide anything twice.
     if (state && (state.observedAt === overview.observedAt || at < state.update.track.last.at))
-      return { connection, state: { ...state.update, boundary: false, reason: null }, threshold, repeated: true };
-    const update = trackRound(
-      state?.update.track ?? null,
-      roundObservation(overview.status, at, threshold),
-      options.seed,
-    );
-    return { connection, state: update, threshold, repeated: false };
+      return {
+        connection,
+        state: { track: previous!, boundary: false, reason: null },
+        threshold,
+        store: adopted,
+        observedAt: state.observedAt,
+      };
+    const update = trackRound(previous, roundObservation(overview.status, at, threshold), options.seed);
+    return { connection, state: update, threshold, store: true, observedAt: overview.observedAt };
   }
 
   /** Feeds one status read. Idempotent per `observedAt`; `seed` applies only when empty or after a gap. */
@@ -70,10 +112,10 @@ export class GameRounds {
     options: { fields?: SettingsSnapshot["fields"]; seed?: RoundSeed | null } = {},
   ): RoundObserved {
     const result = this.compute(serverId, overview, options);
-    if (!result.repeated)
+    if (result.store)
       this.states.set(serverId, {
         connection: result.connection,
-        observedAt: overview.observedAt,
+        observedAt: result.observedAt,
         update: result.state,
       });
     return { ...result.state, threshold: result.threshold };
