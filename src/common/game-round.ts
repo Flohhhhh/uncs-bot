@@ -1,3 +1,5 @@
+import { sameMap } from "./map-labels";
+
 export type RoundStamp = { map: string; startedAt: number };
 
 export function roundStamp(
@@ -17,5 +19,5 @@ export function roundStamp(
 
 /** The API exposes an elapsed clock, not an authoritative round ID. Allow sampling jitter only. */
 export function sameRound(a: RoundStamp, b: RoundStamp) {
-  return a.map === b.map && Math.abs(a.startedAt - b.startedAt) <= 30_000;
+  return sameMap(a.map, b.map) && Math.abs(a.startedAt - b.startedAt) <= 30_000;
 }
