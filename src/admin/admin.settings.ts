@@ -1,7 +1,13 @@
 import { Injectable, ServiceUnavailableException } from "@nestjs/common";
 import { createHash } from "node:crypto";
 import { EnvService } from "../env/env.service";
-import { LEGACY_SERVER_ID, validRconUrl, type GameServerSummary, type RconConnection } from "../common/game-server";
+import {
+  LEGACY_SERVER_ID,
+  LEGACY_SERVER_NAME,
+  validRconUrl,
+  type GameServerSummary,
+  type RconConnection,
+} from "../common/game-server";
 
 @Injectable()
 export class AdminSettings {
@@ -65,7 +71,7 @@ export class AdminSettings {
     const definitions: Array<{ id: string; name: string; rconUrl: string; joinId?: string }> = configured ?? [
       {
         id: LEGACY_SERVER_ID,
-        name: "The UNCs",
+        name: LEGACY_SERVER_NAME,
         rconUrl: this.env.get("WARDOGS_RCON_URL") ?? "",
         joinId: this.env.get("WARDOGS_SERVER_JOIN_ID"),
       },

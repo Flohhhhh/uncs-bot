@@ -10,6 +10,7 @@ import {
 } from "discord.js";
 import { createHash, randomBytes } from "node:crypto";
 import { EnvService } from "../env/env.service";
+import { LEGACY_SERVER_ID, LEGACY_SERVER_NAME } from "../common/game-server";
 import {
   alertCategory,
   reviewDecisions,
@@ -133,12 +134,19 @@ export class StaffAlerts {
     ];
     return community.includes(channelId);
   }
+  /** The configured server name, the same one GameServers gives the monitor's alerts; undefined when unknown. */
+  private serverName(serverId: string) {
+    const configured = this.env.get("WARDOGS_SERVERS");
+    if (configured) return configured.find((server) => server.id === serverId)?.name;
+    return serverId === LEGACY_SERVER_ID ? LEGACY_SERVER_NAME : undefined;
+  }
 
   /**
    * Map-vote and 50v50 automation that needs a person. Logs the text, then records an `automation`
    * alert and posts it like any other: the same channel checks and refusals, no mentions (warning
-   * severity, never a ping) and no snooze. The same key repeats at most every 30 minutes, and at
-   * most 10 a server post per rolling hour. Returns true only when the alert was posted. Never throws.
+   * severity, never a ping) and no snooze. The footer names the configured server, as the monitor's
+   * alerts do. The same key repeats at most every 30 minutes, and at most 10 a server post per
+   * rolling hour. Returns true only when the alert was posted. Never throws.
    */
   async send(serverId: string, key: string, message: string): Promise<boolean> {
     const text = cleanText(message, 1800);
@@ -146,6 +154,7 @@ export class StaffAlerts {
     try {
       const alert = await this.raise({
         serverId,
+        serverName: this.serverName(serverId),
         kind: "automation",
         severity: "warning",
         key: `automation:${key}`,

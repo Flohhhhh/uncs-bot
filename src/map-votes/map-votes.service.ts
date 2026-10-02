@@ -200,6 +200,10 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
   private queueActor(actor: Staff, serverId: string): Staff {
     return { ...actor, id: `system:map-vote:${serverId}`, name: "Gramps community vote" };
   }
+  /** A manual ballot closes under its own audit actor, named for its creator, so their dashboard throttle never applies. */
+  private ballotActor(actor: Staff, voteId: string): Staff {
+    return { ...actor, id: `system:map-vote:${voteId}` };
+  }
   private async automaticStatus(serverId: string): Promise<AutomaticVoteStatus | null> {
     const saved = await this.store.policy(serverId);
     if (!saved) return null;
@@ -1615,7 +1619,7 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
             }));
           }
         } else
-          ({ state, message, patch } = await this.queueWinner(actor, {
+          ({ state, message, patch } = await this.queueWinner(this.ballotActor(actor, vote.id), {
             id: vote.id,
             action: "map-next",
             reason: `Discord map vote ${vote.id}`,

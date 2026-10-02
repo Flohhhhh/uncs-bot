@@ -558,7 +558,7 @@ describe("durable Discord map voting", () => {
     expect(auth.serverStaff).toHaveBeenCalledWith(expect.objectContaining({ id: staff.id }), "primary", true);
     expect(admin.act).toHaveBeenCalledTimes(1);
     expect(admin.act).toHaveBeenCalledWith(
-      expect.objectContaining({ id: staff.id, role: "admin" }),
+      expect.objectContaining({ id: `system:map-vote:${input.id}`, name: staff.name, role: "admin" }),
       expect.objectContaining({
         id: input.id,
         action: "map-next",
@@ -569,6 +569,27 @@ describe("durable Discord map voting", () => {
       }),
     );
     expect(store.finish).toHaveBeenCalledWith(input.id, "queued", expect.any(String));
+  });
+  it("closes under its own audit actor, so the creator's last dashboard action cannot throttle it", async () => {
+    const f = fixture();
+    const adminStore = { begin: jest.fn().mockResolvedValue({ created: true }), finish: jest.fn() };
+    const admin = new AdminService(
+      fixtureServers({ ...f.game, execute: jest.fn().mockResolvedValue({ state: "pending", message: "Saved" }) }),
+      adminStore as unknown as AdminStore,
+    );
+    f.admin.act.mockImplementation((actor: Staff, action: unknown) => admin.act(actor, action));
+    await admin.act(
+      { ...staff, serverId: "primary" },
+      { id: randomUUID(), action: "broadcast", reason: "Staff notice", message: "Hello" },
+    );
+    f.closing();
+    await f.service.tick();
+    expect(adminStore.begin).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: `system:map-vote:${f.record.id}`, name: staff.name }),
+      expect.objectContaining({ id: f.record.id, action: "map-next" }),
+      expect.any(String),
+    );
+    expect(f.store.finish).toHaveBeenCalledWith(f.record.id, "queued", expect.any(String));
   });
   it("retains the rotation without game or role reads when nobody voted", async () => {
     const { service, store, record, admin, game, auth } = fixture();

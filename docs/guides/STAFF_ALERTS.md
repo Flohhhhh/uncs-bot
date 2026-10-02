@@ -75,7 +75,9 @@ Every seeding alert adds: "Gramps reads the player count over RCON. It cannot se
 
 ### Automation alerts
 
-Map votes and 50v50 events call `StaffAlerts.send(server, key, message)` when automation needs a person. Gramps logs the text, records an `automation` alert for the staff API and posts it as an amber embed titled **Automation needs a person**, through the same channel checks and refusals as every other alert (section 2). It never mentions anyone, so it never pings or uses up the 30-minute ping, and a snooze, even `all`, never holds it back. It returns true only when the alert was posted; a refused channel or a Discord error is recorded as `failed` and never throws into the voting or event worker. Staff can acknowledge it like any alert. The text is cleaned and capped at 600 characters in the embed; the log keeps up to 1,800.
+Map votes and 50v50 events call `StaffAlerts.send(server, key, message)` when automation needs a person. Gramps logs the text, records an `automation` alert for the staff API and posts it as an amber embed titled **Automation needs a person**, through the same channel checks and refusals as every other alert (section 2). It never mentions anyone, so it never pings or uses up the 30-minute ping, and a snooze, even `all`, never holds it back. It returns true only when the alert was posted; a refused channel or a Discord error is recorded as `failed` and never throws into the voting or event worker. Staff can acknowledge it like any alert. The footer names the server as configured (`WARDOGS_SERVERS`), like the monitor's alerts. The text is cleaned and capped at 600 characters in the embed; the log keeps up to 1,800.
+
+A channel that took map-vote alerts before these checks existed is refused now, and its alerts are only logged and recorded as `failed`, if `@everyone` can view it, Gramps lacks **Embed Links** or **Read Message History** there, or it is the weekly leaderboard channel. After deploying, check `channel.state` is `ok` in the staff status (section 2).
 
 ### The October 2 incident, replayed
 

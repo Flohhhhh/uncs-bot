@@ -202,32 +202,41 @@ describe("alert-only staff alert delivery", () => {
     expect(rich.role).toEqual({ id: rich.pingRole, mentionable: false });
   });
 
-  const refusals: [string, (rich: Rich) => void, string][] = [
-    ["no staff channel", (rich) => delete rich.env.STAFF_ALERTS_CHANNEL_ID, "no staff channel"],
-    ["no staff guild", (rich) => delete rich.env.ADMIN_GUILD_ID, "wrong-guild"],
-    ["the voting channel", (rich) => (rich.env.STAFF_ALERTS_CHANNEL_ID = votes), "community-channel"],
-    ["the community channel", (rich) => (rich.env.STAFF_ALERTS_CHANNEL_ID = community), "community-channel"],
-    ["the weekly leaderboard channel", (rich) => (rich.env.STAFF_ALERTS_CHANNEL_ID = leaderboard), "community-channel"],
+  /** Label, change, reason, and whether the channel is fetched at all (refused from the settings alone if not). */
+  const refusals: [string, (rich: Rich) => void, string, boolean][] = [
+    ["no staff channel", (rich) => delete rich.env.STAFF_ALERTS_CHANNEL_ID, "no staff channel", false],
+    ["no staff guild", (rich) => delete rich.env.ADMIN_GUILD_ID, "wrong-guild", false],
+    ["the voting channel", (rich) => (rich.env.STAFF_ALERTS_CHANNEL_ID = votes), "community-channel", false],
+    ["the community channel", (rich) => (rich.env.STAFF_ALERTS_CHANNEL_ID = community), "community-channel", false],
+    [
+      "the weekly leaderboard channel",
+      (rich) => (rich.env.STAFF_ALERTS_CHANNEL_ID = leaderboard),
+      "community-channel",
+      false,
+    ],
     [
       "a server status channel",
       (rich) => (rich.env.WARDOGS_SERVERS = [{ communityStatus: { channelId: alerts, messageId: "1".repeat(18) } }]),
       "community-channel",
+      false,
     ],
-    ["another guild", (rich) => (rich.channel.guildId = "999999999999999999"), "wrong-guild"],
-    ["not a text channel", (rich) => (rich.channel.type = ChannelType.GuildVoice), "not-text"],
-    ["visible to @everyone", (rich) => rich.makePublic(), "public"],
-    ["missing Embed Links", (rich) => rich.deny(PermissionFlagsBits.EmbedLinks), "missing-permissions"],
+    ["another guild", (rich) => (rich.channel.guildId = "999999999999999999"), "wrong-guild", true],
+    ["not a text channel", (rich) => (rich.channel.type = ChannelType.GuildVoice), "not-text", true],
+    ["visible to @everyone", (rich) => rich.makePublic(), "public", true],
+    ["missing Embed Links", (rich) => rich.deny(PermissionFlagsBits.EmbedLinks), "missing-permissions", true],
     [
       "missing Read Message History",
       (rich) => rich.deny(PermissionFlagsBits.ReadMessageHistory),
       "missing-permissions",
+      true,
     ],
-    ["Discord offline", (rich) => rich.offline(), "discord-offline"],
+    ["Discord offline", (rich) => rich.offline(), "discord-offline", false],
   ];
-  it.each(refusals)("records a failed delivery without throwing for %s", async (_, change, reason) => {
+  it.each(refusals)("records a failed delivery without throwing for %s", async (_, change, reason, fetches) => {
     const rich = richFixture();
     change(rich);
     await expect(rich.service.raise(input())).resolves.toMatchObject({ delivery: { state: "failed", reason } });
+    expect(rich.client.channels.fetch).toHaveBeenCalledTimes(fetches ? 1 : 0);
     expect(rich.channel.send).not.toHaveBeenCalled();
   });
 
@@ -469,6 +478,24 @@ describe("alert-only staff alert delivery", () => {
       );
     });
 
+    it("names the configured server in the footer, as monitor alerts do, or its ID when unknown", async () => {
+      const legacy = richFixture();
+      await legacy.service.send("primary", "review:1", "Needs review");
+      await legacy.service.send("event", "review:1", "Needs review");
+      const [primary, other] = [legacy.service.list("primary")[0], legacy.service.list("event")[0]];
+      expect(sent(legacy, 0).embeds[0].footer).toEqual({ text: `Gramps · The UNCs · alert ${primary.id}` });
+      expect(sent(legacy, 1).embeds[0].footer).toEqual({ text: `Gramps · event · alert ${other.id}` });
+      const configured = richFixture({
+        WARDOGS_SERVERS: [
+          { id: "primary", name: "UNCs Primary" },
+          { id: "event", name: "UNCs Event" },
+        ],
+      });
+      await configured.service.send("event", "review:1", "Needs review");
+      const alert = configured.service.list("event")[0];
+      expect(sent(configured, 0).embeds[0].footer).toEqual({ text: `Gramps · UNCs Event · alert ${alert.id}` });
+    });
+
     it("posts at most ten a server an hour, apart from the monitoring limits", async () => {
       const rich = richFixture();
       for (let index = 0; index < 12; index++) await rich.service.send("primary", `issue:${index}`, "Alert");
@@ -501,10 +528,11 @@ describe("alert-only staff alert delivery", () => {
       expect((await rich.service.raise(input()))?.pinged).toBe(true);
     });
 
-    it.each(refusals)("refuses %s like any other alert, without throwing", async (_, change, reason) => {
+    it.each(refusals)("refuses %s like any other alert, without throwing", async (_, change, reason, fetches) => {
       const rich = richFixture();
       change(rich);
       await expect(rich.service.send("primary", "map-vote-review:1", "Needs review")).resolves.toBe(false);
+      expect(rich.client.channels.fetch).toHaveBeenCalledTimes(fetches ? 1 : 0);
       expect(rich.channel.send).not.toHaveBeenCalled();
       expect(rich.service.list("primary")[0]).toMatchObject({
         kind: "automation",
