@@ -725,8 +725,6 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
           true,
         );
         if (actor.role !== "admin") throw new Error("Creator no longer authorized.");
-        if (vote.automation && !(await this.store.policy(vote.serverId))?.policy.enabled)
-          throw new Error("Voting switched off.");
         const game = this.servers.get(vote.serverId);
         const settings = await game.configuration();
         if (
@@ -761,6 +759,8 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
           this.stopped
         )
           throw new Error("Round cannot be confirmed.");
+        if (vote.automation && !(await this.store.policy(vote.serverId))?.policy.enabled)
+          throw new Error("Voting switched off.");
         if ((await this.store.get(vote.id))?.state !== "closing" || this.stopped) return;
         actionStarted = true;
         const result = await this.admin.act(actor, {

@@ -1060,6 +1060,38 @@ describe("score-based voting controls and reminders", () => {
     expect(f.admin.act).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "map-next" }));
     expect(f.discord.remind).not.toHaveBeenCalled();
   });
+  it("honors switching off while the winner's final game read is in flight", async () => {
+    const f = scored();
+    f.score(95);
+    const overview = await f.game.overview();
+    let finishRead!: (value: typeof overview) => void;
+    const pendingRead = new Promise<typeof overview>((resolve) => {
+      finishRead = resolve;
+    });
+    let readStarted!: () => void;
+    const reading = new Promise<void>((resolve) => {
+      readStarted = resolve;
+    });
+    f.game.overview.mockResolvedValueOnce(overview).mockImplementationOnce(() => {
+      readStarted();
+      return pendingRead;
+    });
+    f.store.claimClose.mockImplementation(async () => {
+      f.record.state = "closing";
+      return f.record;
+    });
+
+    const closing = f.service.tick();
+    await reading;
+    expect(f.record.state).toBe("closing");
+    f.saved.policy.enabled = false;
+    finishRead(overview);
+    await closing;
+
+    expect(f.admin.act).not.toHaveBeenCalled();
+    expect(f.store.finish).toHaveBeenCalledWith(f.record.id, "cancelled", expect.any(String));
+    expect(f.discord.remind).not.toHaveBeenCalled();
+  });
   it.each(["ended", "reset", "staff-override", "disabled", "stale", "missing-scores", "permission"])(
     "does not send messages or queue a winner after %s",
     async (failure) => {
