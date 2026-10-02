@@ -51,8 +51,9 @@ import type {
 
 const previewPort = Number(process.env.PREVIEW_PORT || 4317);
 // PREVIEW_GAME_MODE=pre-round reproduces the 2 October waiting sample (1/100 players, scores 0);
-// full-server shows 100/100 players and a 100-point match in progress. PREVIEW_CLOCK=false hides
-// the match clock on every server, as the live build did on 2 October.
+// full-server shows 100/100 players (a 34/33/33 roster, so 50v50 readiness can pass) and a 100-point
+// match in progress. PREVIEW_CLOCK=false hides the match clock on every server, as the live build did
+// on 2 October.
 const previewMode = process.env.PREVIEW_GAME_MODE ?? "live";
 const previewClock = process.env.PREVIEW_CLOCK !== "false";
 function createPreviewGame(name: string, reportsClock: boolean) {
@@ -107,6 +108,19 @@ function createPreviewGame(name: string, reportsClock: boolean) {
       pingMs: 44,
     },
   ];
+  if (previewMode === "full-server")
+    // A full server: 34/33/33 across the three teams, every identity linked and unique.
+    players.push(
+      ...Array.from({ length: 100 - players.length }, (_, index) => ({
+        name: `Preview player ${index + 1}`,
+        steamId: String(76561198100000000n + BigInt(index)),
+        faction: ["RED", "BLU", "GRN"][(index + players.length) % 3],
+        kills: 0,
+        deaths: 0,
+        cash: 1000,
+        pingMs: 40,
+      })),
+    );
   const factions = [
     { code: "RED", name: "Valkyra", colorHex: "#D86060", score: 18420 },
     { code: "BLU", name: "Lonestar", colorHex: "#5B95D8", score: 14800 },
@@ -921,7 +935,8 @@ const eventStore = {
       event.state === "complete" ||
       demoEventOperations.has(op.id) ||
       (event.operation && !manual) ||
-      (event.stop && op.kind !== "restore_lock")
+      (event.state === "needs_review" && op.kind !== "restore_lock") ||
+      (event.stop && op.kind !== "restore_lock" && op.kind !== "ended")
     )
       return null;
     demoEventOperations.set(op.id, {
@@ -938,7 +953,7 @@ const eventStore = {
       progress,
       version: version + 1,
       updatedAt: new Date(),
-      state: op.kind === "restore_lock" ? "stopping" : event.state,
+      state: op.kind === "restore_lock" || event.stop ? "stopping" : event.state,
     });
     return structuredClone(event);
   },
@@ -979,6 +994,33 @@ const eventStore = {
   },
   async recover() {
     /* Preview effects run in this one in-memory process only. */
+  },
+  async halt(id: string, reason: string, opId?: string) {
+    const event = demoServerEvents.get(id);
+    if (!event || ["complete", "needs_review"].includes(event.state)) return null;
+    if (opId ? event.operation?.id !== opId : event.operation) return null;
+    if (opId) Object.assign(demoEventOperations.get(opId) ?? {}, { state: "unknown", message: "Interrupted." });
+    Object.assign(event, {
+      stop: event.stop ?? {
+        id: randomUUID(),
+        actorId: "system:event-halt",
+        actorName: "Gramps 50v50 safety stop",
+        reason,
+        at: new Date().toISOString(),
+      },
+      state: "stopping",
+      operation: null,
+      message: `${reason} The team lock is being restored.`,
+      version: event.version + 1,
+      updatedAt: new Date(),
+    });
+    return structuredClone(event);
+  },
+  async completeRestored(id: string, version: number, message: string) {
+    const event = demoServerEvents.get(id)!;
+    if (event.version === version && !event.operation && event.stop && event.state === "stopping")
+      Object.assign(event, { state: "complete", message, version: version + 1, updatedAt: new Date() });
+    return structuredClone(event);
   },
 };
 const demoVotePolicies = new Map<
