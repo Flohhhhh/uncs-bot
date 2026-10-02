@@ -214,6 +214,10 @@ describe("supporter persistence and founder eligibility", () => {
       query.mock.calls.find(([config]) => config.text.startsWith('insert into "supporter_observations"'))![0].text,
     ).toContain("on conflict do nothing");
   });
+  it("reports the record's Discord account for a new observation so its roles can be checked", async () => {
+    const { store } = fixture();
+    await expect(store.ingest(observation)).resolves.toEqual({ duplicate: false, discordId: staff.id });
+  });
   it("keeps an older charge from replacing newer state", async () => {
     const { store, query } = fixture();
     await store.ingest(observation);

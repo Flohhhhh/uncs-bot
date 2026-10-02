@@ -1691,6 +1691,74 @@ describe("launch storage on isolated PostgreSQL", () => {
     ]);
   });
 
+  it("reads who supports right now for the Supporter role and which Supporter roles Gramps still holds", async () => {
+    const donor = "567890123456789013";
+    const patron = "567890123456789014";
+    const paypal = await supporters.recordPaypal(
+      {
+        id: randomUUID(),
+        displayName: "Fictional PayPal supporter",
+        discordId: donor,
+        paidAt: new Date("2026-11-01T12:00:00.000Z"),
+        amountCents: 500,
+        currency: "USD",
+        transactionId: "7AB12345CD678901E",
+        completedPaymentVerified: true,
+        firstSuccessfulPaymentVerified: true,
+        minimumConfirmed: false,
+        awardFounder: false,
+        reason: "Checked a fictional completed PayPal payment",
+      },
+      staff,
+      null,
+      policy,
+    );
+    const imported = await supporters.importApiMember(
+      campaign,
+      {
+        ...apiMember("supporter-sync", [charge("pledge_start:9001", "2026-11-02T12:00:00.000Z")], true),
+        discordId: patron,
+      },
+      new Date("2026-11-02T13:00:00.000Z"),
+    );
+    expect(imported).toMatchObject({ discordLinked: true, discordId: patron });
+    const within = new Date("2026-11-20T00:00:00.000Z");
+    expect(await roles.supporterDesired(undefined, within)).toEqual(
+      new Map([
+        [donor, paypal.supporter.id],
+        [patron, imported.memberId],
+      ]),
+    );
+    expect(await roles.supporterDesired([patron], within)).toEqual(new Map([[patron, imported.memberId]]));
+    // 31 days after the PayPal payment it no longer counts; the active patron still does.
+    expect(await roles.supporterDesired(undefined, new Date("2026-12-02T12:00:00.000Z"))).toEqual(
+      new Map([[patron, imported.memberId]]),
+    );
+    const base = {
+      trigger: "event" as const,
+      requestedBy: null,
+      guildId: "678901234567890123",
+      discordUserId: donor,
+      roleKind: "supporter" as const,
+      roleId: "789012345678901235",
+      basisType: "supporter" as const,
+      basisId: paypal.supporter.id,
+    };
+    const held = (roleId = base.roleId) => roles.heldBasis(base.guildId, "supporter", roleId);
+    expect(await held()).toEqual(new Map());
+    await roles.note({ ...base, discordUserId: patron, basisId: imported.memberId });
+    const added = await roles.begin({ ...base, operation: "add" });
+    await roles.finish(added, "applied", true, "Role added.");
+    // A noted role is never Gramps' own; history for another role ID does not count.
+    expect(await held()).toEqual(new Map([[donor, paypal.supporter.id]]));
+    expect(await held("789012345678901299")).toEqual(new Map());
+    const removal = await roles.begin({ ...base, operation: "remove" });
+    await roles.finish(removal, "unknown", false, "Lost response");
+    expect(await held()).toEqual(new Map([[donor, paypal.supporter.id]]));
+    await roles.confirm(removal, "remove");
+    expect(await held()).toEqual(new Map());
+  });
+
   it("keeps duplicate applicant identities and SteamIDs from creating additional requests", async () => {
     const input = applicationInput();
     const first = await applications.create(input);

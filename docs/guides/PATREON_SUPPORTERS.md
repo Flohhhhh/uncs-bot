@@ -1,6 +1,6 @@
 # Supporter records (Patreon and PayPal)
 
-This feature keeps a private supporter ledger in the UNC dashboard. It imports the Patreon campaign's members and completed payments from the authenticated Patreon API, and records optional signed Patreon webhook observations, checked Patreon receipts, staff-checked PayPal payments, identity links, and permanent founder promises. It sends no RCON commands. When [automatic Discord roles](DISCORD_ROLES.md) are switched on, founders with a linked Discord account receive the Founder role, including a Discord account that the Patreon import filled in. Existing legacy and seeding access are separate and are never changed by this integration.
+This feature keeps a private supporter ledger in the UNC dashboard. It imports the Patreon campaign's members and completed payments from the authenticated Patreon API, and records optional signed Patreon webhook observations, checked Patreon receipts, staff-checked PayPal payments, identity links, and permanent founder promises. It sends no RCON commands. When [automatic Discord roles](DISCORD_ROLES.md) are switched on, founders with a linked Discord account receive the Founder role, including a Discord account that the Patreon import filled in, and people who currently support can receive the [Supporter role](#supporter-role). Existing legacy and seeding access are separate and are never changed by this integration.
 
 ## Why the Supporters page can show 0 records
 
@@ -26,6 +26,19 @@ For a receipt, an administrator must check the completed receipt and payment his
 The current dashboard offers the founder award only for a staff receipt. A founder whose only qualifying payment is imported is awarded through `POST /admin/api/supporters/:id/founder` with that payment's ID, and a PayPal founder through the PayPal record, until the dashboard redesign supports both.
 
 Founder awards are separate permanent records with their own audit and payment reference. Cancellation does not remove them. A later subscription payment is not a new founder qualification. Refund disputes and corrections require staff review. When Patreon later reports a founder's qualifying payment as refunded, declined or fraudulent, the import marks that payment unverified and lists the founder under the sync status's `founderReviews`. This includes a founder awarded on a staff receipt: the founder is listed when any imported payment dated in the founder window, widened by 36 hours on each side, is no longer verified. The import never deletes or changes the promise.
+
+### Supporter role
+
+The founder window covers September 30 through October 14, 2026 (Eastern). People who support after that are recognised with an optional **Supporter** Discord role instead. It needs `DISCORD_SUPPORTER_ROLE_ID` and the [automatic Discord roles](DISCORD_ROLES.md#the-supporter-role) switched on.
+
+The Supporter role is a Discord role only. It does not grant whitelist access, queue priority or any other in-game reward, and it does not change founder promises. Gramps adds it while a supporter with a linked Discord account supports right now, and removes it when that support ends:
+
+- a Patreon patron counts while Patreon reports them active, their latest charge was not refunded or reversed, and their newest payment is at least US$5 (the founder minimum). Any tier counts. After a declined charge the role stays for 7 days while Patreon retries the card;
+- a PayPal supporter counts for 31 days after each payment of at least US$5 that staff record. A payment in another currency counts when staff confirm it was worth at least US$5 (`minimumConfirmed`).
+
+Patreon amounts come from the Patreon API import (or a staff receipt), so Patreon supporters need the import configured. As with founders, an imported Patreon payment in another currency does not meet the minimum, because staff cannot confirm its value on an imported payment.
+
+A founder who still supports holds both roles. A founder who stops supporting keeps Founder and loses Supporter. Gramps removes only a Supporter role it added itself; a role staff gave by hand stays.
 
 ### Founder window settings
 

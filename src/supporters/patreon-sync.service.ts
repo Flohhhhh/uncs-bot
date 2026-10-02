@@ -97,8 +97,9 @@ export class PatreonSyncService implements OnApplicationBootstrap, OnModuleDestr
   ) {}
 
   /**
-   * A Discord account the sync linked can make a founder eligible for the Founder role, so the role service checks
-   * that account like a staff link. Fire-and-forget: a role problem never fails the import.
+   * A Discord account the sync linked can make a founder eligible for the Founder role, and a changed status or
+   * payment can start or end support for the Supporter role, so the role service checks that account like a staff
+   * change. Fire-and-forget: a role problem never fails the import.
    */
   private notifyRoles(discordId: string | null) {
     try {
@@ -220,10 +221,13 @@ export class PatreonSyncService implements OnApplicationBootstrap, OnModuleDestr
         if (result.updated) counts.updated++;
         counts.payments += result.payments;
         counts.revokedPayments += result.revoked;
-        if (result.discordLinked) {
-          counts.discordLinks++;
-          this.notifyRoles(member.discordId);
-        }
+        if (result.discordLinked) counts.discordLinks++;
+        // An unchanged record queues nothing; the six-hour role safety pass covers time-based expiry.
+        if (
+          result.discordId &&
+          (result.created || result.updated || result.payments || result.revoked || result.discordLinked)
+        )
+          this.notifyRoles(result.discordId);
         if (result.conflict) {
           counts.conflicts++;
           if (counts.conflictDetails.length < MAX_DETAILS)

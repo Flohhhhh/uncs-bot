@@ -5,7 +5,16 @@ import type { DiscordRolesService } from "../discord-roles/discord-roles.service
 import { SupportersService } from "./supporters.service";
 import type { SupportersStore } from "./supporters.store";
 import type { PatreonSyncService } from "./patreon-sync.service";
-import { founderBlocker, linkSchema, parsePatreon, type FounderPolicy } from "./supporters.types";
+import {
+  founderBlocker,
+  linkSchema,
+  parsePatreon,
+  PAYPAL_SUPPORT_MS,
+  SUPPORTER_DECLINE_GRACE_MS,
+  supportActive,
+  type FounderPolicy,
+  type SupportFacts,
+} from "./supporters.types";
 
 const secret = "dedicated-patreon-webhook-secret";
 const campaign = "123456";
@@ -478,6 +487,123 @@ describe("PayPal supporter records", () => {
     await expect(service.paypal(admin, body)).rejects.toMatchObject({ status: 409 });
   });
 });
+describe("who supports right now, for the Supporter role", () => {
+  const day = 86_400_000;
+  const chargedAt = Date.parse("2026-11-01T12:00:00Z");
+  const paid = (overrides: Partial<SupportFacts["payments"][number]> = {}) => ({
+    source: "patreon_api",
+    paidAt: "2026-11-01T12:00:00+00:00",
+    amountCents: 500,
+    currency: "USD",
+    minimumConfirmed: false,
+    ...overrides,
+  });
+  const patron = (overrides: Partial<SupportFacts> = {}): SupportFacts => ({
+    provider: "patreon",
+    patronStatus: "active_patron",
+    lastChargeStatus: "Paid",
+    lastChargeAt: "2026-11-01T12:00:00+00:00",
+    payments: [paid()],
+    ...overrides,
+  });
+  const paypal = (...payments: SupportFacts["payments"]): SupportFacts => ({
+    provider: "paypal",
+    patronStatus: null,
+    lastChargeStatus: null,
+    lastChargeAt: null,
+    payments,
+  });
+  const now = chargedAt + day;
+
+  it.each<[string, SupportFacts, boolean]>([
+    ["an active patron on the US$5 tier", patron(), true],
+    ["an active patron on a higher tier", patron({ payments: [paid({ amountCents: 2000 })] }), true],
+    [
+      "an active patron paying another currency confirmed by staff",
+      patron({ payments: [paid({ currency: "EUR", minimumConfirmed: true })] }),
+      true,
+    ],
+    ["an active patron whose charge is still pending", patron({ lastChargeStatus: "Pending" }), true],
+    [
+      "an active patron whose newest payment is below US$5",
+      patron({ payments: [paid({ amountCents: 300 }), paid()] }),
+      false,
+    ],
+    [
+      "an active patron paying another currency without staff confirmation",
+      patron({ payments: [paid({ currency: "EUR" })] }),
+      false,
+    ],
+    ["an active patron with no verified payment", patron({ payments: [] }), false],
+    ["a refunded latest charge", patron({ lastChargeStatus: "Refunded" }), false],
+    ["a partially refunded latest charge", patron({ lastChargeStatus: "Partially Refunded" }), false],
+    ["a fraudulent latest charge", patron({ lastChargeStatus: "Fraud" }), false],
+    ["a latest charge Patreon reports as Other", patron({ lastChargeStatus: "Other" }), false],
+    ["a former patron", patron({ patronStatus: "former_patron" }), false],
+    ["a follower who never paid", patron({ patronStatus: null, lastChargeStatus: null, payments: [] }), false],
+    ["a declined patron with no charge date", patron({ patronStatus: "declined_patron", lastChargeAt: null }), false],
+    ["a PayPal payment of US$5", paypal(paid({ source: "paypal" })), true],
+    ["a PayPal payment below US$5", paypal(paid({ source: "paypal", amountCents: 499 })), false],
+    [
+      "a non-USD PayPal payment staff confirmed",
+      paypal(paid({ source: "paypal", currency: "CAD", amountCents: 700, minimumConfirmed: true })),
+      true,
+    ],
+    [
+      "a small PayPal gift after a qualifying one",
+      paypal(paid({ source: "paypal", amountCents: 100 }), paid({ source: "paypal" })),
+      true,
+    ],
+  ])("%s", (_label, record, expected) => {
+    expect(supportActive(record, now)).toBe(expected);
+  });
+
+  it("keeps a declined patron for 7 days after the declined charge while Patreon retries", () => {
+    const declined = patron({ patronStatus: "declined_patron", lastChargeStatus: "Declined" });
+    expect(supportActive(declined, chargedAt + SUPPORTER_DECLINE_GRACE_MS - 1)).toBe(true);
+    expect(supportActive(declined, new Date(chargedAt + SUPPORTER_DECLINE_GRACE_MS))).toBe(false);
+    // A reversed charge ends support at once, grace or not.
+    expect(supportActive({ ...declined, lastChargeStatus: "Refunded" }, chargedAt + 1)).toBe(false);
+  });
+
+  it("counts a PayPal payment for 31 days after it was paid", () => {
+    const record = paypal(paid({ source: "paypal", paidAt: new Date(chargedAt) }));
+    expect(supportActive(record, chargedAt + PAYPAL_SUPPORT_MS - 1)).toBe(true);
+    expect(supportActive(record, chargedAt + PAYPAL_SUPPORT_MS)).toBe(false);
+  });
+
+  it("keeps an active patron on an annual or long-standing pledge", () => {
+    expect(supportActive(patron(), chargedAt + 364 * day)).toBe(true);
+  });
+});
+
+describe("Supporter role notifications", () => {
+  it("asks for a role check after a new signed observation and a staff receipt, never on a duplicate", async () => {
+    const { service, store, roles } = fixture();
+    const { raw, signature } = signed();
+    store.ingest.mockResolvedValueOnce({ duplicate: false, discordId: "123456789012345678" });
+    // The response never carries the supporter's Discord ID back to Patreon.
+    await expect(service.webhook(raw, signature, "members:update")).resolves.toEqual({ ok: true, duplicate: false });
+    expect(roles.supporterChanged).toHaveBeenCalledWith("123456789012345678");
+    store.ingest.mockResolvedValueOnce({ duplicate: true });
+    await expect(service.webhook(raw, signature, "members:update")).resolves.toEqual({ ok: true, duplicate: true });
+    expect(roles.supporterChanged).toHaveBeenCalledTimes(1);
+    store.mutate.mockResolvedValueOnce({ ok: true, replayed: false, supporter: { discordId: "123456789012345678" } });
+    await service.mutate(admin, randomUUID(), "payment", {
+      id: randomUUID(),
+      version: 1,
+      confirm: "member-123",
+      reason: "Checked Patreon receipt",
+      paidAt: "2026-09-29T12:00:00Z",
+      amountCents: 500,
+      currency: "USD",
+      reference: "Receipt-123",
+      completedPaymentVerified: true,
+    });
+    expect(roles.supporterChanged).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("Founder role notifications", () => {
   const supporter = { discordId: "123456789012345678" };
   const review = { id: randomUUID(), version: 1, confirm: "member-123", reason: "Checked" };

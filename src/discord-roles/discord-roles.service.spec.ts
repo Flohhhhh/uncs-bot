@@ -5,11 +5,13 @@ import type { EnvService } from "../env/env.service";
 import type { DiscordRolesDiscord, RoleMember } from "./discord-roles.discord";
 import { DiscordRolesService } from "./discord-roles.service";
 import type { DiscordRolesStore, RoleActionStart } from "./discord-roles.store";
-import type { RoleCheckView } from "./discord-roles.types";
+import { PAYPAL_SUPPORT_MS, supportActive, type SupportFacts } from "../supporters/supporters.types";
+import { SAFETY_PASS_MS, type RoleCheckView } from "./discord-roles.types";
 
 const GUILD = "100000000000000001";
 const UNC = "200000000000000001";
 const FOUNDER = "200000000000000002";
+const SUPPORTER = "200000000000000004";
 const A = "300000000000000001";
 const B = "300000000000000002";
 const admin: Staff = { id: "400000000000000001", name: "Admin", role: "admin", csrf: "csrf" };
@@ -79,6 +81,7 @@ function fixture(env: Record<string, unknown> = {}) {
   const state = {
     member: new Map<string, string>(),
     founder: new Map<string, string>(),
+    supporter: new Map<string, string>(),
     revoked: new Map<string, string>(),
   };
   const order: string[] = [];
@@ -90,6 +93,24 @@ function fixture(env: Record<string, unknown> = {}) {
       founder: only(state.founder, users),
     })),
     revokedBasis: jest.fn(async (users?: string[]) => only(state.revoked, users)),
+    supporterDesired: jest.fn(async (users?: string[]) => only(state.supporter, users)),
+    heldBasis: jest.fn(async (guildId: string, kind: string, roleId: string, users?: string[]) => {
+      const latest = new Map<string, LedgerRow>();
+      for (const row of ledger)
+        if (
+          row.guildId === guildId &&
+          row.roleKind === kind &&
+          row.roleId === roleId &&
+          ["applied", "unknown", "started"].includes(row.state) &&
+          (!users || users.includes(row.discordUserId))
+        )
+          latest.set(row.discordUserId, row);
+      return new Map(
+        [...latest]
+          .filter(([, row]) => row.operation === "add" || (row.operation === "remove" && row.state !== "applied"))
+          .map(([user, row]) => [user, row.basisId]),
+      );
+    }),
     lastEffective: jest.fn(async (guildId: string, userId: string, kind: string, roleId?: string) => {
       const rows = ledger.filter(
         (row) =>
@@ -144,7 +165,11 @@ function fixture(env: Record<string, unknown> = {}) {
     check: jest.fn(async () => ({
       manageRoles: true,
       highestRolePosition: 9,
-      roles: { member: assignable(UNC, "UNC"), founder: assignable(FOUNDER, "Founder") },
+      roles: {
+        member: assignable(UNC, "UNC"),
+        founder: assignable(FOUNDER, "Founder"),
+        supporter: assignable(SUPPORTER, "Supporter"),
+      },
     })),
     member: jest.fn(
       async (_guildId: string, userId: string): Promise<RoleMember | null> => members.get(userId) ?? null,
@@ -550,6 +575,7 @@ describe("Discord role passes", () => {
       roles: {
         member: { ...assignable(UNC, "UNC"), assignable: false, privileged: true, problem: "Privileged" },
         founder: assignable(FOUNDER, "Founder"),
+        supporter: assignable(SUPPORTER, "Supporter"),
       },
     });
     state.member.set(A, "application-a");
@@ -570,6 +596,150 @@ describe("Discord role passes", () => {
     await service.tick();
     expect(store.desired).not.toHaveBeenCalled();
     await expect(service.reconcile(admin, reconcile())).rejects.toMatchObject({ status: 503 });
+  });
+});
+
+describe("the Supporter role", () => {
+  const withSupporter = { DISCORD_SUPPORTER_ROLE_ID: SUPPORTER };
+
+  it("is skipped entirely while DISCORD_SUPPORTER_ROLE_ID is not set", async () => {
+    const { service, state, addMember, store, ledger, status } = fixture();
+    state.supporter.set(A, "supporter-a");
+    const member = addMember(A);
+    service.supporterChanged(A);
+    await service.tick();
+    await service.reconcile(admin, reconcile());
+    expect(store.supporterDesired).not.toHaveBeenCalled();
+    expect(store.heldBasis).not.toHaveBeenCalled();
+    expect(member.add).not.toHaveBeenCalled();
+    expect(ledger).toHaveLength(0);
+    const view = await status();
+    expect(view).toMatchObject({ configured: { supporterRole: false }, summary: { supporterEligible: null } });
+    expect(view.lastFullPass).toMatchObject({ error: null, blocked: 0 });
+  });
+
+  it("adds the Supporter role beside the Founder role and removes only the Supporter role once support lapses", async () => {
+    const { service, state, addMember, ledger } = fixture(withSupporter);
+    state.founder.set(A, "supporter-a");
+    state.supporter.set(A, "supporter-a");
+    const member = addMember(A);
+    service.supporterChanged(A);
+    await service.tick();
+    expect(member.add).toHaveBeenCalledWith(FOUNDER, "Gramps: founding supporter");
+    expect(member.add).toHaveBeenCalledWith(SUPPORTER, "Gramps: active supporter");
+    expect(ledger.at(-1)).toMatchObject({
+      roleKind: "supporter",
+      roleId: SUPPORTER,
+      operation: "add",
+      basisType: "supporter",
+      basisId: "supporter-a",
+      state: "applied",
+    });
+    state.supporter.delete(A);
+    service.supporterChanged(A);
+    await service.tick();
+    expect(member.remove).toHaveBeenCalledTimes(1);
+    expect(member.remove).toHaveBeenCalledWith(SUPPORTER, "Gramps: support ended");
+    expect(member.roles.has(FOUNDER)).toBe(true);
+    expect(member.roles.has(SUPPORTER)).toBe(false);
+    expect(ledger.at(-1)).toMatchObject({
+      roleKind: "supporter",
+      operation: "remove",
+      basisType: "supporter",
+      basisId: "supporter-a",
+      state: "applied",
+      changed: true,
+    });
+    // Support that starts again adds the role again.
+    state.supporter.set(A, "supporter-a");
+    service.supporterChanged(A);
+    await service.tick();
+    expect(member.add).toHaveBeenCalledTimes(3);
+    expect(member.roles.has(SUPPORTER)).toBe(true);
+  });
+
+  it("never removes a Supporter role that was already present and never re-adds one staff removed", async () => {
+    const { service, state, addMember, ledger, status } = fixture(withSupporter);
+    state.supporter.set(A, "supporter-a");
+    state.supporter.set(B, "supporter-b");
+    const present = addMember(A, [SUPPORTER]);
+    const added = addMember(B);
+    await service.reconcile(admin, reconcile());
+    expect(present.add).not.toHaveBeenCalled();
+    expect(ledger.find((row) => row.discordUserId === A)).toMatchObject({ operation: "note", changed: false });
+    expect(added.add).toHaveBeenCalledWith(SUPPORTER, "Gramps: active supporter");
+    // Staff remove B's role by hand; A's support lapses.
+    added.roles.delete(SUPPORTER);
+    state.supporter.delete(A);
+    service.supporterChanged(A);
+    service.supporterChanged(B);
+    await service.tick();
+    expect(present.remove).not.toHaveBeenCalled();
+    expect(present.roles.has(SUPPORTER)).toBe(true);
+    expect(added.add).toHaveBeenCalledTimes(1);
+    expect((await status()).attention).toContainEqual(
+      expect.objectContaining({ kind: "removed_in_discord", discordUserId: B, roleKind: "supporter" }),
+    );
+  });
+
+  it("notices a lapsed PayPal payment on the six-hour safety pass without any event", async () => {
+    const paidAt = Date.parse("2026-11-01T12:00:00Z");
+    // Paid 31 days ago, less three hours: still supporting at startup, lapsed by the first safety pass.
+    jest.useFakeTimers({ now: paidAt + PAYPAL_SUPPORT_MS - 3 * 3_600_000 });
+    const record: SupportFacts = {
+      provider: "paypal",
+      patronStatus: null,
+      lastChargeStatus: null,
+      lastChargeAt: null,
+      payments: [
+        { source: "paypal", paidAt: new Date(paidAt), amountCents: 500, currency: "USD", minimumConfirmed: false },
+      ],
+    };
+    const { service, store, addMember, ledger } = fixture(withSupporter);
+    store.supporterDesired.mockImplementation(async () =>
+      supportActive(record, Date.now()) ? new Map([[A, "paypal-a"]]) : new Map<string, string>(),
+    );
+    const member = addMember(A);
+    service.onApplicationBootstrap();
+    await jest.advanceTimersByTimeAsync(0);
+    expect(member.add).toHaveBeenCalledWith(SUPPORTER, "Gramps: active supporter");
+    expect(ledger).toMatchObject([{ trigger: "startup", operation: "add", basisId: "paypal-a" }]);
+    // The safety timer queues a full pass, which starts on the next timer turn.
+    await jest.advanceTimersByTimeAsync(SAFETY_PASS_MS);
+    await jest.advanceTimersByTimeAsync(1);
+    expect(member.remove).toHaveBeenCalledWith(SUPPORTER, "Gramps: support ended");
+    expect(ledger.at(-1)).toMatchObject({ trigger: "schedule", operation: "remove", basisId: "paypal-a" });
+    expect(store.heldBasis).toHaveBeenLastCalledWith(GUILD, "supporter", SUPPORTER, undefined);
+  });
+
+  it("does not flag a lapsed supporter who left the server", async () => {
+    const { service, ledger, status, store } = fixture(withSupporter);
+    ledger.push(
+      history({
+        discordUserId: B,
+        roleKind: "supporter",
+        roleId: SUPPORTER,
+        basisType: "supporter",
+        basisId: "supporter-b",
+      }),
+    );
+    const { summary } = await service.reconcile(admin, reconcile());
+    expect(store.heldBasis).toHaveBeenCalledWith(GUILD, "supporter", SUPPORTER, undefined);
+    expect(summary).toMatchObject({ users: 1, added: 0, removed: 0, failed: 0 });
+    expect((await status()).attention).not.toContainEqual(expect.objectContaining({ discordUserId: B }));
+    expect(ledger).toHaveLength(1);
+  });
+
+  it("reports the Supporter role setup and how many people support right now", async () => {
+    const { service, state } = fixture(withSupporter);
+    state.supporter.set(A, "supporter-a");
+    await expect(service.status(admin)).resolves.toMatchObject({
+      configured: { supporterRole: true },
+      roles: { supporter: { id: SUPPORTER, assignable: true } },
+      ready: true,
+      summary: { supporterEligible: 1 },
+      note: expect.stringContaining("Supporter role is a Discord role only"),
+    });
   });
 });
 

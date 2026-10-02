@@ -12,6 +12,7 @@ import type { Staff } from "../admin/admin.types";
 import { PatreonSyncService } from "./patreon-sync.service";
 import { SupportersStore } from "./supporters.store";
 import {
+  FOUNDER_MINIMUM,
   founderSchema,
   linkSchema,
   manualMemberSchema,
@@ -67,8 +68,8 @@ export class SupportersService {
    */
   policy(): FounderPolicy {
     const unconfigured: FounderPolicy = {
-      amountCents: 500,
-      currency: "USD",
+      amountCents: FOUNDER_MINIMUM.amountCents,
+      currency: FOUNDER_MINIMUM.currency,
       startsAt: null,
       endsAt: null,
       configured: false,
@@ -115,7 +116,10 @@ export class SupportersService {
       this.env.get("PATREON_WEBHOOK_SECRET")!,
       this.env.get("PATREON_CAMPAIGN_ID")!,
     );
-    return { ok: true, ...(await this.store.ingest(observation)) };
+    const result = await this.store.ingest(observation);
+    // A new observation can start, pause or end support, so the Supporter role is checked again.
+    if (!result.duplicate) this.notifyRoles(result.discordId);
+    return { ok: true, duplicate: result.duplicate };
   }
   async list(staff: Staff, search: unknown = "", provider: unknown = undefined) {
     this.admin(staff);
@@ -143,7 +147,7 @@ export class SupportersService {
       provider: parsedProvider.data ?? null,
       limit: 100,
       sync: this.patreonSync.status(),
-      note: "Private supporter records for Patreon and PayPal. Membership changes need review; a tier or active membership is not proof of a completed payment. Founder records are permanent promises for future standard whitelist access. No game access is changed here. When Discord roles are switched on, founders with a linked Discord account receive the Founder role.",
+      note: "Private supporter records for Patreon and PayPal. Membership changes need review; a tier or active membership is not proof of a completed payment. Founder records are permanent promises for future standard whitelist access. No game access is changed here. When Discord roles are switched on, founders with a linked Discord account receive the Founder role, and people who currently support receive the Supporter role if it is configured. The Supporter role is a Discord role only.",
     };
   }
   /** Staff-triggered Patreon import; concurrent requests join the running sync. */
@@ -181,8 +185,9 @@ export class SupportersService {
     try {
       // The store applies the Patreon configuration check to Patreon records only.
       const result = await this.store.mutate(memberId, input, staff, this.campaign(), policy);
-      // A founder award or a changed Discord link can change who should hold the Founder role.
-      if (!result.replayed && (input.kind === "founder" || input.kind === "link"))
+      // A founder award, a changed Discord link or a new receipt can change who should hold the Founder or
+      // Supporter role.
+      if (!result.replayed && (input.kind === "founder" || input.kind === "link" || input.kind === "payment"))
         this.notifyRoles(result.supporter?.discordId);
       return result;
     } catch (error) {

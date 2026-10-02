@@ -38,6 +38,8 @@ export type ApiImportResult = {
   revoked: number;
   discordLinked: boolean;
   conflict: "discord-in-use" | "discord-differs" | null;
+  /** The record's Discord account after the import, or null; used only to queue a Discord role check. */
+  discordId: string | null;
 };
 /** A founder promise for staff review, with the payment that is no longer verified. */
 export type FounderReview = {
@@ -205,7 +207,10 @@ export class SupportersStore {
     return { ok: true, replayed: result.replayed, supporter: await this.get(result.memberId, campaignId, policy) };
   }
 
-  async ingest(observation: PatreonObservation) {
+  /** Records one signed observation. A new one reports the record's Discord account so its roles can be checked. */
+  async ingest(
+    observation: PatreonObservation,
+  ): Promise<{ duplicate: true } | { duplicate: false; discordId: string | null }> {
     return this.db.transaction(async (tx) => {
       await tx
         .insert(supporterMembers)
@@ -239,7 +244,7 @@ export class SupportersStore {
         })
         .onConflictDoNothing()
         .returning({ hash: supporterObservations.hash });
-      if (!inserted) return { duplicate: true };
+      if (!inserted) return { duplicate: true as const };
       // An undated/equal-date update is always pending review, never an entitlement.
       await tx
         .update(supporterMembers)
@@ -267,7 +272,7 @@ export class SupportersStore {
           })
           .onConflictDoNothing();
       }
-      return { duplicate: false };
+      return { duplicate: false as const, discordId: member.discordId };
     });
   }
 
@@ -317,6 +322,7 @@ export class SupportersStore {
         revoked: 0,
         discordLinked: false,
         conflict: null,
+        discordId: member.discordId,
       };
       // An unchanged snapshot keeps the member's review state; a changed one needs review like a webhook.
       const patch: Partial<typeof supporterMembers.$inferInsert> = observed
@@ -406,6 +412,7 @@ export class SupportersStore {
           else {
             patch.discordId = snapshot.discordId;
             result.discordLinked = true;
+            result.discordId = snapshot.discordId;
             actions.push({
               id: randomUUID(),
               memberId: member.id,

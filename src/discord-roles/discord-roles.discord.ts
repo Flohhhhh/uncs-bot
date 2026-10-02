@@ -24,6 +24,7 @@ const PRIVILEGED_PERMISSIONS = [
 const LABELS: Record<DiscordRoleKind, { name: string; env: string }> = {
   member: { name: "UNC", env: "DISCORD_MEMBER_ROLE_ID" },
   founder: { name: "Founder", env: "DISCORD_FOUNDER_ROLE_ID" },
+  supporter: { name: "Supporter", env: "DISCORD_SUPPORTER_ROLE_ID" },
 };
 
 /** The parts of a guild member the role pass needs; a test double needs nothing else. */
@@ -43,7 +44,7 @@ export class DiscordRolesDiscord {
     return this.client.isReady();
   }
 
-  /** Reads the bot's own permissions and both configured roles. Nothing is changed. */
+  /** Reads the bot's own permissions and every configured role. Nothing is changed. */
   async check(
     guildId: string,
     roleIds: Record<DiscordRoleKind, string | undefined>,
@@ -59,6 +60,7 @@ export class DiscordRolesDiscord {
     const view = (kind: DiscordRoleKind): RoleCheckView => {
       const id = roleIds[kind] ?? null,
         label = LABELS[kind];
+      const shared = ROLE_KINDS.find((other) => other !== kind && roleIds[other] === id);
       const role: Role | undefined = id ? roles.get(id) : undefined;
       if (!id || !role)
         return {
@@ -86,8 +88,8 @@ export class DiscordRolesDiscord {
               ? "This role grants moderation or administrator permissions. Gramps only assigns roles without them."
               : staffRole
                 ? "This role is a dashboard staff role. Use a separate role for the community tag."
-                : roleIds.member === roleIds.founder
-                  ? "The UNC and Founder roles must be two different roles."
+                : shared
+                  ? `The ${label.name} and ${LABELS[shared].name} roles must be two different roles.`
                   : !manageRoles
                     ? "Give the bot's role the Manage Roles permission."
                     : !role.editable

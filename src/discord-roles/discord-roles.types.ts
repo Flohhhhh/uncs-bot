@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type {
   DiscordRoleActionState,
+  DiscordRoleBasisType,
   DiscordRoleKind,
   DiscordRoleOperation,
   DiscordRoleTrigger,
@@ -8,14 +9,26 @@ import type {
 
 export const ROLES_ACTOR_ID = "system:discord-roles";
 export const ROLES_ACTOR_NAME = "Gramps Discord roles";
-export const ROLE_KINDS = ["member", "founder"] as const satisfies readonly DiscordRoleKind[];
-/** Audit-log reasons shown in Discord. They name the rule, never private data. */
+export const ROLE_KINDS = ["member", "founder", "supporter"] as const satisfies readonly DiscordRoleKind[];
+/** Audit-log reasons shown in Discord. They name the rule, never private data. Founder has no removal. */
 export const ROLE_REASONS = {
   member: { add: "Gramps: UNC member application approved", remove: "Gramps: UNC application revoked" },
   founder: { add: "Gramps: founding supporter" },
-} as const;
+  supporter: { add: "Gramps: active supporter", remove: "Gramps: support ended" },
+} as const satisfies Record<DiscordRoleKind, { add: string; remove?: string }>;
+/** The kind of record each role's ledger rows name as their basis. */
+export const BASIS_TYPES = {
+  member: "application",
+  founder: "founder",
+  supporter: "supporter",
+} as const satisfies Record<DiscordRoleKind, DiscordRoleBasisType>;
+/** Why a role Gramps added is removed. Founder roles are never removed automatically. */
+const ENDED_WHY = {
+  member: "application-revoked",
+  supporter: "support-lapsed",
+} as const satisfies Record<Exclude<DiscordRoleKind, "founder">, string>;
 
-export type { DiscordRoleKind, DiscordRoleTrigger };
+export type { DiscordRoleBasisType, DiscordRoleKind, DiscordRoleTrigger };
 /** The newest ledger row for a person and role that is applied, unknown or still started. */
 export type LedgerEntry = {
   id: string;
@@ -28,8 +41,12 @@ export type RoleFacts = {
   kind: DiscordRoleKind;
   /** The application or supporter record that makes the role desired, or null. */
   desiredBasis: string | null;
-  /** A revoked UNC application with no approved one remaining (member role only), or null. */
-  revokedBasis: string | null;
+  /**
+   * The record that used to justify the role and has ended, or null: a revoked UNC application with no approved
+   * one remaining (UNC), or the supporter record behind a Supporter role Gramps holds after that support lapsed.
+   * Founder roles have none.
+   */
+  endedBasis: string | null;
   hasRole: boolean;
   /** When the person joined the server this time; null when Discord does not report it. */
   joinedAt: Date | null;
@@ -37,7 +54,7 @@ export type RoleFacts = {
 };
 export type RoleDecision =
   | { op: "add"; basisId: string; why: "desired" | "retry-unknown-add" }
-  | { op: "remove"; basisId: string; why: "application-revoked" | "retry-unknown-remove" }
+  | { op: "remove"; basisId: string; why: (typeof ENDED_WHY)[keyof typeof ENDED_WHY] | "retry-unknown-remove" }
   | { op: "note"; basisId: string; why: "already-present" }
   | { op: "confirm"; entryId: string; why: "unknown-add-present" | "unknown-remove-absent" }
   | {
@@ -50,8 +67,8 @@ const uncertain = (entry: LedgerEntry) => entry.state === "unknown" || entry.sta
 /**
  * Decides one role for one member from the ledger history of the configured role. Manual Discord changes
  * win: a role that was already present is only noted, a role staff removed is not re-added during the same
- * membership, and only a role Gramps added during the current membership can be removed, and only the UNC
- * role after its application is revoked.
+ * membership, and only a role Gramps added during the current membership can be removed: the UNC role after
+ * its application is revoked, or the Supporter role after support lapsed. The Founder role is never removed.
  */
 export function decide(facts: RoleFacts): RoleDecision {
   // Ledger history from an earlier membership no longer applies after the person left and rejoined.
@@ -75,16 +92,16 @@ export function decide(facts: RoleFacts): RoleDecision {
     };
   }
   if (facts.kind === "founder") return { op: "none", why: "founder-kept" };
-  if (!facts.revokedBasis) return { op: "none", why: "no-basis" };
+  if (!facts.endedBasis) return { op: "none", why: "no-basis" };
   // A removal is only ever started for a role Gramps added, so an unconfirmed one is still Gramps' own:
   // confirm it once the role is gone, and remove again while it is present.
   if (current?.operation === "remove" && uncertain(current))
     return facts.hasRole
-      ? { op: "remove", basisId: facts.revokedBasis, why: "retry-unknown-remove" }
+      ? { op: "remove", basisId: facts.endedBasis, why: "retry-unknown-remove" }
       : { op: "confirm", entryId: current.id, why: "unknown-remove-absent" };
   if (!facts.hasRole) return { op: "none", why: "not-present" };
   if (current?.operation === "add" && (current.changed || uncertain(current)))
-    return { op: "remove", basisId: facts.revokedBasis, why: "application-revoked" };
+    return { op: "remove", basisId: facts.endedBasis, why: ENDED_WHY[facts.kind] };
   return { op: "none", why: "not-ours" };
 }
 
@@ -147,7 +164,7 @@ export type RoleCheckView = {
   assignable: boolean;
   /** A plain-English fix, or null when the role can be assigned. */
   problem: string | null;
-  /** Roles named exactly "UNC" or "Founder", listed only while the role ID is not configured. */
+  /** Roles named exactly "UNC", "Founder" or "Supporter", listed only while the role ID is not set or wrong. */
   candidates?: { id: string; name: string }[];
 };
 export type RolesCheck = {

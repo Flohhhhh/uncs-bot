@@ -4,6 +4,7 @@ import { DiscordRolesDiscord } from "./discord-roles.discord";
 const GUILD = "100000000000000001";
 const UNC = "200000000000000001";
 const FOUNDER = "200000000000000002";
+const SUPPORTER = "200000000000000004";
 type FakeRole = ReturnType<typeof role>;
 function role(
   id: string,
@@ -24,6 +25,7 @@ function fixture(options: { roles?: FakeRole[]; manageRoles?: boolean; members?:
   const roles = options.roles ?? [
     role(UNC, "UNC"),
     role(FOUNDER, "Founder"),
+    role(SUPPORTER, "Supporter"),
     role(GUILD, "@everyone", { position: 0 }),
   ];
   const cache = new Map(roles.map((item) => [item.id, item]));
@@ -48,10 +50,10 @@ function fixture(options: { roles?: FakeRole[]; manageRoles?: boolean; members?:
   const client = { isReady: () => true, guilds: { fetch: jest.fn(async () => guild) } };
   return { discord: new DiscordRolesDiscord(client as unknown as Client), fetchMember };
 }
-const ids = { member: UNC, founder: FOUNDER };
+const ids = { member: UNC, founder: FOUNDER, supporter: SUPPORTER };
 
 describe("Discord role setup checks", () => {
-  it("reports both roles as assignable with the bot's permission and position", async () => {
+  it("reports every role as assignable with the bot's permission and position", async () => {
     const { discord } = fixture();
     await expect(discord.check(GUILD, ids, [])).resolves.toEqual({
       manageRoles: true,
@@ -61,6 +63,13 @@ describe("Discord role setup checks", () => {
         founder: expect.objectContaining({
           id: FOUNDER,
           name: "Founder",
+          exists: true,
+          assignable: true,
+          problem: null,
+        }),
+        supporter: expect.objectContaining({
+          id: SUPPORTER,
+          name: "Supporter",
           exists: true,
           assignable: true,
           problem: null,
@@ -95,13 +104,18 @@ describe("Discord role setup checks", () => {
       assignable: false,
       problem: expect.stringContaining("staff role"),
     });
-    expect((await discord.check(GUILD, { member: GUILD, founder: FOUNDER }, [])).roles.member).toMatchObject({
+    expect((await discord.check(GUILD, { ...ids, member: GUILD }, [])).roles.member).toMatchObject({
       assignable: false,
       problem: expect.stringContaining("@everyone"),
     });
-    const same = await discord.check(GUILD, { member: UNC, founder: UNC }, []);
+    const same = await discord.check(GUILD, { ...ids, founder: UNC }, []);
     expect(same.roles.member.problem).toContain("two different roles");
     expect(same.roles.founder.problem).toContain("two different roles");
+    expect(same.roles.supporter.assignable).toBe(true);
+    const supporter = await discord.check(GUILD, { ...ids, supporter: FOUNDER }, []);
+    expect(supporter.roles.supporter.problem).toBe("The Supporter and Founder roles must be two different roles.");
+    expect(supporter.roles.founder.problem).toBe("The Founder and Supporter roles must be two different roles.");
+    expect(supporter.roles.member.assignable).toBe(true);
   });
   it("asks for Manage Roles before anything else about an otherwise valid role", async () => {
     const { discord } = fixture({ manageRoles: false });
@@ -113,7 +127,11 @@ describe("Discord role setup checks", () => {
     const { discord } = fixture({
       roles: [role(UNC, "UNC"), role("200000000000000003", "UNC Crew"), role(FOUNDER, "Founder")],
     });
-    const result = await discord.check(GUILD, { member: undefined, founder: "299999999999999999" }, []);
+    const result = await discord.check(
+      GUILD,
+      { member: undefined, founder: "299999999999999999", supporter: undefined },
+      [],
+    );
     expect(result.roles.member).toMatchObject({
       exists: false,
       assignable: false,
@@ -125,6 +143,26 @@ describe("Discord role setup checks", () => {
       problem: expect.stringContaining("No role with ID 299999999999999999"),
       candidates: [{ id: FOUNDER, name: "Founder" }],
     });
+  });
+  it("lists roles named exactly Supporter while DISCORD_SUPPORTER_ROLE_ID is not set", async () => {
+    const { discord } = fixture({
+      roles: [
+        role(UNC, "UNC"),
+        role(FOUNDER, "Founder"),
+        role(SUPPORTER, "Supporter"),
+        role("200000000000000005", "Supporters"),
+      ],
+    });
+    const result = await discord.check(GUILD, { ...ids, supporter: undefined }, []);
+    expect(result.roles.supporter).toMatchObject({
+      id: null,
+      exists: false,
+      assignable: false,
+      problem: expect.stringContaining("Set DISCORD_SUPPORTER_ROLE_ID to the Supporter role ID"),
+      candidates: [{ id: SUPPORTER, name: "Supporter" }],
+    });
+    expect(result.roles.member.assignable).toBe(true);
+    expect(result.roles.founder.assignable).toBe(true);
   });
 });
 

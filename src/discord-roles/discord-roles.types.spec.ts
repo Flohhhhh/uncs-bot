@@ -1,4 +1,10 @@
-import { classifyDiscordError, decide, type LedgerEntry, type RoleFacts } from "./discord-roles.types";
+import {
+  PAYPAL_SUPPORT_MS,
+  SUPPORTER_DECLINE_GRACE_MS,
+  supportActive,
+  type SupportFacts,
+} from "../supporters/supporters.types";
+import { classifyDiscordError, decide, ROLE_REASONS, type LedgerEntry, type RoleFacts } from "./discord-roles.types";
 
 const joinedAt = new Date("2026-10-01T12:00:00Z");
 const entry = (
@@ -16,7 +22,7 @@ const entry = (
 const facts = (overrides: Partial<RoleFacts>): RoleFacts => ({
   kind: "member",
   desiredBasis: null,
-  revokedBasis: null,
+  endedBasis: null,
   hasRole: false,
   joinedAt,
   lastEffective: null,
@@ -105,67 +111,63 @@ describe("deciding one role for one member", () => {
     // Not desired.
     [
       "removes a UNC role Gramps added after revocation",
-      { revokedBasis: "app", hasRole: true, lastEffective: applied },
+      { endedBasis: "app", hasRole: true, lastEffective: applied },
       { op: "remove", basisId: "app" },
     ],
-    [
-      "removes after an unknown add",
-      { revokedBasis: "app", hasRole: true, lastEffective: unknownAdd },
-      { op: "remove" },
-    ],
+    ["removes after an unknown add", { endedBasis: "app", hasRole: true, lastEffective: unknownAdd }, { op: "remove" }],
     [
       "removes after an unfinished add",
-      { revokedBasis: "app", hasRole: true, lastEffective: startedAdd },
+      { endedBasis: "app", hasRole: true, lastEffective: startedAdd },
       { op: "remove" },
     ],
     [
       "retries an unknown removal while the role is still present",
-      { revokedBasis: "app", hasRole: true, lastEffective: unknownRemove },
+      { endedBasis: "app", hasRole: true, lastEffective: unknownRemove },
       { op: "remove", basisId: "app", why: "retry-unknown-remove" },
     ],
     [
       "retries an unfinished removal while the role is still present",
-      { revokedBasis: "app", hasRole: true, lastEffective: startedRemove },
+      { endedBasis: "app", hasRole: true, lastEffective: startedRemove },
       { op: "remove", basisId: "app", why: "retry-unknown-remove" },
     ],
     [
       "confirms an unknown removal when the role is gone",
-      { revokedBasis: "app", lastEffective: unknownRemove },
+      { endedBasis: "app", lastEffective: unknownRemove },
       { op: "confirm", entryId: unknownRemove.id, why: "unknown-remove-absent" },
     ],
     [
       "confirms an unfinished removal when the role is gone",
-      { revokedBasis: "app", lastEffective: startedRemove },
+      { endedBasis: "app", lastEffective: startedRemove },
       { op: "confirm", entryId: startedRemove.id },
     ],
     [
       "never retries a removal from an earlier membership",
-      { revokedBasis: "app", hasRole: true, lastEffective: beforeJoin(unknownRemove) },
+      { endedBasis: "app", hasRole: true, lastEffective: beforeJoin(unknownRemove) },
       { op: "none", why: "not-ours" },
     ],
     [
       "never removes a role given back after a confirmed removal",
-      { revokedBasis: "app", hasRole: true, lastEffective: removal },
+      { endedBasis: "app", hasRole: true, lastEffective: removal },
       { op: "none", why: "not-ours" },
     ],
     [
       "never removes a noted role",
-      { revokedBasis: "app", hasRole: true, lastEffective: note },
+      { endedBasis: "app", hasRole: true, lastEffective: note },
       { op: "none", why: "not-ours" },
     ],
     [
       "never removes a role with no ledger history",
-      { revokedBasis: "app", hasRole: true },
+      { endedBasis: "app", hasRole: true },
       { op: "none", why: "not-ours" },
     ],
     [
       "never removes a role added in an earlier membership",
-      { revokedBasis: "app", hasRole: true, lastEffective: beforeJoin(applied) },
+      { endedBasis: "app", hasRole: true, lastEffective: beforeJoin(applied) },
       { op: "none", why: "not-ours" },
     ],
     [
       "does nothing when the revoked member no longer has it",
-      { revokedBasis: "app", lastEffective: applied },
+      { endedBasis: "app", lastEffective: applied },
       { op: "none", why: "not-present" },
     ],
     [
@@ -175,11 +177,150 @@ describe("deciding one role for one member", () => {
     ],
     [
       "never removes a Founder role",
-      { kind: "founder", revokedBasis: "x", hasRole: true, lastEffective: applied },
+      { kind: "founder", endedBasis: "x", hasRole: true, lastEffective: applied },
       { op: "none", why: "founder-kept" },
+    ],
+    // Supporter.
+    [
+      "adds a Supporter role for someone who supports",
+      { kind: "supporter", desiredBasis: "record" },
+      { op: "add", basisId: "record", why: "desired" },
+    ],
+    [
+      "only notes a Supporter role someone else gave",
+      { kind: "supporter", desiredBasis: "record", hasRole: true },
+      { op: "note", basisId: "record", why: "already-present" },
+    ],
+    [
+      "does not re-add a Supporter role staff removed in this membership",
+      { kind: "supporter", desiredBasis: "record", lastEffective: applied },
+      { op: "none", why: "removed-in-discord" },
+    ],
+    [
+      "removes a Supporter role Gramps added once support lapsed",
+      { kind: "supporter", endedBasis: "record", hasRole: true, lastEffective: applied },
+      { op: "remove", basisId: "record", why: "support-lapsed" },
+    ],
+    [
+      "retries an unknown Supporter removal while the role is still present",
+      { kind: "supporter", endedBasis: "record", hasRole: true, lastEffective: unknownRemove },
+      { op: "remove", basisId: "record", why: "retry-unknown-remove" },
+    ],
+    [
+      "confirms an unknown Supporter removal when the role is gone",
+      { kind: "supporter", endedBasis: "record", lastEffective: unknownRemove },
+      { op: "confirm", entryId: unknownRemove.id, why: "unknown-remove-absent" },
+    ],
+    [
+      "never removes a lapsed Supporter role that was already present",
+      { kind: "supporter", endedBasis: "record", hasRole: true, lastEffective: note },
+      { op: "none", why: "not-ours" },
+    ],
+    [
+      "never removes a lapsed Supporter role Gramps has no record of adding",
+      { kind: "supporter", endedBasis: "record", hasRole: true },
+      { op: "none", why: "not-ours" },
+    ],
+    [
+      "never removes a Supporter role added in an earlier membership",
+      { kind: "supporter", endedBasis: "record", hasRole: true, lastEffective: beforeJoin(applied) },
+      { op: "none", why: "not-ours" },
     ],
   ])("%s", (_label, overrides, expected) => {
     expect(decide(facts(overrides))).toMatchObject(expected);
+  });
+});
+
+describe("deciding the Supporter role from supporter records over time", () => {
+  const day = 86_400_000;
+  const chargedAt = Date.parse("2026-11-01T12:00:00Z");
+  const payment = (overrides: Partial<SupportFacts["payments"][number]> = {}) => ({
+    source: "patreon_api",
+    paidAt: new Date(chargedAt),
+    amountCents: 500,
+    currency: "USD",
+    minimumConfirmed: false,
+    ...overrides,
+  });
+  const patron = (overrides: Partial<SupportFacts> = {}): SupportFacts => ({
+    provider: "patreon",
+    patronStatus: "active_patron",
+    lastChargeStatus: "Paid",
+    lastChargeAt: new Date(chargedAt),
+    payments: [payment()],
+    ...overrides,
+  });
+  const declined = patron({ patronStatus: "declined_patron", lastChargeStatus: "Declined" });
+  const paypal = patron({
+    provider: "paypal",
+    patronStatus: null,
+    lastChargeStatus: null,
+    lastChargeAt: null,
+    payments: [payment({ source: "paypal", amountCents: 1000 })],
+  });
+  /** The service's view of one record: desired while it supports, otherwise lapsed with the same record. */
+  const supporter = (record: SupportFacts, now: number, overrides: Partial<RoleFacts> = {}) => {
+    const active = supportActive(record, now);
+    return decide(
+      facts({
+        kind: "supporter",
+        desiredBasis: active ? "record" : null,
+        endedBasis: active ? null : "record",
+        hasRole: true,
+        lastEffective: applied,
+        ...overrides,
+      }),
+    );
+  };
+  const kept = { op: "none", why: "already-recorded" };
+  const lapsed = { op: "remove", basisId: "record", why: "support-lapsed" };
+
+  it("adds the role for an active patron of any paid tier and keeps it while they support", () => {
+    expect(supporter(patron(), chargedAt + day, { hasRole: false, lastEffective: null })).toEqual({
+      op: "add",
+      basisId: "record",
+      why: "desired",
+    });
+    expect(supporter(patron({ payments: [payment({ amountCents: 2500 })] }), chargedAt + 300 * day)).toEqual(kept);
+  });
+
+  it("keeps the role for 7 days after a declined charge, then removes it", () => {
+    expect(SUPPORTER_DECLINE_GRACE_MS).toBe(7 * day);
+    expect(supporter(declined, chargedAt + SUPPORTER_DECLINE_GRACE_MS - 1)).toEqual(kept);
+    expect(supporter(declined, chargedAt + SUPPORTER_DECLINE_GRACE_MS)).toEqual(lapsed);
+  });
+
+  it("keeps the role for 31 days after a PayPal payment, then removes it", () => {
+    expect(PAYPAL_SUPPORT_MS).toBe(31 * day);
+    expect(supporter(paypal, chargedAt, { hasRole: false, lastEffective: null })).toMatchObject({ op: "add" });
+    expect(supporter(paypal, chargedAt + PAYPAL_SUPPORT_MS - 1)).toEqual(kept);
+    expect(supporter(paypal, chargedAt + PAYPAL_SUPPORT_MS)).toEqual(lapsed);
+  });
+
+  it("removes the role at once when Patreon reports a refund, fraud or a cancelled membership", () => {
+    for (const record of [
+      patron({ lastChargeStatus: "Refunded" }),
+      patron({ lastChargeStatus: "Fraud" }),
+      patron({ patronStatus: "former_patron" }),
+    ])
+      expect(supporter(record, chargedAt + day)).toEqual(lapsed);
+  });
+
+  it("never removes a lapsed Supporter role that was already present before Gramps checked", () => {
+    expect(supporter(paypal, chargedAt + PAYPAL_SUPPORT_MS, { lastEffective: note })).toEqual({
+      op: "none",
+      why: "not-ours",
+    });
+  });
+
+  it("keeps the Founder role of a founder whose support lapsed and removes only the Supporter role", () => {
+    const now = chargedAt + SUPPORTER_DECLINE_GRACE_MS;
+    const founder = decide(facts({ kind: "founder", desiredBasis: "record", hasRole: true, lastEffective: applied }));
+    expect(founder).toEqual(kept);
+    expect(supporter(declined, now)).toEqual(lapsed);
+    // A founder who still supports holds both roles.
+    expect(supporter(patron(), now)).toEqual(kept);
+    expect(ROLE_REASONS.supporter).toEqual({ add: "Gramps: active supporter", remove: "Gramps: support ended" });
   });
 });
 

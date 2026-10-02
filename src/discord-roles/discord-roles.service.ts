@@ -17,6 +17,7 @@ import { DiscordRolesStore } from "./discord-roles.store";
 import {
   ADMIN_COOLDOWN_MS,
   BACKOFF_MS,
+  BASIS_TYPES,
   classifyDiscordError,
   decide,
   EVENT_DEBOUNCE_MS,
@@ -51,9 +52,9 @@ const MAX_ATTENTION = 100;
 class SetupProblem extends Error {}
 
 /**
- * Keeps the UNC member and Founder roles in step with approved applications and founder records.
- * One pass runs at a time in this process (a single Gramps instance is assumed; Discord's role add and
- * remove calls are idempotent anyway). Every change is written to the role ledger before Discord is
+ * Keeps the UNC member, Founder and Supporter roles in step with approved applications, founder records and
+ * current support. One pass runs at a time in this process (a single Gramps instance is assumed; Discord's role
+ * add and remove calls are idempotent anyway). Every change is written to the role ledger before Discord is
  * contacted, and only roles Gramps itself added during the current membership are ever removed.
  */
 @Injectable()
@@ -98,6 +99,7 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
       roleIds: {
         member: this.env.get("DISCORD_MEMBER_ROLE_ID"),
         founder: this.env.get("DISCORD_FOUNDER_ROLE_ID"),
+        supporter: this.env.get("DISCORD_SUPPORTER_ROLE_ID"),
       } as Record<DiscordRoleKind, string | undefined>,
       staffRoleIds: [
         ...ids(this.env.get("ADMIN_ADMIN_ROLE_IDS")),
@@ -128,7 +130,10 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
     this.enqueue(discordUserId, "event");
   }
 
-  /** A founder was recorded or a supporter's Discord account changed. Fire-and-forget; never throws. */
+  /**
+   * A founder was recorded, a supporter's Discord account changed, or support started, changed or ended.
+   * Fire-and-forget; never throws. Time-based expiry needs no event: the six-hour safety pass re-reads it.
+   */
   supporterChanged(discordUserId: string | null | undefined) {
     this.enqueue(discordUserId, "event");
   }
@@ -293,8 +298,28 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
       if (!usable.length)
         throw new SetupProblem("No role can be assigned. Fix the role setup on the Discord roles page.");
       const list = users ? [...users.keys()] : undefined;
-      const [desired, revoked] = await Promise.all([this.store.desired(list), this.store.revokedBasis(list)]);
-      const candidates = [...new Set([...desired.member.keys(), ...desired.founder.keys(), ...revoked.keys()])];
+      // The Supporter role is read only while it is configured and passes its checks.
+      const supporterRole = usable.includes("supporter") ? options.roleIds.supporter! : null;
+      const [desired, revoked, supporting, held] = await Promise.all([
+        this.store.desired(list),
+        this.store.revokedBasis(list),
+        supporterRole ? this.store.supporterDesired(list) : new Map<string, string>(),
+        supporterRole ? this.store.heldBasis(guildId, "supporter", supporterRole, list) : new Map<string, string>(),
+      ]);
+      const wanted: Record<DiscordRoleKind, Map<string, string>> = { ...desired, supporter: supporting };
+      // The record that used to justify a role that has ended. A Supporter role Gramps holds for someone who no
+      // longer supports has lapsed; its basis is the supporter record named when Gramps added it.
+      const ended: Record<DiscordRoleKind, Map<string, string>> = {
+        member: revoked,
+        founder: new Map(),
+        supporter: new Map([...held].filter(([userId]) => !supporting.has(userId))),
+      };
+      const candidates = [
+        ...new Set([
+          ...ROLE_KINDS.flatMap((kind) => [...wanted[kind].keys()]),
+          ...ROLE_KINDS.flatMap((kind) => [...ended[kind].keys()]),
+        ]),
+      ];
       if (!dryRun) {
         // People this pass covers who no longer have a reason to hold or lose a role need no attention.
         const covered = new Set(candidates);
@@ -333,7 +358,9 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
         }
         if (!member) {
           if (!dryRun) this.forgetAttention(userId);
-          attention({ kind: "not_in_server", discordUserId: userId });
+          // Someone whose only reason is a lapsed Supporter role has nothing to receive, so needs no attention.
+          if (ROLE_KINDS.some((kind) => wanted[kind].has(userId)) || revoked.has(userId))
+            attention({ kind: "not_in_server", discordUserId: userId });
           plan?.push({ discordUserId: userId, roleKind: null, op: "none", why: "not-in-server" });
           continue;
         }
@@ -341,13 +368,13 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
           if (blockedKinds.has(kind)) continue;
           if (!dryRun) this.forgetAttention(userId, [kind]);
           const roleId = options.roleIds[kind]!;
-          const desiredBasis = desired[kind].get(userId) ?? null;
-          const revokedBasis = kind === "member" ? (revoked.get(userId) ?? null) : null;
-          if (!desiredBasis && !revokedBasis) continue;
+          const desiredBasis = wanted[kind].get(userId) ?? null;
+          const endedBasis = ended[kind].get(userId) ?? null;
+          if (!desiredBasis && !endedBasis) continue;
           const decision = decide({
             kind,
             desiredBasis,
-            revokedBasis,
+            endedBasis,
             hasRole: member.has(roleId),
             joinedAt: member.joinedAt,
             lastEffective: await this.store.lastEffective(guildId, userId, kind, roleId),
@@ -367,7 +394,7 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
             discordUserId: userId,
             roleKind: kind,
             roleId,
-            basisType: kind === "member" ? ("application" as const) : ("founder" as const),
+            basisType: BASIS_TYPES[kind],
           };
           if (decision.op === "confirm") {
             await this.store.confirm(decision.entryId, decision.why === "unknown-add-present" ? "add" : "remove");
@@ -380,6 +407,10 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
             summary.noted++;
             continue;
           }
+          const reasons: { add: string; remove?: string } = ROLE_REASONS[kind];
+          const reason = decision.op === "add" ? reasons.add : reasons.remove;
+          // decide() never removes a Founder role; a role without a removal reason is never removed.
+          if (!reason) continue;
           if (writes >= MAX_WRITES_PER_PASS) {
             this.defer(userId, userTrigger, Date.now() + FOLLOW_UP_MS);
             summary.deferred++;
@@ -391,8 +422,8 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
           const actionId = await this.store.begin({ ...base, operation: decision.op, basisId: decision.basisId });
           let failure: DiscordFailure | null = null;
           try {
-            if (decision.op === "add") await member.add(roleId, ROLE_REASONS[kind].add);
-            else await member.remove(roleId, ROLE_REASONS.member.remove);
+            if (decision.op === "add") await member.add(roleId, reason);
+            else await member.remove(roleId, reason);
           } catch (error) {
             failure = classifyDiscordError(error);
           }
@@ -495,10 +526,12 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
       ]),
     ) as Record<DiscordRoleKind, RoleCheckView>;
     const configuredKinds = ROLE_KINDS.filter((kind) => options.roleIds[kind]);
-    const [summary, foundersWithoutDiscord, recent] = await Promise.all([
+    const [summary, foundersWithoutDiscord, recent, supporterEligible] = await Promise.all([
       this.store.summary(),
       this.store.foundersWithoutDiscord(),
       this.store.recent(25),
+      // People who support right now; counted only while the Supporter role is configured.
+      options.roleIds.supporter ? this.store.supporterDesired().then((desired) => desired.size) : null,
     ]);
     const next = Math.min(...[...this.deferredUsers.values()].map((entry) => entry.at));
     return {
@@ -507,6 +540,7 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
         guild: Boolean(options.guildId),
         memberRole: Boolean(options.roleIds.member),
         founderRole: Boolean(options.roleIds.founder),
+        supporterRole: Boolean(options.roleIds.supporter),
       },
       discordReady,
       bot: { manageRoles: check?.manageRoles ?? null, highestRolePosition: check?.highestRolePosition ?? null },
@@ -520,7 +554,7 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
       queued: this.pendingUsers.size + this.deferredUsers.size,
       fullPassQueued: this.fullPending !== null,
       nextRetryAt: Number.isFinite(next) ? new Date(next).toISOString() : null,
-      summary,
+      summary: { ...summary, supporterEligible },
       attention: [
         ...foundersWithoutDiscord.map(
           (founder): AttentionItem => ({
@@ -534,7 +568,7 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
         ...[...this.attentionItems.values()].slice(0, MAX_ATTENTION),
       ],
       recent,
-      note: "Gramps adds the UNC role for approved UNC member applications and the Founder role for founders with a linked Discord account. It removes only a UNC role it added itself, after that application is revoked. Founder roles are never removed automatically.",
+      note: "Gramps adds the UNC role for approved UNC member applications, the Founder role for founders with a linked Discord account and, when configured, the Supporter role for people who support right now (an active Patreon membership, a declined Patreon charge for up to 7 days, or a PayPal payment in the last 31 days). It removes only roles it added itself: the UNC role after that application is revoked, and the Supporter role after support lapses. Founder roles are never removed automatically. The Supporter role is a Discord role only.",
     };
   }
 

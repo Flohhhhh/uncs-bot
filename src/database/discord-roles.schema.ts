@@ -1,7 +1,8 @@
 import { boolean, index, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 
 export type DiscordRoleTrigger = "startup" | "event" | "member-join" | "admin" | "schedule";
-export type DiscordRoleKind = "member" | "founder";
+export type DiscordRoleKind = "member" | "founder" | "supporter";
+export type DiscordRoleBasisType = "application" | "founder" | "supporter";
 export type DiscordRoleOperation = "add" | "remove" | "note";
 export type DiscordRoleActionState = "started" | "applied" | "failed" | "unknown";
 
@@ -22,7 +23,7 @@ export const discordRoleActions = pgTable(
     roleKind: text("role_kind").$type<DiscordRoleKind>().notNull(),
     roleId: text("role_id").notNull(),
     operation: text("operation").$type<DiscordRoleOperation>().notNull(),
-    basisType: text("basis_type").$type<"application" | "founder">().notNull(),
+    basisType: text("basis_type").$type<DiscordRoleBasisType>().notNull(),
     // The application UUID or the supporter record UUID that justified this operation.
     basisId: text("basis_id").notNull(),
     changed: boolean("changed").notNull().default(false),

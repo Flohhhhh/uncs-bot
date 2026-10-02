@@ -3,6 +3,7 @@ import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { isPublicIndividualSteamId } from "../common/steam-id";
 import type { SupporterPaymentSource, SupporterProvider } from "../database/supporters.schema";
+import { PATREON_REVERSED_CHARGE_STATUSES } from "./patreon.client";
 
 export const MAX_PATREON_BYTES = 65_536;
 const line = (maximum: number) =>
@@ -177,6 +178,8 @@ export type FounderPolicy = {
   source: "SUPPORTER_FOUNDER" | "PATREON_FOUNDER" | null;
 };
 export const policyDays = 15;
+/** The founder minimum. The Supporter Discord role uses the same minimum. */
+export const FOUNDER_MINIMUM = { amountCents: 500, currency: "USD" } as const;
 
 /** Verified payment sources that can qualify a founder. Another provider's source slots in here. */
 export const FOUNDER_PAYMENT_SOURCES = [
@@ -223,6 +226,21 @@ export function founderIdentity(member: { discordId: string | null; steamId: str
   return (Boolean(member.discordId) || steamValid) && (!member.steamId || steamValid);
 }
 /**
+ * The founder rule's minimum: at least US$5, or a payment in another currency that staff confirmed was worth at
+ * least that. Amount and currency are recorded but never create tiers.
+ */
+export function meetsFounderMinimum(
+  payment: Pick<FounderPaymentFacts, "amountCents" | "currency" | "minimumConfirmed">,
+  minimum: { amountCents: number; currency: string } = FOUNDER_MINIMUM,
+) {
+  return (
+    payment.amountCents !== null &&
+    (payment.currency === minimum.currency
+      ? payment.amountCents >= minimum.amountCents
+      : payment.currency !== null && payment.minimumConfirmed === true)
+  );
+}
+/**
  * The first reason this payment cannot make its member a founder, or null when it qualifies. One rule for every
  * provider: a verified first successful payment from a qualifying source, inside the end-exclusive window, worth at
  * least US$5. `earlierPayment` ignores the imported copy of a staff receipt's own charge, and
@@ -242,16 +260,48 @@ export function founderBlocker(
   if (context.earlierPayment) return "earlier_payment";
   const paidAt = new Date(payment.paidAt).getTime();
   if (!Number.isFinite(paidAt) || paidAt < starts || paidAt >= ends) return "outside_window";
-  // Amount and currency are recorded but never create tiers. A non-USD amount needs staff confirmation.
-  const meetsMinimum =
-    payment.amountCents !== null &&
-    (payment.currency === policy.currency
-      ? payment.amountCents >= policy.amountCents
-      : payment.currency !== null && payment.minimumConfirmed === true);
-  if (!meetsMinimum) return "below_minimum";
+  if (!meetsFounderMinimum(payment, policy)) return "below_minimum";
   if (!context.hasIdentity) return "no_identity";
   if (context.otherFounder) return "already_founder";
   return null;
+}
+/** A declined Patreon patron keeps the Supporter role this long after the declined charge while Patreon retries. */
+export const SUPPORTER_DECLINE_GRACE_MS = 7 * 86_400_000;
+/** A staff-recorded PayPal payment keeps the Supporter role this long after it was paid (covers one-time gifts). */
+export const PAYPAL_SUPPORT_MS = 31 * 86_400_000;
+/** The facts of one supporter record that the Supporter Discord role reads. */
+export type SupportFacts = {
+  provider: SupporterProvider;
+  patronStatus: string | null;
+  lastChargeStatus: string | null;
+  lastChargeAt: Date | string | null;
+  /** Verified payments with a known amount from founder-qualifying sources, newest first. */
+  payments: Pick<FounderPaymentFacts, "source" | "paidAt" | "amountCents" | "currency" | "minimumConfirmed">[];
+};
+/**
+ * Whether a supporter record supports The UNCs right now, for the Supporter Discord role. It is a Discord role
+ * only: it grants no whitelist or game access.
+ *
+ * - Patreon: an active patron, or a declined patron until 7 days after the declined charge (Patreon retries the
+ *   card), whose latest charge was not refunded, fraudulent or otherwise reversed, and whose newest known payment
+ *   meets the founder minimum. Any tier counts.
+ * - PayPal: a staff-recorded payment that meets the founder minimum, until 31 days after it was paid.
+ *
+ * Every window ends exclusively at the stated time.
+ */
+export function supportActive(record: SupportFacts, now: Date | number) {
+  const at = typeof now === "number" ? now : now.getTime();
+  const time = (value: Date | string | null) => (value === null ? NaN : new Date(value).getTime());
+  if (record.provider === "paypal")
+    return record.payments.some(
+      (payment) =>
+        payment.source === "paypal" && meetsFounderMinimum(payment) && at < time(payment.paidAt) + PAYPAL_SUPPORT_MS,
+    );
+  const [newest] = record.payments;
+  if (!newest || !meetsFounderMinimum(newest)) return false;
+  if (record.lastChargeStatus && PATREON_REVERSED_CHARGE_STATUSES.has(record.lastChargeStatus)) return false;
+  if (record.patronStatus === "active_patron") return true;
+  return record.patronStatus === "declined_patron" && at < time(record.lastChargeAt) + SUPPORTER_DECLINE_GRACE_MS;
 }
 export type PaymentView = {
   id: string;

@@ -84,6 +84,7 @@ const imported = (overrides: Partial<ApiImportResult> = {}): ApiImportResult => 
   revoked: 0,
   discordLinked: false,
   conflict: null,
+  discordId: null,
   ...overrides,
 });
 function fixture(
@@ -372,18 +373,30 @@ describe("Patreon sync worker", () => {
     expect(store.founderReviews).toHaveBeenCalledWith(campaign);
     expectNoToken();
   });
-  it("asks the role service to check only the Discord accounts the sync linked", async () => {
+  it("asks the role service to check linked Discord accounts whose supporter record changed", async () => {
     const { service, store, roles } = tracked();
-    store.importApiMember.mockResolvedValueOnce(imported({ discordLinked: true }));
+    store.importApiMember.mockResolvedValueOnce(imported({ discordLinked: true, discordId }));
     fetchMock.mockResolvedValueOnce(onePage());
     await service.sync();
     expect(roles.supporterChanged).toHaveBeenCalledTimes(1);
     expect(roles.supporterChanged).toHaveBeenCalledWith(discordId);
-    // An unchanged link, a conflict or a member without a connected account queues nothing.
-    store.importApiMember.mockResolvedValueOnce(imported({ discordLinked: false, conflict: "discord-differs" }));
+    // A changed status on a record staff already linked can start or end support for the Supporter role.
+    const linked = "223456789012345678";
+    store.importApiMember.mockResolvedValueOnce(
+      imported({ created: false, updated: true, payments: 0, discordId: linked, conflict: "discord-differs" }),
+    );
     fetchMock.mockResolvedValueOnce(onePage());
     await service.sync();
-    expect(roles.supporterChanged).toHaveBeenCalledTimes(1);
+    expect(roles.supporterChanged).toHaveBeenCalledTimes(2);
+    expect(roles.supporterChanged).toHaveBeenLastCalledWith(linked);
+    // An unchanged record, or a changed one without a linked Discord account, queues nothing.
+    store.importApiMember.mockResolvedValueOnce(imported({ created: false, payments: 0, discordId: linked }));
+    fetchMock.mockResolvedValueOnce(onePage());
+    await service.sync();
+    store.importApiMember.mockResolvedValueOnce(imported({ discordLinked: false, conflict: "discord-in-use" }));
+    fetchMock.mockResolvedValueOnce(onePage());
+    await service.sync();
+    expect(roles.supporterChanged).toHaveBeenCalledTimes(2);
   });
   it("keeps importing when the role service throws", async () => {
     const roles = {
@@ -392,7 +405,7 @@ describe("Patreon sync worker", () => {
       }),
     };
     const { service, store } = tracked({}, roles);
-    store.importApiMember.mockResolvedValueOnce(imported({ discordLinked: true }));
+    store.importApiMember.mockResolvedValueOnce(imported({ discordLinked: true, discordId }));
     fetchMock.mockResolvedValueOnce(onePage());
     expect(await service.sync()).toMatchObject({ lastError: null, discordLinks: 1 });
     expect(roles.supporterChanged).toHaveBeenCalledWith(discordId);
@@ -451,7 +464,9 @@ describe("Patreon sync worker", () => {
     );
     try {
       const { service, store } = tracked({}, roles);
-      store.importApiMember.mockResolvedValueOnce(imported({ created: false, payments: 0, discordLinked: true }));
+      store.importApiMember.mockResolvedValueOnce(
+        imported({ created: false, payments: 0, discordLinked: true, discordId }),
+      );
       fetchMock.mockResolvedValueOnce(onePage());
       await service.sync();
       await roles.tick();

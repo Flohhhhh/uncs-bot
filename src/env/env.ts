@@ -128,8 +128,9 @@ export const Env = z.object({
   SUPPORTER_FOUNDER_END_AT: z.iso.datetime({ offset: true }).optional(),
 
   /**
-   * Automatic UNC member and Founder roles in ADMIN_GUILD_ID. Off by default; the status page and
-   * dry runs still work while off. Requires Manage Roles and a bot role above both roles.
+   * Automatic UNC member, Founder and Supporter roles in ADMIN_GUILD_ID. Off by default; the status page
+   * and dry runs still work while off. Requires Manage Roles and a bot role above every configured role.
+   * A role whose ID is not set is skipped.
    */
   DISCORD_ROLES_ENABLED: z
     .enum(["true", "false"])
@@ -137,6 +138,7 @@ export const Env = z.object({
     .transform((value) => value === "true"),
   DISCORD_MEMBER_ROLE_ID: discordId.optional(),
   DISCORD_FOUNDER_ROLE_ID: discordId.optional(),
+  DISCORD_SUPPORTER_ROLE_ID: discordId.optional(),
 
   /** Website requests remain disabled until the reviewed schema is deployed. */
   WHITELIST_APPLICATIONS_ENABLED: z
