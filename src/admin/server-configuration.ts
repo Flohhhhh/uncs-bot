@@ -35,7 +35,12 @@ function fieldState(doc: ConfigDocument, field: SettingField) {
 function readValue(doc: ConfigDocument, field: SettingField): SettingValue | null {
   const raw = scalarValue(doc.text, field.section, field.key);
   if (field.secret || raw === null) return null;
-  if (field.type === "number") return settingValue(field, /^\d+$/.test(raw) ? Number(raw) : NaN);
+  // Show a saved whole number even when it is outside the range staff may save, so it can be corrected here.
+  if (field.type === "number") {
+    if (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw)))
+      throw new Error("The configured value is not a whole number.");
+    return Number(raw);
+  }
   if (field.type === "boolean") {
     if (!/^(true|false)$/i.test(raw)) throw new Error("The configured value is not a boolean.");
     return raw.toLowerCase() === "true";

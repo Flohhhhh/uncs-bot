@@ -74,6 +74,11 @@ function server(overrides: Partial<CombatServerResponse> = {}): CombatServerResp
         headshot: false,
       }),
     ],
+    lastBatch: null,
+    lastRejected: null,
+    rejectedCount: 0,
+    lastRejectedWithoutToken: null,
+    rejectedWithoutTokenCount: 0,
     ...overrides,
   };
 }
@@ -289,6 +294,87 @@ describe("CombatPage", () => {
     expect(screen.getByRole("button", { name })).toBeTruthy();
     expect(document.querySelector("img")).toBeNull();
     expect(screen.getByText("This is recorded history; an empty feed does not mean nobody played.")).toBeTruthy();
+  });
+
+  it("shows no delivery notices while every delivery reaching Gramps was accepted cleanly", async () => {
+    request.mockResolvedValue(
+      server({ lastBatch: { at: observedAt, accepted: 3, skipped: 1, invalid: 0, firstInvalid: null } }),
+    );
+    render(page());
+    await screen.findByRole("table", { name: "Server leaderboard" });
+    expect(document.querySelector(".notice")).toBeNull();
+  });
+
+  it("shows staff why the game's deliveries were refused, even before any batch was accepted", async () => {
+    request.mockResolvedValue(
+      server({
+        connected: false,
+        feedStatus: "waiting",
+        lastReceivedAt: null,
+        trackingStartedAt: null,
+        leaderboard: [],
+        events: [],
+        totals: { events: 0, kills: 0, deaths: 0, headshotKills: 0, players: 0 },
+        lastRejected: { at: observedAt, status: 400, reason: "invalid payload: events.0.eventTime (bad format)" },
+        rejectedCount: 4,
+        lastRejectedWithoutToken: { at: observedAt, status: 401, reason: "token mismatch" },
+        rejectedWithoutTokenCount: 1,
+      }),
+    );
+    render(page());
+    await screen.findByText("Waiting for the first combat events");
+    const refused = screen.getByText("Latest game feed delivery refused.").closest(".notice");
+    expect(refused).toHaveClass("warning");
+    expect(refused).toHaveTextContent("HTTP 400, invalid payload: events.0.eventTime (bad format).");
+    expect(refused).toHaveTextContent("No batch has been accepted since.");
+    expect(refused).toHaveTextContent("4 deliveries with the feed token refused since Gramps started.");
+    const withoutToken = screen.getByText("1 request without the feed token refused").closest(".notice");
+    expect(withoutToken).toHaveClass("info");
+    expect(withoutToken).toHaveTextContent("HTTP 401, token mismatch.");
+    expect(withoutToken).toHaveTextContent("do not show that the game sent them");
+  });
+
+  it("warns when the last batch skipped invalid entries and marks older refusals as superseded", async () => {
+    request.mockResolvedValue(
+      server({
+        lastBatch: {
+          at: observedAt,
+          accepted: 1,
+          skipped: 3,
+          invalid: 2,
+          firstInvalid: "events.1.eventId (bad format)",
+        },
+        lastRejected: { at: "2026-09-30T17:00:00.000Z", status: 503, reason: "storage unavailable" },
+        rejectedCount: 1,
+      }),
+    );
+    render(page());
+    await screen.findByRole("table", { name: "Server leaderboard" });
+    const skipped = screen.getByText("Last batch skipped invalid entries.").closest(".notice");
+    expect(skipped).toHaveClass("warning");
+    expect(skipped).toHaveTextContent("1 killed event accepted, 2 invalid entries skipped.");
+    expect(skipped).toHaveTextContent("First invalid: events.1.eventId (bad format).");
+    const earlier = screen.getByText("Earlier game feed delivery refused.").closest(".notice");
+    expect(earlier).toHaveClass("info");
+    expect(earlier).toHaveTextContent("HTTP 503, storage unavailable. Later batches were accepted.");
+    expect(screen.queryByText(/without the feed token refused/)).toBeNull();
+  });
+
+  it("keeps delivery notices on the server view, not a player's history", async () => {
+    const response = server({
+      lastRejected: { at: observedAt, status: 503, reason: "storage unavailable" },
+      rejectedCount: 1,
+    });
+    const { leaderboard, ...base } = response;
+    request.mockImplementation(async (path) =>
+      path.startsWith("combat/players/") ? { ...base, steamId: aliceId, player: leaderboard[0] } : response,
+    );
+    render(page());
+    const table = await screen.findByRole("table", { name: "Server leaderboard" });
+    expect(screen.getByText("Latest game feed delivery refused.")).toBeInTheDocument();
+    fireEvent.click(within(table).getByRole("button", { name: "Alice" }));
+    expect(await screen.findByRole("heading", { name: "Alice" })).toBeTruthy();
+    expect(screen.queryByText("Latest game feed delivery refused.")).toBeNull();
   });
 
   it("blocks navigation while another staff action is in progress", async () => {

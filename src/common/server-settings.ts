@@ -115,8 +115,8 @@ export const settingFields: SettingField[] = [
     label: "Players to start a match",
     group: "Gameplay",
     type: "number",
-    min: 0,
-    help: "The selected game mode may enforce a higher minimum.",
+    min: 20,
+    help: "The game will not start a match with fewer than 20 players.",
   },
   {
     id: "scorePeriod",
@@ -198,13 +198,9 @@ export function settingValue(field: SettingField, value: unknown): SettingValue 
     return value;
   }
   if (field.type === "number") {
-    if (
-      typeof value !== "number" ||
-      !Number.isSafeInteger(value) ||
-      value < (field.min ?? 0) ||
-      value > (field.max ?? Number.MAX_SAFE_INTEGER)
-    )
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value > (field.max ?? Number.MAX_SAFE_INTEGER))
       throw new Error(`Enter a valid whole number for ${field.label}.`);
+    if (value < (field.min ?? 0)) throw new Error(`${field.label} must be at least ${field.min}.`);
     return value;
   }
   if (

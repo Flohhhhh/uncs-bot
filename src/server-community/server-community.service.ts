@@ -3,11 +3,12 @@ import { Client } from "discord.js";
 import { createHash, randomUUID } from "node:crypto";
 import { AdminStore, COMMUNITY_MESSAGES_ACTOR_ID } from "../admin/admin.store";
 import { actionSchema, type ActionResult, type AdminAction, type Staff } from "../admin/admin.types";
-import { RconError, WardogsClient } from "../admin/wardogs.client";
+import { RconError, RESERVED_SLOTS_CACHE_MS, WardogsClient } from "../admin/wardogs.client";
 import { EnvService } from "../env/env.service";
 import { GameServers } from "../admin/game-servers";
 import type { GameServerSummary } from "../common/game-server";
 import type { CommunityMessagesStatus } from "../common/community-messages";
+import { CommunityRotation, type WelcomePool } from "./community-rotation";
 import { initialCommunityState, observeCommunity, statusCard, type CommunitySnapshot } from "./community-state";
 
 const SYSTEM_ACTOR: Staff = {
@@ -19,6 +20,8 @@ const SYSTEM_ACTOR: Staff = {
 const MAX_QUEUE = 64;
 const MAX_SENDS_PER_TICK = 1;
 const MESSAGE_TTL_MS = 60_000;
+/** After a failed whitelist read, joiners get the standard welcome without another read for this long. */
+export const WHITELIST_RETRY_MS = 60_000;
 type QueuedMessage = { action: AdminAction; readyAt: number; expiresAt: number; followUps: string[] };
 type StatusCardTarget = { channelId: string; messageId: string } | null | undefined;
 
@@ -30,6 +33,24 @@ function communityOptions(env: EnvService, card: StatusCardTarget) {
   const round = enabled && env.get("SERVER_COMMUNITY_ROUND_ENABLED") === true;
   const status = enabled && env.get("SERVER_COMMUNITY_DISCORD_STATUS_ENABLED") === true && !!channelId && !!messageId;
   return { welcome, round, status, channelId, messageId, active: welcome || round || status };
+}
+
+/** Variants take precedence over the sequence, which takes precedence over the legacy single message. */
+function welcomeVariants(env: EnvService): string[][] {
+  return (
+    env.get("SERVER_COMMUNITY_WELCOME_VARIANTS") ?? [
+      env.get("SERVER_COMMUNITY_WELCOME_MESSAGES") ?? [env.get("SERVER_COMMUNITY_WELCOME_MESSAGE")],
+    ]
+  );
+}
+
+/** Welcome variants for players on the server's running whitelist; undefined keeps one pool for everyone. */
+function whitelistedWelcomeVariants(env: EnvService): string[][] | undefined {
+  return env.get("SERVER_COMMUNITY_WHITELISTED_WELCOME_VARIANTS");
+}
+
+function roundMessages(env: EnvService): string[] {
+  return env.get("SERVER_COMMUNITY_ROUND_MESSAGES") ?? [env.get("SERVER_COMMUNITY_ROUND_MESSAGE")];
 }
 
 @Injectable()
@@ -52,6 +73,9 @@ export class ServerCommunityService implements OnApplicationBootstrap, OnModuleD
     const serverId = this.servers.resolve(id);
     const options = communityOptions(this.env, this.cardTarget(serverId));
     const worker = this.workers.get(serverId);
+    const variants = welcomeVariants(this.env);
+    const whitelistedVariants = whitelistedWelcomeVariants(this.env);
+    const rounds = roundMessages(this.env);
     return {
       enabled: this.env.get("SERVER_COMMUNITY_ENABLED") === true,
       workerStarted: !!worker && options.active,
@@ -62,13 +86,20 @@ export class ServerCommunityService implements OnApplicationBootstrap, OnModuleD
       }),
       welcome: {
         enabled: options.welcome,
-        messages: this.env.get("SERVER_COMMUNITY_WELCOME_MESSAGES") ?? [
-          this.env.get("SERVER_COMMUNITY_WELCOME_MESSAGE"),
-        ],
+        messages: variants[0],
+        variants,
+        whitelistedVariants: whitelistedVariants ?? null,
+        whitelist: whitelistedVariants
+          ? {
+              source: "running-whitelist",
+              cacheSeconds: RESERVED_SLOTS_CACHE_MS / 1000,
+              ...(worker?.whitelistObservations() ?? { lastLoadedAt: null, lastFailedAt: null }),
+            }
+          : null,
         delaySeconds: this.env.get("SERVER_COMMUNITY_WELCOME_DELAY_SECONDS"),
         spacingSeconds: this.env.get("SERVER_COMMUNITY_WELCOME_SPACING_SECONDS"),
       },
-      round: { enabled: options.round, message: this.env.get("SERVER_COMMUNITY_ROUND_MESSAGE") },
+      round: { enabled: options.round, message: rounds[0], messages: rounds },
       discordStatus: {
         enabled:
           this.env.get("SERVER_COMMUNITY_ENABLED") === true &&
@@ -115,6 +146,9 @@ export class ServerCommunityWorker implements OnApplicationBootstrap, OnModuleDe
   private cardSavedAt = 0;
   private cardKey = "";
   private lastMessageAcknowledgedAt: string | null = null;
+  private whitelistLoadedAt: string | null = null;
+  private whitelistFailedAt: string | null = null;
+  private whitelistRetryAt = 0;
 
   constructor(
     private readonly game: WardogsClient,
@@ -123,6 +157,7 @@ export class ServerCommunityWorker implements OnApplicationBootstrap, OnModuleDe
     private readonly discord: Client,
     private readonly server: GameServerSummary = { id: "primary", name: "The UNCs", version: "0".repeat(64) },
     private readonly card?: StatusCardTarget,
+    private readonly rotation = new CommunityRotation(),
   ) {}
 
   private options() {
@@ -135,6 +170,11 @@ export class ServerCommunityWorker implements OnApplicationBootstrap, OnModuleDe
       lastMessageAcknowledgedAt: this.lastMessageAcknowledgedAt,
       lastStatusCardUpdatedAt: this.cardSavedAt ? new Date(this.cardSavedAt).toISOString() : null,
     };
+  }
+
+  /** When the whitelist used to pick welcome pools was last read, and when a read last failed. */
+  whitelistObservations() {
+    return { lastLoadedAt: this.whitelistLoadedAt, lastFailedAt: this.whitelistFailedAt };
   }
 
   onApplicationBootstrap() {
@@ -192,18 +232,29 @@ export class ServerCommunityWorker implements OnApplicationBootstrap, OnModuleDe
           expiresAt > now &&
           (action.action === "message" ? options.welcome && connected.has(action.steamId) : options.round),
       );
-      if (options.round && observation.round)
-        this.enqueue({ action: "broadcast", message: this.env.get("SERVER_COMMUNITY_ROUND_MESSAGE") }, now, true);
+      if (options.round && observation.round) {
+        const messages = roundMessages(this.env);
+        this.enqueue({ action: "broadcast", message: messages[this.rotation.round(messages.length)] }, now, true);
+      }
       if (options.welcome) {
-        const messages = this.env.get("SERVER_COMMUNITY_WELCOME_MESSAGES") ?? [
-          this.env.get("SERVER_COMMUNITY_WELCOME_MESSAGE"),
-        ];
+        const variants = welcomeVariants(this.env);
+        const whitelistedVariants = whitelistedWelcomeVariants(this.env);
         const readyAt = now + this.env.get("SERVER_COMMUNITY_WELCOME_DELAY_SECONDS") * 1000;
         const available = MAX_QUEUE - this.queue.length;
         if (observation.joined.length > available)
           this.logger.warn("Community message queue is full; excess welcomes were skipped.");
-        for (const steamId of observation.joined.slice(0, available))
-          this.enqueue({ action: "message", steamId, message: messages[0] }, readyAt, false, messages.slice(1));
+        const joining = observation.joined.slice(0, available);
+        // Read the whitelist only when it can change a welcome, and at most once per cache period.
+        const whitelisted = whitelistedVariants && joining.length ? await this.whitelistedPlayers() : null;
+        if (this.stopped) return 30_000;
+        for (const steamId of joining) {
+          const [pool, choices]: [WelcomePool, string[][]] =
+            whitelistedVariants && whitelisted?.has(steamId)
+              ? ["whitelisted", whitelistedVariants]
+              : ["standard", variants];
+          const [message, ...followUps] = choices[this.rotation.welcome(steamId, choices.length, pool)];
+          this.enqueue({ action: "message", steamId, message }, readyAt, false, followUps);
+        }
       }
       for (let sent = 0; sent < MAX_SENDS_PER_TICK && this.queue.length && !this.stopped; sent++) {
         // A future welcome must not hold up another recipient or a ready round message.
@@ -226,6 +277,21 @@ export class ServerCommunityWorker implements OnApplicationBootstrap, OnModuleDe
       return current.status.players.current > 0 ? 5_000 : 15_000;
     } finally {
       this.running = false;
+    }
+  }
+
+  /** The running whitelist, or null so every joiner gets the standard welcome. Never throws. */
+  private async whitelistedPlayers(): Promise<ReadonlySet<string> | null> {
+    if (Date.now() < this.whitelistRetryAt) return null;
+    try {
+      const { ids, loadedAt } = await this.game.reservedSlots();
+      this.whitelistLoadedAt = loadedAt;
+      return ids;
+    } catch {
+      this.whitelistFailedAt = new Date().toISOString();
+      this.whitelistRetryAt = Date.now() + WHITELIST_RETRY_MS;
+      this.logger.warn("The server whitelist could not be read; joiners get the standard welcome for now.");
+      return null;
     }
   }
 

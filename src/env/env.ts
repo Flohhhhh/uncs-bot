@@ -2,6 +2,7 @@ import { nonEmptyString } from "../common/schemas/non-empty-string.schema";
 import { z } from "zod";
 import { jsonSetting } from "./json-setting";
 import { gameServerConnections, gameServerJoinId } from "../common/game-server";
+import { DST_HOURS, SLOT_TIME, WEEKDAYS } from "../weekly-leaderboard/weekly-schedule";
 
 const discordId = z.string().regex(/^\d{17,20}$/, "Use a Discord numeric ID.");
 const communityMessage = z
@@ -13,6 +14,15 @@ const communityMessage = z
     (value) => [...value].every((character) => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127),
     "Use a single-line message without control characters.",
   );
+const welcomeSequence = z.array(communityMessage).min(1).max(4);
+const distinct = <T>(values: T[]) => new Set(values.map((value) => JSON.stringify(value))).size === values.length;
+/** 20 variants of four 200-character messages, with room for JSON escapes and formatting. */
+const WELCOME_VARIANTS_MAX_LENGTH = 32_768;
+const ROUND_MESSAGES_MAX_LENGTH = 8_192;
+const welcomeVariants = jsonSetting(
+  z.array(welcomeSequence).min(1).max(20).refine(distinct, "Use different welcome variants."),
+  WELCOME_VARIANTS_MAX_LENGTH,
+).optional();
 const discordIds = z
   .string()
   .default("")
@@ -75,6 +85,23 @@ export const Env = z.object({
     .transform((value) => value === "true"),
   WARDOGS_FEED_TOKEN: z.string().min(32).max(512).regex(/^\S+$/).optional(),
 
+  /** Weekly Discord leaderboard post; off by default. Also gates the staff post-now; preview still works. */
+  WEEKLY_LEADERBOARD_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  /** Text or announcement channel in ADMIN_GUILD_ID. */
+  WEEKLY_LEADERBOARD_CHANNEL_ID: discordId.optional(),
+  /** Day and time of the weekly slot in America/New_York (fixed time zone). */
+  WEEKLY_LEADERBOARD_DAY: z.enum(WEEKDAYS).default("sunday"),
+  WEEKLY_LEADERBOARD_TIME: z
+    .string()
+    .regex(SLOT_TIME, "Use HH:MM in 24-hour time.")
+    .refine((value) => !DST_HOURS.test(value), "Choose a time outside 01:00–02:59 (DST changes).")
+    .default("20:00"),
+  WEEKLY_LEADERBOARD_MIN_KILLS: z.coerce.number().int().min(1).max(100_000).default(100),
+  WEEKLY_LEADERBOARD_MIN_PLAYERS: z.coerce.number().int().min(5).max(1_000).default(10),
+
   /** One optional community worker; leave off until the old announcer is disabled. */
   SERVER_COMMUNITY_ENABLED: z
     .enum(["true", "false"])
@@ -94,10 +121,22 @@ export const Env = z.object({
     .transform((value) => value === "true"),
   SERVER_COMMUNITY_WELCOME_MESSAGE: communityMessage.default("Welcome to The UNCs! Squad up and enjoy the server."),
   /** Optional JSON array replaces the legacy single message. No placeholder expansion. */
-  SERVER_COMMUNITY_WELCOME_MESSAGES: jsonSetting(z.array(communityMessage).min(1).max(4), 2048).optional(),
+  SERVER_COMMUNITY_WELCOME_MESSAGES: jsonSetting(welcomeSequence, 2048).optional(),
+  /** Optional JSON array of 1-20 welcome sequences; one is chosen per join. Replaces both settings above. */
+  SERVER_COMMUNITY_WELCOME_VARIANTS: welcomeVariants,
+  /**
+   * Optional variants, in the same shape, for joiners on that server's running whitelist (reserved slots).
+   * Unset, or when the whitelist cannot be read, every joiner gets the ordinary welcome settings above.
+   */
+  SERVER_COMMUNITY_WHITELISTED_WELCOME_VARIANTS: welcomeVariants,
   SERVER_COMMUNITY_WELCOME_DELAY_SECONDS: z.coerce.number().int().min(0).max(60).default(10),
   SERVER_COMMUNITY_WELCOME_SPACING_SECONDS: z.coerce.number().int().min(10).max(120).default(20),
   SERVER_COMMUNITY_ROUND_MESSAGE: communityMessage.default("GG! Thanks for playing on The UNCs. See you next round."),
+  /** Optional JSON array of 1-20 round messages; one is chosen per round. Replaces the single message. */
+  SERVER_COMMUNITY_ROUND_MESSAGES: jsonSetting(
+    z.array(communityMessage).min(1).max(20).refine(distinct, "Use different round messages."),
+    ROUND_MESSAGES_MAX_LENGTH,
+  ).optional(),
   SERVER_COMMUNITY_DISCORD_CHANNEL_ID: discordId.optional(),
   SERVER_COMMUNITY_DISCORD_MESSAGE_ID: discordId.optional(),
 
@@ -113,6 +152,16 @@ export const Env = z.object({
   PATREON_WEBHOOK_SECRET: z.string().min(16).max(512).optional(),
   PATREON_FOUNDER_START_AT: z.iso.datetime({ offset: true }).optional(),
   PATREON_FOUNDER_END_AT: z.iso.datetime({ offset: true }).optional(),
+  /**
+   * Creator's Access Token for the read-only member import. Never logged or returned. A malformed value
+   * leaves the import unconfigured (shown on the Supporters page) instead of stopping the bot.
+   */
+  PATREON_CREATOR_ACCESS_TOKEN: z
+    .string()
+    .trim()
+    .optional()
+    .transform((value) => value || undefined),
+  PATREON_SYNC_INTERVAL_MINUTES: z.coerce.number().int().min(10).max(1440).default(30),
 
   /** Website requests remain disabled until the reviewed schema is deployed. */
   WHITELIST_APPLICATIONS_ENABLED: z

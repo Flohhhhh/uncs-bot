@@ -13,6 +13,7 @@ import type {
   SupporterMutation,
   SupporterView,
 } from "../src/supporters/supporters.types";
+import type { PatreonMemberSnapshot } from "../src/supporters/patreon.client";
 import { AdminStore, COMMUNITY_MESSAGES_ACTOR_ID } from "../src/admin/admin.store";
 import type { ActionResult, AdminAction, Staff } from "../src/admin/admin.types";
 import { MapVotesStore } from "../src/map-votes/map-votes.store";
@@ -129,6 +130,40 @@ describe("launch storage on isolated PostgreSQL", () => {
     };
     return (await supporters.mutate(record.id, input, staff, campaign, policy)).supporter!;
   }
+  async function linked(name: string, steamId: string) {
+    const record = await register(name);
+    return (
+      await supporters.mutate(
+        record.id,
+        { ...review(record), kind: "link", discordId: staff.id, steamId },
+        staff,
+        campaign,
+        policy,
+      )
+    ).supporter!;
+  }
+  const charge = (id: string, date: string, type = "pledge_start") => ({
+    id,
+    date: new Date(date),
+    amountCents: 500,
+    currency: "USD",
+    paymentStatus: "Paid",
+    type,
+  });
+  const apiMember = (
+    patreonMemberId: string,
+    events: PatreonMemberSnapshot["events"],
+    historyComplete: boolean,
+  ): PatreonMemberSnapshot => ({
+    patreonMemberId,
+    displayName: "Sample supporter",
+    patronStatus: "active_patron",
+    lastChargeStatus: "Paid",
+    lastChargeAt: events.at(-1)?.date ?? null,
+    discordId: null,
+    events,
+    historyComplete,
+  });
   const applicationInput = (discordUserId = staff.id, steamId = "76561198000000001") => ({
     discordUserId,
     discordDisplayName: "Sample applicant",
@@ -389,6 +424,35 @@ describe("launch storage on isolated PostgreSQL", () => {
     expect(await telemetry.events(since, now, undefined, "primary")).toEqual([]);
     expect(await telemetry.tracking("primary")).toBeNull();
     expect((await telemetry.tracking("east"))?.lastReceivedAt).toEqual(now);
+  });
+
+  it("stores game GUIDs that are not RFC 4122 UUIDs and deduplicates them across letter case", async () => {
+    const telemetry = new TelemetryStore(drizzle({ client, schema }));
+    const now = new Date(),
+      since = new Date(now.getTime() - 60_000);
+    // Version 0 / variant 0 values: valid hexadecimal GUIDs that zod's uuid() rejects.
+    const serverId = "ABCDEF01-2345-0789-0BCD-EF0123456789",
+      eventId = "00000000-0000-0000-0000-00000000000A",
+      matchId = "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF";
+    const feed = (id: string) =>
+      parseFeed({
+        serverId,
+        serverName: "Game label",
+        events: [{ eventId: id, type: "killed", eventTime: 1, matchId }],
+      });
+    expect(await telemetry.ingest(feed(eventId), now, "east")).toEqual({ inserted: 1, duplicates: 0, skipped: 0 });
+    expect(await telemetry.ingest(feed(eventId.toLowerCase()), now, "east")).toEqual({
+      inserted: 0,
+      duplicates: 1,
+      skipped: 0,
+    });
+    expect(await telemetry.events(since, now, undefined, "east")).toEqual([
+      expect.objectContaining({
+        eventId: eventId.toLowerCase(),
+        serverInstanceId: serverId.toLowerCase(),
+        matchId: matchId.toLowerCase(),
+      }),
+    ]);
   });
   function eventInput() {
     const { operation: _operation, ...record } = eventFixture();
@@ -800,6 +864,233 @@ describe("launch storage on isolated PostgreSQL", () => {
       reviewState: "pending",
       version: record.version + 1,
     });
+  });
+
+  it("imports Patreon API members idempotently and qualifies a first payment despite an earlier webhook row", async () => {
+    // A webhook status row for the same charge, recorded a minute earlier, must not block the API payment.
+    await supporters.ingest({
+      hash: "d".repeat(64),
+      campaignId: campaign,
+      patreonMemberId: "api-member",
+      displayName: "API supporter",
+      patronStatus: "active_patron",
+      lastChargeStatus: "Paid",
+      lastChargeAt: new Date("2026-09-30T11:59:00.000Z"),
+      receivedAt: new Date("2026-09-30T12:00:05.000Z"),
+      trigger: "members:pledge:create",
+    });
+    const snapshot: PatreonMemberSnapshot = {
+      patreonMemberId: "api-member",
+      displayName: "API supporter",
+      patronStatus: "active_patron",
+      lastChargeStatus: "Paid",
+      lastChargeAt: new Date("2026-09-30T12:00:00.000Z"),
+      discordId: staff.id,
+      events: [
+        {
+          id: "pledge_start:1001",
+          date: new Date("2026-09-30T12:00:00.000Z"),
+          amountCents: 500,
+          currency: "USD",
+          paymentStatus: "Paid",
+          type: "pledge_start",
+        },
+      ],
+      historyComplete: true,
+    };
+    expect(await supporters.importApiMember(campaign, snapshot, new Date())).toMatchObject({
+      created: false,
+      updated: true,
+      payments: 1,
+      discordLinked: true,
+    });
+    expect(await supporters.importApiMember(campaign, snapshot, new Date())).toMatchObject({
+      updated: false,
+      payments: 0,
+      discordLinked: false,
+    });
+    let [record] = await supporters.list(campaign, policy, undefined, "api-member");
+    expect(record).toMatchObject({
+      discordId: staff.id,
+      steamId: null,
+      identityState: "unlinked",
+      reviewState: "pending",
+      founderEligiblePayment: {
+        source: "patreon_api",
+        reference: "pledge_start:1001",
+        verificationState: "verified",
+        firstSuccessfulPaymentVerified: true,
+        amountCents: 500,
+      },
+    });
+    expect(
+      (await client.query("SELECT count(*)::int AS count FROM supporter_payments WHERE member_id = $1", [record.id]))
+        .rows,
+    ).toEqual([{ count: 2 }]);
+    record = (
+      await supporters.mutate(
+        record.id,
+        { ...review(record), kind: "link", discordId: staff.id, steamId: "76561198000000002" },
+        staff,
+        campaign,
+        policy,
+      )
+    ).supporter!;
+    record = (
+      await supporters.mutate(
+        record.id,
+        { ...review(record), kind: "founder", paymentId: record.founderEligiblePayment!.id },
+        staff,
+        campaign,
+        policy,
+      )
+    ).supporter!;
+    expect(record.founder).not.toBeNull();
+    const refunded = { ...snapshot, events: [{ ...snapshot.events[0], paymentStatus: "Refunded" }] };
+    expect(await supporters.importApiMember(campaign, refunded, new Date())).toMatchObject({ revoked: 1 });
+    expect(await supporters.get(record.id, campaign, policy)).toMatchObject({
+      founder: record.founder,
+      founderEligiblePayment: null,
+    });
+    expect(await supporters.founderReviews(campaign)).toEqual([
+      expect.objectContaining({ supporterId: record.id, paymentSource: "patreon_api", reference: "pledge_start:1001" }),
+    ]);
+    const kinds = (
+      await client.query<{ kind: string }>("SELECT kind FROM supporter_actions WHERE member_id = $1", [record.id])
+    ).rows.map((row) => row.kind);
+    expect(kinds.sort()).toEqual(["founder", "link", "patreon-discord-link", "patreon-payment-status"]);
+  });
+
+  it("keeps a staff receipt eligible beside the earlier imported copy of its charge and reviews its founder after a refund", async () => {
+    // The receipt's time was estimated from Patreon's date-only history; the real charge was earlier that morning.
+    let record = await payment(
+      await linked("receipt-member", "76561198000000003"),
+      "2026-09-30T16:00:00.000Z",
+      "receipt-2001",
+    );
+    const receipt = record.founderEligiblePayment!;
+    expect(receipt).toMatchObject({ source: "manual_receipt", reference: "receipt-2001" });
+    // The returned history fails the completeness check, so the import derives no first payment.
+    const snapshot = apiMember("receipt-member", [charge("pledge_start:2001", "2026-09-30T13:42:00.000Z")], false);
+    expect(await supporters.importApiMember(campaign, snapshot, new Date())).toMatchObject({ payments: 1 });
+    record = (await supporters.get(record.id, campaign, policy))!;
+    expect(record.latestPayment).toMatchObject({ source: "manual_receipt" });
+    expect(record.founderEligiblePayment).toEqual(receipt);
+    record = (
+      await supporters.mutate(
+        record.id,
+        { ...review(record), kind: "founder", paymentId: receipt.id },
+        staff,
+        campaign,
+        policy,
+      )
+    ).supporter!;
+    expect(record.founder).toMatchObject({ paymentId: receipt.id });
+    expect(await supporters.founderReviews(campaign)).toEqual([]);
+    const refunded = apiMember(
+      "receipt-member",
+      [{ ...snapshot.events[0], paymentStatus: "Refunded" }],
+      snapshot.historyComplete,
+    );
+    expect(await supporters.importApiMember(campaign, refunded, new Date())).toMatchObject({ revoked: 1 });
+    const [copy] = (
+      await client.query<{ id: string }>("SELECT id FROM supporter_payments WHERE reference = 'pledge_start:2001'")
+    ).rows;
+    expect(await supporters.founderReviews(campaign)).toEqual([
+      {
+        supporterId: record.id,
+        patreonMemberId: "receipt-member",
+        paymentId: receipt.id,
+        paymentSource: "manual_receipt",
+        reference: "receipt-2001",
+        unverifiedPaymentId: copy.id,
+        unverifiedReference: "pledge_start:2001",
+      },
+    ]);
+    // The promise is never changed, but the refunded charge no longer qualifies the receipt.
+    expect(await supporters.get(record.id, campaign, policy)).toMatchObject({
+      founder: record.founder,
+      founderEligiblePayment: null,
+    });
+  });
+
+  it("refuses a founder award on a staff receipt whose imported copy was refunded before the award", async () => {
+    let record = await payment(
+      await linked("refunded-member", "76561198000000004"),
+      "2026-10-01T16:00:00.000Z",
+      "receipt-5001",
+    );
+    const receiptId = record.latestPayment!.id;
+    await supporters.importApiMember(
+      campaign,
+      apiMember("refunded-member", [charge("pledge_start:5001", "2026-10-01T18:30:00.000Z")], true),
+      new Date(),
+    );
+    await supporters.importApiMember(
+      campaign,
+      apiMember(
+        "refunded-member",
+        [{ ...charge("pledge_start:5001", "2026-10-01T18:30:00.000Z"), paymentStatus: "Refunded" }],
+        true,
+      ),
+      new Date(),
+    );
+    record = (await supporters.get(record.id, campaign, policy))!;
+    expect(record.founderEligiblePayment).toBeNull();
+    await expect(
+      supporters.mutate(
+        record.id,
+        { ...review(record), kind: "founder", paymentId: receiptId },
+        staff,
+        campaign,
+        policy,
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+    expect((await client.query("SELECT 1 FROM supporter_founders")).rowCount).toBe(0);
+  });
+
+  it("shows a staff receipt rather than an imported copy of the same charge with the same time", async () => {
+    let record = await payment(await register("tie-member"), "2026-10-01T12:00:00.000Z", "receipt-4001");
+    await supporters.importApiMember(
+      campaign,
+      apiMember("tie-member", [charge("pledge_start:4001", "2026-10-01T12:00:00.000Z")], true),
+      new Date(),
+    );
+    record = (await supporters.get(record.id, campaign, policy))!;
+    expect(record.founderEligiblePayment).toMatchObject({ source: "manual_receipt", reference: "receipt-4001" });
+  });
+
+  it("still blocks a staff receipt with a separate earlier imported charge inside the matching tolerance", async () => {
+    // Joined on September 30 and charged again on October 1; staff recorded the second charge as the first.
+    let record = await payment(
+      await linked("renewal-member", "76561198000000005"),
+      "2026-10-01T16:00:00.000Z",
+      "receipt-3002",
+    );
+    const receiptId = record.latestPayment!.id;
+    await supporters.importApiMember(
+      campaign,
+      apiMember(
+        "renewal-member",
+        [
+          charge("pledge_start:3001", "2026-09-30T06:00:00.000Z"),
+          charge("subscription:3002", "2026-10-01T05:00:00.000Z", "subscription"),
+        ],
+        true,
+      ),
+      new Date(),
+    );
+    record = (await supporters.get(record.id, campaign, policy))!;
+    expect(record.founderEligiblePayment).toMatchObject({ source: "patreon_api", reference: "pledge_start:3001" });
+    await expect(
+      supporters.mutate(
+        record.id,
+        { ...review(record), kind: "founder", paymentId: receiptId },
+        staff,
+        campaign,
+        policy,
+      ),
+    ).rejects.toMatchObject({ status: 409 });
   });
 
   it.each(["2026-09-30T03:59:59.999Z", "2026-10-15T04:00:00.000Z"])(
