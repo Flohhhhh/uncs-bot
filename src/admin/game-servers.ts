@@ -30,7 +30,9 @@ export class GameServers {
       (this.settings.explicitServers() || version !== undefined) &&
       this.list().find((server) => server.id === id)?.version !== version
     )
-      throw new ConflictException("The selected server connection changed. Refresh and review the action again.");
+      throw new ConflictException(
+        "The selected server connection changed. Reload this page and review the action again.",
+      );
   }
   connectionHash(id: string) {
     const endpoint = this.settings.connection(this.resolve(id)).rconUrl;
@@ -42,7 +44,7 @@ export class GameServers {
     if (!definition) throw new NotFoundException("Choose a configured game server.");
     let entry = this.clients.get(id);
     if (entry && entry.version !== definition.version)
-      throw new ConflictException("The server configuration changed. Restart this instance before connecting.");
+      throw new ConflictException("The Gramps connection configuration changed. Restart Gramps before connecting.");
     if (!entry) {
       const connection = this.settings.connection(id);
       entry = { client: new WardogsClient({ rcon: () => connection }), version: definition.version };
