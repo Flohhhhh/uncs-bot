@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { api } from "../../api/client";
 import { AdminContext } from "../../app/context";
@@ -10,6 +10,30 @@ import type { MapSelection } from "../../../../../src/common/server-settings";
 vi.mock("../../api/client", () => ({ api: vi.fn() }));
 const request = vi.mocked(api);
 const catalog = { maps: [{ id: "Kavkazi" }], lightings: [{ id: "DayClear" }], experiences: [{ id: "KOTH" }] };
+it("rechecks unavailable options without changing the staff selection", async () => {
+  request.mockRejectedValueOnce(new Error("Options unavailable"));
+  request.mockResolvedValueOnce({ experiences: catalog.experiences, zones: ["Zone.Default"] });
+  const change = vi.fn(),
+    ready = vi.fn();
+  render(
+    <AdminContext.Provider value={context()}>
+      <MapPicker
+        catalog={catalog}
+        value={{ map: "Kavkazi", experiences: ["KOTH"], zoneAlternator: "Zone.Default" }}
+        change={change}
+        onReadyChange={ready}
+      />
+    </AdminContext.Provider>,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "Retry map options" }));
+  expect(ready).toHaveBeenLastCalledWith(false);
+  await waitFor(() => expect(ready).toHaveBeenLastCalledWith(true));
+  expect(screen.getByRole("checkbox", { name: "King of the Hill" })).toBeChecked();
+  expect(screen.getByRole("combobox", { name: /Zone layout/ })).toHaveValue("Zone.Default");
+  expect(change).not.toHaveBeenCalled();
+  expect(request).toHaveBeenCalledTimes(2);
+  expect(request.mock.calls.every(([path, options]) => path === "catalog/maps/Kavkazi" && !options?.method)).toBe(true);
+});
 it("presents game names while preserving exact catalog IDs, and waits for valid options", async () => {
   request.mockResolvedValue({
     experiences: [{ id: "Madrid_KOTH_01" }, { id: "KOTH_Hardcore" }],
