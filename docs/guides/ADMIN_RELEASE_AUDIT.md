@@ -1,5 +1,11 @@
 # Dashboard release audit
 
+## October 1 21:46 EDT — event round-timing prerequisite surfaced
+
+Optional 50v50 previously allowed a start review when the game supplied no round clock, although the existing backend necessarily refused that start. The draft now explains the missing timing and disables Review. Opening a start review also reads the selected server overview and blocks Arm while that read is pending, failed or missing usable timing. A read-only Check round timing button preserves the chosen teams and other draft values. The shared round parser remains authoritative for clock validity; the backend still independently checks the actual start request. No extra polling or typed confirmation was added. Stop remains available without a game read, and restoration does not acquire a clock requirement.
+
+All **244 dashboard tests**, the frontend production build/typecheck, touched-file lint, global formatting and whitespace checks pass. New cases cover the missing-clock draft, loss of timing before review, pending/failed review reads, read-only retry, retained team choices and no POST from disabled submission. Isolated browser acceptance on port 4320 verified the no-clock primary warning and preserved selections after rechecking, then a clock-enabled event server with the correct target, separate Arm button, zero text fields and a safe Back action. No events were created and no browser errors occurred. Production rollout is pending; optional events remain disabled live and require a verified round signal plus controlled rehearsal before activation.
+
 ## October 1 21:36 EDT — simple confirmations and clock compatibility are live
 
 [Release #49](https://github.com/Flohhhhh/uncs-bot/pull/49) includes [#48](https://github.com/Flohhhhh/uncs-bot/pull/48), [#50](https://github.com/Flohhhhh/uncs-bot/pull/50) and [#51](https://github.com/Flohhhhh/uncs-bot/pull/51), merged normally to main `b612a49af4b3d53751bcd3d5e33ae1b630255d3b`. Railway `db9e07a6-b5ae-47c3-8013-170c1491e991` is Active. Production health returns 200 and `index-8SPtNwah.js` exactly matches the tested build (SHA-256 `8ec5766162ebd99f3aab2636048b67ae9806ef9e3df19501f40ae0a5ff27509a`). Release CI passed **640 backend, 241 dashboard and 32 PostgreSQL tests**, build, formatting, lint, typecheck, handler validation and migration checks.
