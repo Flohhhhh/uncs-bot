@@ -4,7 +4,14 @@ import { useResource } from "../../api/use-resource";
 import { useAdmin } from "../../app/context";
 import { Badge, Card, Empty, Metric, Search, date } from "../../components/ui";
 import { CopyValue, DataTable } from "../../components/data-table";
-import type { CombatEvent, CombatEventKind, CombatPeriod, CombatPlayer, CombatResponse } from "./combat.types";
+import type {
+  CombatEvent,
+  CombatEventKind,
+  CombatFeedDeliveries,
+  CombatPeriod,
+  CombatPlayer,
+  CombatResponse,
+} from "./combat.types";
 
 const periods: Record<CombatPeriod, string> = { day: "Last 24 hours", week: "Last 7 days", month: "Last 30 days" };
 const validSteamId = isPublicIndividualSteamId;
@@ -14,6 +21,43 @@ const ratio = (player: CombatPlayer | null | undefined) =>
   typeof player?.kd === "number" && Number.isFinite(player.kd) ? player.kd.toFixed(2) : "—";
 const headshotShare = (player: CombatPlayer) =>
   player.kills > 0 ? `${Math.round((player.headshotKills / player.kills) * 100)}%` : "—";
+const plural = (value: number, one: string, many: string) => `${count(value)} ${value === 1 ? one : many}`;
+
+// Why deliveries that reached Gramps were refused or partly skipped, since it last started. A
+// receipt time alone cannot show that every event of a batch was invalid or that the game's
+// deliveries are being refused.
+function FeedDeliveries({ feed }: { feed: CombatFeedDeliveries }) {
+  const { lastBatch, lastRejected, rejectedCount, lastRejectedWithoutToken, rejectedWithoutTokenCount } = feed;
+  const refusedLast = lastRejected && (!lastBatch || Date.parse(lastRejected.at) >= Date.parse(lastBatch.at));
+  return (
+    <>
+      {lastRejected && (
+        <p className={`notice ${refusedLast ? "warning" : "info"}`}>
+          <strong>{refusedLast ? "Latest game feed delivery refused." : "Earlier game feed delivery refused."}</strong>{" "}
+          {date(lastRejected.at)}: HTTP {lastRejected.status}, {lastRejected.reason}.{" "}
+          {refusedLast ? "No batch has been accepted since. " : "Later batches were accepted. "}
+          {plural(rejectedCount, "delivery", "deliveries")} with the feed token refused since Gramps started.
+        </p>
+      )}
+      {lastBatch && lastBatch.invalid > 0 && (
+        <p className="notice warning">
+          <strong>Last batch skipped invalid entries.</strong> {date(lastBatch.at)}:{" "}
+          {plural(lastBatch.accepted, "killed event", "killed events")} accepted,{" "}
+          {plural(lastBatch.invalid, "invalid entry", "invalid entries")} skipped. First invalid:{" "}
+          {lastBatch.firstInvalid ?? "not recorded"}.
+        </p>
+      )}
+      {lastRejectedWithoutToken && rejectedWithoutTokenCount > 0 && (
+        <p className="notice info">
+          <strong>{plural(rejectedWithoutTokenCount, "request", "requests")} without the feed token refused</strong>{" "}
+          since Gramps started. Latest {date(lastRejectedWithoutToken.at)}: HTTP {lastRejectedWithoutToken.status},{" "}
+          {lastRejectedWithoutToken.reason}. Anyone can reach the feed URL, so these do not show that the game sent
+          them. If no batches arrive, check the feed token the game uses.
+        </p>
+      )}
+    </>
+  );
+}
 
 function PlayerLink({
   id,
@@ -207,6 +251,7 @@ function CombatView({
           </div>
         </dl>
       </div>
+      {!playerId && "rejectedCount" in data && <FeedDeliveries feed={data} />}
       {!data.connected && !data.trackingStartedAt && !data.totals.events ? (
         <Empty
           title={!data.enabled ? "Combat tracking is off" : "Waiting for the first combat events"}
