@@ -335,7 +335,7 @@ describe("Wardogs action outcomes", () => {
           id: randomUUID(),
           action: add ? "whitelist-add" : "whitelist-remove",
           steamId: target,
-          confirm: target,
+          ...(!add ? { confirm: target } : {}),
           reason: "Member request",
         }),
       );
