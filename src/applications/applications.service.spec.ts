@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { ConflictException } from "@nestjs/common";
 import { ApplicationsService } from "./applications.service";
 import type { ApplicationsStore } from "./applications.store";
 import type { AdminService } from "../admin/admin.service";
@@ -62,16 +63,32 @@ function fixture(
     create: jest.fn(async (values) => record(values)),
     own: jest.fn(async () => current ?? undefined),
     list: jest.fn(async () => (current ? [current] : [])),
+    get: jest.fn(async (_id, serverId) => (current?.serverId === serverId ? { ...current } : undefined)),
+    finishRecheck: jest.fn(async (previous, review, actor, outcome) => {
+      if (!current || current.status !== previous.status || current.reviewId !== previous.reviewId)
+        throw new ConflictException("Application changed during the check");
+      current = record({
+        ...current,
+        status: outcome.state === "applied" ? "approved" : "needs_review",
+        reviewId: review.id,
+        reviewKind: "recheck",
+        reviewedAt: new Date(),
+        reviewedBy: actor.id,
+        reviewReason: review.reason,
+        lastActionState: outcome.state,
+        lastActionMessage: outcome.message,
+      });
+      return current;
+    }),
     claim: jest.fn(async (_id, review, kind, actor) => {
-      if (!current || current.status !== (kind === "recheck" ? "needs_review" : "pending"))
-        return { claimed: false, application: current ?? undefined };
+      if (!current || current.status !== "pending") return { claimed: false, application: current ?? undefined };
       current = record({
         ...current,
         status: kind === "decline" ? "declined" : "processing",
         reviewedAt: new Date(),
         reviewedBy: actor.id,
         reviewReason: review.reason,
-        actionId: kind === "recheck" ? current.actionId : review.id,
+        actionId: review.id,
         reviewId: review.id,
         reviewKind: kind,
         lastActionState: kind === "decline" ? "applied" : "started",
@@ -80,7 +97,8 @@ function fixture(
       });
       return { claimed: true, application: { ...current } };
     }),
-    finishApproval: jest.fn(async (_id, _actionId, outcome) => {
+    finishApproval: jest.fn(async (_id, actionId, outcome) => {
+      if (current?.status !== "processing" || current.reviewId !== actionId) throw new Error("Application changed");
       current = record({
         ...current!,
         status: outcome.state === "applied" ? "approved" : "needs_review",
@@ -297,6 +315,19 @@ describe("durable application decisions", () => {
     expect(result.outcome.state).toBe("unknown");
     expect(admin.act).toHaveBeenCalledTimes(1);
   });
+  it("recovers a lost approval completion by reading access without sending the grant again", async () => {
+    const { service, store, admin, game } = fixture();
+    const approvalId = randomUUID();
+    store.finishApproval.mockRejectedValueOnce(new Error("Database unavailable"));
+    await service.review(staff, applicationId, "approve", { id: approvalId, reason: "Reviewed request" });
+    const result = await service.review(staff, applicationId, "recheck", {
+      id: randomUUID(),
+      reason: "Check live result",
+    });
+    expect(result.application).toMatchObject({ status: "approved", actionId: approvalId, reviewKind: "recheck" });
+    expect(game.whitelist).toHaveBeenCalledTimes(1);
+    expect(admin.act).toHaveBeenCalledTimes(1);
+  });
   it("records a thrown game-service error for manual review without retrying", async () => {
     const { service, admin } = fixture();
     admin.act.mockRejectedValueOnce(new Error("secret upstream detail"));
@@ -374,8 +405,8 @@ describe("durable application decisions", () => {
       expect(admin.act).not.toHaveBeenCalled();
     },
   );
-  it("does not recheck an approval still processing", async () => {
-    const { service, game, admin } = fixture({ initial: record({ status: "processing", actionId: randomUUID() }) });
+  it.each(["pending", "approved", "declined"] as const)("does not recheck a %s application", async (status) => {
+    const { service, game, admin } = fixture({ initial: record({ status, actionId: randomUUID() }) });
     await expect(
       service.review(staff, applicationId, "recheck", { id: randomUUID(), reason: "Check live result" }),
     ).rejects.toMatchObject({ status: 409 });
@@ -388,5 +419,47 @@ describe("durable application decisions", () => {
     await service.review(staff, applicationId, "approve", request);
     await expect(service.review(staff, applicationId, "recheck", request)).rejects.toMatchObject({ status: 409 });
     expect(game.whitelist).not.toHaveBeenCalled();
+  });
+  it("leaves a failed recheck save recoverable and replays a saved recheck without another game read", async () => {
+    const { service, store, game, admin, current } = fixture({ initial: record({ status: "processing" }) });
+    store.finishRecheck.mockRejectedValueOnce(new Error("Database unavailable"));
+    const failed = await service.review(staff, applicationId, "recheck", { id: randomUUID(), reason: "Check access" });
+    expect(failed.outcome.state).toBe("unknown");
+    expect(current()?.status).toBe("processing");
+    const request = { id: randomUUID(), reason: "Check access" };
+    const recovered = await service.review(staff, applicationId, "recheck", request);
+    expect(recovered.application.status).toBe("approved");
+    expect(await service.review(staff, applicationId, "recheck", request)).toEqual(recovered);
+    expect(game.whitelist).toHaveBeenCalledTimes(2);
+    expect(admin.act).not.toHaveBeenCalled();
+    expect(store.claim).not.toHaveBeenCalled();
+  });
+  it("rejects a stale readback when the original approval completes during its game read", async () => {
+    const { service, store, game, admin, current } = fixture();
+    const approvalId = randomUUID();
+    store.finishApproval.mockRejectedValueOnce(new Error("Completion deferred"));
+    await service.review(staff, applicationId, "approve", { id: approvalId, reason: "Reviewed" });
+    game.whitelist.mockImplementationOnce(async () => {
+      await store.finishApproval(applicationId, approvalId, { state: "applied", message: "Original completion" });
+      return { entries: [], configurationAvailable: true };
+    });
+    await expect(
+      service.review(staff, applicationId, "recheck", { id: randomUUID(), reason: "Check access" }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(current()).toMatchObject({
+      status: "approved",
+      reviewId: approvalId,
+      lastActionMessage: "Original completion",
+    });
+    expect(admin.act).toHaveBeenCalledTimes(1);
+  });
+  it("never reads the game or returns contacts when rechecking another server's application", async () => {
+    const { service, game, admin, store } = fixture({ initial: record({ status: "processing", serverId: "event" }) });
+    await expect(
+      service.review(staff, applicationId, "recheck", { id: randomUUID(), reason: "Check access" }),
+    ).rejects.toMatchObject({ status: 404 });
+    expect(store.get).toHaveBeenCalledWith(applicationId, "primary");
+    expect(game.whitelist).not.toHaveBeenCalled();
+    expect(admin.act).not.toHaveBeenCalled();
   });
 });
