@@ -60,10 +60,79 @@ describe("automatic ballot options", () => {
       infantry,
     ]);
   });
-  it("explains that a 50v50-only ballot is not available yet", () => {
-    const plan = ballot([normal, ozeti, zestafona], 0, { mapChoices: false, modeChoices: false });
-    expect(plan.options).toEqual([]);
-    expect(plan.notes[0]).toContain("50v50");
+  it("offers normal teams or 50v50 on the next entry when only 50v50 is switched on", () => {
+    const offeredFifty = { ...defaultVotingSettings.fiftyFifty, offered: true };
+    const ready = { fifty: { ready: true, reason: "" } };
+    const plan = ballot(
+      [normal, ozeti, zestafona],
+      0,
+      { mapChoices: false, modeChoices: false },
+      { fiftyFifty: offeredFifty },
+      ready,
+    );
+    expect(offered(plan)).toEqual([ozeti, { ...ozeti, event: "50v50" }]);
+    expect(plan.options.map((option) => [option.kind, option.placement])).toEqual([
+      ["map", "already-next"],
+      ["fifty", "already-next"],
+    ]);
+    expect(plan.fifty).toEqual({ offered: true, reason: "Offered as the last option." });
+    const waiting = ballot(
+      [normal, ozeti, zestafona],
+      0,
+      { mapChoices: false, modeChoices: false },
+      { fiftyFifty: offeredFifty },
+      { fifty: { ready: false, reason: "64 of 80 players online" } },
+    );
+    expect(waiting.options).toEqual([]);
+    expect(waiting.notes[0]).toBe(
+      "Only the 50v50 option is switched on, and it cannot be offered now. 50v50 not offered: 64 of 80 players online.",
+    );
+    expect(waiting.fifty).toEqual({ offered: false, reason: "50v50 not offered: 64 of 80 players online." });
+  });
+  it("puts a ready 50v50 option last, counted in the option total, on the next rotation entry", () => {
+    const fiftyFifty = { ...defaultVotingSettings.fiftyFifty, offered: true };
+    const entries = [normal, ozeti, zestafona, ozetiInfantry];
+    const plan = ballot(
+      entries,
+      0,
+      { modeChoices: true },
+      { optionCount: 3, fiftyFifty },
+      { fifty: { ready: true, reason: "" } },
+    );
+    expect(offered(plan)).toEqual([ozeti, zestafona, { ...ozeti, event: "50v50" }]);
+    expect(plan.options.at(-1)).toMatchObject({ kind: "fifty", placement: "already-next" });
+    // Not ready, or switched off: the full count goes to maps and the reason is kept.
+    const notReady = ballot(
+      entries,
+      0,
+      { modeChoices: true },
+      { optionCount: 3, fiftyFifty },
+      {
+        fifty: { ready: false, reason: "optional events are off in Gramps" },
+      },
+    );
+    expect(offered(notReady)).toEqual([ozeti, zestafona, ozetiInfantry]);
+    expect(notReady.fifty.reason).toBe("50v50 not offered: optional events are off in Gramps.");
+    expect(ballot(entries, 0, { modeChoices: true }, { optionCount: 3 }).fifty).toEqual({
+      offered: false,
+      reason: "The 50v50 option is off.",
+    });
+    // An unavailable next entry cannot be played as 50v50.
+    const unavailable = ballot(
+      entries,
+      0,
+      { modeChoices: true },
+      { optionCount: 3, fiftyFifty },
+      {
+        fifty: { ready: true, reason: "" },
+        issues: [{ index: 1 }],
+      },
+    );
+    expect(unavailable.fifty.offered).toBe(false);
+    expect(offered(unavailable).some((choice) => "event" in choice)).toBe(false);
+    // 50v50 needs at least one normal option beside it.
+    const alone = ballot([normal, infantry], 0, {}, { fiftyFifty }, { fifty: { ready: true, reason: "" } });
+    expect(alone.options).toEqual([]);
   });
   it("walks forward nearest first, skips unavailable rows and offers one entry per map and rule set", () => {
     const plan = ballot([zestafona, normal, zestafonaDusk, ozeti, zestafona], 1, {}, {}, { issues: [{ index: 3 }] });

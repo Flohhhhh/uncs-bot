@@ -17,13 +17,24 @@ function tieRule(vote: MapVoteRecord) {
     ? "A tie goes to the first tied option (never 50v50); no votes keeps the rotation."
     : "A tie or no votes keeps the rotation.";
 }
+/** What a 50v50 option does, from the settings the ballot opened with. */
+function fiftyDetails(vote: MapVoteRecord) {
+  const fifty = automationSettings(vote.automation ?? {}).fiftyFifty;
+  const closed = fifty.closedFaction ? plainLabel(fifty.closedFaction, 30) : "the smallest team";
+  const end = fifty.autoEnd
+    ? `ends after ${fifty.rounds} round${fifty.rounds === 1 ? "" : "s"}`
+    : "runs until staff stop it";
+  return `Next round as two teams of up to 50; ${closed} is closed and its players are moved at round start; ${end}.`;
+}
 
 export function ballotMessage(vote: MapVoteRecord) {
   const open = vote.state === "open";
   const counted = hasVoteCounts(vote);
   const choices = vote.choices.map(
     (choice, index) =>
-      `${index + 1}. ${plainLabel(mapLabel(choice.map), 80)}${counted ? ` — ${vote.counts[index] ?? 0} votes` : ""}\n   ${plainLabel(selectionDetails(choice), 150)}`,
+      `${index + 1}. ${choice.event === "50v50" ? "50v50 · " : ""}${plainLabel(mapLabel(choice.map), 80)}${
+        counted ? ` — ${vote.counts[index] ?? 0} votes` : ""
+      }\n   ${choice.event === "50v50" ? fiftyDetails(vote) : plainLabel(selectionDetails(choice), 150)}`,
   );
   const winner =
     vote.winner === null ? "" : `\nWinner: ${plainLabel(voteChoiceTitle(vote.choices[vote.winner]), 150)}.`;

@@ -226,6 +226,34 @@ describe("customizable automatic ballots", () => {
       `uncs-map-vote/${record.id}/1`,
     ]);
   });
+  it("explains what the 50v50 option does, from the ballot's own settings", () => {
+    const fifty = { map: "NorthAmerica", experiences: ["KOTH"], event: "50v50" as const };
+    const ballot = (patch: Partial<typeof settings.fiftyFifty>) =>
+      ballotMessage({
+        ...automatic,
+        choices: [{ map: "Europe", experiences: ["KOTH"] }, fifty],
+        automation: {
+          ...automatic.automation!,
+          settings: { ...settings, fiftyFifty: { ...settings.fiftyFifty, offered: true, ...patch } },
+        },
+      }).content;
+    expect(ballot({})).toContain(
+      "2. 50v50 · Zestafona\n   Next round as two teams of up to 50; the smallest team is closed and its players are moved at round start; ends after 1 round.",
+    );
+    expect(ballot({ closedFaction: "Manticore", rounds: 2 })).toContain(
+      "Manticore is closed and its players are moved at round start; ends after 2 rounds.",
+    );
+    expect(ballot({ autoEnd: false })).toContain("runs until staff stop it.");
+    const counted = ballotMessage({
+      ...automatic,
+      state: "queued",
+      winner: 1,
+      counts: [2, 8],
+      choices: [{ map: "Europe", experiences: ["KOTH"] }, fifty],
+    }).content;
+    expect(counted).toContain("2. 50v50 · Zestafona — 8 votes");
+    expect(counted).toContain("Winner: Zestafona King of the Hill 50v50.");
+  });
   it("uses the configured close score in reminders", async () => {
     const { service, channel } = fixture();
     await service.remind({ ...automatic, counts: [1, 2] }, "midpoint");

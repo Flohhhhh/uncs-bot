@@ -51,6 +51,7 @@ import type { AdminAction, Staff } from "../admin/admin.types";
 import type { WardogsClient } from "../admin/wardogs.client";
 import { EnvService } from "../env/env.service";
 import { plainLabel } from "../server-community/community-state";
+import { ServerEventsService } from "../server-events/server-events.service";
 import { StaffAlerts } from "../staff-alerts/staff-alerts.service";
 import type { mapVotePolicies } from "../database/schema";
 import { MapVotesStore } from "./map-votes.store";
@@ -70,6 +71,7 @@ import {
 
 type PolicyRow = typeof mapVotePolicies.$inferSelect;
 type FinishState = "queued" | "no_votes" | "tied" | "cancelled" | "needs_review";
+type Finish = { state: FinishState; message: string; patch?: Partial<VoteAutomation> };
 type AutomaticNote = Omit<AutomaticVoteStatus, "enabled" | "delaySeconds" | "closesAtScore" | "choices">;
 type AutomaticStart = {
   previousId: string | null;
@@ -101,6 +103,8 @@ const STEP_SAMPLE_MS = 20_000;
 const PREVIEW_INTERVAL_MS = 5_000;
 const REFUSAL_BRAKE = 3;
 const BROADCAST_LIMIT = 200;
+/** A voted 50v50 still needs its offer minimum, less this allowance for leavers, when the ballot closes. */
+const FIFTY_CLOSE_ALLOWANCE = 10;
 
 function pickPolicy(raw: unknown): VotingPolicy {
   const value = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
@@ -141,6 +145,16 @@ function duration(seconds: number) {
 function settingsError(issue: VotingIssue) {
   return new BadRequestException({ message: issue.message, path: issue.path, statusCode: 400 });
 }
+const withoutStop = (text: string) => text.trim().replace(/[.!?]+$/, "");
+/** Automatic ballots, newest first, as the 50v50 cooldown counts them. */
+function ballotRounds(history: MapVoteRecord[]) {
+  return history
+    .filter((vote) => vote.automation)
+    .map((vote) => ({ roundId: vote.automation!.round?.id, createdAt: vote.createdAt }));
+}
+function isFiftyWinner(vote: Pick<MapVoteRecord, "winner" | "choices">) {
+  return vote.winner !== null && vote.choices[vote.winner]?.event === "50v50";
+}
 
 @Injectable()
 export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy {
@@ -154,6 +168,9 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
   private readonly lastScores = new Map<string, { at: number; score: number }>();
   private readonly reviewLogged = new Set<string>();
   private readonly previews = new Map<string, number>();
+  /** Voted 50v50 events that need staff review, by server, and their alert counts. */
+  private readonly eventReviews = new Map<string, { id: string; at: string; message: string }>();
+  private readonly eventAlerts = new Map<string, { count: number; at: number }>();
   constructor(
     private readonly store: MapVotesStore,
     private readonly servers: GameServers,
@@ -163,6 +180,7 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
     private readonly env: EnvService,
     private readonly rounds: GameRounds,
     private readonly alerts: StaffAlerts,
+    private readonly events: ServerEventsService,
   ) {}
   private options() {
     const guildId = this.env.get("ADMIN_GUILD_ID"),
@@ -195,6 +213,7 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
       valid = false;
     }
     const live = this.options().enabled && policy.enabled && connectionMatches && valid;
+    const review = this.eventReviews.get(serverId);
     return {
       enabled: live,
       delaySeconds: settings.openDelaySeconds,
@@ -210,6 +229,7 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
       checkedAt: null,
       phase: live ? "waiting_rotation" : "off",
       ...(live ? this.automaticMessages.get(serverId) : {}),
+      ...(live && review ? { alert: { at: review.at, message: review.message } } : {}),
     };
   }
   private enabled() {
@@ -226,17 +246,24 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
       const game = this.servers.get(serverId);
       const [config, overview] = await Promise.all([game.configuration(), game.overview()]);
       const capabilities = overview.capabilities ?? (await game.capabilities());
+      const eventsEnabled = this.env.get("SERVER_EVENTS_ENABLED") === true;
+      const controls =
+        serves(capabilities, "PATCH", "/v1/players/{id}") && serves(capabilities, "POST", "/v1/broadcast");
       return {
         startThreshold: this.rounds.threshold(serverId, config.fields),
         factions: (overview.status.factionScores ?? []).map((faction) => faction.name).filter(Boolean),
-        eventsEnabled: this.env.get("SERVER_EVENTS_ENABLED") === true,
+        eventsEnabled,
         routes: {
           kill: serves(capabilities, "POST", "/v1/players/{id}/kill"),
           message: serves(capabilities, "POST", "/v1/players/{id}/message"),
         },
         fifty: {
-          available: false,
-          message: "50v50 settings can be saved now. Ballots offer the 50v50 option after a later update.",
+          available: eventsEnabled && controls,
+          message: !eventsEnabled
+            ? "Optional events are off in Gramps, so ballots never offer 50v50. These settings can still be prepared."
+            : !controls
+              ? "This game build does not advertise team moves and broadcasts, so ballots cannot offer 50v50."
+              : "Ballots offer 50v50 as the last option whenever every readiness check passes; the voting status explains any check that fails.",
         },
       };
     } catch {
@@ -454,14 +481,30 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
       ),
       check(
         "50v50 option",
-        async () =>
-          (await savedSettings()).fiftyFifty.offered
-            ? {
-                status: "review",
-                message: "Saved as offered. Ballots offer the 50v50 option after a later update.",
-              }
-            : { status: "ok", message: "Off. Ballots offer maps and rule variants only." },
-        "The 50v50 settings could not be read.",
+        async () => {
+          const settings = await savedSettings();
+          if (!settings.fiftyFifty.offered)
+            return { status: "ok", message: "Off. Ballots offer maps and rule variants only." };
+          const game = this.servers.get(serverId);
+          const [config, overview, history] = await Promise.all([
+            game.configuration(),
+            game.overview(),
+            this.store.history(serverId),
+          ]);
+          const track = this.rounds.peek(serverId, overview, { fields: config.fields }).track;
+          const readiness = await this.events.voteEventReadiness(
+            serverId,
+            settings.fiftyFifty,
+            config,
+            overview,
+            track,
+            ballotRounds(history),
+          );
+          return readiness.ok
+            ? { status: "ok", message: "Ready. Ballots offer 50v50 as the last option while every check passes." }
+            : { status: "review", message: `Offered, but not right now: ${readiness.reason}.` };
+        },
+        "The 50v50 readiness checks could not be read.",
       ),
     ]);
     return { serverId, checkedAt: new Date().toISOString(), checks };
@@ -548,10 +591,10 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
         kind: option.kind,
         placement: option.placement,
       })),
-      fifty: {
+      fifty: evaluation.plan?.fifty ?? {
         offered: false,
         reason: draft.data.fiftyFifty.offered
-          ? "Ballots offer the 50v50 option after a later update."
+          ? "50v50 is checked once the round and rotation allow a ballot."
           : "The 50v50 option is off.",
       },
       blocked,
@@ -853,6 +896,15 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
         resolved = await resolve("cancelled", "The ballot could not be posted. A new ballot opens next round.", {
           outcome: "unposted",
         });
+    } else if (isFiftyWinner(vote)) {
+      // R3: a voted 50v50 is confirmed only by the event recorded under this ballot's ID.
+      const map = mapLabel(vote.choices[vote.winner!].map);
+      resolved = (await this.events.voteEvent(vote.id))
+        ? await resolve("queued", "Confirmed on recheck: the 50v50 event is recorded.", { event: { id: vote.id } })
+        : await resolve(
+            "cancelled",
+            `Confirmed on recheck: no 50v50 was recorded. ${map} plays with normal teams; the rotation was left unchanged.`,
+          );
     } else {
       const queue = vote.automation?.queue;
       if (queue) {
@@ -898,11 +950,34 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
       ["needs_review"],
     );
   }
+  /** Shows, and alerts staff about, a voted 50v50 that needs review. The event worker restores the lock. */
+  private async watchVoteEvent(serverId: string, history: MapVoteRecord[]) {
+    const linked = history.find((vote) => vote.automation?.event);
+    let event: Awaited<ReturnType<ServerEventsService["voteEvent"]>> = null;
+    try {
+      event = linked ? await this.events.voteEvent(linked.automation!.event!.id) : null;
+    } catch {
+      return;
+    }
+    if (!linked || event?.state !== "needs_review") {
+      this.eventReviews.delete(serverId);
+      return;
+    }
+    const message = `The 50v50 chosen by the ${linked.createdAt.toISOString().slice(11, 16)} UTC ballot needs staff review: ${event.message}`;
+    this.eventReviews.set(serverId, { id: linked.id, at: new Date().toISOString(), message });
+    const key = `event-review:${linked.id}`;
+    const previous = this.eventAlerts.get(key);
+    if (previous && (previous.count >= 2 || Date.now() - previous.at < ALERT_REPEAT_MS)) return;
+    if (this.eventAlerts.size > 500) this.eventAlerts.clear();
+    this.eventAlerts.set(key, { count: (previous?.count ?? 0) + 1, at: Date.now() });
+    await this.alerts.send(serverId, key, `${linked.serverName}: ${message}`);
+  }
   private async openAutomatic(recipe: PolicyRow) {
     const serverId = this.servers.resolve(recipe.serverId);
     const { policy, settings } = readStoredPolicy(recipe.policy);
     const connection = this.servers.connectionHash(serverId);
     const history = await this.store.history(serverId);
+    await this.watchVoteEvent(serverId, history);
     const active = history.find((vote) => ACTIVE_STATES.includes(vote.state));
     if (active) {
       if (active.state === "needs_review") {
@@ -1109,6 +1184,21 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
     const checked = await game.checkRotation();
     if (checked.revision !== config.revision || checked.issues.some((issue) => !issue.unavailable))
       throw new Error("Rotation options could not be checked.");
+    let fifty: { ready: boolean; reason: string } | undefined;
+    if (settings.fiftyFifty.offered)
+      try {
+        const readiness = await this.events.voteEventReadiness(
+          serverId,
+          settings.fiftyFifty,
+          config,
+          overview,
+          track,
+          ballotRounds(history),
+        );
+        fifty = readiness.ok ? { ready: true, reason: "" } : { ready: false, reason: readiness.reason };
+      } catch {
+        fifty = { ready: false, reason: "its checks could not be read" };
+      }
     const plan = buildBallot({
       policy,
       settings,
@@ -1117,8 +1207,10 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
       statusNextIndex,
       history: history.map((vote) => ({ currentMap: vote.currentMap, automatic: !!vote.automation })),
       unavailablePool: settings.source === "pool" ? await this.unavailablePool(game, settings.pool) : undefined,
+      fifty,
     });
     result.plan = plan;
+    result.detail.fifty = plan.fifty;
     if (plan.options.length < 2 && block("waiting_rotation", plan.notes[0])) return result;
     if (result.blocked || !track) return result;
     result.message = "Opening a ballot.";
@@ -1453,12 +1545,20 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
           )
             throw new Error("Round cannot be confirmed.");
         }
-        if (automation && !(await this.store.policy(vote.serverId))?.policy.enabled)
-          throw new Error("Voting switched off.");
+        const policyRow = automation ? await this.store.policy(vote.serverId) : null;
+        if (automation && !policyRow?.policy.enabled) throw new Error("Voting switched off.");
         if ((await this.store.get(vote.id))?.state !== "closing" || this.stopped) return;
         const winner = vote.choices[vote.winner];
         const entry = stripEvent(winner);
-        if (current) {
+        if (winner.event === "50v50") {
+          if (!current) throw new Error("Only automatic ballots can start a 50v50.");
+          // No queue change: the next rotation entry plays as 50v50.
+          ({ state, message, patch } = await this.startFifty(
+            vote,
+            { ...actor, name: policyRow?.actorName || actor.name },
+            overview.status.players?.current ?? 0,
+          ));
+        } else if (current) {
           const plan = planMapNext(
             rotation.entries,
             rotation.currentIndex!,
@@ -1509,10 +1609,65 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
     await this.updateMessage(finished);
     if (current) await this.announceResult(finished, actor);
   }
+  /**
+   * Starts the 50v50 a ballot chose, or explains why normal teams continue. Only an error after the
+   * event may have been recorded needs review, and the review recheck reads the event store.
+   */
+  private async startFifty(vote: MapVoteRecord, actor: Staff, players: number): Promise<Finish> {
+    const fifty = automationSettings(vote.automation!).fiftyFifty;
+    const votes = vote.counts[vote.winner!] ?? 0;
+    const total = vote.counts.reduce((sum, count) => sum + count, 0);
+    const map = mapLabel(vote.choices[vote.winner!].map);
+    const normal = (reason: string): Finish => ({
+      state: "cancelled",
+      message: `50v50 won but ${reason}. The rotation continues with normal teams.`,
+    });
+    if (votes < fifty.minVotes) return normal(`it needed ${fifty.minVotes} votes and had ${votes}`);
+    const floor = Math.max(0, fifty.minPlayers - FIFTY_CLOSE_ALLOWANCE);
+    if (players < floor) return normal(`only ${players} players are online (${floor} needed)`);
+    const end = fifty.autoEnd
+      ? `normal teams return after ${fifty.rounds} round${fifty.rounds === 1 ? "" : "s"}`
+      : "normal teams return when staff stop it";
+    const queued: Finish = {
+      state: "queued",
+      message: `50v50 chosen (${votes} of ${total} votes). Next round on ${map} runs as 50v50; teams are sorted at round start; ${end}.`,
+      patch: { event: { id: vote.id } },
+    };
+    try {
+      await this.events.startFromVote({
+        voteId: vote.id,
+        serverId: vote.serverId,
+        actor,
+        fifty,
+        votes,
+        total,
+        label: map,
+      });
+      return queued;
+    } catch (error) {
+      if (error instanceof HttpException)
+        return {
+          state: "cancelled",
+          message: `50v50 could not start: ${withoutStop(error.message)}. ${map} plays with normal teams; the rotation was left unchanged.`,
+          patch: { outcome: "refused" },
+        };
+      try {
+        if (await this.events.voteEvent(vote.id)) return queued;
+      } catch {
+        /* The review recheck reads the event store again. */
+      }
+      return {
+        state: "needs_review",
+        message: "The 50v50 start is unconfirmed. Gramps is checking whether its event was recorded.",
+      };
+    }
+  }
   /** One in-game result notice for queued, tied or no-vote automatic ballots. Never retried. */
   private async announceResult(vote: MapVoteRecord, verified: Staff | null) {
     const settings = automationSettings(vote.automation!);
     if (!settings.announce.resultInGame || !["queued", "tied", "no_votes"].includes(vote.state)) return;
+    // A voted 50v50 is announced by its event's own notice.
+    if (vote.state === "queued" && isFiftyWinner(vote)) return;
     try {
       const actor =
         verified ??
