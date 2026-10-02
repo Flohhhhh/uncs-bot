@@ -424,7 +424,7 @@ function AdminApplications() {
                 <td>
                   <button
                     className="button secondary small"
-                    disabled={busy || resource.loading}
+                    disabled={busy || resource.loading || resource.refreshing}
                     onClick={() => setSelected(record)}
                   >
                     View request
@@ -443,7 +443,7 @@ function AdminApplications() {
       {selected && (
         <ApplicationReview
           record={selected}
-          unavailable={Boolean(resource.error) || resource.loading}
+          unavailable={Boolean(resource.error) || resource.loading || resource.refreshing}
           onClose={() => setSelected(null)}
           onReviewed={() => {
             void resource.refresh();

@@ -18,9 +18,9 @@ export function ServerIdentityReadout() {
 }
 
 function IdentityDetails() {
-  const { data, error, loading, refresh } = useResource<ServerIdentity>("server-identity");
+  const { data, error, loading, refreshing, refresh } = useResource<ServerIdentity>("server-identity");
   return (
-    <div aria-busy={loading}>
+    <div aria-busy={loading || refreshing}>
       {error ? (
         <p role="alert">Server identity could not be loaded.</p>
       ) : !data ? (
@@ -52,7 +52,12 @@ function IdentityDetails() {
         </dl>
       )}
       <p className="muted">Reported by the running game. The saved image URL is shown below.</p>
-      <button className="button secondary small" type="button" disabled={loading} onClick={() => void refresh()}>
+      <button
+        className="button secondary small"
+        type="button"
+        disabled={loading || refreshing}
+        onClick={() => void refresh()}
+      >
         Refresh identity
       </button>
     </div>

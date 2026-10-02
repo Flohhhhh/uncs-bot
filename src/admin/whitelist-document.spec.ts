@@ -153,6 +153,14 @@ describe("targeted whitelist edits", () => {
       editWhitelist({ ...document, text: document.text.replace("Token=unchanged", `Token="${value}"`) }, added, true),
     ).toThrow("redacted");
   });
+  it("never writes a value that a later edit would read as redacted", () => {
+    // Writes are only ClearArray and validated numeric IDs, so the redaction guard cannot lock the next edit.
+    const withAdded = editWhitelist(document, added, true);
+    const cleared = editWhitelist(document, existing, false);
+    for (const text of [withAdded, editWhitelist({ ...document, text: withAdded }, existing, false), cleared])
+      expect(() => editWhitelist({ ...document, text }, added, false)).not.toThrow();
+    expect(cleared).toContain("!DefaultReservedPlayerIds=ClearArray");
+  });
   it("honors redaction and locked metadata independently of writable=true", () => {
     expect(() => editWhitelist({ ...document, redacted: true }, added, true)).toThrow("redacted");
     expect(() =>

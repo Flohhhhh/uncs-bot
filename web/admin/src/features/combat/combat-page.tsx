@@ -165,7 +165,7 @@ function CombatView({
   disabled,
 }: CombatViewProps) {
   const path = `${playerId ? `combat/players/${encodeURIComponent(playerId)}` : "combat"}?period=${period}`;
-  const { data: result, loading, error, refresh } = useResource<CombatResponse>(path);
+  const { data: result, loading, refreshing, error, refresh } = useResource<CombatResponse>(path);
   // Keep the selected window/identity paired with its response even if a shared
   // resource hook briefly retains the previous result while changing its key.
   const data = result?.period === period && (playerId ? result.steamId === playerId : !result.steamId) ? result : null;
@@ -180,7 +180,7 @@ function CombatView({
           <button
             type="button"
             className="button secondary small"
-            disabled={disabled || loading}
+            disabled={disabled || loading || refreshing}
             onClick={() => void refresh()}
           >
             Retry combat history
@@ -212,14 +212,14 @@ function CombatView({
         ? "NO RECENT BATCH"
         : "WAITING FOR FEED";
   return (
-    <div aria-busy={loading}>
+    <div aria-busy={loading || refreshing}>
       {error && (
         <div className="notice error" role="alert">
           Combat history could not be refreshed. Showing the last received snapshot; feed status is unavailable.{" "}
           <button
             type="button"
             className="button secondary small"
-            disabled={disabled || loading}
+            disabled={disabled || loading || refreshing}
             onClick={() => void refresh()}
           >
             Retry combat history

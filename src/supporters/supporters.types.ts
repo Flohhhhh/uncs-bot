@@ -33,7 +33,8 @@ const payloadSchema = z.object({
     id: providerId,
     type: z.literal("member"),
     attributes: z.object({
-      full_name: displayName,
+      // Like the API import, an unusable name is dropped rather than rejecting the member's whole update.
+      full_name: displayName.catch(null),
       patron_status: optionalText,
       last_charge_status: optionalText,
       last_charge_date: timestamp.nullish().transform((value) => value ?? null),

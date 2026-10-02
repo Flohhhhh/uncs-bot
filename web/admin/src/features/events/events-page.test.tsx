@@ -437,3 +437,33 @@ it("labels retained event actions after a failed refresh", async () => {
   expect(dialog.getByText("Recorded team move")).toBeInTheDocument();
   expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
 });
+
+it("keeps the draft editable while a background refresh is pending", async () => {
+  const { state, rerender } = show();
+  await selectTeams();
+  const duration = screen.getByRole("spinbutton", { name: "Duration (minutes)" });
+  fireEvent.change(duration, { target: { value: "90" } });
+  const fallback = request.getMockImplementation()!;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  request.mockImplementation(async (path, init) => {
+    await held;
+    return fallback(path, init);
+  });
+  rerender(
+    <AdminContext.Provider value={{ ...state, refreshVersion: 1 }}>
+      <EventsPage />
+    </AdminContext.Provider>,
+  );
+  await waitFor(() =>
+    expect(request.mock.calls.filter(([path]) => ["events", "settings", "overview"].includes(path))).toHaveLength(6),
+  );
+  expect(duration).toBeEnabled();
+  expect(screen.getByRole("combobox", { name: "Team 1" })).toBeEnabled();
+  expect(screen.getByRole("checkbox", { name: /Force a respawn/ })).toBeEnabled();
+  expect(screen.queryByText("Checking round timing…")).not.toBeInTheDocument();
+  await act(async () => release());
+  expect(duration).toHaveValue(90);
+  expect(screen.getByRole("button", { name: "Review event" })).toBeEnabled();
+  expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+});
