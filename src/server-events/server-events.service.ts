@@ -78,11 +78,22 @@ export type VoteEventStart = {
   /** The administrator who saved the voting controls, verified for this server. */
   actor: Staff;
   fifty: FiftyFiftySettings;
+  /**
+   * Players needed when the ballot closes: the offer minimum less an allowance for players who leave as
+   * the voted round ends. Defaults to the offer minimum.
+   */
+  minPlayers?: number;
   votes: number;
   total: number;
   /** The rotation entry that plays as 50v50. */
   label: string;
 };
+/**
+ * When a winning ballot starts the event: `minPlayers` replaces the offer minimum, and a roster that is
+ * still settling (unlinked identities, or a roster count that differs from the player count for one
+ * read) is left to the planner, which waits on it and stops the event if it stays unsafe.
+ */
+type ReadinessAtClose = { minPlayers?: number; atClose?: boolean };
 
 const MINUTE = 60_000;
 const INTERRUPTED_MS = 2 * MINUTE;
@@ -286,6 +297,7 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
     overview: EventSnapshot,
     track: RoundTrack | null,
     ballots?: { roundId?: string; createdAt: Date }[],
+    close: ReadinessAtClose = {},
   ): Promise<VoteEventReadiness> {
     const no = (reason: string): VoteEventReadiness => ({ ok: false, reason });
     if (!this.enabled()) return no("optional events are off in Gramps");
@@ -323,14 +335,17 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
     if (factions.length !== 3 || new Set(factions).size !== 3) return no("the game does not report three teams");
     if (fifty.closedFaction && !factions.includes(fifty.closedFaction))
       return no(`${plainLabel(fifty.closedFaction, 30)} is not playing`);
-    try {
-      eventRoster({ options: { ...this.voteOptionsBase(fifty), source: { kind: "vote", voteId: "" } } }, overview);
-    } catch {
-      return no("the roster has unlinked, duplicate or unassigned players, or more than 100 places");
+    if (!close.atClose) {
+      try {
+        eventRoster({ options: { ...this.voteOptionsBase(fifty), source: { kind: "vote", voteId: "" } } }, overview);
+      } catch {
+        return no("the roster has unlinked, duplicate or unassigned players, or more than 100 places");
+      }
+      if (overview.players.length !== overview.status.players.current) return no("the roster is still changing");
     }
-    if (overview.players.length !== overview.status.players.current) return no("the roster is still changing");
-    if (overview.status.players.current < fifty.minPlayers)
-      return no(`${overview.status.players.current} of ${fifty.minPlayers} players online`);
+    const minPlayers = close.minPlayers ?? fifty.minPlayers;
+    if (overview.status.players.current < minPlayers)
+      return no(`${overview.status.players.current} of ${minPlayers} players online`);
     return { ok: true };
   }
   private voteOptionsBase(fifty: FiftyFiftySettings) {
@@ -361,14 +376,33 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
     const configuration = await game.configuration();
     const overview = await game.overview();
     const track = this.rounds.observe(input.serverId, overview, { fields: configuration.fields }).track;
-    const readiness = await this.voteEventReadiness(input.serverId, input.fifty, configuration, overview, track);
+    const readiness = await this.voteEventReadiness(
+      input.serverId,
+      input.fifty,
+      configuration,
+      overview,
+      track,
+      undefined,
+      { minPlayers: input.minPlayers, atClose: true },
+    );
     if (!readiness.ok) throw new ConflictException(sentence(readiness.reason));
     const lock = configuration.fields.find((field) => field.id === "lockOverpopulated")!.value as boolean;
     const base = this.voteOptionsBase(input.fifty);
     const source = { kind: "vote" as const, voteId: input.voteId, label: plainLabel(input.label, 60) };
-    const roster = eventRoster({ options: { ...base, source } }, overview);
-    // Provisional: each 50v50 round resolves its own teams when sorting starts.
-    const teams = voteTeams(input.fifty.closedFaction, roster.factions, roster.players)!;
+    // Provisional: each 50v50 round resolves its own teams when sorting starts. A roster still settling
+    // at the close names them from the factions alone.
+    let teams: [string, string] | null;
+    try {
+      const roster = eventRoster({ options: { ...base, source } }, overview);
+      teams = voteTeams(input.fifty.closedFaction, roster.factions, roster.players);
+    } catch {
+      teams = voteTeams(
+        input.fifty.closedFaction,
+        overview.status.factionScores.map((faction) => faction.name),
+        [],
+      );
+    }
+    if (!teams) throw new ConflictException("The closed team is not playing.");
     const options: EventOptions = {
       ...base,
       teams,

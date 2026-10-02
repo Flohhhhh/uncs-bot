@@ -676,6 +676,53 @@ describe("a 50v50 started by a community vote", () => {
     expect(f.store.create).not.toHaveBeenCalled();
     expect(f.admin.act).not.toHaveBeenCalled();
   });
+  /** A full-server read after `leavers` players left at the end of the voted round. */
+  const afterLeavers = (leavers: number, rosterLag = 0) => {
+    const snapshot = fullServerSnapshot(Date.now());
+    snapshot.players = snapshot.players.slice(leavers);
+    snapshot.status.players.current = snapshot.players.length + rosterLag;
+    return snapshot;
+  };
+  it("starts at the ballot's close-time player floor, below the offer minimum", async () => {
+    const f = voting();
+    f.game.overview.mockImplementation(async () => afterLeavers(25));
+    // 75 players: under the offer minimum of 80, at or above the close-time floor of 70.
+    const started = await f.service.startFromVote({
+      voteId: f.voteId,
+      serverId: "primary",
+      actor: voteActor,
+      fifty,
+      minPlayers: 70,
+      votes: 12,
+      total: 20,
+      label: "Zestafona",
+    });
+    expect(started.created).toBe(true);
+    const below = voting();
+    below.game.overview.mockImplementation(async () => afterLeavers(31));
+    await expect(
+      below.service.startFromVote({
+        voteId: below.voteId,
+        serverId: "primary",
+        actor: voteActor,
+        fifty,
+        minPlayers: 70,
+        votes: 12,
+        total: 20,
+        label: "Zestafona",
+      }),
+    ).rejects.toThrow("69 of 70 players online.");
+  });
+  it("leaves a roster still settling at the close to the planner instead of refusing a winning 50v50", async () => {
+    const f = voting();
+    // GET /v1/status and GET /v1/players differ by one joiner, and one player is not linked yet.
+    f.game.overview.mockImplementation(async () => ({ ...afterLeavers(2, 1), unlinkedPlayerCount: 1 }));
+    const started = await f.start();
+    expect(started.created).toBe(true);
+    // Provisional teams come from the current factions; each 50v50 round resolves its own.
+    expect(f.store.create.mock.calls[0][0].options.teams).toHaveLength(2);
+    expect(f.admin.act).not.toHaveBeenCalled();
+  });
   it("explains readiness, including the cooldown after the last voted 50v50", async () => {
     const f = voting();
     const overview = fullServerSnapshot();

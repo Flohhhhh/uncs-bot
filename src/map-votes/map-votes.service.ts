@@ -1641,17 +1641,19 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
         serverId: vote.serverId,
         actor,
         fifty,
+        minPlayers: floor,
         votes,
         total,
         label: map,
       });
       return queued;
     } catch (error) {
+      // Readiness at the close is not a queue refusal, so it never pauses automatic voting.
       if (error instanceof HttpException)
         return {
           state: "cancelled",
           message: `50v50 could not start: ${withoutStop(error.message)}. ${map} plays with normal teams; the rotation was left unchanged.`,
-          patch: { outcome: "refused" },
+          patch: { outcome: "fifty_unready" },
         };
       try {
         if (await this.events.voteEvent(vote.id)) return queued;

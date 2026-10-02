@@ -1862,6 +1862,27 @@ describe("ballots that need review", () => {
     await f.service.tick();
     expect((await f.service.list(staff)).automatic?.phase).not.toBe("paused");
   });
+  it("keeps voting automatic after 50v50 winners that could not start", async () => {
+    const f = automatic();
+    const unready = (minutes: number): MapVoteRecord => ({
+      ...f.record,
+      id: randomUUID(),
+      state: "cancelled",
+      message: "50v50 could not start: 75 of 80 players online. Ozeti plays with normal teams.",
+      createdAt: new Date(now.getTime() - minutes * 60_000),
+      automation: {
+        policy: defaultVotingPolicy,
+        highestScore: 95,
+        reminders: {},
+        policyVersion: 1,
+        outcome: "fifty_unready",
+      },
+    });
+    f.store.history.mockResolvedValue([unready(20), unready(60), unready(100)]);
+    await f.service.tick();
+    expect((await f.service.list(staff)).automatic?.phase).not.toBe("paused");
+    expect(f.alerts.send).not.toHaveBeenCalled();
+  });
 });
 
 describe("customizable voting controls", () => {
@@ -2091,6 +2112,8 @@ describe("a 50v50 option on automatic ballots", () => {
       serverId: "primary",
       actor: expect.objectContaining({ id: staff.id, name: "Dennis", role: "admin" }),
       fifty: expect.objectContaining({ offered: true, minPlayers: 40, minVotes: 3, rounds: 1, autoEnd: true }),
+      // The offer minimum less 10 players who may leave as the voted round ends.
+      minPlayers: 30,
       votes: 8,
       total: 10,
       label: "Ozeti",
@@ -2136,7 +2159,8 @@ describe("a 50v50 option on automatic ballots", () => {
       f.record.id,
       "cancelled",
       "50v50 could not start: Another optional event is active or needs review. Ozeti plays with normal teams; the rotation was left unchanged.",
-      { outcome: "refused" },
+      // Not a queue refusal: it never counts towards pausing automatic voting.
+      { outcome: "fifty_unready" },
     );
     expect(f.admin.act).not.toHaveBeenCalled();
   });

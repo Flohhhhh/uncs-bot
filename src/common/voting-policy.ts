@@ -150,7 +150,16 @@ export type VoteRotationSnapshot = {
   nextLabel?: string;
 };
 export type MapNextPlacement = "already-next" | "move" | "swap" | "insert" | "append";
-export type VoteOutcome = "refused" | "expired" | "match_ended" | "rotation_changed" | "stopped" | "unposted";
+/** Only "refused" (the game cleanly refused the queued winner) counts towards pausing automatic voting. */
+export type VoteOutcome =
+  | "refused"
+  | "expired"
+  | "match_ended"
+  | "rotation_changed"
+  | "stopped"
+  | "unposted"
+  /** A winning 50v50 failed its checks at the close; normal teams continue. */
+  | "fifty_unready";
 export type VoteAutomation = {
   policy: VotingPolicy;
   highestScore: number;
