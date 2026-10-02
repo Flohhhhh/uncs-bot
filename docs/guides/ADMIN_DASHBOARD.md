@@ -124,7 +124,7 @@ No built-in per-clan preferred-team or team-slot reservation setting was found i
 
 ## Limits and operations
 
-The optional admin-only [Patreon supporter ledger](PATREON_SUPPORTERS.md) records signed membership observations, staff-checked payment evidence, account matches and permanent founder promises. Availability and webhook delivery require separate verification; a membership observation does not verify payment or account ownership. Provider events never directly grant or remove game access.
+The optional admin-only [Patreon supporter ledger](PATREON_SUPPORTERS.md) imports campaign members and completed payments from the authenticated Patreon API, and records signed membership observations, staff-checked payment evidence, account matches and permanent founder promises. Availability, the import and webhook delivery require separate verification; a membership observation does not verify payment or account ownership. Provider events never directly grant or remove game access.
 
 Recorded player statistics, the public server leaderboard and staff combat history are described in [Combat history](COMBAT_HISTORY.md). The independently authenticated game-event feed is configured in production, but its first native batch is still unverified. Configuration alone does not make the history live.
 
