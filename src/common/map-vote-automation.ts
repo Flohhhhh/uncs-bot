@@ -27,3 +27,9 @@ export type AutomaticVoteStatus = {
   message: string;
   checkedAt: string | null;
 };
+
+export type MapVoteSetup = {
+  serverId: string;
+  checkedAt: string;
+  checks: { label: string; status: "ok" | "blocked" | "review"; message: string }[];
+};

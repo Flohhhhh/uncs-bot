@@ -238,6 +238,39 @@ it("does not query settings or catalog when disabled", async () => {
   expect(screen.getByRole("link", { name: "Open match & maps" })).toHaveAttribute("href", "/match?server=primary");
   expect(request.mock.calls.map(([path]) => path)).toEqual(["map-votes"]);
 });
+it("checks voting setup only on request, clears stale results on retry, and never sends a mutation", async () => {
+  enabled = false;
+  const fallback = request.getMockImplementation()!;
+  let resolveSetup!: (value: unknown) => void;
+  request.mockImplementation((path, options) =>
+    path === "map-votes/setup"
+      ? (new Promise((resolve) => {
+          resolveSetup = resolve;
+        }) as never)
+      : fallback(path, options),
+  );
+  show();
+  await screen.findByRole("heading", { name: "Discord map voting is off" });
+  fireEvent.click(screen.getByText("How to enable voting"));
+  expect(request.mock.calls.map(([path]) => path)).toEqual(["map-votes"]);
+  fireEvent.click(screen.getByRole("button", { name: "Check voting setup" }));
+  expect(screen.getByRole("button", { name: "Checking setup…" })).toBeDisabled();
+  resolveSetup({
+    serverId: "primary",
+    checkedAt: "2026-10-02T06:00:00Z",
+    checks: [{ label: "Storage", status: "ok", message: "Voting tables are readable." }],
+  });
+  await screen.findByText("Voting tables are readable.");
+  request.mockImplementation(async (path, options) => {
+    if (path === "map-votes/setup") throw new Error("Setup check unavailable");
+    return fallback(path, options);
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Check voting setup" }));
+  await screen.findByText("Setup check unavailable");
+  expect(screen.queryByText("Voting tables are readable.")).not.toBeInTheDocument();
+  expect(request.mock.calls.some(([, options]) => options?.method === "POST")).toBe(false);
+  expect(request.mock.calls.filter(([path]) => path === "map-votes/setup")).toHaveLength(2);
+});
 it("excludes the current map and duplicate choices, and requires two options", async () => {
   show();
   const picker = await screen.findByRole("combobox", { name: "Map" });

@@ -36,6 +36,7 @@ describe("admin HTTP boundaries", () => {
   };
   const game = { overview: jest.fn(), execute: jest.fn(), configuration: jest.fn() };
   const votes = {
+    setup: jest.fn().mockResolvedValue({ serverId: "primary", checks: [] }),
     list: jest.fn().mockResolvedValue({ enabled: false, votes: [] }),
     start: jest.fn(),
     cancel: jest.fn(),
@@ -193,6 +194,24 @@ describe("admin HTTP boundaries", () => {
       .expect(200);
     expect(result.headers["cache-control"]).toBe("no-store");
     expect(votes.list).toHaveBeenCalledWith(expect.objectContaining({ id: session.userId }));
+  });
+  it("keeps the voting setup check authenticated, uncached and scoped to a known server", async () => {
+    const path = "/admin/api/servers/primary/map-votes/setup";
+    await request(app.getHttpServer()).get(path).expect(401);
+    expect(votes.setup).not.toHaveBeenCalled();
+    const result = await request(app.getHttpServer())
+      .get(path)
+      .set("Cookie", `__Host-uncs_admin_session=${token}`)
+      .expect(200);
+    expect(result.headers["cache-control"]).toBe("no-store");
+    expect(votes.setup).toHaveBeenCalledWith(expect.objectContaining({ id: session.userId, serverId: "primary" }));
+    votes.setup.mockClear();
+    await request(app.getHttpServer())
+      .get("/admin/api/servers/unknown/map-votes/setup")
+      .set("Cookie", `__Host-uncs_admin_session=${token}`)
+      .expect(404);
+    expect(votes.setup).not.toHaveBeenCalled();
+    expect(game.execute).not.toHaveBeenCalled();
   });
   it.each(["/admin/api/events", "/admin/api/events/d0a3cdd7-a1c7-4904-a99e-cf058b432c34/operations"])(
     "keeps %s private and uncached",

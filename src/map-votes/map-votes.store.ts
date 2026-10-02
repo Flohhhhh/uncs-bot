@@ -9,6 +9,22 @@ import type { Staff } from "../admin/admin.types";
 export class MapVotesStore {
   constructor(@Inject(DATABASE) private readonly db: Database) {}
 
+  async checkSetup(serverId: string) {
+    // Resolve every expected column without reading member choices or changing any records.
+    await this.db.select().from(mapVoteBallots).limit(0);
+    const [unfinished] = await this.db
+      .select()
+      .from(mapVotes)
+      .where(
+        and(
+          eq(mapVotes.serverId, serverId),
+          inArray(mapVotes.state, ["publishing", "open", "closing", "needs_review"]),
+        ),
+      )
+      .limit(1);
+    return { unfinished: !!unfinished };
+  }
+
   async get(id: string) {
     const [vote] = await this.db.select().from(mapVotes).where(eq(mapVotes.id, id));
     return vote ?? null;

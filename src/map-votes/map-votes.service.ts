@@ -16,7 +16,7 @@ import { GameServers } from "../admin/game-servers";
 import { validateMapSelection } from "../admin/server-configuration";
 import { sameMap } from "../common/map-labels";
 import { roundStamp, sameRound, type RoundStamp } from "../common/game-round";
-import type { AutomaticMapVote, AutomaticVoteStatus } from "../common/map-vote-automation";
+import type { AutomaticMapVote, AutomaticVoteStatus, MapVoteSetup } from "../common/map-vote-automation";
 import type { MapSelection } from "../common/server-settings";
 import type { Staff } from "../admin/admin.types";
 import { EnvService } from "../env/env.service";
@@ -71,6 +71,84 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
         "Map voting is not enabled. Its database and Discord channel need owner setup.",
       );
     return { guildId: options.guildId!, channelId: options.channelId! };
+  }
+  async setup(staff: Staff): Promise<MapVoteSetup> {
+    this.requireStaff(staff);
+    const serverId = this.servers.resolve(staff.serverId);
+    const { guildId, channelId } = this.options();
+    const recipe = this.env.get("MAP_VOTES_AUTOMATIC")?.find((item) => item.serverId === serverId);
+    const check = async (
+      label: string,
+      read: () => Promise<Omit<MapVoteSetup["checks"][number], "label">>,
+      failure: string,
+    ): Promise<MapVoteSetup["checks"][number]> => {
+      try {
+        return { label, ...(await read()) };
+      } catch {
+        return { label, status: "blocked", message: failure };
+      }
+    };
+    const checks = await Promise.all([
+      check(
+        "Storage",
+        async () => {
+          const storage = await this.store.checkSetup(serverId);
+          return storage.unfinished
+            ? {
+                status: "review",
+                message: "Tables are readable. An unfinished ballot exists; review it before enabling voting.",
+              }
+            : { status: "ok", message: "Voting tables are readable. No unfinished ballot on this server." };
+        },
+        "Voting storage could not be read. Check database access and the existing 0003 migration.",
+      ),
+      check(
+        "Discord channel",
+        async () => {
+          if (!guildId || !channelId)
+            return { status: "blocked", message: "Choose a voting channel in the community's Gramps configuration." };
+          const channel = await this.discord.check(guildId, channelId);
+          return { status: "ok", message: `Gramps can read and post in #${channel.name}.` };
+        },
+        "The voting channel is unavailable or Gramps lacks permission to read and post there.",
+      ),
+      check(
+        "Automatic voting",
+        async () => {
+          if (!recipe) return { status: "blocked", message: "Configure an automatic voting policy for this server." };
+          const actor = await this.auth.serverStaff(
+            { id: recipe.actorId, name: "Gramps automatic voting", role: "admin", csrf: "" },
+            serverId,
+            true,
+          );
+          if (actor.role !== "admin")
+            return { status: "blocked", message: "The configured voting administrator needs access to this server." };
+          return {
+            status: "ok",
+            message: `${recipe.minutes}-minute ballots after ${recipe.delaySeconds} seconds at a confirmed rotation position.`,
+          };
+        },
+        "The configured voting administrator's access could not be verified.",
+      ),
+      check(
+        "Rotation",
+        async () => {
+          const { rotation } = await this.servers.get(serverId).configuration();
+          return rotation.editable && rotation.enabled && rotation.mode === "Ordered" && rotation.currentIndex !== null
+            ? {
+                status: "ok",
+                message:
+                  "Ordered rotation and current position confirmed. Ballot choices are validated before opening.",
+              }
+            : {
+                status: "blocked",
+                message: "Voting needs an editable ordered rotation with a confirmed current position.",
+              };
+        },
+        "The server's current rotation could not be read.",
+      ),
+    ]);
+    return { serverId, checkedAt: new Date().toISOString(), checks };
   }
   async list(staff: Staff) {
     this.requireStaff(staff);
