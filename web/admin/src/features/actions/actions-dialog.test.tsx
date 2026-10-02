@@ -62,7 +62,7 @@ describe("server action review", () => {
     [
       "does not guess the next round when the rotation is off",
       { enabled: false, mode: "Ordered", currentIndex: 0, nextIndex: 1, currentMap: "Harbor" },
-      "Next map not confirmed.",
+      "No fixed next map: rotation is off.",
     ],
     [
       "does not guess the next round when the running entry is unknown",

@@ -116,6 +116,21 @@ describe("reviewed team moves", () => {
     await act(async () => finish({ state: "applied", message: "Confirmed" }));
     expect(screen.getByRole("heading", { name: "Team requests complete" })).toBeInTheDocument();
   });
+  it("shows a single player's result on one line without the outcomes table or review label", async () => {
+    request.mockResolvedValue({ state: "applied", message: "Assignment confirmed by the game." });
+    render(
+      <AdminContext.Provider value={context()}>
+        <TeamMoveDialog players={[alice]} initialFaction="Lonestar" onClose={vi.fn()} />
+      </AdminContext.Provider>,
+    );
+    expect(screen.getByRole("dialog")).toHaveTextContent("STAFF REVIEW");
+    submit();
+    const line = await screen.findByRole("status", { name: "Team move outcome" });
+    await waitFor(() => expect(line).toHaveTextContent("Applied Assignment confirmed by the game."));
+    expect(screen.queryByRole("table", { name: "Team move outcomes" })).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog")).not.toHaveTextContent("STAFF REVIEW");
+    expect(request).toHaveBeenCalledOnce();
+  });
   it("sends each player with a unique ID, exact confirmation and faction name, spaced sequentially", async () => {
     vi.useFakeTimers();
     request.mockResolvedValue({ state: "applied", message: "Assignment confirmed; respawn may be needed." });

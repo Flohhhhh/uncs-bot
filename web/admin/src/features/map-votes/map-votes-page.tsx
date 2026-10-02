@@ -40,6 +40,7 @@ function VoteReview({
   const [id] = useState(() => crypto.randomUUID());
   const submitted = useRef(false);
   const [result, setResult] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
   const settings = useResource<SettingsSnapshot>(draft ? "settings" : null);
   const blocked = !!draft && statusUnavailable;
   const rotationReady =
@@ -61,6 +62,7 @@ function VoteReview({
       });
       setResult(response.message);
     } catch (error) {
+      setFailed(true);
       setResult(
         `${errorMessage(error)} Refresh the ballot history and check Discord before starting another vote. This request will not be sent again.`,
       );
@@ -70,7 +72,13 @@ function VoteReview({
     }
   }
   return (
-    <Modal serverScoped title={vote ? "Close this ballot" : "Review Discord ballot"} onClose={close} busy={busy}>
+    <Modal
+      serverScoped
+      title={vote ? "Close this ballot" : "Review Discord ballot"}
+      onClose={close}
+      busy={busy}
+      eyebrow={result ? null : undefined}
+    >
       {draft && (
         <>
           <ol className="change-summary">
@@ -96,7 +104,7 @@ function VoteReview({
       )}
       {result ? (
         <>
-          <p className="notice" role="status">
+          <p className={`notice${failed ? " warning" : ""}`} role="status">
             {result}
           </p>
           <p>

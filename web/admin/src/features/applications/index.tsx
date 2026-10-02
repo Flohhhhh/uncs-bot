@@ -122,7 +122,7 @@ function ApplicationDetails({ record }: { record: WhitelistApplication }) {
         )}
       </dl>
       {record.lastActionState && (
-        <div className={`notice ${record.status === "approved" ? "" : "warning"}`}>
+        <div className={`notice ${record.status === "approved" ? "success" : "warning"}`}>
           <strong>Last review: {record.lastActionState}</strong>
           <br />
           {record.lastActionMessage || "No additional details were recorded."}
@@ -255,6 +255,7 @@ function ApplicationReview({
       }
       busy={sending}
       onClose={onClose}
+      eyebrow={result ? null : undefined}
     >
       <form onSubmit={submit}>
         <ApplicationDetails record={record} />
@@ -312,7 +313,7 @@ function ApplicationReview({
           </p>
         )}
         {result && (
-          <p className={`notice ${result.complete ? "" : "warning"}`} role="status">
+          <p className={`notice ${result.complete ? "success" : "warning"}`} role="status">
             {result.message}
           </p>
         )}

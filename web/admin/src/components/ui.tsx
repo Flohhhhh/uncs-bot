@@ -209,25 +209,6 @@ function TabStrip<T extends string>({
     </>
   );
 }
-export function Metric({
-  label,
-  value,
-  note,
-  word = false,
-}: {
-  label: string;
-  value: ReactNode;
-  note?: ReactNode;
-  word?: boolean;
-}) {
-  return (
-    <div className="metric">
-      <div className="metric-label">{label}</div>
-      <div className={`metric-value ${word ? "word" : ""}`}>{value}</div>
-      <div className="metric-note">{note}</div>
-    </div>
-  );
-}
 export function Card({
   title,
   subtitle,
@@ -343,10 +324,13 @@ export function Modal({
   useEffect(() => {
     setDialogOpen(true);
     const element = dialog.current;
+    // React removes the dialog before this cleanup runs, so the browser cannot restore focus itself.
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     element?.showModal();
     return () => {
       element?.close();
       setDialogOpen(false);
+      if (previous?.isConnected) previous.focus();
     };
   }, [setDialogOpen]);
   return (
@@ -446,7 +430,11 @@ export function date(value?: string | null) {
   return value ? new Date(value).toLocaleString() : "Not recorded";
 }
 
-export type TableHeader = string | { label: string; sort: "none" | "ascending" | "descending"; onSort: () => void };
+export type TableHeader =
+  | string
+  /** A heading only screen readers hear, such as a selection column. */
+  | { label: string; hidden: true }
+  | { label: string; sort: "none" | "ascending" | "descending"; onSort: () => void };
 /** Rows above this count scroll inside the table on wide screens instead of lengthening the page. */
 export const scrollRowLimit = 25;
 export function Table({
@@ -487,9 +475,15 @@ export function Table({
         <thead>
           <tr>
             {headers.map((header, index) => (
-              <th key={index} scope="col" aria-sort={typeof header === "string" ? undefined : header.sort}>
+              <th
+                key={index}
+                scope="col"
+                aria-sort={typeof header === "object" && "sort" in header ? header.sort : undefined}
+              >
                 {typeof header === "string" ? (
                   header || <span className="sr-only">Actions</span>
+                ) : "hidden" in header ? (
+                  <span className="sr-only">{header.label}</span>
                 ) : (
                   <button
                     type="button"

@@ -48,7 +48,8 @@ function notFixed(rotation: RotationSnapshot) {
 /** What plays after this match, as far as the saved rotation and the game confirm it. */
 export function nextRoundSummary(source: SettingsSnapshot | RotationSnapshot | null | undefined): NextRoundSummary {
   const rotation = source && "rotation" in source ? source.rotation : source;
-  if (!rotation)
+  // A malformed read counts as unavailable, never as a confirmed next round.
+  if (!rotation || !Array.isArray(rotation.entries))
     return {
       state: "unavailable",
       entry: null,

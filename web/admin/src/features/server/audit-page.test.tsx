@@ -5,7 +5,7 @@ import { api } from "../../api/client";
 import type { Audit } from "../../api/types";
 import { AdminContext } from "../../app/context";
 import { alice, context } from "../players/test-fixtures";
-import { AuditPage } from "./pages";
+import { DashboardHistory } from "./pages";
 
 vi.mock("../../api/client", () => ({ api: vi.fn() }));
 const request = vi.mocked(api);
@@ -29,9 +29,9 @@ const recent: Audit[] = Array.from({ length: 100 }, (_value, index) => ({
 }));
 function mount(admin = context()) {
   return render(
-    <MemoryRouter initialEntries={["/audit?server=primary"]}>
+    <MemoryRouter initialEntries={["/activity?server=primary&view=actions"]}>
       <AdminContext.Provider value={admin}>
-        <AuditPage />
+        <DashboardHistory />
       </AdminContext.Provider>
     </MemoryRouter>,
   );

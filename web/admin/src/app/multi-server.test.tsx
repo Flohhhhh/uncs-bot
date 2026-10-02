@@ -174,29 +174,36 @@ it("does not silently fall back when an unavailable server is in a deep link", a
   await waitFor(() => expect(fetcher.mock.calls).toHaveLength(2));
 });
 it("keeps map editing and the voting view on the explicitly selected server", async () => {
-  const { router } = mount("/match?server=primary", async (url) =>
+  const { router, fetcher } = mount("/match?server=primary", async (url) =>
     url.endsWith("/map-votes")
       ? json({ enabled: false, votes: [], serverId: "primary" })
-      : url.endsWith("/settings")
-        ? json({
-            revision: "r1",
-            fields: [],
-            rotation: {
-              mode: "Ordered",
-              enabled: true,
-              editable: true,
-              entries: [],
-              currentIndex: null,
-              currentMap: "Harbor",
-            },
-          })
-        : url.endsWith("/catalog")
-          ? json({ maps: [], experiences: [], lightings: [] })
-          : json(overview("Primary")),
+      : url.endsWith("/map-votes/controls")
+        ? json({ serverId: "primary", version: 0, available: true, ready: false, message: "Voting is off." })
+        : url.endsWith("/settings")
+          ? json({
+              revision: "r1",
+              fields: [],
+              rotation: {
+                mode: "Ordered",
+                enabled: true,
+                editable: true,
+                entries: [],
+                currentIndex: null,
+                currentMap: "Harbor",
+              },
+            })
+          : url.endsWith("/catalog")
+            ? json({ maps: [], experiences: [], lightings: [] })
+            : json(overview("Primary")),
   );
-  fireEvent.click(await screen.findByRole("button", { name: "Edit rotation" }));
-  expect(screen.getByRole("button", { name: "Edit rotation" })).toHaveAttribute("aria-pressed", "true");
-  expect(new URLSearchParams(router.state.location.search).get("server")).toBe("primary");
+  const rotation = await screen.findByRole("tab", { name: "Rotation" });
+  fireEvent.click(rotation);
+  expect(rotation).toHaveAttribute("aria-selected", "true");
+  expect(router.state.location.search).toBe("?server=primary&view=rotation");
+  fireEvent.click(screen.getByRole("tab", { name: "Voting" }));
+  await screen.findByRole("heading", { name: "Discord map voting is off" });
+  expect(router.state.location.search).toBe("?server=primary&view=voting");
+  expect(fetcher.mock.calls.some(([url]) => url.includes("/servers/event/"))).toBe(false);
   // Older voting links land on the Match & maps voting view of the same server.
   await act(async () => {
     await router.navigate("/votes?server=primary");

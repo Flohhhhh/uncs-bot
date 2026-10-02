@@ -9,10 +9,10 @@ import type { ActionName, ActionResult, Catalog } from "../../api/types";
 import { useResource } from "../../api/use-resource";
 import { useGameAdmin as useAdmin } from "../../app/context";
 import { Modal, OutcomeBadge, ReasonField } from "../../components/ui";
-import { nextRoundSummary } from "../server/next-round";
+import { nextRoundLine, nextRoundSummary } from "../server/next-round";
 import { ActionReceipt } from "./action-receipt";
 import { TeamMoveDialog } from "../players/team-move";
-import { MapPicker } from "./map-picker";
+import { MapPicker, mapSelectionLabel } from "./map-picker";
 import {
   actionDefinitions,
   allowed,
@@ -62,13 +62,9 @@ export function ActionsDialog({
 }
 
 /** One line on what plays after an ended match, only as far as the saved rotation confirms it. */
-function nextRoundLine(settings: { data: SettingsSnapshot | null; loading: boolean }) {
+function reviewNextRound(settings: { data: SettingsSnapshot | null; loading: boolean; error: string }) {
   if (settings.loading && !settings.data) return "Next: checking the rotation…";
-  const valid = Array.isArray(settings.data?.rotation?.entries) ? settings.data : null;
-  const next = nextRoundSummary(valid);
-  if (next.state === "saved") return `Next: ${next.label} (saved rotation).`;
-  if (next.state === "game-next") return `Next: ${next.label} (the game's next rotation entry).`;
-  return "Next map not confirmed.";
+  return `${nextRoundLine(nextRoundSummary(settings.error ? null : settings.data))}.`;
 }
 
 function ActionForm({
@@ -261,7 +257,7 @@ function ActionForm({
           aria-label={affectsEveryone ? "Live match warning" : "Player action warning"}
         >
           {affectsEveryone && <strong>{impact}</strong>}
-          {action === "match-end" && reviewedRound && <p>{nextRoundLine(settings)}</p>}
+          {action === "match-end" && reviewedRound && <p>{reviewNextRound(settings)}</p>}
           <p>{description}</p>
           {phrase && reviewedRound && (
             <p>
@@ -376,6 +372,12 @@ function ActionForm({
           </div>
         )}
         <div className="dialog-actions">
+          {action === "map" && !result && catalog.data && selection.map && (
+            <span className="map-picker-chip dialog-choice">
+              <span className="sr-only">Selected: </span>
+              {mapSelectionLabel(selection, catalog.data)}
+            </span>
+          )}
           <button type="button" className="button secondary" onClick={onClose} disabled={sending}>
             {result ? "Close" : "Cancel"}
           </button>

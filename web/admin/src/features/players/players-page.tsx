@@ -213,7 +213,7 @@ export function PlayersPage() {
             label="Live players"
             rows={found}
             columns={[
-              { label: "Select" },
+              { label: "Select", hideLabel: true },
               { label: "Player", value: (player) => player.name },
               { label: "Team", value: (player) => playerFaction(player, teams)?.label ?? player.faction },
               { label: "Kills", value: (player) => player.kills, firstDirection: "descending" },
@@ -240,9 +240,9 @@ export function PlayersPage() {
                   <td className="player-team">
                     <FactionChip team={current} fallback={player.faction || "Choosing team"} />
                   </td>
-                  <td data-label="Kills">{player.kills ?? "—"}</td>
-                  <td data-label="Deaths">{player.deaths ?? "—"}</td>
-                  <td data-label="Ping">
+                  <td>{player.kills ?? "—"}</td>
+                  <td>{player.deaths ?? "—"}</td>
+                  <td>
                     {player.pingMs ?? "—"} <span className="muted">ms</span>
                   </td>
                 </tr>

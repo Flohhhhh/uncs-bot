@@ -4,7 +4,7 @@ import { MemoryRouter, useLocation } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import { AdminContext } from "../app/context";
 import { context } from "../features/players/test-fixtures";
-import { ActionButton, Empty, Metric, Modal, OutcomeBadge, Sheet, Tabs, type OutcomeState } from "./ui";
+import { ActionButton, Empty, Modal, OutcomeBadge, Sheet, Tabs, type OutcomeState } from "./ui";
 
 describe("OutcomeBadge", () => {
   it.each([
@@ -42,14 +42,6 @@ describe("Empty", () => {
   });
 });
 
-describe("Metric", () => {
-  it("shows no link arrow, because a metric is not a link", () => {
-    render(<Metric label="PLAYERS ONLINE" value={6} note="of 100" />);
-    expect(screen.getByText("PLAYERS ONLINE")).toHaveTextContent(/^PLAYERS ONLINE$/);
-    expect(screen.queryByText("↗")).not.toBeInTheDocument();
-  });
-});
-
 describe("Modal", () => {
   const modal = (eyebrow?: string | null) => (
     <AdminContext.Provider value={context()}>
@@ -64,6 +56,30 @@ describe("Modal", () => {
     rerender(modal(null));
     expect(screen.getByRole("dialog", { name: "Kick player" })).not.toHaveTextContent("STAFF REVIEW");
     expect(screen.getByRole("button", { name: "Close dialog" })).toBeInTheDocument();
+  });
+  it("returns focus to the control that opened it", () => {
+    function Opener() {
+      const [open, setOpen] = useState(false);
+      return (
+        <AdminContext.Provider value={context()}>
+          <button type="button" onClick={() => setOpen(true)}>
+            Remove ban
+          </button>
+          {open && (
+            <Modal title="Remove ban" onClose={() => setOpen(false)}>
+              <p>Body</p>
+            </Modal>
+          )}
+        </AdminContext.Provider>
+      );
+    }
+    render(<Opener />);
+    const opener = screen.getByRole("button", { name: "Remove ban" });
+    opener.focus();
+    fireEvent.click(opener);
+    fireEvent.click(screen.getByRole("button", { name: "Close dialog" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(opener).toHaveFocus();
   });
 });
 

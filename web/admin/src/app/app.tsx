@@ -13,6 +13,7 @@ import { ApplicationsPage } from "../features/applications";
 import { SupportersPage } from "../features/supporters";
 import { SettingsPage, PermissionsPage } from "../features/server/settings-page";
 import { NavigationGuard } from "./navigation-guard";
+import { serverSearch } from "./server-link";
 import { ServerChoices, ServerSwitcher } from "./server-switcher";
 import { AccountDetails, AccountMenu, StatusPill } from "./shell";
 import { ActivityPage } from "../features/server/activity-page";
@@ -329,13 +330,14 @@ function Dashboard({
     (game ? server.role : me.role) === "admin" ? (
       element
     ) : (
-      <Navigate to={{ pathname: "/overview", search: location.search }} replace />
+      <Navigate to={{ pathname: "/overview", search: serverSearch(location.search) }} replace />
     );
   const sectionLink = (id: PageId, onNavigate?: () => void) => {
     const item: Page = pages[id];
     return (
       <NavLink
-        to={{ pathname: `/${id}`, search: location.search }}
+        // Only the server follows staff to another section; page views such as `?view=` stay behind.
+        to={{ pathname: `/${id}`, search: serverSearch(location.search) }}
         className={({ isActive }) => (isActive || id === key ? "active" : "")}
         aria-current={id === key ? "page" : undefined}
         onClick={(event) => {

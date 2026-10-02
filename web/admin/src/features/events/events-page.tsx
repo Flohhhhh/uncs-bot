@@ -59,6 +59,7 @@ function EventReview({
   const [id] = useState(() => crypto.randomUUID());
   const submitted = useRef(false);
   const [result, setResult] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
   const settings = useResource<SettingsSnapshot>(review.kind === "restore" ? "settings" : null);
   const roster = useResource<Overview>(review.kind === "start" ? "overview" : null);
   const teams = liveFactions(roster.data ?? overview);
@@ -85,6 +86,7 @@ function EventReview({
     try {
       setResult((await api<Event>(path, { method: "POST", body: JSON.stringify(body) })).message);
     } catch (error) {
+      setFailed(true);
       setResult(
         `${errorMessage(error)} Refresh event history and inspect this request before another attempt. It will not be sent again.`,
       );
@@ -105,6 +107,7 @@ function EventReview({
       }
       onClose={close}
       busy={busy}
+      eyebrow={result ? null : undefined}
     >
       {review.kind === "start" ? (
         <>
@@ -172,7 +175,7 @@ function EventReview({
       )}
       {result ? (
         <>
-          <p className="notice" role="status">
+          <p className={`notice${failed ? " warning" : ""}`} role="status">
             {result}
           </p>
           <p>

@@ -20,6 +20,16 @@ export type TeamItem = {
 export type TeamMoveResult = { label: string; items: TeamItem[]; stopped: boolean };
 const localLabels = { queued: "Not sent", sending: "Sending…", skipped: "Already on team" } as const;
 
+const isLocal = (state: ItemState): state is keyof typeof localLabels =>
+  state === "queued" || state === "sending" || state === "skipped";
+function ItemOutcome({ state }: { state: ItemState }) {
+  return isLocal(state) ? (
+    <Badge kind={state === "sending" ? "warn" : "neutral"}>{localLabels[state]}</Badge>
+  ) : (
+    <OutcomeBadge state={state} />
+  );
+}
+
 export function TeamResults({ items }: { items: TeamItem[] }) {
   return (
     <Table headers={["Player", "Outcome", "Details"]} label="Team move outcomes" scrollable>
@@ -30,19 +40,27 @@ export function TeamResults({ items }: { items: TeamItem[] }) {
             <small>{item.steamId}</small>
           </td>
           <td>
-            {item.state === "queued" || item.state === "sending" || item.state === "skipped" ? (
-              <Badge kind={item.state === "sending" ? "warn" : "neutral"}>{localLabels[item.state]}</Badge>
-            ) : (
-              <OutcomeBadge state={item.state} />
-            )}
+            <ItemOutcome state={item.state} />
           </td>
           <td className="audit-detail">
             {item.message}
-            {!["queued", "skipped", "sending"].includes(item.state) && <ActionReceipt id={item.id} />}
+            {!isLocal(item.state) && <ActionReceipt id={item.id} />}
           </td>
         </tr>
       ))}
     </Table>
+  );
+}
+
+/** A single player's move reads as one line instead of a one-row table. */
+function TeamResultLine({ item }: { item: TeamItem }) {
+  return (
+    <div className="team-result-line" role="status" aria-label="Team move outcome">
+      <p>
+        <ItemOutcome state={item.state} /> {item.message}
+      </p>
+      {!isLocal(item.state) && <ActionReceipt id={item.id} />}
+    </div>
   );
 }
 
@@ -206,15 +224,20 @@ export function TeamMoveDialog({
             : `Move ${items.length === 1 ? items[0].name : `${items.length} players`}`
       }
       description={
-        done || running
-          ? `${destination?.label ?? faction}. Each player has their own recorded outcome. ${items.filter((item) => item.state === "queued").length} not sent.`
-          : "Review the named players and destination. This changes team assignment without sending a forced kill; players may need to respawn."
+        (done || running) && items.length === 1
+          ? `${items[0].name} to ${destination?.label ?? faction}.`
+          : done || running
+            ? `${destination?.label ?? faction}. Each player has their own recorded outcome. ${items.filter((item) => item.state === "queued").length} not sent.`
+            : "Review the named players and destination. This changes team assignment without sending a forced kill; players may need to respawn."
       }
       onClose={onClose}
       busy={running}
+      eyebrow={done ? null : undefined}
     >
       <form onSubmit={(event) => void submit(event)}>
-        {submitted.current ? (
+        {submitted.current && items.length === 1 ? (
+          <TeamResultLine item={items[0]} />
+        ) : submitted.current ? (
           <>
             <div className="team-progress" role="status">
               {items.filter((item) => item.state !== "queued" && item.state !== "sending").length} / {items.length}{" "}

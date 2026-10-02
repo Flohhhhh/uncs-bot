@@ -121,14 +121,34 @@ it("shows recent non-combat activity and labels scores with live team colors", a
   expect(screen.getByText("Red · Valkyra", { selector: ".overview-scores .faction-chip" })).toBeInTheDocument();
   expect(request.mock.calls.map(([path]) => path)).not.toContain("combat?period=day");
 });
-it("hides admin-only reads from moderators", () => {
+it("hides admin-only reads from moderators and takes their next round from the running rotation", async () => {
+  reads.rotation = {
+    enabled: true,
+    mode: "Ordered",
+    entries: [
+      { index: 0, map: "Harbor", status: "now" },
+      { index: 1, map: "Ozeti", lighting: "DayClear", status: "next" },
+    ],
+  };
   const admin = context();
   admin.me.role = "moderator";
   show(admin);
   const now = screen.getByRole("region", { name: "Now" });
-  expect(within(now).queryByText("Next round")).not.toBeInTheDocument();
+  expect(await within(now).findByText("Ozeti · Day clear")).toBeInTheDocument();
   expect(within(now).queryByText("Vote")).not.toBeInTheDocument();
   const paths = request.mock.calls.map(([path]) => path);
+  expect(paths).toContain("rotation");
   expect(paths).not.toContain("settings");
   expect(paths).not.toContain("map-votes");
+});
+it("does not name a next round when a moderator's rotation read fails", async () => {
+  request.mockImplementation(async (path) =>
+    path === "rotation" ? Promise.reject(new Error("Rotation unavailable")) : (reads[path] as never),
+  );
+  const admin = context();
+  admin.me.role = "moderator";
+  show(admin);
+  const now = screen.getByRole("region", { name: "Now" });
+  expect(await within(now).findByText("Rotation could not be read")).toBeInTheDocument();
+  expect(within(now).getByText("Unavailable")).toBeInTheDocument();
 });

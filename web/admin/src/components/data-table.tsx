@@ -3,7 +3,13 @@ import { Table, type TableHeader } from "./ui";
 
 type SortValue = string | number | boolean | null | undefined;
 type Direction = "ascending" | "descending";
-type Column<T> = { label: string; value?: (row: T) => SortValue; firstDirection?: Direction };
+type Column<T> = {
+  label: string;
+  value?: (row: T) => SortValue;
+  firstDirection?: Direction;
+  /** Keep the heading for screen readers only, such as a selection column. */
+  hideLabel?: boolean;
+};
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 const missing = (value: SortValue) =>
   value === null || value === undefined || (typeof value === "number" && !Number.isFinite(value));
@@ -69,7 +75,9 @@ export function DataTable<T>({
                 : null;
             }),
         }
-      : column.label,
+      : column.hideLabel
+        ? { label: column.label, hidden: true as const }
+        : column.label,
   );
   const sortable = columns.flatMap((column, index) =>
     column.value

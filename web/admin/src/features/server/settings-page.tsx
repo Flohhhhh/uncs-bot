@@ -111,7 +111,13 @@ export function ReviewChanges({
     finished(outcome.state);
   }
   return (
-    <Modal serverScoped title={saveLabels[action.action]} onClose={close} busy={admin.busy}>
+    <Modal
+      serverScoped
+      title={saveLabels[action.action]}
+      onClose={close}
+      busy={admin.busy}
+      eyebrow={result ? null : undefined}
+    >
       {!result && action.action === "rotation-save" && <p>Saves the ongoing rotation. The current match continues.</p>}
       {groups ? (
         groups.map((group, index) => (

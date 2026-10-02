@@ -36,7 +36,7 @@ function chooseEventServer() {
   fireEvent.click(screen.getByRole("option", { name: /^Event server / }));
 }
 
-function mount() {
+function mount(path = "/settings") {
   const fetcher = vi.fn(
     async (url: string) =>
       new Response(
@@ -75,7 +75,7 @@ function mount() {
   );
   vi.stubGlobal("fetch", fetcher);
   const router = createMemoryRouter([{ path: "/*", element: <App /> }], {
-    initialEntries: ["/overview", "/settings"],
+    initialEntries: ["/overview", path],
     initialIndex: 1,
   });
   render(<RouterProvider router={router} />);
@@ -107,6 +107,25 @@ it("keeps a settings draft when leaving is cancelled, then discards only after c
   fireEvent.click(await screen.findByRole("button", { name: "Discard changes" }));
   await waitFor(() => expect(router.state.location.pathname).toBe("/activity"));
   expect(unload()).toBe(false);
+  expect(actionCalls(fetcher)).toHaveLength(0);
+});
+
+it("switches Match & maps views with a rotation draft and still guards leaving the page", async () => {
+  const { router, fetcher } = mount("/match?view=rotation");
+  // Europe is shown as Ozeti.
+  fireEvent.click(await screen.findByRole("button", { name: "Move Ozeti up" }));
+  expect(unload()).toBe(true);
+  fireEvent.click(screen.getByRole("tab", { name: "Next round" }));
+  await waitFor(() => expect(router.state.location.search).toBe("?view=next"));
+  expect(screen.queryByRole("dialog", { name: "Discard unsaved changes?" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("tab", { name: "Rotation" }));
+  const queue = screen.getByRole("list", { name: "Rotation queue" });
+  expect(within(queue).getAllByRole("listitem")[0]).toHaveTextContent("Ozeti");
+  expect(unload()).toBe(true);
+  fireEvent.click(screen.getByRole("link", { name: /Server activity/ }));
+  expect(await screen.findByRole("dialog", { name: "Discard unsaved changes?" })).toBeInTheDocument();
+  expect(router.state.location.pathname).toBe("/match");
+  fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
   expect(actionCalls(fetcher)).toHaveLength(0);
 });
 

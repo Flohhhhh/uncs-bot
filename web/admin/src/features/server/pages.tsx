@@ -5,7 +5,7 @@ import { Fragment, useId, useState, type CSSProperties, type ReactNode } from "r
 import { ServerLink as Link } from "../../app/server-link";
 import { useGameAdmin as useAdmin } from "../../app/context";
 import { useResource } from "../../api/use-resource";
-import type { Audit, Ban, Whitelist } from "../../api/types";
+import type { Audit, Ban, Rotation, Whitelist } from "../../api/types";
 import { ActionButton, Badge, Card, Empty, OutcomeBadge, Search, date } from "../../components/ui";
 import { CopyValue, DataTable, compareValues } from "../../components/data-table";
 import { actionDefinitions, allowed, singleLine } from "../actions/policy";
@@ -14,17 +14,11 @@ import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 import { PlayerButton, PlayerSheet, type SheetPlayer } from "../players/player-actions";
 import { EmptyRoster } from "../players/empty-roster";
 import { PlayerPicker } from "../players/player-picker";
-import { nextRoundSummary } from "./next-round";
+import { nextRoundSummary, runningRotationSnapshot } from "./next-round";
+import { voteSummary, type VoteList } from "../map-votes/vote-status";
 import { ActivityLine, When, useActivityEntries } from "./activity-entries";
 import { CommunityMessages } from "./community-messages";
 
-/** Only the fields the Overview reads from the voting status. */
-type VoteSummary = { enabled?: boolean; votes?: { state?: string; closesAt?: string; automation?: unknown }[] };
-const voteStates: Record<string, string> = {
-  publishing: "Creating ballot",
-  closing: "Counting votes",
-  needs_review: "Needs review",
-};
 const clockTime = (value: string | number) =>
   new Date(value).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 function elapsed(seconds: number) {
@@ -48,8 +42,10 @@ function NowItem({ label, value, note, title }: { label: string; value: ReactNod
 export function OverviewPage() {
   const { overview, me, stale, busy, openAction } = useAdmin();
   const isAdmin = me.role === "admin";
+  // Admins read the saved rotation; other staff read the game's running rotation.
   const settings = useResource<SettingsSnapshot>(isAdmin ? "settings" : null);
-  const voting = useResource<VoteSummary>(isAdmin ? "map-votes" : null);
+  const running = useResource<Rotation>(isAdmin ? null : "rotation");
+  const voting = useResource<VoteList>(isAdmin ? "map-votes" : null);
   const activity = useActivityEntries(false);
   const [managed, setManaged] = useState<SheetPlayer | null>(null);
   if (!overview)
@@ -65,16 +61,18 @@ export function OverviewPage() {
   ]
     .filter(Boolean)
     .join(" · ");
-  // A malformed read counts as unavailable, never as a confirmed next round.
-  const snapshot =
-    settings.data && typeof settings.data === "object" && "rotation" in settings.data && settings.data.rotation
+  // A malformed or failed read counts as unavailable, never as a confirmed next round.
+  const rotationRead = isAdmin ? settings : running;
+  const snapshot = isAdmin
+    ? settings.data && typeof settings.data === "object" && "rotation" in settings.data && settings.data.rotation
       ? settings.data
+      : null
+    : running.data && Array.isArray(running.data.entries)
+      ? runningRotationSnapshot(running.data, status.map)
       : null;
-  const next = nextRoundSummary(snapshot);
+  const next = nextRoundSummary(rotationRead.error ? null : snapshot);
   const votes = voting.data && Array.isArray(voting.data.votes) ? voting.data : null;
-  const vote = votes?.votes?.find((item) =>
-    ["publishing", "open", "closing", "needs_review"].includes(item.state ?? ""),
-  );
+  const vote = voteSummary(votes, voting.error || (voting.data && !votes ? "The voting status was unreadable." : ""));
   const top = [...players].sort((a, b) => compareValues(a.kills, b.kills, "descending")).slice(0, 8);
   const recent = activity.entries.filter((entry) => entry.category !== "combat").slice(0, 6);
   return (
@@ -136,43 +134,29 @@ export function OverviewPage() {
               : "Not reported by the game"
           }
         />
-        {isAdmin && (
-          <NowItem
-            label="Next round"
-            value={snapshot ? next.label : settings.loading && !settings.error ? "Checking…" : "Unavailable"}
-            note={
-              !snapshot
-                ? settings.error && "Settings could not be read"
-                : next.state === "saved"
-                  ? "Saved next round"
-                  : next.state === "game-next"
-                    ? "Next in the game’s rotation"
-                    : undefined
-            }
-            title={next.note || undefined}
-          />
-        )}
-        {isAdmin && (
-          <NowItem
-            label="Vote"
-            value={
-              !votes
-                ? voting.loading && !voting.error
+        <NowItem
+          label="Next round"
+          value={
+            rotationRead.error
+              ? "Unavailable"
+              : snapshot
+                ? next.label
+                : rotationRead.loading
                   ? "Checking…"
                   : "Unavailable"
-                : !votes.enabled
-                  ? "Off"
-                  : !vote
-                    ? "None"
-                    : vote.state === "open"
-                      ? vote.automation || !vote.closesAt
-                        ? "Open"
-                        : `Open · ends ${clockTime(vote.closesAt)}`
-                      : voteStates[vote.state ?? ""]
-            }
-            note={vote?.state === "open" && vote.automation ? "Closes automatically" : undefined}
-          />
-        )}
+          }
+          note={
+            rotationRead.error
+              ? isAdmin
+                ? "Settings could not be read"
+                : "Rotation could not be read"
+              : snapshot
+                ? next.caption
+                : undefined
+          }
+          title={next.note || undefined}
+        />
+        {isAdmin && <NowItem label="Vote" value={vote.label} />}
         <Link className="text-button now-link" to="/match">
           Match &amp; maps →
         </Link>
@@ -557,9 +541,6 @@ function sentMessage(entry: Audit) {
   return typeof value === "string" ? value.trim() : "";
 }
 /** Dashboard action receipts. Also shown as the Activity hub's "Action history" view. */
-export function AuditPage() {
-  return <DashboardHistory />;
-}
 export function DashboardHistory({ initialQuery = "" }: { initialQuery?: string } = {}) {
   const { overview } = useAdmin();
   const [query, setQuery] = useState(initialQuery);

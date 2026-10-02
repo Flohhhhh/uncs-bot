@@ -218,6 +218,7 @@ function SupporterReview({
       className="supporter-dialog"
       busy={sending}
       onClose={onClose}
+      eyebrow={result ? null : undefined}
       title={
         result
           ? result.saved
@@ -391,7 +392,7 @@ function SupporterReview({
           </p>
         )}
         {result && (
-          <p className={`notice ${result.saved ? "" : "warning"}`} role="status">
+          <p className={`notice ${result.saved ? "success" : "warning"}`} role="status">
             {result.message}
           </p>
         )}
