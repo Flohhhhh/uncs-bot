@@ -6,14 +6,16 @@ import {
   SupportersAdminController,
   SupportersExceptionFilter,
 } from "./supporters.controller";
+import { PatreonClient } from "./patreon.client";
+import { PatreonSyncService } from "./patreon-sync.service";
 import { SupportersService } from "./supporters.service";
 import { SupportersStore } from "./supporters.store";
 
 @Module({
   imports: [AdminModule],
-  providers: [SupportersService, SupportersStore, SupportersExceptionFilter],
+  providers: [SupportersService, SupportersStore, SupportersExceptionFilter, PatreonClient, PatreonSyncService],
   controllers: [PatreonWebhookController, SupportersAdminController],
-  exports: [SupportersService, SupportersStore],
+  exports: [SupportersService, SupportersStore, PatreonSyncService],
 })
 export class SupportersModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {
