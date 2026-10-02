@@ -17,7 +17,7 @@ import { AdminStore, COMMUNITY_MESSAGES_ACTOR_ID } from "../src/admin/admin.stor
 import type { ActionResult, AdminAction, Staff } from "../src/admin/admin.types";
 import { MapVotesStore } from "../src/map-votes/map-votes.store";
 import { ServerEventsStore } from "../src/server-events/server-events.store";
-import { eventFixture, eventStaff } from "../src/server-events/event-fixtures";
+import { eventFixture, eventStaff, voteEventFixture } from "../src/server-events/event-fixtures";
 import { operation } from "../src/server-events/event-planner";
 import { TelemetryStore } from "../src/telemetry/telemetry.store";
 import { parseFeed } from "../src/telemetry/telemetry.types";
@@ -508,6 +508,63 @@ describe("launch storage on isolated PostgreSQL", () => {
     );
     const settled = (await events.get(event.id))!;
     expect((await events.completeUnchanged(event.id, settled.version))?.state).toBe("complete");
+  });
+  it("halts a voted event atomically, settling only its own stale operation as unknown", async () => {
+    const { operation: _operation, ...vote } = voteEventFixture();
+    const event = (await events.create(vote)).event;
+    expect(event.options).toEqual(vote.options);
+    expect(event.progress).toEqual(vote.progress);
+    const op = operation(event, "move", { action: "team" });
+    const claimed = (await events.claim(event.id, event.version, op, eventStaff, event.progress))!;
+    expect(await events.halt(event.id, "Interrupted.", randomUUID())).toBeNull();
+    const halted = (await events.halt(event.id, "Interrupted.", op.id))!;
+    expect(halted).toMatchObject({
+      state: "stopping",
+      operation: null,
+      lastActionId: op.id,
+      stop: { actorId: "system:event-halt", reason: "Interrupted." },
+    });
+    expect(halted.version).toBe(claimed.version + 1);
+    expect((await events.operations(event.id))[0]).toMatchObject({ id: op.id, state: "unknown" });
+    // A late settlement cannot reopen the event, and only the notice and the restore may start now.
+    await events.settle(
+      event.id,
+      op.id,
+      { state: "applied", message: "Late" },
+      { state: "active", progress: event.progress, message: "Late" },
+    );
+    expect(await events.get(event.id)).toMatchObject({ state: "stopping" });
+    const move = operation(event, "move", { action: "team" });
+    expect(await events.claim(event.id, halted.version, move, eventStaff, event.progress)).toBeNull();
+    const ended = operation(event, "ended", { action: "broadcast", message: "50v50 is over." });
+    expect(await events.claim(event.id, halted.version, ended, eventStaff, event.progress)).toMatchObject({
+      state: "stopping",
+    });
+    await events.settle(
+      event.id,
+      ended.id,
+      { state: "applied", message: "Sent" },
+      { state: "stopping", progress: event.progress, message: "Sent" },
+    );
+    const stopped = (await events.get(event.id))!;
+    expect(await events.halt(event.id, "Again.")).toMatchObject({ stop: halted.stop });
+    // The lock already reads its original value: complete without a write, only from stopping.
+    expect((await events.completeRestored(event.id, stopped.version, "Already restored."))?.state).toBe("stopping");
+    const current = (await events.get(event.id))!;
+    expect(await events.completeRestored(event.id, current.version, "Already restored.")).toMatchObject({
+      state: "complete",
+      message: "Already restored.",
+    });
+    expect(await events.halt(event.id, "After completion.")).toBeNull();
+  });
+  it("never halts an event that waits for staff review", async () => {
+    const { operation: _operation, ...vote } = voteEventFixture();
+    const event = (await events.create(vote)).event;
+    const op = operation(event, "move", { action: "team" });
+    const claimed = (await events.claim(event.id, event.version, op, eventStaff, event.progress))!;
+    await events.recover(claimed, new Date(claimed.updatedAt.getTime() + 121_000));
+    expect(await events.halt(event.id, "Interrupted.", op.id)).toBeNull();
+    expect(await events.get(event.id)).toMatchObject({ state: "needs_review", stop: null });
   });
   it("fails closed when the inflight-operation pointer cannot be resolved", async () => {
     const event = (await events.create(eventInput())).event;
