@@ -17,7 +17,7 @@ export function ballotMessage(vote: MapVoteRecord) {
   return {
     content: `**Next map · ${plainLabel(vote.serverName)}**\n${choices.join("\n")}\n\n${
       open
-        ? `Closes <t:${Math.floor(vote.closesAt.getTime() / 1000)}:R>. One vote per Discord member; choosing again changes your vote. Ties use the first listed option. No votes keeps the rotation.\nThe winner queues only if the round and settings still match.`
+        ? `Closes <t:${Math.floor(vote.closesAt.getTime() / 1000)}:R>. One vote per Discord member; choosing again changes your vote. A tie or no votes keeps the rotation.\nThe winner queues only if the rotation position and settings still match. Staff can override the choice.`
         : `${winner}\n${plainLabel(vote.message, 350)}`
     }`,
     components: [

@@ -38,7 +38,15 @@ export const cancelMapVoteSchema = z
   .strict();
 export type StartMapVote = z.infer<typeof startMapVoteSchema>;
 export type MapVoteChoice = z.infer<typeof mapSelectionSchema>;
-export type MapVoteState = "publishing" | "open" | "closing" | "queued" | "no_votes" | "cancelled" | "needs_review";
+export type MapVoteState =
+  | "publishing"
+  | "open"
+  | "closing"
+  | "queued"
+  | "no_votes"
+  | "tied"
+  | "cancelled"
+  | "needs_review";
 export type MapVoteCancellation = {
   id: string;
   actorId: string;
@@ -75,13 +83,13 @@ export type MapVoteRecord = {
   cancellation: MapVoteCancellation | null;
 };
 
-/** Ties follow the displayed option order; zero votes never changes the rotation. */
+/** A tie or no votes keeps the saved rotation. */
 export function ballotWinner(counts: number[]) {
   const maximum = Math.max(0, ...counts);
-  return maximum > 0 ? counts.indexOf(maximum) : null;
+  return maximum > 0 && counts.filter((count) => count === maximum).length === 1 ? counts.indexOf(maximum) : null;
 }
 export function hasVoteCounts(vote: MapVoteRecord) {
-  return vote.winner !== null || ["closing", "queued", "no_votes"].includes(vote.state);
+  return vote.winner !== null || ["closing", "queued", "no_votes", "tied"].includes(vote.state);
 }
 
 export function mapVoteView(vote: MapVoteRecord) {

@@ -4,18 +4,21 @@ import type { MapSelection, SettingsSnapshot } from "../../../../../src/common/s
 import { VoteResults, voteStateLabels as stateLabels, type Vote, type VoteList } from "./vote-status";
 import { useGameApi } from "../../api/server-client";
 import { useResource } from "../../api/use-resource";
-import type { Catalog, Overview } from "../../api/types";
+import type { Catalog } from "../../api/types";
 import { useGameAdmin as useAdmin } from "../../app/context";
 import { ServerLink as Link } from "../../app/server-link";
 import { Badge, Card, Empty, Modal, date } from "../../components/ui";
 import { CopyValue, DataTable } from "../../components/data-table";
-import { hasRoundTiming, RoundTimingNotice } from "../../components/round-timing";
 import { MapPicker } from "../actions/map-picker";
 import { errorMessage } from "../actions/policy";
 
 type Draft = { serverId: string; revision: string; choices: MapSelection[]; minutes: number };
-const timingMessage =
-  "Round timing is unavailable. Voting needs it to check that the winner still belongs to this round.";
+function positionReady(settings?: SettingsSnapshot | null) {
+  const rotation = settings?.rotation;
+  return (
+    !!rotation && rotation.editable && rotation.enabled && rotation.mode === "Ordered" && rotation.currentIndex !== null
+  );
+}
 
 function VoteReview({
   draft,
@@ -35,12 +38,17 @@ function VoteReview({
   const [id] = useState(() => crypto.randomUUID());
   const submitted = useRef(false);
   const [result, setResult] = useState<string | null>(null);
-  const overview = useResource<Overview>(draft ? "overview" : null);
+  const settings = useResource<SettingsSnapshot>(draft ? "settings" : null);
   const blocked = !!draft && statusUnavailable;
-  const timingReady = !draft || (!overview.loading && !overview.error && hasRoundTiming(overview.data));
+  const rotationReady =
+    !draft ||
+    (!settings.loading &&
+      !settings.error &&
+      positionReady(settings.data) &&
+      settings.data?.revision === draft.revision);
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (busy || submitted.current || blocked || !timingReady) return;
+    if (busy || submitted.current || blocked || !rotationReady) return;
     const reason = vote ? "Staff closed map vote." : "Staff started map vote.";
     submitted.current = true;
     setBusy(true);
@@ -69,12 +77,12 @@ function VoteReview({
             ))}
           </ol>
           <p>
-            Voting lasts {draft.minutes} minutes. Each Discord member gets one vote and can change it. Ties use the
-            first listed option; no votes keeps the rotation.
+            Voting lasts {draft.minutes} minutes. Each Discord member gets one vote and can change it. A tie or no votes
+            keeps the rotation.
           </p>
           <p className="muted">
-            The winner queues for the next round only if the round, settings and your administrator access still match.
-            The current match continues.
+            The winner queues for the next round only if the rotation position, settings and your administrator access
+            still match. The current match continues.
           </p>
         </>
       )}
@@ -99,12 +107,29 @@ function VoteReview({
       ) : (
         <form onSubmit={(event) => void submit(event)}>
           {blocked && <p role="alert">Refresh ballot history before publishing.</p>}
-          {draft && <RoundTimingNotice resource={overview} busy={busy} message={timingMessage} />}
+          {draft && !rotationReady && (
+            <div className="notice warning" role="alert">
+              <p>
+                {settings.error ||
+                  (settings.loading
+                    ? "Checking the rotation…"
+                    : "The rotation changed or its position is unavailable. Return to the ballot and refresh.")}
+              </p>
+              <button
+                type="button"
+                className="button secondary"
+                disabled={busy || settings.loading}
+                onClick={settings.refresh}
+              >
+                Check rotation
+              </button>
+            </div>
+          )}
           <div className="dialog-actions">
             <button type="button" className="button secondary" disabled={busy} onClick={close}>
               Back
             </button>
-            <button className="button primary" disabled={busy || blocked || !timingReady}>
+            <button className="button primary" disabled={busy || blocked || !rotationReady}>
               {busy ? "Saving…" : vote ? "Confirm close" : "Publish ballot"}
             </button>
           </div>
@@ -132,7 +157,8 @@ export function MapVotesPage() {
             <summary>How to enable voting</summary>
             <p>
               A server owner needs to choose a Discord voting channel and enable map voting in Gramps. This setup is not
-              available in the dashboard yet. Automatic voting also needs reliable round timing from the game.
+              available in the dashboard yet. Automatic voting also needs an explicit server policy and a confirmed
+              rotation position.
             </p>
           </details>
         </div>
@@ -163,7 +189,6 @@ function EnabledMapVotes({
   const active = data.votes.some((vote) => ["publishing", "open", "closing", "needs_review"].includes(vote.state));
   const settings = useResource<SettingsSnapshot>(active ? null : "settings");
   const catalog = useResource<Catalog>(active ? null : "catalog");
-  const overview = useResource<Overview>(active ? null : "overview");
   const [selection, setSelection] = useState<MapSelection>({ map: "", experiences: [] });
   const [selectionReady, setSelectionReady] = useState(false);
   const [choices, setChoices] = useState<MapSelection[]>([]);
@@ -180,10 +205,9 @@ function EnabledMapVotes({
   const changed = revision !== null && revision !== settings.data?.revision;
   const unavailable =
     loading || !!error || admin.busy || !!settings.error || settings.loading || !!catalog.error || catalog.loading;
-  const rotationReady =
-    rotation?.editable && rotation.enabled && rotation.mode === "Ordered" && rotation.currentIndex !== null;
+  const rotationReady = positionReady(settings.data);
   const canEdit = !active && !unavailable && !changed && rotationReady;
-  const canStart = canEdit && !overview.loading && !overview.error && hasRoundTiming(overview.data);
+  const canStart = canEdit;
   function clear() {
     setChoices([]);
     setSelection({ map: "", experiences: [] });
@@ -207,117 +231,120 @@ function EnabledMapVotes({
         </Link>
       </p>
       <VoteResults data={data} error={error} />
-      <Card title="Ballot controls" subtitle="Publish a ballot in the community’s configured Discord channel.">
-        <div className="card-body">
-          {!active && <RoundTimingNotice resource={overview} busy={admin.busy} message={timingMessage} />}
-          {active && (
-            <p className="notice warning">
-              An active ballot or unresolved result needs attention below before another vote can start.
-            </p>
-          )}
-          {!active &&
-            (changed || settings.error || catalog.error || (!settings.loading && rotation && !rotationReady)) && (
+      <details open={!data.automatic?.enabled}>
+        <summary>{data.automatic?.enabled ? "Staff override" : "Manual ballot"}</summary>
+        <Card title="Ballot controls" subtitle="Publish a ballot in the community’s configured Discord channel.">
+          <div className="card-body">
+            {active && (
               <p className="notice warning">
-                {settings.error ||
-                  catalog.error ||
-                  (changed
-                    ? "Server settings changed. Discard this draft and refresh."
-                    : "Voting needs an editable, enabled, ordered rotation and a known current map.")}
+                An active ballot or unresolved result needs attention below before another vote can start.
               </p>
             )}
-          {!active && catalog.data && (
-            <>
-              <MapPicker
-                value={selection}
-                change={setSelection}
-                onReadyChange={setSelectionReady}
-                disabled={!canEdit}
-                catalog={{
-                  ...catalog.data,
-                  maps: catalog.data.maps.filter(
-                    (map) => !sameMap(map.id, rotation?.currentMap) && !choices.some((choice) => choice.map === map.id),
-                  ),
-                }}
-              />
-              <div className="dialog-actions">
-                <button
-                  type="button"
-                  className="button secondary"
-                  disabled={
-                    !canEdit ||
-                    !selectionReady ||
-                    choices.length >= 5 ||
-                    sameMap(selection.map, rotation?.currentMap) ||
-                    choices.some((choice) => choice.map === selection.map)
-                  }
-                  onClick={() => {
-                    setRevision(revision ?? settings.data!.revision);
-                    setChoices([...choices, selection]);
-                    setSelection({ map: "", experiences: [] });
+            {!active &&
+              (changed || settings.error || catalog.error || (!settings.loading && rotation && !rotationReady)) && (
+                <p className="notice warning">
+                  {settings.error ||
+                    catalog.error ||
+                    (changed
+                      ? "Server settings changed. Discard this draft and refresh."
+                      : "Voting needs an editable, enabled, ordered rotation and a known current map.")}
+                </p>
+              )}
+            {!active && catalog.data && (
+              <>
+                <MapPicker
+                  value={selection}
+                  change={setSelection}
+                  onReadyChange={setSelectionReady}
+                  disabled={!canEdit}
+                  catalog={{
+                    ...catalog.data,
+                    maps: catalog.data.maps.filter(
+                      (map) =>
+                        !sameMap(map.id, rotation?.currentMap) && !choices.some((choice) => choice.map === map.id),
+                    ),
                   }}
-                >
-                  Add map option
-                </button>
-              </div>
-              <ol className="rotation-editor" aria-label="Ballot choices">
-                {choices.map((choice) => (
-                  <li key={choice.map}>
-                    <span>{selectionLabel(choice)}</span>
-                    <button
-                      className="button secondary small"
-                      disabled={admin.busy}
-                      aria-label={`Remove ${mapLabel(choice.map)}`}
-                      onClick={() => setChoices(choices.filter((entry) => entry.map !== choice.map))}
-                    >
-                      Remove
-                    </button>
-                  </li>
-                ))}
-              </ol>
-              <div className="settings-grid">
-                <label>
-                  Voting duration (minutes)
-                  <input
-                    type="number"
-                    min={2}
-                    max={30}
-                    step={1}
-                    value={minutes}
-                    disabled={!canEdit}
-                    onChange={(event) => setMinutes(Number(event.target.value))}
-                  />
-                </label>
-              </div>
-              <p className="muted">Choose 2–5 maps. The current map is excluded.</p>
-              <div className="dialog-actions">
-                {dirty && (
-                  <button className="button secondary" disabled={admin.busy} onClick={clear}>
-                    Discard draft
+                />
+                <div className="dialog-actions">
+                  <button
+                    type="button"
+                    className="button secondary"
+                    disabled={
+                      !canEdit ||
+                      !selectionReady ||
+                      choices.length >= 5 ||
+                      sameMap(selection.map, rotation?.currentMap) ||
+                      choices.some((choice) => choice.map === selection.map)
+                    }
+                    onClick={() => {
+                      setRevision(revision ?? settings.data!.revision);
+                      setChoices([...choices, selection]);
+                      setSelection({ map: "", experiences: [] });
+                    }}
+                  >
+                    Add map option
                   </button>
-                )}
-                <button
-                  className="button primary"
-                  disabled={
-                    !canStart || choices.length < 2 || !Number.isInteger(minutes) || minutes < 2 || minutes > 30
-                  }
-                  onClick={() =>
-                    setReview({
-                      draft: {
-                        serverId: data.serverId,
-                        revision: revision!,
-                        choices: structuredClone(choices),
-                        minutes,
-                      },
-                    })
-                  }
-                >
-                  Review ballot
-                </button>
-              </div>
-            </>
-          )}
-        </div>
-      </Card>
+                </div>
+                <ol className="rotation-editor" aria-label="Ballot choices">
+                  {choices.map((choice) => (
+                    <li key={choice.map}>
+                      <span>{selectionLabel(choice)}</span>
+                      <button
+                        className="button secondary small"
+                        disabled={admin.busy}
+                        aria-label={`Remove ${mapLabel(choice.map)}`}
+                        onClick={() => setChoices(choices.filter((entry) => entry.map !== choice.map))}
+                      >
+                        Remove
+                      </button>
+                    </li>
+                  ))}
+                </ol>
+                <div className="settings-grid">
+                  <label>
+                    Voting duration (minutes)
+                    <input
+                      type="number"
+                      min={2}
+                      max={30}
+                      step={1}
+                      value={minutes}
+                      disabled={!canEdit}
+                      onChange={(event) => setMinutes(Number(event.target.value))}
+                    />
+                  </label>
+                </div>
+                <p className="muted">Choose 2–5 maps. The current map is excluded.</p>
+                <div className="dialog-actions">
+                  {dirty && (
+                    <button className="button secondary" disabled={admin.busy} onClick={clear}>
+                      Discard draft
+                    </button>
+                  )}
+                  <button
+                    className="button primary"
+                    disabled={
+                      !canStart || choices.length < 2 || !Number.isInteger(minutes) || minutes < 2 || minutes > 30
+                    }
+                    onClick={() =>
+                      setReview({
+                        draft: {
+                          serverId: data.serverId,
+                          revision: revision!,
+                          choices: structuredClone(choices),
+                          minutes,
+                        },
+                      })
+                    }
+                  >
+                    Review ballot
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </Card>
+      </details>
       <Card title="Ballot history" subtitle="Latest 20 ballots. Open a row for choices and its receipt.">
         {!data.votes.length ? (
           <Empty title="No ballots yet" />
