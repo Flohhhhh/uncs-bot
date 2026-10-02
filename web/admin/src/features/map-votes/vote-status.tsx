@@ -44,11 +44,15 @@ export function VoteResults({ data, error = "" }: { data: VoteList; error?: stri
         )}
         {error && (
           <p role="alert" className="notice warning">
-            Vote totals could not refresh. Displayed totals are from the last successful check.
+            Voting status and totals could not refresh. Showing the last successful check.
           </p>
         )}
         {!data.enabled ? (
-          <p>Community voting is not enabled. The saved rotation chooses the next map.</p>
+          <p>
+            {error
+              ? "Voting was off at the last successful check."
+              : "Community voting is not enabled. The saved rotation chooses the next map."}
+          </p>
         ) : !vote ? (
           <p>No ballot has opened yet.</p>
         ) : (
