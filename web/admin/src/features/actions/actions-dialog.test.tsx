@@ -17,7 +17,7 @@ describe("server action review", () => {
     ["match-restart", "Restart current match", "RESTART MATCH"],
     ["match-end", "End current match", "END MATCH"],
   ] as const)(
-    "requires explicit confirmation before %s can affect the running match",
+    "reviews %s without typing and sends only after the confirmation button is clicked",
     async (action, label, phrase) => {
       request.mockResolvedValue({ state: "accepted", message: "Game acknowledged the request." });
       const close = vi.fn();
@@ -31,13 +31,8 @@ describe("server action review", () => {
       );
       const send = screen.getByRole("button", { name: label });
       expect(send).toHaveClass("danger");
-      expect(send).toBeDisabled();
-      fireEvent.submit(send.closest("form")!);
-      fireEvent.change(screen.getByPlaceholderText(phrase), { target: { value: "CONFIRM" } });
-      fireEvent.submit(send.closest("form")!);
-      expect(send).toBeDisabled();
+      expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
       expect(request).not.toHaveBeenCalled();
-      fireEvent.change(screen.getByPlaceholderText(phrase), { target: { value: phrase } });
       expect(send).toBeEnabled();
       fireEvent.click(send);
       fireEvent.submit(send.closest("form")!);
@@ -54,12 +49,11 @@ describe("server action review", () => {
         <ActionsDialog action="match-restart" onClose={vi.fn()} />
       </AdminContext.Provider>,
     );
-    fireEvent.change(screen.getByPlaceholderText("RESTART MATCH"), { target: { value: "RESTART MATCH" } });
     fireEvent.click(screen.getByRole("button", { name: "Restart current match" }));
     await screen.findByText("The game refused the restart.");
     fireEvent.click(screen.getByRole("button", { name: "Back to edits" }));
-    expect(screen.getByPlaceholderText("RESTART MATCH")).toHaveValue("");
-    expect(screen.getByRole("button", { name: "Restart current match" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Restart current match" })).toBeEnabled();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
     expect(request).toHaveBeenCalledTimes(1);
   });
   it("retains the reviewed round across refreshes and captures a new round only after a rejected attempt", async () => {
@@ -72,7 +66,6 @@ describe("server action review", () => {
       </AdminContext.Provider>
     );
     const { rerender } = render(tree(first));
-    fireEvent.change(screen.getByPlaceholderText("RESTART MATCH"), { target: { value: "RESTART MATCH" } });
     rerender(tree(later));
     expect(screen.getByRole("note", { name: "Live match warning" })).toHaveTextContent("Reviewed match: Harbor");
     fireEvent.click(screen.getByRole("button", { name: "Restart current match" }));
@@ -83,8 +76,7 @@ describe("server action review", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Back to edits" }));
     expect(screen.getByRole("note", { name: "Live match warning" })).toHaveTextContent("Reviewed match: Ozeti");
-    expect(screen.getByRole("button", { name: "Restart current match" })).toBeDisabled();
-    fireEvent.change(screen.getByPlaceholderText("RESTART MATCH"), { target: { value: "RESTART MATCH" } });
+    expect(request).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole("button", { name: "Restart current match" }));
     await screen.findByText("The round changed. Nothing was sent.");
     expect(JSON.parse(String(request.mock.calls[1][1]?.body)).expectedRound).toEqual({
@@ -93,25 +85,50 @@ describe("server action review", () => {
     });
   });
   it.each(["match-end", "match-restart", "map"] as const)(
-    "blocks %s when the reviewed match clock is unavailable",
+    "blocks %s when the reviewed map is unavailable",
     (action) => {
       const current = overview();
-      current.status.matchSeconds = undefined;
+      current.status.map = "";
       request.mockImplementation(() => new Promise(() => {}));
       render(
         <AdminContext.Provider value={context({ overview: current })}>
           <ActionsDialog action={action} onClose={vi.fn()} />
         </AdminContext.Provider>,
       );
-      const phrase = action === "match-end" ? "END MATCH" : action === "match-restart" ? "RESTART MATCH" : "CHANGE MAP";
-      const input = screen.getByPlaceholderText(phrase);
-      fireEvent.change(input, { target: { value: phrase } });
-      expect(screen.getByRole("note", { name: "Live match warning" })).toHaveTextContent("match clock is unavailable");
-      expect(input.closest("form")!.querySelector("button[type=submit]")).toBeDisabled();
-      fireEvent.submit(input.closest("form")!);
+      const label =
+        action === "match-end"
+          ? "End current match"
+          : action === "match-restart"
+            ? "Restart current match"
+            : "Change map";
+      const submit = screen.getByRole("button", { name: label });
+      expect(screen.getByRole("note", { name: "Live match warning" })).toHaveTextContent("current map is unavailable");
+      expect(submit).toBeDisabled();
+      fireEvent.submit(submit.closest("form")!);
       expect(request.mock.calls.some(([path]) => path === "actions")).toBe(false);
     },
   );
+  it("allows an explicitly reviewed map when this game build supplies no round clock", async () => {
+    const current = overview();
+    current.status.matchSeconds = undefined;
+    request.mockResolvedValue({ state: "accepted", message: "Restart requested" });
+    render(
+      <AdminContext.Provider value={context({ overview: current })}>
+        <ActionsDialog action="match-restart" onClose={vi.fn()} />
+      </AdminContext.Provider>,
+    );
+    expect(screen.getByRole("note", { name: "Live match warning" })).toHaveTextContent(
+      "not a new round on the same map",
+    );
+    expect(request).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Restart current match" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Restart current match" }));
+    await screen.findByText("Restart requested");
+    expect(JSON.parse(String(request.mock.calls[0][1]?.body)).expectedRound).toEqual({
+      map: "Harbor",
+      startedAt: null,
+    });
+  });
   it.each(["receipt", "http"])(
     "preserves entries after a definite %s rejection and records a reviewed retry separately",
     async (kind) => {
@@ -286,9 +303,8 @@ describe("server action review", () => {
     await screen.findByRole("option", { name: "Harbor" });
     fireEvent.change(screen.getByRole("combobox", { name: "Map" }), { target: { value: "Harbor" } });
     await screen.findByRole("checkbox", { name: "Conquest" });
-    expect(screen.getByRole("button", { name: "Change map" })).toBeDisabled();
     expect(screen.queryByLabelText("Reason")).not.toBeInTheDocument();
-    fireEvent.change(screen.getByPlaceholderText("CHANGE MAP"), { target: { value: "CHANGE MAP" } });
+    expect(request.mock.calls.some(([path]) => path === "actions")).toBe(false);
     await waitFor(() => expect(screen.getByRole("button", { name: "Change map" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Change map" }));
     await waitFor(() =>
@@ -330,7 +346,6 @@ describe("server action review", () => {
       </AdminContext.Provider>,
     );
     fireEvent.change(await screen.findByRole("combobox", { name: "Map" }), { target: { value: "Harbor" } });
-    fireEvent.change(screen.getByPlaceholderText("CHANGE MAP"), { target: { value: "CHANGE MAP" } });
     const send = screen.getByRole("button", { name: "Change map" });
     expect(send).toBeDisabled();
     fireEvent.submit(send.closest("form")!);
@@ -354,7 +369,6 @@ describe("server action review", () => {
     fireEvent.change(screen.getByRole("combobox", { name: "Map" }), { target: { value: "Harbor" } });
     await waitFor(() => expect(request.mock.calls.some(([path]) => path === "catalog/maps/Harbor")).toBe(true));
     expect(screen.queryByLabelText("Reason")).not.toBeInTheDocument();
-    fireEvent.change(screen.getByPlaceholderText("CHANGE MAP"), { target: { value: "CHANGE MAP" } });
     await waitFor(() => expect(screen.getByRole("button", { name: "Change map" })).toBeEnabled());
     let reject!: (error: Error) => void;
     request.mockImplementation((path) =>

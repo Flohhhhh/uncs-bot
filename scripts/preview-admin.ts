@@ -47,7 +47,7 @@ import type {
 } from "../src/supporters/supporters.types";
 
 const previewPort = Number(process.env.PREVIEW_PORT || 4317);
-function createPreviewGame(name: string) {
+function createPreviewGame(name: string, reportsClock: boolean) {
   let previewRoundStart = Date.now() - 600_000;
 
   const players = [
@@ -185,7 +185,7 @@ function createPreviewGame(name: string) {
         return {
           serverName: scalarValue(text, SESSION, "ServerName") || "Local preview",
           map: currentMap,
-          matchSeconds: (Date.now() - previewRoundStart) / 1000,
+          ...(reportsClock ? { matchSeconds: (Date.now() - previewRoundStart) / 1000 } : {}),
           lighting,
           experiences: ["KOTH"],
           scoreTick: { current: 24, min: 18, max: 30 },
@@ -305,8 +305,9 @@ function createPreviewGame(name: string) {
     players,
   };
 }
-const primaryPreview = createPreviewGame("The UNCs | Primary preview");
-const eventPreview = createPreviewGame("The UNCs | Event preview");
+// Exercise both supported status shapes; the live primary currently omits the optional clock.
+const primaryPreview = createPreviewGame("The UNCs | Primary preview", false);
+const eventPreview = createPreviewGame("The UNCs | Event preview", true);
 const players = primaryPreview.players;
 const previewDefinitions = [
   {

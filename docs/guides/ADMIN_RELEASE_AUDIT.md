@@ -1,5 +1,21 @@
 # Dashboard release audit
 
+## October 1 21:30 EDT — use click confirmation, not phrase entry
+
+Dennis explicitly requested an extra confirmation step without retyping a phrase. The restart/end/map and event start/restoration reviews now remove those text fields and their validation state. Opening a review still sends nothing; only the separately named action button submits. Consequence warnings, explicit server/map targeting, duplicate-send prevention, stale-data checks and backend request validation remain. Returning from a definite rejection opens another review; it does not resend. This supersedes earlier instructions in this chronological audit to require a typed phrase.
+
+All **241 dashboard tests**, the frontend production build/typecheck, touched-file lint, global formatting and whitespace checks pass. The isolated browser shows a restart review with no text input, clear impact and target, Cancel and Restart current match. Cancel closes without a command. Final deployment is pending the combined release. A fresh read of live Identity still shows the older banner URL `https://files.catbox.moe/mcttle.png`; the prepared QR banner has not been applied. No live game action or Discord message was sent.
+
+## October 1 21:24 EDT — missing live clock compatibility correction
+
+Read-only acceptance of [release #47](https://github.com/Flohhhhh/uncs-bot/pull/47), main `3898c9023f458a48c538ba8f5afeb21bdefdd75b`, found a real incompatibility: **the live overview does not supply a usable match clock**. Its restart review displayed the new clock-unavailable warning and disabled submission. Cancel closed it without a game command. Railway `28c3dec1-e1ec-44d4-84ad-b2efbecb429a` was Active, health returned 200, and `index-DASW4hvO.js` matched the tested build. Passing tests with a clock were insufficient production evidence; this section supersedes the preceding claim that missing clocks should always disable manual match controls.
+
+The correction retains a required reviewed map and checks a fresh map immediately before every end/restart/map command. When a usable clock was present in the review, the existing round comparison remains mandatory and a subsequently missing clock still refuses the write. When the build supplies no clock, the review explicitly states that it can detect a changed map but cannot detect a new round on the same map. Exact typed confirmation, explicit server targeting and fresh map verification still apply. No round identity is invented and the automatic team/event clock requirements are unchanged. A missing/unreadable map remains a refusal. The inherent read/write race and brief same-map reset limitation remain.
+
+Local checks cover all **640 backend cases** and **241 dashboard tests**, full build/typechecks, lint, formatting and whitespace. Three static HTTP cases initially failed because the local build and asset-dependent tests were started concurrently; they pass after the completed build. Run those checks sequentially. Release acceptance of the correction is pending.
+
+The optional Discord status card also now reuses the shared Bakurani/Ozeti/Zestafona labels in [#48](https://github.com/Flohhhhh/uncs-bot/pull/48); its 71 existing community tests and direct local rendered output pass. This does not enable or send a Discord message. The official console's description behavior was rechecked: it still writes `wdrcon.descriptions` in browser local storage and reports that scope. No supported game-published description setting was verified.
+
 ## October 1 21:12 EDT — stale match confirmations guarded
 
 Isolated tests reproduced manual end/restart/map reviews remaining actionable after the reviewed round changed. These three actions now carry the original reviewed map and estimated start time. Immediately before the native mutation, after any map catalog validation, the backend reads fresh status without using the overview cache. Changed rounds, absent clocks and unreadable status stop the operation before a game write. Older browser requests without round evidence receive refresh guidance. The frontend preserves the reviewed round across refreshes, disables match changes when it cannot identify a round, and requires a fresh phrase after a definite rejection. Routine player actions remain unchanged.

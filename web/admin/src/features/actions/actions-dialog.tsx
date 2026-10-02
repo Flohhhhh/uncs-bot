@@ -49,15 +49,19 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
   const api = useGameApi();
   const admin = useAdmin();
   const [id, setId] = useState(() => crypto.randomUUID());
-  const readRound = () =>
-    admin.overview ? roundStamp(admin.overview.status, Date.parse(admin.overview.observedAt)) : null;
+  const readRound = () => {
+    const snapshot = admin.overview;
+    if (!snapshot?.status.map) return null;
+    return (
+      roundStamp(snapshot.status, Date.parse(snapshot.observedAt)) ?? { map: snapshot.status.map, startedAt: null }
+    );
+  };
   const [reviewedRound, setReviewedRound] = useState(readRound);
   const form = useRef<HTMLFormElement>(null);
   const returningToEdits = useRef(false);
   const submitted = useRef(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
-  const [confirmation, setConfirmation] = useState("");
   const [result, setResult] = useState<ActionResult | null>(null);
   const [selection, setSelection] = useState<MapSelection>({ map: "", experiences: [] });
   const [mapReady, setMapReady] = useState(false);
@@ -74,7 +78,6 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
   const requiresConfirmation = confirmedActions.includes(action);
   const requiresReason = ["kick", "ban", "unban", "whitelist-remove"].includes(action);
   const choicesReady = catalogReady && (action !== "map" || mapReady);
-  const confirmationReady = !phrase || confirmation === phrase;
   const roundReady = !phrase || !!reviewedRound;
   const affectsEveryone = !!phrase || action === "lighting";
   const warnLiveImpact = affectsEveryone || ["kick", "ban", "kill"].includes(action);
@@ -91,11 +94,10 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (submitted.current || !permitted || !choicesReady || !confirmationReady || !roundReady) return;
+    if (submitted.current || !permitted || !choicesReady || !roundReady) return;
     const values = new FormData(event.currentTarget);
     const reason = requiresReason ? String(values.get("reason") ?? "").trim() : `Staff action: ${title}.`;
     const target = steamId || String(values.get("steamId") ?? "");
-    const confirm = phrase ? String(values.get("confirm") ?? "") : target;
     if (!singleLine(reason, 3)) {
       setError("Enter a single-line reason between 3 and 200 characters.");
       return;
@@ -104,14 +106,10 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
       setError("Enter a 17-digit SteamID64 for a personal Steam account.");
       return;
     }
-    if (requiresConfirmation && confirm !== (phrase ?? target)) {
-      setError("The confirmation must match exactly. Nothing was sent.");
-      return;
-    }
     const input: Record<string, unknown> = { id, action, reason };
     if (phrase) input.expectedRound = reviewedRound;
     if (requiresPlayer) input.steamId = target;
-    if (requiresConfirmation) input.confirm = confirm;
+    if (requiresConfirmation) input.confirm = phrase ?? target;
     if (action === "message" || action === "broadcast") {
       const message = String(values.get("message") ?? "").trim();
       if (!singleLine(message)) {
@@ -192,11 +190,16 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
           )}
           <p>{description}</p>
           {phrase && reviewedRound && (
-            <p>Reviewed match: {mapLabel(reviewedRound.map)}. The round is checked again before sending.</p>
+            <p>
+              Reviewed match: {mapLabel(reviewedRound.map)}.{" "}
+              {reviewedRound.startedAt === null
+                ? "This server can detect a changed map, but not a new round on the same map."
+                : "The round is checked again before sending."}
+            </p>
           )}
           {phrase && !reviewedRound && (
             <p>
-              The match clock is unavailable. Close this review and refresh the dashboard before making a match change.
+              The current map is unavailable. Close this review and refresh the dashboard before making a match change.
             </p>
           )}
           {action === "map" && <p>Use Queue next map to keep the current round running.</p>}
@@ -287,19 +290,6 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
                 </label>
               )}
               {requiresReason && <ReasonField />}
-              {phrase && (
-                <label>
-                  Type <strong>{phrase}</strong> to confirm
-                  <input
-                    name="confirm"
-                    required
-                    autoComplete="off"
-                    placeholder={phrase}
-                    value={confirmation}
-                    onChange={(event) => setConfirmation(event.target.value)}
-                  />
-                </label>
-              )}
             </fieldset>
             {!permitted && !sending && (
               <p className="notice warning">
@@ -325,7 +315,6 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
                 submitted.current = false;
                 returningToEdits.current = true;
                 setId(crypto.randomUUID());
-                setConfirmation("");
                 setReviewedRound(readRound());
                 setResult(null);
               }}
@@ -337,9 +326,7 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
             <button
               type="submit"
               className={`button ${phrase || action === "kill" || action === "ban" ? "danger" : "primary"}`}
-              disabled={
-                !permitted || sending || submitted.current || !choicesReady || !confirmationReady || !roundReady
-              }
+              disabled={!permitted || sending || submitted.current || !choicesReady || !roundReady}
             >
               {sending ? "Sending…" : title}
             </button>
