@@ -276,6 +276,39 @@ describe("watch-list joins", () => {
     expect(lookup.mock.calls.map(([steamIds]) => steamIds)).toEqual([[clean]]);
   });
 
+  it("alerts when a listed player who was online before a long empty or failed stretch comes back", async () => {
+    // Overnight: the listed player leaves last, the roster stays empty for ten hours, and they seed first.
+    const night = workerFixture(values, { sources: [sourceFor()] });
+    await night.pass(roster(clean), 0);
+    await night.pass(roster(clean, listed));
+    await night.pass(roster(listed));
+    for (let read = 0; read < 40; read++) await night.pass(roster(), 15 * 60_000);
+    await night.pass(roster(listed));
+    expect(night.alerts.list("primary").map((alert) => alert.title)).toEqual([
+      "Watch list: player joined",
+      "Watch list: player joined",
+    ]);
+
+    // The game goes down with everyone on, and the listed player is in the first read ten hours later.
+    const crash = workerFixture(values, { sources: [sourceFor()] });
+    await crash.pass(roster(clean), 0);
+    await crash.pass(roster(clean, listed));
+    crash.game.failWith(new RconError("The game server could not be reached.", false, "unreachable"));
+    for (let read = 0; read < 40; read++) await crash.pass(undefined, 15 * 60_000);
+    crash.game.failWith(null);
+    await crash.pass(roster(listed, clean), 30_000);
+    expect(crash.alerts.list("primary")).toHaveLength(2);
+
+    // An empty roster for longer than a map load shows the listed player left, even when they come back first.
+    const short = workerFixture({ ...values, STAFF_ALERTS_WATCHLIST_COOLDOWN_MINUTES: 10 }, { sources: [sourceFor()] });
+    await short.pass(roster(clean), 0);
+    await short.pass(roster(clean, listed));
+    await short.pass(roster(listed));
+    for (let read = 0; read < 80; read++) await short.pass(roster(), 15_000);
+    await short.pass(roster(listed));
+    expect(short.alerts.list("primary")).toHaveLength(2);
+  });
+
   it("keeps the start window open when Gramps starts during a map load", async () => {
     const role = "678901234567890123";
     const { pass, alerts, discord } = workerFixture(
