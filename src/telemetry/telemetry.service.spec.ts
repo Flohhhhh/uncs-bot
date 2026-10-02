@@ -2,7 +2,7 @@ import { Logger } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import type { EnvService } from "../env/env.service";
 import { TelemetryDeliveries } from "./telemetry.deliveries";
-import { TelemetryService, UNNAMED_PLAYER } from "./telemetry.service";
+import { TelemetryService, UNNAMED_PLAYER, publicName } from "./telemetry.service";
 import type { TelemetryStore } from "./telemetry.store";
 import { emptyTotals, periodMilliseconds } from "./telemetry.types";
 import { fixtureServers } from "../admin/game-server-fixture";
@@ -467,5 +467,19 @@ describe("telemetry authorization and reporting", () => {
       lastBatch: null,
       lastRejected: { status: 503, reason: "storage unavailable" },
     });
+  });
+  it("reports whether the feed is usable for the weekly board without a reason or token", () => {
+    expect(fixture().service.feedAvailable("primary")).toBe(true);
+    expect(fixture(false).service.feedAvailable("primary")).toBe(false);
+    expect(fixture(true, "too-short-token").service.feedAvailable("primary")).toBe(false);
+  });
+  it("shares the public name rule with the weekly board unchanged", () => {
+    expect(publicName(steamId, " Player ")).toBe(" Player ");
+    expect(publicName(steamId, `Tag ${steamId}`)).toBe(UNNAMED_PLAYER);
+    expect(publicName(null, "76561198000000009")).toBe(UNNAMED_PLAYER);
+    expect(publicName(steamId, "   ")).toBe(UNNAMED_PLAYER);
+    expect(publicName(steamId, 5)).toBe(UNNAMED_PLAYER);
+    // The website's stricter rule (any 17-digit run) is applied by the Discord renderer, not here.
+    expect(publicName(steamId, "x76561198000000009x")).toBe("x76561198000000009x");
   });
 });
