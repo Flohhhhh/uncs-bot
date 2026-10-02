@@ -8,7 +8,7 @@ import type { ActionName, ActionResult, Catalog } from "../../api/types";
 import { useResource } from "../../api/use-resource";
 import { useGameAdmin as useAdmin } from "../../app/context";
 import { Modal, ReasonField } from "../../components/ui";
-import { CopyValue } from "../../components/data-table";
+import { ActionReceipt } from "./action-receipt";
 import { TeamMoveDialog } from "../players/team-move";
 import { MapPicker } from "./map-picker";
 import {
@@ -227,10 +227,7 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
             {["unknown", "pending", "accepted"].includes(result.state) && !/action history/i.test(result.message) && (
               <p>Check Action history for confirmation before repeating this action.</p>
             )}
-            <details>
-              <summary>Action details</summary>
-              <CopyValue value={id} label="action ID" />
-            </details>
+            <ActionReceipt id={id} />
           </div>
         )}
         {(!result || result.state === "failed") && (
