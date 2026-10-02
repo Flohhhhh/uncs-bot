@@ -11,7 +11,7 @@ import { z } from "zod";
 import { AdminService } from "../admin/admin.service";
 import type { ActionResult, Staff } from "../admin/admin.types";
 import { GameServers } from "../admin/game-servers";
-import { LEGACY_SERVER_ID } from "../common/game-server";
+import { LEGACY_SERVER_ID, publicGameServer } from "../common/game-server";
 import { EnvService } from "../env/env.service";
 import { ApplicationsStore } from "./applications.store";
 import {
@@ -55,7 +55,7 @@ export class ApplicationsService {
       ...identity,
       emailRequired: this.emailRequired(),
       serverId,
-      servers: this.servers.list().map(({ id, name }) => ({ id, name })),
+      servers: this.servers.list().map(publicGameServer),
       application: ownApplication(await this.store.own(identity.userId, serverId)),
     };
   }

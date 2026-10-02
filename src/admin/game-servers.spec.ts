@@ -114,6 +114,22 @@ describe("explicit game-server registry", () => {
 });
 
 describe("server deployment configuration", () => {
+  it("validates separate public joining codes and does not fall back to another server's code", () => {
+    const joinId = "abcd1111-1111-4111-8111-111111111111";
+    const configured = [{ ...servers[0], joinId }, servers[1]];
+    expect(Env.shape.WARDOGS_SERVERS.parse(JSON.stringify(configured))).toEqual(configured);
+    expect(settings(configured).servers()).toMatchObject([{ id: "east", joinId }, { id: "central" }]);
+    expect(settings(configured).servers()[1]).not.toHaveProperty("joinId");
+    expect(Env.shape.WARDOGS_SERVER_JOIN_ID.parse(joinId)).toBe(joinId);
+    expect(Env.shape.WARDOGS_SERVER_JOIN_ID.parse(undefined)).toBeUndefined();
+    for (const value of ["", "https://server.example.test", "game-password", "<script>"])
+      expect(Env.shape.WARDOGS_SERVER_JOIN_ID.safeParse(value).success).toBe(false);
+    expect(
+      Env.shape.WARDOGS_SERVERS.safeParse(
+        JSON.stringify([configured[0], { ...servers[1], joinId: joinId.toUpperCase() }]),
+      ).success,
+    ).toBe(false);
+  });
   it("validates the whole registry without involving a game connection", () => {
     expect(Env.shape.WARDOGS_SERVERS.parse(JSON.stringify(servers))).toEqual(servers);
     expect(Env.shape.WARDOGS_SERVERS.parse(undefined)).toBeUndefined();

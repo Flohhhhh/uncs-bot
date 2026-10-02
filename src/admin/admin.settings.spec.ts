@@ -25,6 +25,12 @@ function settings(overrides: Record<string, unknown> = {}) {
 }
 
 describe("dashboard settings boundary", () => {
+  it("adds the optional primary public join code without changing action connection versions", () => {
+    const plain = settings().servers()[0];
+    expect(plain).not.toHaveProperty("joinId");
+    const joinId = "11111111-1111-4111-8111-111111111111";
+    expect(settings({ WARDOGS_SERVER_JOIN_ID: joinId }).servers()[0]).toEqual({ ...plain, joinId });
+  });
   it("keeps staff access disabled without its flag or Discord credentials", () => {
     expect(() => settings({ ADMIN_ENABLED: false }).get()).toThrow("not been connected");
     expect(() => settings({ ADMIN_DISCORD_CLIENT_SECRET: undefined }).get()).toThrow("not been connected");
