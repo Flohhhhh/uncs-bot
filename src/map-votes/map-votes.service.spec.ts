@@ -1571,6 +1571,89 @@ describe("automatic ballots that follow the round, not the clock", () => {
       expect(f.admin.act).not.toHaveBeenCalled();
     },
   );
+  it("cancels when the round tracker sees a new round although the map and score still match", async () => {
+    const f = await openBallot({ leading: 30 });
+    f.status({ matchSeconds: 600 });
+    await f.service.tick();
+    expect(f.store.cancel).not.toHaveBeenCalled();
+    // The match clock restarts while the scoreboard and rotation position are unchanged.
+    later();
+    f.status({ matchSeconds: 5 });
+    await f.service.tick();
+    expect(f.store.cancel).toHaveBeenCalledWith(
+      f.record.id,
+      expect.any(String),
+      expect.anything(),
+      "The match ended before voting closed. The rotation continues.",
+      expect.any(String),
+    );
+    expect(f.admin.act).not.toHaveBeenCalled();
+  });
+  it.each([
+    [
+      "staff reorder the rotation",
+      (f: Awaited<ReturnType<typeof openBallot>>, settings: Awaited<ReturnType<typeof f.game.configuration>>) =>
+        f.game.configuration.mockResolvedValue({
+          ...settings,
+          rotation: {
+            ...settings.rotation,
+            entries: [settings.rotation.entries[0], ...settings.rotation.entries.slice(1).reverse()],
+          },
+        }),
+    ],
+    [
+      "the round tracker sees a new round",
+      (f: Awaited<ReturnType<typeof openBallot>>) => {
+        later(1_000);
+        f.status({ matchSeconds: 5 });
+      },
+    ],
+  ])("closes without queueing when %s between the close claim and the close", async (_, change) => {
+    const f = await openBallot({ leading: 80 });
+    f.status({ matchSeconds: 600 });
+    await f.service.tick();
+    const settings = await f.game.configuration();
+    const claim = f.store.claimClose.getMockImplementation()!;
+    f.store.claimClose.mockImplementation(async (...args: unknown[]) => {
+      const claimed = await claim(...args);
+      change(f, settings);
+      return claimed;
+    });
+    later();
+    f.status({ factionScores: leadingScores(95), matchSeconds: 615 });
+    await f.service.tick();
+    expect(f.store.claimClose).toHaveBeenCalled();
+    expect(f.admin.act).not.toHaveBeenCalled();
+    expect(f.store.finish).toHaveBeenCalledWith(f.record.id, "cancelled", expect.any(String));
+  });
+  it("never opens below the game's start threshold, even with a lower saved minimum", async () => {
+    const f = automatic("primary", { minPlayers: 10 });
+    const settings = await f.game.configuration();
+    f.game.configuration.mockResolvedValue({
+      ...settings,
+      fields: [{ id: "minRequiredPlayers", value: 30, editable: true }],
+    });
+    f.status({ players: { current: 25, max: 100 } });
+    await observeForWindow(f);
+    expect((await f.service.list(staff)).automatic).toMatchObject({
+      phase: "waiting_players",
+      message: "Waiting for 30 players before a ballot opens (25/100).",
+      players: { current: 25, required: 30 },
+    });
+    expect(f.discord.publish).not.toHaveBeenCalled();
+  });
+  it.each([
+    [86, 5_000],
+    [84, 15_000],
+  ])("at %s points, polls again after %s ms", async (leading, delay) => {
+    const f = await openBallot({ leading });
+    await f.service.tick();
+    const timers = jest.spyOn(global, "setTimeout");
+    f.service.onApplicationBootstrap();
+    expect(timers).toHaveBeenLastCalledWith(expect.any(Function), delay);
+    f.service.onModuleDestroy();
+    timers.mockRestore();
+  });
   it("keeps an open ballot after a restart that reads the same round", async () => {
     const f = await openBallot({ leading: 30 });
     const restarted = f.make().service;

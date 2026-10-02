@@ -237,6 +237,9 @@ describe("ballot results", () => {
     expect(closeReached({ settings, maxStep: 12 }, 88)).toBe(true);
     expect(closeReached({ settings, maxStep: 12 }, 79)).toBe(false);
     expect(closeReached({ settings, maxStep: 5 }, 88)).toBe(false);
+    // A large observed step never closes before the early window (10 points under the close score).
+    expect(closeReached({ settings, maxStep: 30 }, 75)).toBe(false);
+    expect(closeReached({ settings, maxStep: 30 }, 80)).toBe(true);
     expect(closeReached({}, 94)).toBe(false);
     expect(closeReached({}, 95)).toBe(true);
   });
