@@ -13,6 +13,55 @@ beforeEach(() => {
 });
 
 describe("server action review", () => {
+  it.each([
+    ["match-restart", "Restart current match", "RESTART MATCH"],
+    ["match-end", "End current match", "END MATCH"],
+  ] as const)(
+    "requires explicit confirmation before %s can affect the running match",
+    async (action, label, phrase) => {
+      request.mockResolvedValue({ state: "accepted", message: "Game acknowledged the request." });
+      const close = vi.fn();
+      render(
+        <AdminContext.Provider value={context()}>
+          <ActionsDialog action={action} onClose={close} />
+        </AdminContext.Provider>,
+      );
+      expect(screen.getByRole("note", { name: "Live match warning" })).toHaveTextContent(
+        "Affects everyone · 3 players connected",
+      );
+      const send = screen.getByRole("button", { name: label });
+      expect(send).toHaveClass("danger");
+      expect(send).toBeDisabled();
+      fireEvent.submit(send.closest("form")!);
+      fireEvent.change(screen.getByPlaceholderText(phrase), { target: { value: "CONFIRM" } });
+      fireEvent.submit(send.closest("form")!);
+      expect(send).toBeDisabled();
+      expect(request).not.toHaveBeenCalled();
+      fireEvent.change(screen.getByPlaceholderText(phrase), { target: { value: phrase } });
+      expect(send).toBeEnabled();
+      fireEvent.click(send);
+      fireEvent.submit(send.closest("form")!);
+      await screen.findByText("Game acknowledged the request.");
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(String(request.mock.calls[0][1]?.body))).toMatchObject({ action, confirm: phrase });
+      expect(close).not.toHaveBeenCalled();
+    },
+  );
+  it("requires a fresh disruptive-action confirmation after returning from a definite rejection", async () => {
+    request.mockResolvedValue({ state: "failed", message: "The game refused the restart." });
+    render(
+      <AdminContext.Provider value={context()}>
+        <ActionsDialog action="match-restart" onClose={vi.fn()} />
+      </AdminContext.Provider>,
+    );
+    fireEvent.change(screen.getByPlaceholderText("RESTART MATCH"), { target: { value: "RESTART MATCH" } });
+    fireEvent.click(screen.getByRole("button", { name: "Restart current match" }));
+    await screen.findByText("The game refused the restart.");
+    fireEvent.click(screen.getByRole("button", { name: "Back to edits" }));
+    expect(screen.getByPlaceholderText("RESTART MATCH")).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Restart current match" })).toBeDisabled();
+    expect(request).toHaveBeenCalledTimes(1);
+  });
   it.each(["receipt", "http"])(
     "preserves entries after a definite %s rejection and records a reviewed retry separately",
     async (kind) => {
@@ -187,9 +236,10 @@ describe("server action review", () => {
     await screen.findByRole("option", { name: "Harbor" });
     fireEvent.change(screen.getByRole("combobox", { name: "Map" }), { target: { value: "Harbor" } });
     await screen.findByRole("checkbox", { name: "Conquest" });
-    await waitFor(() => expect(screen.getByRole("button", { name: "Change map" })).toBeEnabled());
+    expect(screen.getByRole("button", { name: "Change map" })).toBeDisabled();
     expect(screen.queryByLabelText("Reason")).not.toBeInTheDocument();
     fireEvent.change(screen.getByPlaceholderText("CHANGE MAP"), { target: { value: "CHANGE MAP" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Change map" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Change map" }));
     await waitFor(() =>
       expect(screen.getByRole("status", { name: "Action result" })).toHaveTextContent("Accepted · not verified"),

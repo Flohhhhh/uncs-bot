@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, expect, it, vi } from "vitest";
 import { api } from "../../api/client";
@@ -18,7 +18,27 @@ function page(version = 0) {
     </MemoryRouter>
   );
 }
-beforeEach(() => request.mockReset());
+beforeEach(() => {
+  request.mockReset();
+});
+it("keeps disruptive controls collapsed and only opens a separate action review", async () => {
+  request.mockResolvedValue(rotation);
+  const admin = context();
+  render(
+    <MemoryRouter>
+      <AdminContext.Provider value={admin}>
+        <MatchPage />
+      </AdminContext.Provider>
+    </MemoryRouter>,
+  );
+  const summary = screen.getByText("Change, end or restart the current match");
+  expect(summary.closest("details")).not.toHaveAttribute("open");
+  expect(screen.getByRole("link", { name: "Edit rotation & queue next map →" })).toBeInTheDocument();
+  fireEvent.click(summary);
+  fireEvent.click(screen.getByRole("button", { name: "Restart match" }));
+  expect(admin.openAction).toHaveBeenCalledWith("match-restart", undefined);
+  expect(request.mock.calls.every(([, options]) => !options?.method)).toBe(true);
+});
 it("does not call the rotation unavailable while its first read is pending", async () => {
   let done!: (value: unknown) => void;
   request.mockReturnValue(

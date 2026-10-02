@@ -44,12 +44,12 @@ export const actionDefinitions: Record<ActionName, readonly [string, string, str
   ],
   "match-end": [
     "End current match",
-    "End this round and follow the server's current map rotation.",
+    "Ends the current round for everyone and follows the server’s rotation. The round cannot be resumed.",
     "POST /v1/match/end",
   ],
   "match-restart": [
     "Restart current match",
-    "Reload the current match. This does not restart the server process or apply startup settings.",
+    "Interrupts and reloads the current match for everyone. This does not restart the server process or apply startup settings.",
     "POST /v1/match/restart",
   ],
   map: ["Change map", "Travel to the selected map after the end-of-match screen.", "POST /v1/match/map"],
