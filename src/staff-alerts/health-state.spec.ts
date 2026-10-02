@@ -258,6 +258,13 @@ describe("health inference from RCON reads", () => {
     quiet.read(quiet.fail(), 5 * 60_000);
     expect(quiet.read(quiet.good({ players: 30, ...next }), 30_000).restartLike).toBe(true);
     expect(quiet.kinds()).toEqual(["game-restart"]);
+
+    // So is a failed read followed by more than a minute without a good one.
+    const late = harness();
+    late.read(late.good({ players: 30 }));
+    late.read(late.fail(), 15_000);
+    expect(late.read(late.good({ players: 30, ...next }), 5 * 60_000).restartLike).toBe(true);
+    expect(late.kinds()).toEqual(["game-restart"]);
   });
 
   it("sends no restart alert after an interruption with no restart signal", () => {
