@@ -6,7 +6,7 @@ import { Card, Empty, Search, Tabs, date, type TabOption } from "../../component
 import { DataTable } from "../../components/data-table";
 import { CombatPage } from "../combat/combat-page";
 import { PlayerSheet, type SheetPlayer } from "../players/player-actions";
-import { DashboardHistory } from "./pages";
+import { DashboardHistory, actionIdPattern } from "./pages";
 import { GameLogView } from "./game-log";
 import {
   ActivityLine,
@@ -173,7 +173,10 @@ export function ActivityFeed() {
 
 type View = "feed" | "combat" | "actions" | "commands";
 
-/** The activity hub. The view and a focused player live in the URL (`?view=combat&player=…`) beside `server`. */
+/**
+ * The activity hub. The view and a focused player live in the URL (`?view=combat&player=…`) beside `server`.
+ * `?view=actions&id=<action ID>` opens that action's stored receipt.
+ */
 export function ActivityPage() {
   const { me } = useGameAdmin();
   const [params, setParams] = useSearchParams();
@@ -186,6 +189,8 @@ export function ActivityPage() {
   const view = tabs.find((tab) => tab.id === params.get("view"))?.id ?? "feed";
   const requested = params.get("player") ?? "";
   const player = isPublicIndividualSteamId(requested) ? requested : "";
+  const requestedId = params.get("id")?.trim() ?? "";
+  const receipt = actionIdPattern.test(requestedId) ? requestedId.toLowerCase() : "";
   const update = (changes: Record<string, string>) =>
     setParams(
       (current) => {
@@ -199,12 +204,17 @@ export function ActivityPage() {
       { replace: true },
     );
   return (
-    <Tabs label="Activity views" tabs={tabs} value={view} onChange={(id) => update({ view: id, player: "" })}>
+    <Tabs
+      label="Activity views"
+      tabs={tabs}
+      value={view}
+      onChange={(next) => update({ view: next, player: "", id: "" })}
+    >
       {(selected) =>
         selected === "combat" ? (
           <CombatPage playerId={player} onPlayerChange={(id) => update({ player: id })} />
         ) : selected === "actions" ? (
-          <DashboardHistory key={player} initialQuery={player} />
+          <DashboardHistory key={receipt || player} initialQuery={receipt || player} />
         ) : selected === "commands" ? (
           <GameLogView />
         ) : (

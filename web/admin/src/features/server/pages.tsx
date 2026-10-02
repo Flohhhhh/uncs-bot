@@ -1,12 +1,12 @@
 import { lightingLabel, mapLabel, modeLabel, zoneLabel } from "../../../../../src/common/map-labels";
 import { roundStamp } from "../../../../../src/common/game-round";
 import type { SettingsSnapshot } from "../../../../../src/common/server-settings";
-import { useState, type CSSProperties, type ReactNode } from "react";
+import { Fragment, useState, type CSSProperties, type ReactNode } from "react";
 import { ServerLink as Link } from "../../app/server-link";
 import { useGameAdmin as useAdmin } from "../../app/context";
 import { useResource } from "../../api/use-resource";
 import type { Audit, Ban, Whitelist } from "../../api/types";
-import { ActionButton, Badge, Card, Empty, Search, date } from "../../components/ui";
+import { ActionButton, Badge, Card, Empty, OutcomeBadge, Search, date } from "../../components/ui";
 import { CopyValue, DataTable, compareValues } from "../../components/data-table";
 import { actionDefinitions, allowed } from "../actions/policy";
 import { FactionChip, liveFactions, playerFaction } from "../players/factions";
@@ -486,19 +486,31 @@ export function AnnouncementsPage() {
     </div>
   );
 }
+/** A complete action ID. Anything shorter stays a search of the recent actions. */
+export const actionIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** The message text an announcement or player message carried, when the receipt has it. */
+function sentMessage(entry: Audit) {
+  const value = (entry.details as Record<string, unknown> | null | undefined)?.message;
+  return typeof value === "string" ? value.trim() : "";
+}
 /** Dashboard action receipts. Also shown as the Activity hub's "Action history" view. */
 export function AuditPage() {
   return <DashboardHistory />;
 }
 export function DashboardHistory({ initialQuery = "" }: { initialQuery?: string } = {}) {
+  const { overview } = useAdmin();
   const [query, setQuery] = useState(initialQuery);
-  const lookupId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(query.trim())
-    ? query.trim().toLowerCase()
-    : "";
+  // Rows whose details differ from the default: closed in recent history, open for an exact lookup.
+  const [toggled, setToggled] = useState<ReadonlySet<string>>(() => new Set());
+  const [managed, setManaged] = useState<SheetPlayer | null>(null);
+  const lookupId = actionIdPattern.test(query.trim()) ? query.trim().toLowerCase() : "";
   const recent = useResource<Audit[]>(lookupId ? null : "audit");
   const receipt = useResource<{ record: Audit | null }>(lookupId ? `audit/${lookupId}` : null);
   const error = lookupId ? receipt.error : recent.error;
   const loading = lookupId ? receipt.loading && !receipt.data : recent.loading && !recent.data;
+  // Receipts store the SteamID only; names come from the latest roster this page has seen.
+  const nameOf = (target: string) => overview?.players.find((player) => player.steamId === target)?.name ?? "";
+  const search = query.trim().toLowerCase();
   const rows = lookupId
     ? receipt.data?.record
       ? [receipt.data.record]
@@ -510,10 +522,18 @@ export function DashboardHistory({ initialQuery = "" }: { initialQuery?: string 
           entry.action,
           actionDefinitions[entry.action]?.[0] || "",
           entry.target,
+          nameOf(entry.target),
           entry.message,
-          entry.details.reason,
-        ].some((value) => value.toLowerCase().includes(query.trim().toLowerCase())),
+          entry.details?.reason,
+        ].some((value) => (value ?? "").toLowerCase().includes(search)),
       );
+  const toggle = (id: string) =>
+    setToggled((previous) => {
+      const next = new Set(previous);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   return (
     <>
       {error && (
@@ -525,7 +545,7 @@ export function DashboardHistory({ initialQuery = "" }: { initialQuery?: string 
       <Search
         value={query}
         onChange={setQuery}
-        placeholder="Search staff, SteamID, reason, or action ID"
+        placeholder="Search staff, player, SteamID, reason, or action ID"
         clearLabel={lookupId ? "Back to recent actions" : "Clear search"}
       />
       <p className="filter-note">
@@ -548,33 +568,74 @@ export function DashboardHistory({ initialQuery = "" }: { initialQuery?: string 
               { label: "Staff", value: (entry) => entry.actorName },
               { label: "Action / target", value: (entry) => actionDefinitions[entry.action]?.[0] || entry.action },
               { label: "Outcome", value: (entry) => entry.state },
-              { label: "Details" },
+              { label: "Reason & result" },
+              { label: "" },
             ]}
-            renderRow={(entry) => (
-              <tr key={entry.id}>
-                <td>{date(entry.createdAt)}</td>
-                <td>
-                  <strong>{entry.actorName}</strong>
-                </td>
-                <td>
-                  {actionDefinitions[entry.action]?.[0] || entry.action}
-                  <small>{entry.target}</small>
-                </td>
-                <td>
-                  <Badge kind={entry.state === "applied" ? "good" : entry.state === "failed" ? "bad" : "warn"}>
-                    {entry.state === "started" ? "Unconfirmed" : entry.state}
-                  </Badge>
-                </td>
-                <td className="audit-detail">
-                  <strong>{entry.details.reason}</strong>
-                  <br />
-                  {entry.message}
-                  <small>
-                    <CopyValue value={entry.id} label="action ID" />
-                  </small>
-                </td>
-              </tr>
-            )}
+            renderRow={(entry) => {
+              const open = lookupId ? !toggled.has(entry.id) : toggled.has(entry.id);
+              const player = isPublicIndividualSteamId(entry.target) ? entry.target : "";
+              const name = player ? nameOf(player) : "";
+              const message = sentMessage(entry);
+              return (
+                <Fragment key={entry.id}>
+                  <tr>
+                    <td className="audit-when">
+                      <When at={entry.createdAt} />
+                    </td>
+                    <td>
+                      <strong>{entry.actorName}</strong>
+                    </td>
+                    <td className="audit-action">
+                      {actionDefinitions[entry.action]?.[0] || entry.action}
+                      {player ? (
+                        <span className="audit-target">
+                          <PlayerButton player={{ steamId: player, name: name || undefined }} onOpen={setManaged} />
+                          {name && <small>{player}</small>}
+                        </span>
+                      ) : (
+                        entry.target !== "server" && <small>{entry.target}</small>
+                      )}
+                    </td>
+                    <td>
+                      <OutcomeBadge state={entry.state} />
+                    </td>
+                    <td className="audit-detail">
+                      {entry.details?.reason && <strong>{entry.details.reason}</strong>}
+                      {entry.message && <span>{entry.message}</span>}
+                    </td>
+                    <td className="audit-toggle">
+                      <button
+                        type="button"
+                        className="text-button"
+                        aria-expanded={open}
+                        aria-controls={`receipt-${entry.id}`}
+                        onClick={() => toggle(entry.id)}
+                      >
+                        Details
+                      </button>
+                    </td>
+                  </tr>
+                  <tr id={`receipt-${entry.id}`} className="audit-more" hidden={!open}>
+                    <td colSpan={6}>
+                      <dl>
+                        <div>
+                          <dt>Action ID</dt>
+                          <dd>
+                            <CopyValue value={entry.id} label="action ID" />
+                          </dd>
+                        </div>
+                        {message && (
+                          <div>
+                            <dt>Message sent</dt>
+                            <dd>{message}</dd>
+                          </div>
+                        )}
+                      </dl>
+                    </td>
+                  </tr>
+                </Fragment>
+              );
+            }}
           />
         ) : error ? (
           <Empty
@@ -593,6 +654,7 @@ export function DashboardHistory({ initialQuery = "" }: { initialQuery?: string 
           />
         )}
       </Card>
+      {managed && <PlayerSheet player={managed} onClose={() => setManaged(null)} />}
     </>
   );
 }

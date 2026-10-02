@@ -249,3 +249,39 @@ it("prefills action history for a linked player and clears the player when staff
   expect(screen.getByRole("searchbox")).toHaveValue("");
   expect(screen.getByTestId("location")).toHaveTextContent(/^\?server=primary&view=actions$/);
 });
+it("opens a linked action receipt by ID and drops the ID when staff change views", async () => {
+  const id = "7ab342f1-4200-4dfe-9050-5d7f2c310151";
+  request.mockImplementation(
+    async (path) =>
+      (path === `audit/${id}`
+        ? {
+            record: {
+              id,
+              actorName: "Receipt staff",
+              action: "kick",
+              target: "76561198000000002",
+              state: "unknown",
+              message: "Readback unavailable",
+              createdAt: event.observedAt,
+              details: { reason: "Linked from a review" },
+            },
+          }
+        : path === "activity"
+          ? { events: [] }
+          : []) as never,
+  );
+  render(page(context(), <ActivityPage />, `/activity?server=primary&view=actions&id=${id.toUpperCase()}`));
+  expect(screen.getByRole("searchbox")).toHaveValue(id);
+  expect(await screen.findByText("Receipt staff")).toBeInTheDocument();
+  expect(screen.getByText("Unconfirmed")).toBeInTheDocument();
+  expect(request.mock.calls.map(([path]) => path)).not.toContain("audit");
+  fireEvent.click(screen.getByRole("tab", { name: "All activity" }));
+  expect(screen.getByTestId("location")).toHaveTextContent(/^\?server=primary&view=feed$/);
+});
+it("ignores an ID that is not a complete action ID", async () => {
+  request.mockImplementation(async (path) => (path === "activity" ? { events: [] } : []) as never);
+  render(page(context(), <ActivityPage />, "/activity?server=primary&view=actions&id=../settings"));
+  expect(screen.getByRole("searchbox")).toHaveValue("");
+  await screen.findByText("No recorded staff actions");
+  expect(request.mock.calls.map(([path]) => path)).toEqual(["audit"]);
+});
