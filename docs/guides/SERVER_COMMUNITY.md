@@ -139,12 +139,12 @@ Recommended for The UNCs server, where whitelisted players go to the front of th
 
 ### Recommended whitelisted welcome copy
 
-Four two-message variants for `SERVER_COMMUNITY_WHITELISTED_WELCOME_VARIANTS`, for use with either standard set above. They welcome regulars back without asking them to get whitelisted, and promise no queue priority, rewards or points. They are not live until the variable is set in the deployment. Before setting it, confirm that the Steam group is still named `UNCs Wardogs` and that theuncsgaming.com still links the Discord.
+Four two-message variants for `SERVER_COMMUNITY_WHITELISTED_WELCOME_VARIANTS`, for use with either standard set above. They welcome regulars back without asking them to get whitelisted, and promise no queue priority, rewards or points. They are not live until the variable is set in the deployment. Regulars are already in the game, so these lines skip directions to the Discord or the Steam group.
 
 | #   | First message                                           | Second message                                                    |
 | --- | ------------------------------------------------------- | ----------------------------------------------------------------- |
-| 1   | `Welcome back, unc. Knees warmed up?`                   | `Find the regulars in our Steam group: UNCs Wardogs`              |
-| 2   | `Look who is back. Grab a squad and take the hill.`     | `Lost your squad? Discord: theuncsgaming.com`                     |
+| 1   | `Welcome back, unc. Knees warmed up?`                   | `The crew missed you. Your knees did not.`                        |
+| 2   | `Look who is back. Grab a squad and take the hill.`     | `Go show the rookies how it is done.`                             |
 | 3   | `Welcome back. Hydrate, use comms, play the objective.` | `Thanks for being part of the crew. Your knees are proud of you.` |
 | 4   | `The UNCs salute you. Reading glasses on, soldier.`     | `Server quiet? Bring a friend and help seed.`                     |
 
@@ -153,7 +153,7 @@ Paste this exact single-line value into the deployment, without surrounding quot
 `SERVER_COMMUNITY_WHITELISTED_WELCOME_VARIANTS`
 
 ```text
-[["Welcome back, unc. Knees warmed up?","Find the regulars in our Steam group: UNCs Wardogs"],["Look who is back. Grab a squad and take the hill.","Lost your squad? Discord: theuncsgaming.com"],["Welcome back. Hydrate, use comms, play the objective.","Thanks for being part of the crew. Your knees are proud of you."],["The UNCs salute you. Reading glasses on, soldier.","Server quiet? Bring a friend and help seed."]]
+[["Welcome back, unc. Knees warmed up?","The crew missed you. Your knees did not."],["Look who is back. Grab a squad and take the hill.","Go show the rookies how it is done."],["Welcome back. Hydrate, use comms, play the objective.","Thanks for being part of the crew. Your knees are proud of you."],["The UNCs salute you. Reading glasses on, soldier.","Server quiet? Bring a friend and help seed."]]
 ```
 
 `src/server-community/recommended-copy.spec.ts` also checks that this table, the paste value and `.env.example` agree, pass startup validation and keep every message under 200 characters; that no message mentions the whitelist, queues, priority, rewards, points, bonuses or "free"; and that no variant repeats one from the standard sets.
