@@ -11,7 +11,7 @@ import {
 import { assertEditable, arrayValue, editConfigKey, scalarValue } from "./config-document";
 import type { WardogsClient } from "./wardogs.client";
 import { RconError } from "./rcon-protocol";
-import { mapLabel, zoneLabel, selectionLabel } from "../common/map-labels";
+import { mapLabel, zoneLabel, selectionLabel, sameMap } from "../common/map-labels";
 import { serves } from "../common/admin-policy";
 import {
   statusSchema,
@@ -152,7 +152,7 @@ async function rotationPosition(
       return unavailable(
         `The game reports a position outside the ${entries.length} saved rotation entries. Refresh to check again.`,
       );
-    return entries[index].map === status.map
+    return sameMap(entries[index].map, status.map)
       ? { currentIndex: index, positionNote: "" }
       : mapMismatch(index, entries[index].map);
   }
@@ -183,7 +183,7 @@ async function rotationPosition(
       if (entry.index !== i)
         return unavailable("The game returned inconsistent rotation entry numbers. Refresh to check again.");
       if (
-        entry.map !== saved.map ||
+        !sameMap(entry.map, saved.map) ||
         (saved.experiences.length > 0 &&
           JSON.stringify([...saved.experiences].sort()) !== JSON.stringify([...(entry.experiences ?? [])].sort())) ||
         (!!saved.lighting && saved.lighting !== entry.lighting) ||
@@ -193,7 +193,7 @@ async function rotationPosition(
           `Rotation entry ${i + 1} differs. Running: ${selectionLabel({ ...entry, experiences: entry.experiences ?? [] })}. Saved: ${selectionLabel(saved)}. Refresh to check again.`,
         );
     }
-    if (running.entries[now[0]].map !== status.map) return mapMismatch(now[0], running.entries[now[0]].map);
+    if (!sameMap(running.entries[now[0]].map, status.map)) return mapMismatch(now[0], running.entries[now[0]].map);
     if (running.entries[now[0]].denied)
       return unavailable(`The game marks current rotation entry ${now[0] + 1} unavailable. Refresh to check again.`);
     return { currentIndex: now[0], positionNote: "" };
@@ -319,7 +319,7 @@ export async function changeServerConfiguration(
           scalarValue(doc.text, ROTATION, "RotationMode")?.toLowerCase() !== "ordered"
         )
           throw new RconError("Enable an ordered rotation before choosing the next map.");
-        if (!existing[action.currentIndex] || existing[action.currentIndex].map !== status.map)
+        if (!existing[action.currentIndex] || !sameMap(existing[action.currentIndex].map, status.map))
           throw new RconError("The running map does not match the saved rotation. Reload and review it.");
         entries = [...existing];
         // Removing an earlier entry shifts the running numeric index onto another

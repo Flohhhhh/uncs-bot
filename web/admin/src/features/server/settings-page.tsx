@@ -19,7 +19,7 @@ import { MapPicker } from "../actions/map-picker";
 import { ServerIdentityReadout } from "./server-identity";
 import { SavedRotationCheck } from "./rotation-check";
 import type { RotationRow } from "./rotation-queue";
-import { mapLabel, selectionLabel } from "../../../../../src/common/map-labels";
+import { mapLabel, selectionLabel, sameMap } from "../../../../../src/common/map-labels";
 const RotationQueue = lazy(() => import("./rotation-queue").then((module) => ({ default: module.RotationQueue })));
 
 const timing: Record<string, string> = {
@@ -177,7 +177,7 @@ export function RotationEditor({
   const currentIndex = snapshot.rotation.currentIndex;
   const ordered = snapshot.rotation.enabled && snapshot.rotation.mode === "Ordered";
   const currentMatches =
-    currentIndex !== null && snapshot.rotation.entries[currentIndex]?.map === snapshot.rotation.currentMap;
+    currentIndex !== null && sameMap(snapshot.rotation.entries[currentIndex]?.map, snapshot.rotation.currentMap);
   const nextEntry =
     ordered && currentMatches
       ? snapshot.rotation.entries[(currentIndex + 1) % snapshot.rotation.entries.length]
