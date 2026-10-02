@@ -309,6 +309,45 @@ describe("Wardogs action outcomes", () => {
     expect(request).toHaveBeenCalledWith("DELETE", `/v1/reserved-slots/${id}`, undefined);
     expect(request.mock.calls.some(([, path]) => path === "/v1/config")).toBe(false);
   });
+  it.each([true, false])(
+    "preserves malformed saved IDs during a validated config-based whitelist edit (add: %s)",
+    async (add) => {
+      const client = new WardogsClient(settings);
+      const malformed = "7656119800000000";
+      const source = {
+        ...document,
+        text: document.text.replace(
+          `+DefaultReservedPlayerIds=${existing}`,
+          `+DefaultReservedPlayerIds=${existing}\n.DefaultReservedPlayerIds=${malformed}\n.DefaultReservedPlayerIds=${id}`,
+        ),
+      };
+      const target = add ? "76561198000000001" : id;
+      const request = jest.spyOn(client, "request").mockImplementation(async (method, path) => {
+        if (path === "/v1/capabilities") return { routes: ["PUT /v1/config", "POST /v1/config/validate"] };
+        if (path === "/v1/config") return method === "GET" ? source : { ok: true };
+        if (path === "/v1/config/validate") return { ok: true };
+        if (path === "/v1/reserved-slots")
+          return { reservedSlots: [existing, malformed, ...(add ? [id, target] : [])] };
+        throw new Error("Unexpected route");
+      });
+      const result = await client.execute(
+        actionSchema.parse({
+          id: randomUUID(),
+          action: add ? "whitelist-add" : "whitelist-remove",
+          steamId: target,
+          confirm: target,
+          reason: "Member request",
+        }),
+      );
+      expect(result.state).toBe("applied");
+      const writes = request.mock.calls.filter(([method]) => method === "PUT");
+      expect(writes).toHaveLength(1);
+      expect(writes[0][3]).toBe("r1");
+      expect(writes[0][2]).toContain(`.DefaultReservedPlayerIds=${malformed}`);
+      expect(writes[0][2]).toContain(`.DefaultReservedPlayerIds=${existing}`);
+      expect(request.mock.calls.find(([, path]) => path === "/v1/config/validate")?.[2]).toBe(writes[0][2]);
+    },
+  );
   it("does not retry conflicting config writes or reveal upstream secrets", async () => {
     const transport = jest
       .spyOn(globalThis, "fetch")
