@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, expect, it, vi } from "vitest";
 import { api } from "../../api/client";
@@ -9,6 +9,39 @@ import { MatchPage } from "./pages";
 vi.mock("../../api/client", () => ({ api: vi.fn() }));
 const request = vi.mocked(api);
 const rotation = { enabled: true, mode: "Ordered", entries: [{ index: 0, map: "Saved map", status: "now" }] };
+const settings = {
+  revision: "r1",
+  writable: true,
+  fields: [],
+  notice: "",
+  scoreTick: null,
+  rotation: {
+    ...rotation,
+    editable: true,
+    currentIndex: 0,
+    currentMap: "Kavkazi",
+    entries: [
+      { map: "Kavkazi", experiences: [] },
+      { map: "Europe", experiences: [] },
+    ],
+  },
+};
+function adminPage(state: ReturnType<typeof context>, version = 0) {
+  return (
+    <MemoryRouter>
+      <AdminContext.Provider value={{ ...state, refreshVersion: version }}>
+        <MatchPage />
+      </AdminContext.Provider>
+    </MemoryRouter>
+  );
+}
+function matchRead(path: string) {
+  if (path === "settings") return settings;
+  if (path === "map-votes") return { enabled: false, votes: [] };
+  if (path === "settings/rotation-check") return { revision: "r1", issues: [], total: 2 };
+  if (path === "catalog") return { maps: [{ id: "Kavkazi" }, { id: "Europe" }], lightings: [], experiences: [] };
+  throw new Error(`Unexpected path: ${path}`);
+}
 function page(version = 0) {
   return (
     <MemoryRouter>
@@ -79,4 +112,53 @@ it("hides an old next-map list when refreshing it fails and distinguishes an emp
   view.rerender(page(2));
   await screen.findByText("No maps in the saved rotation");
   expect(screen.queryByText("Rotation could not be loaded")).not.toBeInTheDocument();
+});
+
+it("recovers the administrator's first map-controls read without a page reload or game action", async () => {
+  let failed = true;
+  request.mockImplementation(async (path) => {
+    if (path === "settings" && failed) throw new Error("Settings read failed");
+    return matchRead(path) as never;
+  });
+  render(adminPage(context()));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Settings read failed");
+  failed = false;
+  fireEvent.click(screen.getByRole("button", { name: "Retry map controls" }));
+  expect(await screen.findByRole("button", { name: "Edit rotation" })).toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(request.mock.calls.every(([, options]) => !options?.method)).toBe(true);
+});
+
+it("explains a failed map refresh and keeps the rotation draft locked until retry succeeds", async () => {
+  request.mockImplementation(async (path) => matchRead(path) as never);
+  const state = context();
+  const view = render(adminPage(state));
+  fireEvent.click(await screen.findByRole("button", { name: "Edit rotation" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Move Ozeti up" }));
+  expect(screen.getByRole("button", { name: "Review rotation" })).toBeEnabled();
+  request.mockImplementation(async (path) => {
+    if (path === "settings") throw new Error("Settings read failed");
+    return matchRead(path) as never;
+  });
+  view.rerender(adminPage(state, 1));
+  expect(await screen.findByRole("alert")).toHaveTextContent(/last successful check/i);
+  expect(screen.getByRole("button", { name: "Review rotation" })).toBeDisabled();
+  let finish!: (value: unknown) => void;
+  request.mockImplementation(
+    async (path) =>
+      (path === "settings"
+        ? new Promise((resolve) => {
+            finish = resolve;
+          })
+        : matchRead(path)) as never,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Retry map controls" }));
+  expect(screen.getByRole("button", { name: "Retry map controls" })).toBeDisabled();
+  expect(screen.getByRole("alert")).toHaveTextContent("Settings read failed");
+  expect(screen.getByRole("button", { name: "Review rotation" })).toBeDisabled();
+  await act(async () => finish(settings));
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Review rotation" }));
+  expect(within(screen.getByRole("dialog")).getAllByRole("listitem")[0]).toHaveTextContent("Ozeti");
+  expect(request.mock.calls.every(([, options]) => !options?.method)).toBe(true);
 });

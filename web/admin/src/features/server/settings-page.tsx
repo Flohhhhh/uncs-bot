@@ -140,7 +140,7 @@ export function RotationEditor({
   initialView?: "next" | "rotation";
 }) {
   const [view, setView] = useState(initialView);
-  const { data: catalog, error, loading } = useResource<Catalog>(active ? "catalog" : null);
+  const { data: catalog, error, loading, refresh: refreshCatalog } = useResource<Catalog>(active ? "catalog" : null);
   const savedRows = useMemo(
     () => snapshot.rotation.entries.map((entry, index) => ({ id: snapshot.revision + ":" + index, entry })),
     [snapshot],
@@ -251,7 +251,20 @@ export function RotationEditor({
             Other settings changed. Your map edits are kept and will use the latest settings.
           </p>
         )}
-        {error && <p className="notice warning">{error}</p>}
+        {error && (
+          <div className="notice warning" role="alert">
+            <p>{error}</p>
+            <button
+              type="button"
+              className="button secondary small"
+              disabled={disabled || loading}
+              onClick={refreshCatalog}
+            >
+              Retry map choices
+            </button>
+          </div>
+        )}
+        {!catalog && !error && loading && <p role="status">Loading map choices…</p>}
         {(draft || changedElsewhere) && view === "rotation" && (
           <div className="settings-savebar rotation-savebar">
             <strong>Unsaved rotation · {rows.length} rounds</strong>
