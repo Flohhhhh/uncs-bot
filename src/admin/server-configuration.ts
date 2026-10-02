@@ -144,8 +144,8 @@ function rotationReadFailure(error: unknown) {
   return `The game's reply was not in the expected format (${field || "reply"}: ${issue.message}${more}). Refresh to try again.`;
 }
 /**
- * `nextIndex` is where a next-round choice is inserted: after the running entry, or,
- * when the game names no running entry, the entry the game reports it will play next.
+ * `nextIndex` is the entry played after this match: the one after the running entry, or the
+ * game's own next entry when it names no running entry. Only a running entry allows queuing.
  */
 async function rotationPosition(
   game: WardogsClient,
@@ -210,9 +210,9 @@ async function rotationPosition(
         return unavailable(`The game marks current rotation entry ${now[0] + 1} unavailable. Refresh to check again.`);
       return confirmed(now[0]);
     }
-    // With no running entry named (live status on October 2: nowIndex null, nextIndex 0),
-    // the game still reports which entry plays next. Queue into that slot, as the official
-    // console does, only when its marker in the rotation agrees or is absent.
+    // With no running entry named (for example after a direct map change), the game keeps its
+    // own next entry: on October 2 a row inserted before it was skipped and the game moved its
+    // pointer from entry 1 to 2. Show that entry, but queue only once a rotation round runs.
     const next = status.rotation?.nextIndex;
     if (
       now.length === 0 &&
@@ -222,7 +222,11 @@ async function rotationPosition(
       next < entries.length &&
       marked("next").every((i) => i === next)
     )
-      return { currentIndex: null, nextIndex: next, positionNote: "" };
+      return {
+        currentIndex: null,
+        nextIndex: next,
+        positionNote: `This match was not started from the rotation, so the game will play entry ${next + 1} next. Queue a map once that round starts.`,
+      };
     return unavailable(
       "The game has not identified one current or next rotation entry. Refresh after the next round starts.",
     );
@@ -299,8 +303,6 @@ export async function changeServerConfiguration(
   if (doc.revision !== action.revision)
     throw new RconError("Settings changed since you opened this page. Reload and review your changes.");
   let text = doc.text;
-  // Set only for a choice placed at the game's reported next entry (no running entry named).
-  let reportedNext: number | null = null;
   try {
     if (action.action === "settings-save") {
       for (const [id, input] of Object.entries(action.changes)) {
@@ -342,33 +344,24 @@ export async function changeServerConfiguration(
       if (action.action === "map-next") {
         const status = statusSchema.parse(await game.request("GET", "/v1/status"));
         const position = await rotationPosition(game, status, existing, doc, capabilities);
-        if (position.nextIndex === null) throw new RconError(position.positionNote);
-        if (
-          position.currentIndex !== action.currentIndex ||
-          (action.currentIndex === null && position.nextIndex !== action.nextIndex) ||
-          !sameMap(status.map, action.currentMap)
-        )
+        if (position.currentIndex === null) throw new RconError(position.positionNote);
+        if (position.currentIndex !== action.currentIndex || !sameMap(status.map, action.currentMap))
           throw new RconError("The current round changed. Reload before queuing a map.");
         if (
           scalarValue(doc.text, ROTATION, "bEnabled")?.toLowerCase() !== "true" ||
           scalarValue(doc.text, ROTATION, "RotationMode")?.toLowerCase() !== "ordered"
         )
           throw new RconError("Enable an ordered rotation before choosing the next map.");
-        if (
-          action.currentIndex !== null &&
-          (!existing[action.currentIndex] || !sameMap(existing[action.currentIndex].map, status.map))
-        )
+        if (!existing[action.currentIndex] || !sameMap(existing[action.currentIndex].map, status.map))
           throw new RconError("The running map does not match the saved rotation. Reload and review it.");
         entries = [...existing];
-        const slot = position.nextIndex;
-        if (action.currentIndex === null) reportedNext = slot;
-        // Removing an earlier entry shifts the game's numeric position onto another
-        // map. Only move a matching entry from the slot onward.
+        // Removing an earlier entry shifts the running numeric index onto another
+        // map. Only move a later entry; preserve the current position otherwise.
         const match = entries.findIndex(
-          (entry, index) => index >= slot && formatRotation(entry) === formatRotation(action.entry),
+          (entry, index) => index > action.currentIndex && formatRotation(entry) === formatRotation(action.entry),
         );
         if (match >= 0) entries.splice(match, 1);
-        entries.splice(slot, 0, action.entry);
+        entries.splice(action.currentIndex + 1, 0, action.entry);
       } else entries = action.entries;
       if (entries.length > 100) throw new RconError("Keep the rotation to 100 entries or fewer.");
       const catalog = await game.catalog();
@@ -433,29 +426,11 @@ export async function changeServerConfiguration(
     ...new Set<string>(outcomes.map((outcome: { state?: string }) => labels[outcome.state ?? ""]).filter(Boolean)),
   ];
   if (Array.isArray(result.shadowed) && result.shadowed.length) notes.push("Some values are overridden by the host.");
-  if (reportedNext !== null) {
-    // The game named this slot itself. Report success only if it still names the queued entry next.
-    let next: number | null | undefined;
-    try {
-      next = statusSchema.parse(await game.request("GET", "/v1/status")).rotation?.nextIndex;
-    } catch {
-      next = undefined;
-    }
-    if (next !== reportedNext)
-      return {
-        state: "unknown",
-        message:
-          typeof next === "number"
-            ? `Saved, but the game now reports rotation entry ${next + 1} as next. Review the rotation before this match ends.`
-            : "Saved, but the game did not confirm its next entry. Refresh before this match ends.",
-      };
-  }
-  const nextNote = reportedNext === null ? "" : `The game reports rotation entry ${reportedNext + 1} as next. `;
   // Saved does not establish that gameplay has already adopted the new values.
   return {
     state: "pending",
     ...(revision ? { revision } : {}),
-    message: `Settings saved and verified. ${nextNote}${notes.join(" ") || "Check the running game to confirm when they take effect."}`,
+    message: `Settings saved and verified. ${notes.join(" ") || "Check the running game to confirm when they take effect."}`,
   };
 }
 
