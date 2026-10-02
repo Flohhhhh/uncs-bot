@@ -455,6 +455,16 @@ describe("launch storage on isolated PostgreSQL", () => {
     await expect(events.current("primary")).rejects.toThrow("operation is unavailable");
   });
   const messageId = "345678901234567890";
+  it("reads voting setup without changing data and scopes unfinished ballots to the selected server", async () => {
+    expect(await votes.checkSetup("primary")).toEqual({ unfinished: false });
+    const input = ballotInput();
+    await votes.create({ ...input, serverId: "event" });
+    expect(await votes.checkSetup("primary")).toEqual({ unfinished: false });
+    expect(await votes.checkSetup("event")).toEqual({ unfinished: true });
+    expect(await votes.get(input.id)).toMatchObject({ state: "publishing", messageId: null });
+    expect((await client.query("SELECT count(*)::int AS count FROM map_votes")).rows).toEqual([{ count: 1 }]);
+    expect((await client.query("SELECT count(*)::int AS count FROM map_vote_ballots")).rows).toEqual([{ count: 0 }]);
+  });
   async function openBallot() {
     const input = ballotInput();
     await votes.create(input);

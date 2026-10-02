@@ -123,7 +123,6 @@ export const whitelistApplicationReviews = pgTable(
   (table) => [index("whitelist_application_reviews_application_idx").on(table.applicationId)],
 );
 
-// New source schema only: a human must generate/review its migration before enabling map votes.
 export const mapVotes = pgTable(
   "map_votes",
   {
@@ -173,7 +172,6 @@ export const mapVoteBallots = pgTable(
   (table) => [primaryKey({ columns: [table.voteId, table.discordUserId] })],
 );
 
-// Proposed event schema only. Migration generation and deployment remain human-owned.
 export const serverEvents = pgTable(
   "server_events",
   {

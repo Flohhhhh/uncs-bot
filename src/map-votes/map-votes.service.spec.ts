@@ -50,6 +50,7 @@ function fixture(enabled = true, serverId = "primary") {
     cancellation: null,
   };
   const store = {
+    checkSetup: jest.fn().mockResolvedValue({ unfinished: false }),
     get: jest.fn().mockResolvedValue(null),
     history: jest.fn().mockResolvedValue([record]),
     liveCounts: jest.fn().mockResolvedValue([]),
@@ -107,7 +108,11 @@ function fixture(enabled = true, serverId = "primary") {
       role: await role(),
     })),
   };
-  const discord = { check: jest.fn(), publish: jest.fn().mockResolvedValue(messageId), update: jest.fn() };
+  const discord = {
+    check: jest.fn().mockResolvedValue({ name: "map-voting" }),
+    publish: jest.fn().mockResolvedValue(messageId),
+    update: jest.fn(),
+  };
   const environment: Record<string, unknown> = {
     MAP_VOTES_ENABLED: enabled,
     WARDOGS_RCON_URL: "https://game.example.test",
@@ -193,11 +198,53 @@ describe("durable Discord map voting", () => {
   it.each(["viewer", "moderator"] as const)("rejects %s on every staff route", async (role) => {
     const { service, input, store } = fixture();
     await expect(service.list({ ...staff, role })).rejects.toMatchObject({ status: 403 });
+    await expect(service.setup({ ...staff, role })).rejects.toMatchObject({ status: 403 });
     await expect(service.start({ ...staff, role }, input)).rejects.toMatchObject({ status: 403 });
     await expect(
       service.cancel({ ...staff, role }, input.id, { id: randomUUID(), reason: "Close vote" }),
     ).rejects.toMatchObject({ status: 403 });
     expect(store.get).not.toHaveBeenCalled();
+    expect(store.checkSetup).not.toHaveBeenCalled();
+  });
+  it("checks disabled voting setup for the selected server without enabling or sending effects", async () => {
+    const f = fixture(false, "event");
+    f.environment.MAP_VOTES_AUTOMATIC = automaticMapVotes.parse([{ serverId: "event", actorId: staff.id }]);
+    const result = await f.service.setup({ ...staff, serverId: "event" });
+    expect(result.serverId).toBe("event");
+    expect(result.checks.map((item) => item.status)).toEqual(["ok", "ok", "ok", "ok"]);
+    expect(f.store.checkSetup).toHaveBeenCalledWith("event");
+    expect(f.auth.serverStaff).toHaveBeenCalledWith(expect.objectContaining({ id: staff.id }), "event", true);
+    expect(result.checks[1].message).toContain("#map-voting");
+    expect(JSON.stringify(result)).not.toContain(staff.id);
+    expect(f.environment.MAP_VOTES_ENABLED).toBe(false);
+    expect(f.store.create).not.toHaveBeenCalled();
+    expect(f.store.finish).not.toHaveBeenCalled();
+    expect(f.discord.publish).not.toHaveBeenCalled();
+    expect(f.discord.update).not.toHaveBeenCalled();
+    expect(f.admin.act).not.toHaveBeenCalled();
+  });
+  it("reports setup failures independently without exposing provider details", async () => {
+    const f = fixture(false);
+    const privateError = new Error("private connection and credential details");
+    f.environment.MAP_VOTES_AUTOMATIC = automaticMapVotes.parse([{ serverId: "primary", actorId: staff.id }]);
+    f.store.checkSetup.mockRejectedValue(privateError);
+    f.discord.check.mockRejectedValue(privateError);
+    f.auth.serverStaff.mockRejectedValue(privateError);
+    f.game.configuration.mockRejectedValue(privateError);
+    const result = await f.service.setup(staff);
+    expect(result.checks.map((item) => item.status)).toEqual(["blocked", "blocked", "blocked", "blocked"]);
+    expect(JSON.stringify(result)).not.toContain("private connection");
+    expect(f.admin.act).not.toHaveBeenCalled();
+  });
+  it("distinguishes missing policy/channel configuration and an unfinished ballot", async () => {
+    const f = fixture(false);
+    delete f.environment.MAP_VOTES_CHANNEL_ID;
+    f.store.checkSetup.mockResolvedValue({ unfinished: true });
+    const result = await f.service.setup(staff);
+    expect(result.checks.map((item) => item.status)).toEqual(["review", "blocked", "blocked", "ok"]);
+    expect(f.discord.check).not.toHaveBeenCalled();
+    expect(f.auth.serverStaff).not.toHaveBeenCalled();
+    expect(f.store.finish).not.toHaveBeenCalled();
   });
   it.each([
     { serverId: "other" },
