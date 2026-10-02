@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { ConflictException, ServiceUnavailableException } from "@nestjs/common";
+import { ConflictException, ForbiddenException, ServiceUnavailableException } from "@nestjs/common";
 import { ServerEventsService } from "./server-events.service";
 import { ServerEventsStore } from "./server-events.store";
 import { fixtureServers } from "../admin/game-server-fixture";
@@ -21,7 +21,7 @@ import {
   voteEventFixture,
 } from "./event-fixtures";
 import { operation } from "./event-planner";
-import { eventView, type EventRecord, type EventSnapshot } from "./server-events.types";
+import { eventView, systemStops, type EventRecord, type EventSnapshot } from "./server-events.types";
 
 type Field = { id: string; value: boolean | number | null; editable: boolean };
 const lockField = (value: boolean | null, editable = true): Field => ({ id: "lockOverpopulated", value, editable });
@@ -900,6 +900,40 @@ describe("a 50v50 started by a community vote", () => {
     await f.service.tick();
     expect(actions(f)[1]).toMatchObject({ action: "broadcast" });
     expect(f.current()?.progress.lockDisabledAt).toBe(eventNow + 5_000);
+  });
+  it("retries through a Discord outage instead of parking the event with the lock off", async () => {
+    const f = fixture("primary", voteEventFixture);
+    f.auth.serverStaff.mockRejectedValue(new ServiceUnavailableException("Discord is unavailable."));
+    expect(await f.service.tick()).toBe(30_000);
+    expect(f.current()).toMatchObject({ state: "active", stop: null, operation: null });
+    expect(f.store.observe).not.toHaveBeenCalled();
+    expect(f.alerts.send).not.toHaveBeenCalled();
+    expect(f.admin.act).not.toHaveBeenCalled();
+    // A refusal is lost access: that still needs another administrator.
+    f.auth.serverStaff.mockRejectedValue(new ForbiddenException("Discord membership could not be verified."));
+    jest.setSystemTime(eventNow + 5_000);
+    await f.service.tick();
+    expect(f.current()?.state).toBe("needs_review");
+  });
+  it("keeps working through a single failed access check soon after a confirmed one", async () => {
+    const f = fixture("primary", voteEventFixture);
+    f.set({
+      ...f.record,
+      stop: { id: randomUUID(), ...systemStops.rounds, reason: "Done", at: "" },
+      state: "stopping",
+    });
+    f.set({ ...f.current()!, progress: { ...f.current()!.progress, endedAt: eventNow } });
+    f.game.configuration.mockResolvedValue({ revision: "r9", fields: [lockField(false)] });
+    // The first restore attempt is refused by the game; the access check that pass succeeds.
+    f.admin.act.mockResolvedValueOnce({ state: "failed", changed: false, message: "Busy", revision: undefined! });
+    await f.service.tick();
+    expect(f.admin.act).toHaveBeenCalledTimes(1);
+    // One Discord timeout a minute later: the restore retry still runs on the recent confirmation.
+    f.auth.serverStaff.mockRejectedValueOnce(new ServiceUnavailableException("Discord is unavailable."));
+    jest.setSystemTime(eventNow + 61_000);
+    await f.service.tick();
+    expect(actions(f).at(-1)).toMatchObject({ changes: { lockOverpopulated: true } });
+    expect(f.current()?.state).toBe("complete");
   });
   it("keeps its state, rather than waiting for staff, when Gramps stops before sending", async () => {
     const f = fixture("primary", voteEventFixture);

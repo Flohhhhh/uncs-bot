@@ -104,6 +104,8 @@ const RESTORE_GAP_MS = MINUTE;
 const WATCHDOG_MS = 5 * MINUTE;
 const WATCHDOG_WINDOW_MS = 24 * 60 * MINUTE;
 const ALERT_REPEAT_MS = 30 * MINUTE;
+/** A Discord outage reuses an administrator confirmation this recent; a refusal never does. */
+const ACCESS_GRACE_MS = 5 * MINUTE;
 const stopMessages: Record<SystemStop, string> = {
   rounds: "The voted 50v50 round(s) finished.",
   roster: "The closed team was not playing this round, so the 50v50 ended.",
@@ -122,6 +124,7 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
   private readonly alerted = new Map<string, { count: number; at: number }>();
   private readonly watched = new Map<string, number>();
   private readonly lockOffAlerted = new Set<string>();
+  private readonly confirmedAdmins = new Map<string, { staff: Staff; at: number }>();
   constructor(
     private readonly store: ServerEventsStore,
     private readonly servers: GameServers,
@@ -511,6 +514,32 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
       serverId: event.serverId,
     };
   }
+  /**
+   * A fresh administrator check for event effects. Only a refusal (Discord's 401/403/404, or a role
+   * below administrator) is lost access. Any other failure, such as a Discord timeout or 5xx, reuses a
+   * confirmation from the last five minutes, and is otherwise `null` so the pass is retried.
+   */
+  private async administrator(actor: Staff, serverId: string): Promise<Staff | "lost" | null> {
+    const key = `${serverId}:${actor.id}`;
+    let staff: Staff;
+    try {
+      staff = await this.auth.serverStaff(actor, serverId, true);
+    } catch (error) {
+      if (error instanceof ForbiddenException) {
+        this.confirmedAdmins.delete(key);
+        return "lost";
+      }
+      const confirmed = this.confirmedAdmins.get(key);
+      return confirmed && Date.now() - confirmed.at <= ACCESS_GRACE_MS ? confirmed.staff : null;
+    }
+    if (staff.role !== "admin") {
+      this.confirmedAdmins.delete(key);
+      return "lost";
+    }
+    if (this.confirmedAdmins.size > 500) this.confirmedAdmins.clear();
+    this.confirmedAdmins.set(key, { staff, at: Date.now() });
+    return staff;
+  }
   /** Logs, alerts staff once and once more after 30 minutes, never throws into a worker. */
   private async alert(serverId: string, key: string, message: string) {
     const now = Date.now();
@@ -594,12 +623,17 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
         await this.store.completeUnchanged(event.id, event.version);
         return 15_000;
       }
-      const actor = await this.auth.serverStaff(this.actor(event), serverId, true).catch(() => null);
-      if (actor?.role !== "admin") {
+      const actor = await this.administrator(this.actor(event), serverId);
+      if (actor === "lost") {
         await this.problem(
           event,
           "The responsible staff account no longer has administrator access. New moves have stopped; another administrator must review restoration.",
         );
+        return 30_000;
+      }
+      if (!actor) {
+        // A Discord outage is not lost access: nothing is sent this pass, and the next one checks again.
+        this.logger.warn(`Optional event ${event.id}: administrator access could not be checked. Retrying.`);
         return 30_000;
       }
       const game = this.servers.get(serverId);
@@ -969,8 +1003,9 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
       } else {
         actionSchema.parse(op.action);
         // Event ownership is checked separately; the system actor keeps event effects distinct from manual clicks.
-        const authorized = await this.auth.serverStaff(actor, event.serverId, true);
-        if (authorized.role !== "admin") throw new Error("Administrator access changed.");
+        const authorized = await this.administrator(actor, event.serverId);
+        if (authorized === "lost") throw new Error("Administrator access changed.");
+        if (!authorized) throw new Error("Administrator access could not be checked.");
         if (!(await this.inRound(event, op))) {
           await this.store.settle(
             event.id,
