@@ -1,4 +1,5 @@
-import { lightingLabel } from "../../../../../src/common/map-labels";
+import { lightingLabel, mapLabel } from "../../../../../src/common/map-labels";
+import { roundStamp } from "../../../../../src/common/game-round";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 import type { MapSelection } from "../../../../../src/common/server-settings";
@@ -48,6 +49,9 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
   const api = useGameApi();
   const admin = useAdmin();
   const [id, setId] = useState(() => crypto.randomUUID());
+  const readRound = () =>
+    admin.overview ? roundStamp(admin.overview.status, Date.parse(admin.overview.observedAt)) : null;
+  const [reviewedRound, setReviewedRound] = useState(readRound);
   const form = useRef<HTMLFormElement>(null);
   const returningToEdits = useRef(false);
   const submitted = useRef(false);
@@ -71,6 +75,7 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
   const requiresReason = ["kick", "ban", "unban", "whitelist-remove"].includes(action);
   const choicesReady = catalogReady && (action !== "map" || mapReady);
   const confirmationReady = !phrase || confirmation === phrase;
+  const roundReady = !phrase || !!reviewedRound;
   const affectsEveryone = !!phrase || action === "lighting";
   const warnLiveImpact = affectsEveryone || ["kick", "ban", "kill"].includes(action);
   useEffect(() => {
@@ -86,7 +91,7 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (submitted.current || !permitted || !choicesReady || !confirmationReady) return;
+    if (submitted.current || !permitted || !choicesReady || !confirmationReady || !roundReady) return;
     const values = new FormData(event.currentTarget);
     const reason = requiresReason ? String(values.get("reason") ?? "").trim() : `Staff action: ${title}.`;
     const target = steamId || String(values.get("steamId") ?? "");
@@ -103,7 +108,8 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
       setError("The confirmation must match exactly. Nothing was sent.");
       return;
     }
-    const input: Record<string, string | string[]> = { id, action, reason };
+    const input: Record<string, unknown> = { id, action, reason };
+    if (phrase) input.expectedRound = reviewedRound;
     if (requiresPlayer) input.steamId = target;
     if (requiresConfirmation) input.confirm = confirm;
     if (action === "message" || action === "broadcast") {
@@ -185,6 +191,14 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
             </strong>
           )}
           <p>{description}</p>
+          {phrase && reviewedRound && (
+            <p>Reviewed match: {mapLabel(reviewedRound.map)}. The round is checked again before sending.</p>
+          )}
+          {phrase && !reviewedRound && (
+            <p>
+              The match clock is unavailable. Close this review and refresh the dashboard before making a match change.
+            </p>
+          )}
           {action === "map" && <p>Use Queue next map to keep the current round running.</p>}
         </div>
       )}
@@ -312,6 +326,7 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
                 returningToEdits.current = true;
                 setId(crypto.randomUUID());
                 setConfirmation("");
+                setReviewedRound(readRound());
                 setResult(null);
               }}
             >
@@ -322,7 +337,9 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
             <button
               type="submit"
               className={`button ${phrase || action === "kill" || action === "ban" ? "danger" : "primary"}`}
-              disabled={!permitted || sending || submitted.current || !choicesReady || !confirmationReady}
+              disabled={
+                !permitted || sending || submitted.current || !choicesReady || !confirmationReady || !roundReady
+              }
             >
               {sending ? "Sending…" : title}
             </button>

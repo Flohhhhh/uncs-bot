@@ -19,6 +19,7 @@ export function overview(): Overview {
     status: {
       serverName: "The UNCs",
       map: "Harbor",
+      matchSeconds: 120,
       players: { current: 3, max: 100 },
       factionScores: [
         { name: "Valkyra", colorHex: "D86060", score: 10 },
