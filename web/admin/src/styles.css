@@ -113,10 +113,8 @@
 body {
   margin: 0;
 }
-button,
-input,
-select,
-textarea {
+/* Zero specificity, so the shared field style below can set its own size. */
+:where(button, input, select, textarea) {
   font: inherit;
 }
 button,
