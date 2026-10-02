@@ -29,8 +29,8 @@ All alert state (records, reviews, snoozes, "never flag", cooldowns, peaks) is *
 1. Create a private text channel in the staff Discord server (`ADMIN_GUILD_ID`), for example `#gramps-staff-alerts`. It must not be the voting channel, the community channel, the weekly leaderboard channel or any server's status-card channel; Gramps refuses those (`community-channel`).
 2. Deny **View Channel** to `@everyone`. If `@everyone` can view it, Gramps refuses to post and the status shows `public`.
 3. Allow the staff roles to view it.
-4. Give the Gramps bot, on that channel: **View Channel**, **Send Messages**, **Embed Links** and **Read Message History** (needed to note reviews on the posted message). No other permission is needed; Gramps never mentions `@everyone` or `@here` and sends no buttons.
-5. Optional: create or choose a staff role to ping for high-severity alerts and copy its ID. It must not be the `@everyone` role (whose ID equals the guild ID).
+4. Give the Gramps bot, on that channel: **View Channel**, **Send Messages**, **Embed Links** and **Read Message History** (needed to note reviews on the posted message). No other permission is needed, apart from the ping option in step 5; Gramps never mentions `@everyone` or `@here` and sends no buttons.
+5. Optional: create or choose a staff role to ping for high-severity alerts and copy its ID. It must not be the `@everyone` role (whose ID equals the guild ID). Discord only notifies a role when **Allow anyone to @mention this role** is on in the role's settings, or when the sender has **Mention @everyone, @here, and All Roles**. Turn on one of the two: the role setting, or that permission for Gramps on the staff channel. Gramps never changes the role or its own permissions, and still never mentions `@everyone` or `@here`. Until one is on, the status shows `ping: not-mentionable` and high alerts post without the ping.
 
 ### Railway variables
 
@@ -47,7 +47,7 @@ STAFF_ALERTS_SEEDING_ENABLED=true
 
 Then, a week later, `STAFF_ALERTS_PERFORMANCE_ENABLED=observe`, and after another week of calibration `true` (section 4). The full list with defaults is in `.env.example`; every setting is validated at boot, and JSON settings are never echoed in error messages.
 
-After deploying, open `GET /admin/api/servers/<server>/staff-alerts` (or the dashboard's Staff alerts tab once it lands) and check that `channel.state` is `ok` and `ping` is `ok` or `off`.
+After deploying, open `GET /admin/api/servers/<server>/staff-alerts` (or the dashboard's Staff alerts tab once it lands) and check that `channel.state` is `ok` and `ping` is `ok` or `off`. `not-mentionable` means a ping would notify nobody (step 5); `invalid` means the role is the `@everyone` role or is not in the staff server.
 
 ## 3. Alert kinds
 

@@ -282,7 +282,7 @@ describe("watch-list joins", () => {
       { ...values, STAFF_ALERTS_PING_ROLE_ID: role },
       { sources: [sourceFor()] },
     );
-    discord.channel.guild.roles.cache.set(role, { id: role });
+    discord.channel.guild.roles.cache.set(role, { id: role, mentionable: true });
     await pass(roster(listed, clean), 0);
     expect(alerts.list("primary")).toEqual([
       expect.objectContaining({

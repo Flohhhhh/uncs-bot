@@ -15,6 +15,8 @@ type Rich = ReturnType<typeof richFixture>;
 function richFixture(environment: Record<string, unknown> = {}) {
   const everyoneRole = { id: guild };
   const pingRole = "678901234567890123";
+  // A staff role set up as the guide says: anyone may @mention it.
+  const role = { id: pingRole, mentionable: true };
   let botAllowed: Permission[] = [
     PermissionFlagsBits.ViewChannel,
     PermissionFlagsBits.SendMessages,
@@ -29,7 +31,7 @@ function richFixture(environment: Record<string, unknown> = {}) {
     guildId: guild,
     guild: {
       members: { me, fetchMe: jest.fn().mockResolvedValue(me) },
-      roles: { everyone: everyoneRole, cache: new Map([[pingRole, { id: pingRole }]]) },
+      roles: { everyone: everyoneRole, cache: new Map([[pingRole, role]]) },
     },
     permissionsFor: jest.fn((target: unknown) => ({
       has: (wanted: Permission | Permission[]) => {
@@ -60,6 +62,8 @@ function richFixture(environment: Record<string, unknown> = {}) {
     client,
     env,
     pingRole,
+    role,
+    allow: (permission: Permission) => botAllowed.push(permission),
     deny: (permission: Permission) => (botAllowed = botAllowed.filter((item) => item !== permission)),
     makePublic: () => (everyoneCanView = true),
     offline: () => (ready = false),
@@ -165,15 +169,37 @@ describe("alert-only staff alert delivery", () => {
   });
 
   it.each([
-    ["the @everyone role (the guild ID)", { STAFF_ALERTS_PING_ROLE_ID: guild }, "invalid"],
-    ["a role missing from the guild", { STAFF_ALERTS_PING_ROLE_ID: "789012345678901234" }, "ok"],
-    ["no role", { STAFF_ALERTS_PING_ROLE_ID: undefined }, "off"],
-  ])("never pings %s", async (_, environment, state) => {
+    ["the @everyone role (the guild ID)", { STAFF_ALERTS_PING_ROLE_ID: guild }, "invalid", "invalid"],
+    ["a role missing from the guild", { STAFF_ALERTS_PING_ROLE_ID: "789012345678901234" }, "ok", "invalid"],
+    ["no role", { STAFF_ALERTS_PING_ROLE_ID: undefined }, "off", "off"],
+  ])("never pings %s", async (_, environment, state, status) => {
     const rich = richFixture(environment);
     expect(rich.service.pingState()).toBe(state);
+    await expect(rich.service.channelStatus()).resolves.toMatchObject({ state: "ok", ping: status });
     expect((await rich.service.raise(input()))?.pinged).toBe(false);
     expect(sent(rich, 0).content).toBeUndefined();
     expect(sent(rich, 0).allowedMentions.roles).toEqual([]);
+  });
+
+  it("pings only when Discord would notify the role: it is mentionable, or Gramps may mention all roles there", async () => {
+    const rich = richFixture();
+    rich.role.mentionable = false;
+    await expect(rich.service.channelStatus()).resolves.toEqual({
+      configured: true,
+      state: "ok",
+      ping: "not-mentionable",
+    });
+    const quiet = await rich.service.raise(input());
+    expect(quiet).toMatchObject({ pinged: false, delivery: { state: "posted", reason: null } });
+    expect(sent(rich, 0).content).toBeUndefined();
+    expect(sent(rich, 0).allowedMentions.roles).toEqual([]);
+    // Staff grant Mention @everyone, @here, and All Roles on the channel; Gramps never changes the role.
+    rich.allow(PermissionFlagsBits.MentionEveryone);
+    await expect(rich.service.channelStatus()).resolves.toMatchObject({ ping: "ok" });
+    // The unpinged alert used up no ping, so the next high alert pings at once.
+    expect((await rich.service.raise(input()))?.pinged).toBe(true);
+    expect(sent(rich, 1).content).toBe(`<@&${rich.pingRole}>`);
+    expect(rich.role).toEqual({ id: rich.pingRole, mentionable: false });
   });
 
   const refusals: [string, (rich: Rich) => void, string][] = [
