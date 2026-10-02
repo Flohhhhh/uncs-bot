@@ -1,3 +1,4 @@
+import { mapLabel, modeLabel, lightingLabel } from "../../../../../src/common/map-labels";
 import { useState, type CSSProperties, type ReactNode } from "react";
 import { ServerLink as Link } from "../../app/server-link";
 import { useGameAdmin as useAdmin } from "../../app/context";
@@ -56,7 +57,12 @@ export function OverviewPage() {
           }
           note="Current game population"
         />
-        <Metric label="CURRENT MAP" value={status.map} note={status.experiences?.join(" · ") || "Live game"} word />
+        <Metric
+          label="CURRENT MAP"
+          value={mapLabel(status.map)}
+          note={status.experiences?.map((id) => modeLabel(id)).join(" · ") || "Live game"}
+          word
+        />
         <Metric label="YOUR ACCESS" value={me.role} note="Verified through Discord" word />
         <Metric label="SERVER STATUS" value={stale ? "Unavailable" : "Connected"} note="RCON connection" word />
       </div>
@@ -202,7 +208,7 @@ export function WhitelistPage() {
       {savedIdsInvalid && (
         <div className="notice warning" role="status">
           {data.configuredInvalidEntryCount} saved whitelist entries have invalid SteamIDs. Saved status is shown for
-          valid entries. Configuration-based edits need those IDs corrected in the host panel.
+          valid entries. Edits preserve those entries. Correct them separately in the host panel.
         </div>
       )}
       {!data.configurationAvailable && (
@@ -399,19 +405,19 @@ export function MatchPage() {
   return (
     <>
       <div className="split">
-        <Card title="Current match" badge={<Badge>{status.map}</Badge>}>
+        <Card title="Current match" badge={<Badge>{mapLabel(status.map)}</Badge>}>
           <div className="card-body">
             <div className="info-row">
               <span>Map</span>
-              <strong>{status.map}</strong>
+              <strong>{mapLabel(status.map)}</strong>
             </div>
             <div className="info-row">
               <span>Lighting</span>
-              <strong>{status.lighting || "Not supplied"}</strong>
+              <strong>{(status.lighting && lightingLabel(status.lighting)) || "Not supplied"}</strong>
             </div>
             <div className="info-row">
               <span>Experience</span>
-              <strong>{status.experiences?.join(", ") || "Not supplied"}</strong>
+              <strong>{status.experiences?.map((id) => modeLabel(id)).join(", ") || "Not supplied"}</strong>
             </div>
             <p className="intro">
               Map and match actions affect everyone in the game. Confirm the exact action before sending it to the
@@ -452,8 +458,8 @@ export function MatchPage() {
             <Table headers={["MAP", "LIGHTING", "STATUS"]}>
               {rotation.entries.map((entry) => (
                 <tr key={entry.index}>
-                  <td>{entry.map}</td>
-                  <td>{entry.lighting || "—"}</td>
+                  <td>{mapLabel(entry.map)}</td>
+                  <td>{(entry.lighting && lightingLabel(entry.lighting)) || "—"}</td>
                   <td>
                     <Badge kind={entry.status === "now" ? "good" : "neutral"}>
                       {entry.denied ? "Unavailable" : entry.status || "In rotation"}

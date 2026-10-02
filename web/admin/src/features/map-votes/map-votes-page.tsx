@@ -1,3 +1,4 @@
+import { mapLabel, selectionLabel } from "../../../../../src/common/map-labels";
 import { useEffect, useRef, useState } from "react";
 import type { MapSelection, SettingsSnapshot } from "../../../../../src/common/server-settings";
 import type { mapVoteView } from "../../../../../src/map-votes/map-votes.types";
@@ -23,8 +24,6 @@ const stateLabels = {
   cancelled: "Closed by staff",
   needs_review: "Needs review",
 };
-const selectionLabel = (choice: MapSelection) =>
-  [choice.map, ...choice.experiences, choice.lighting, choice.zoneAlternator].filter(Boolean).join(" · ");
 
 function VoteReview({
   draft,
@@ -253,7 +252,7 @@ function EnabledMapVotes({
                     <button
                       className="button secondary small"
                       disabled={admin.busy}
-                      aria-label={`Remove ${choice.map}`}
+                      aria-label={`Remove ${mapLabel(choice.map)}`}
                       onClick={() => setChoices(choices.filter((entry) => entry.map !== choice.map))}
                     >
                       Remove

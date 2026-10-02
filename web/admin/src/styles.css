@@ -2276,9 +2276,15 @@ dialog textarea {
   min-width: 0;
 }
 .mode-choices label {
+  display: inline-flex;
   flex-direction: row;
   align-items: center;
-  margin: 10px 0;
+  gap: 6px;
+  min-height: 28px;
+  margin: 8px 12px 8px 0;
+}
+.mode-choices small {
+  display: block;
 }
 .mode-choices input {
   width: auto;
@@ -2299,6 +2305,54 @@ dialog textarea {
 .rotation-editor small {
   display: block;
   overflow-wrap: anywhere;
+}
+.rotation-queue {
+  max-height: 65vh;
+  overflow: auto;
+  padding: 4px;
+}
+.rotation-queue li {
+  position: relative;
+  background: var(--panel, #1c2221);
+}
+.rotation-entry-label {
+  flex: 1;
+  min-width: 150px;
+}
+.rotation-position {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.rotation-handle,
+.rotation-draft-card {
+  touch-action: none;
+  cursor: grab;
+}
+.rotation-handle:active,
+.rotation-draft-card:active {
+  cursor: grabbing;
+}
+.rotation-draft-card {
+  display: block;
+  position: relative;
+  margin-top: 16px;
+  text-align: left;
+}
+.rotation-draft-card small {
+  display: block;
+}
+.rotation-drop-end {
+  border: 1px dashed var(--line);
+  padding: 16px;
+  text-align: center;
+}
+.rotation-queue .is-over,
+.rotation-drop-end.is-over {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.rotation-queue .is-dragging {
+  box-shadow: 0 4px 16px #0008;
 }
 .change-summary {
   overflow-wrap: anywhere;
