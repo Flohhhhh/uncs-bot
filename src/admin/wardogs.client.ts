@@ -554,16 +554,22 @@ export class WardogsClient {
         throw new RconError("Choose lighting from the current server catalog.");
     }
     if (action.action === "map" || action.action === "match-end" || action.action === "match-restart") {
-      let currentRound: RoundStamp | null;
+      let current: z.infer<typeof statusSchema>;
       try {
-        const status = statusSchema.parse(await this.request("GET", "/v1/status"));
-        currentRound = roundStamp(status, Date.now());
+        current = statusSchema.parse(await this.request("GET", "/v1/status"));
       } catch {
         throw new RconError(
           "The current round could not be verified. Nothing was sent. Close this review and refresh the dashboard.",
         );
       }
-      if (!action.expectedRound || !currentRound || !sameRound(action.expectedRound, currentRound))
+      const reviewed = action.expectedRound;
+      const currentRound = roundStamp(current, Date.now());
+      if (
+        !reviewed ||
+        reviewed.map !== current.map ||
+        (reviewed.startedAt !== null &&
+          (!currentRound || !sameRound({ map: reviewed.map, startedAt: reviewed.startedAt }, currentRound)))
+      )
         return {
           state: "failed",
           changed: false,

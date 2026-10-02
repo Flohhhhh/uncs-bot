@@ -49,8 +49,13 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
   const api = useGameApi();
   const admin = useAdmin();
   const [id, setId] = useState(() => crypto.randomUUID());
-  const readRound = () =>
-    admin.overview ? roundStamp(admin.overview.status, Date.parse(admin.overview.observedAt)) : null;
+  const readRound = () => {
+    const snapshot = admin.overview;
+    if (!snapshot?.status.map) return null;
+    return (
+      roundStamp(snapshot.status, Date.parse(snapshot.observedAt)) ?? { map: snapshot.status.map, startedAt: null }
+    );
+  };
   const [reviewedRound, setReviewedRound] = useState(readRound);
   const form = useRef<HTMLFormElement>(null);
   const returningToEdits = useRef(false);
@@ -192,11 +197,16 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
           )}
           <p>{description}</p>
           {phrase && reviewedRound && (
-            <p>Reviewed match: {mapLabel(reviewedRound.map)}. The round is checked again before sending.</p>
+            <p>
+              Reviewed match: {mapLabel(reviewedRound.map)}.{" "}
+              {reviewedRound.startedAt === null
+                ? "This server can detect a changed map, but not a new round on the same map."
+                : "The round is checked again before sending."}
+            </p>
           )}
           {phrase && !reviewedRound && (
             <p>
-              The match clock is unavailable. Close this review and refresh the dashboard before making a match change.
+              The current map is unavailable. Close this review and refresh the dashboard before making a match change.
             </p>
           )}
           {action === "map" && <p>Use Queue next map to keep the current round running.</p>}
