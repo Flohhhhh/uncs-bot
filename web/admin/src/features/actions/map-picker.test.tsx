@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { api } from "../../api/client";
 import { AdminContext } from "../../app/context";
@@ -111,7 +111,7 @@ it("shows a pending saved zone honestly and maps the documented None sentinel to
     </AdminContext.Provider>,
   );
   expect(screen.getByRole("option", { name: "Saved: Zone.River" })).toBeInTheDocument();
-  expect(screen.getByText("Loading zone layouts…")).toBeInTheDocument();
+  expect(screen.getByText("Loading map options…")).toBeInTheDocument();
   expect(screen.queryByText("This server has not supplied zone layouts.")).not.toBeInTheDocument();
   view.rerender(
     <AdminContext.Provider value={context()}>
@@ -123,4 +123,53 @@ it("shows a pending saved zone honestly and maps the documented None sentinel to
     </AdminContext.Provider>,
   );
   expect(screen.getByRole("combobox", { name: /Zone layout/ })).toHaveValue("");
+});
+it("orders the fields by what depends on the map and summarizes the round beside its button", async () => {
+  request.mockResolvedValue({
+    experiences: [{ id: "KOTH" }, { id: "KOTH_InfantryOnly" }, { id: "KOTH_Hardcore" }],
+    zones: ["ZoneAlternator.Ozeti.Farmland.Circle"],
+  });
+  function Fixture() {
+    const [value, setValue] = useState<MapSelection>({ map: "", experiences: [] });
+    return (
+      <AdminContext.Provider value={context()}>
+        <MapPicker catalog={{ ...catalog, maps: [{ id: "Europe" }] }} value={value} change={setValue}>
+          <button type="button">Queue next map</button>
+        </MapPicker>
+      </AdminContext.Provider>
+    );
+  }
+  const { container } = render(<Fixture />);
+  const fields = () =>
+    [...container.querySelectorAll(".map-picker-fields > *")].map((field) => field.firstChild?.textContent);
+  expect(fields()).toEqual(["Map", "Game mode", "Zone layout", "Lighting"]);
+  expect(screen.queryByRole("group", { name: "Rules" })).not.toBeInTheDocument();
+  expect(container.querySelector(".map-picker-status")).toBeNull();
+  const footer = screen.getByRole("button", { name: "Queue next map" }).closest(".map-picker-footer")!;
+  expect(footer).toHaveTextContent(/^Queue next map$/);
+  fireEvent.change(screen.getByRole("combobox", { name: "Map" }), { target: { value: "Europe" } });
+  expect(screen.getByText("Loading map options…")).toBeInTheDocument();
+  const rules = await screen.findByRole("group", { name: "Rules" });
+  expect(fields()).toEqual(["Map", "Game mode", "Zone layout", "Rules", "Lighting"]);
+  expect(within(rules).getAllByRole("checkbox")).toHaveLength(2);
+  expect(container.querySelector(".map-picker-status")).toBeNull();
+  expect(screen.queryByText(/Leave both off/)).not.toBeInTheDocument();
+  expect(screen.queryByText("Only options advertised by this server.")).not.toBeInTheDocument();
+  expect(screen.queryByText("Choose a control-zone layout.")).not.toBeInTheDocument();
+  fireEvent.change(screen.getByRole("combobox", { name: "Game mode" }), { target: { value: "KOTH" } });
+  fireEvent.change(screen.getByRole("combobox", { name: "Zone layout" }), {
+    target: { value: "ZoneAlternator.Ozeti.Farmland.Circle" },
+  });
+  fireEvent.change(screen.getByRole("combobox", { name: "Lighting" }), { target: { value: "DayClear" } });
+  expect(footer).toHaveTextContent("Queue next mapSelected: Ozeti · King of the Hill · Farmland · Day clear");
+});
+it("explains missing zone layouts in the single status line", async () => {
+  request.mockResolvedValue({ experiences: catalog.experiences, zones: null });
+  render(
+    <AdminContext.Provider value={context()}>
+      <MapPicker catalog={catalog} value={{ map: "Kavkazi", experiences: [] }} change={vi.fn()} />
+    </AdminContext.Provider>,
+  );
+  expect(await screen.findByText("This server has not supplied zone layouts.")).toBeInTheDocument();
+  expect(screen.getByRole("combobox", { name: "Zone layout" })).toBeDisabled();
 });
