@@ -5,7 +5,7 @@ import { Card, Empty, date } from "../../components/ui";
 import { DataTable } from "../../components/data-table";
 
 export function GameLogView() {
-  const { data, error, loading, refresh } = useResource<GameLog>("game-log");
+  const { data, error, loading, refreshing, refresh } = useResource<GameLog>("game-log");
   const [all, setAll] = useState(false);
   const entries =
     data?.entries
@@ -28,7 +28,7 @@ export function GameLogView() {
             <input type="checkbox" checked={all} onChange={(event) => setAll(event.target.checked)} /> Include reads and
             connections
           </label>
-          <button type="button" className="button secondary small" disabled={loading} onClick={refresh}>
+          <button type="button" className="button secondary small" disabled={loading || refreshing} onClick={refresh}>
             Refresh game log
           </button>
         </div>

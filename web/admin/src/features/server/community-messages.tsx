@@ -4,14 +4,19 @@ import { ServerLink } from "../../app/server-link";
 import { Badge, Card, Empty, date } from "../../components/ui";
 
 export function CommunityMessages() {
-  const { data, error, loading, refresh } = useResource<CommunityMessagesStatus>("community-messages");
+  const { data, error, loading, refreshing, refresh } = useResource<CommunityMessagesStatus>("community-messages");
   return (
     <Card
       title="Automatic community messages"
       badge={<Badge>{error ? "STATUS UNAVAILABLE" : data?.enabled ? "CONFIGURED" : data ? "OFF" : "LOADING"}</Badge>}
     >
-      <div className="card-body" aria-busy={loading}>
-        <button type="button" className="button secondary small" disabled={loading} onClick={() => void refresh()}>
+      <div className="card-body" aria-busy={loading || refreshing}>
+        <button
+          type="button"
+          className="button secondary small"
+          disabled={loading || refreshing}
+          onClick={() => void refresh()}
+        >
           Refresh message status
         </button>
         {error ? (

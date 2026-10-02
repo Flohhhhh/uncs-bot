@@ -7,7 +7,7 @@ import {
   type ExecutionContext,
 } from "@nestjs/common";
 import { Reflector } from "@nestjs/core";
-import { BaseInteraction, GuildChannel, PermissionResolvable } from "discord.js";
+import { BaseInteraction, PermissionResolvable } from "discord.js";
 import { NecordExecutionContext } from "necord";
 import { formatPermissions, replyPermissionError } from "../utils/permission.utils";
 
@@ -31,17 +31,12 @@ export class RequireBotPermissionGuard implements CanActivate {
     }
 
     const [interaction] = NecordExecutionContext.create(context).getContext();
-    if (!interaction || !(interaction instanceof BaseInteraction) || !interaction.guild) return true;
+    if (!interaction || !(interaction instanceof BaseInteraction) || !interaction.guildId) return true;
 
-    const channel = interaction.channel;
-    if (!channel || !(channel instanceof GuildChannel)) return true;
-
-    const botMember = interaction.guild.members.me;
-    if (!botMember) return true;
-
-    const permissions = channel.permissionsFor(botMember);
-    if (!permissions || !permissions.has(requiredPermissions)) {
-      const missing = permissions?.missing(requiredPermissions) ?? requiredPermissions;
+    // Discord resolves these for the channel the command ran in, threads and uncached channels included.
+    const permissions = interaction.appPermissions;
+    if (!permissions.has(requiredPermissions)) {
+      const missing = permissions.missing(requiredPermissions);
       await replyPermissionError(
         interaction,
         `❌ I need the following permission(s) in this channel: **${formatPermissions(missing)}**.`,

@@ -46,6 +46,7 @@ function VoteReview({
   const rotationReady =
     !draft ||
     (!settings.loading &&
+      !settings.refreshing &&
       !settings.error &&
       positionReady(settings.data) &&
       settings.data?.revision === draft.revision);
@@ -114,14 +115,14 @@ function VoteReview({
             <div className="notice warning" role="alert">
               <p>
                 {settings.error ||
-                  (settings.loading
+                  (settings.loading || settings.refreshing
                     ? "Checking the rotation…"
                     : "The rotation changed or its position is unavailable. Return to the ballot and refresh.")}
               </p>
               <button
                 type="button"
                 className="button secondary"
-                disabled={busy || settings.loading}
+                disabled={busy || settings.loading || settings.refreshing}
                 onClick={settings.refresh}
               >
                 Check rotation
@@ -213,7 +214,7 @@ export function MapVotesPage() {
           <button
             type="button"
             className="button secondary"
-            disabled={admin.busy || resource.loading}
+            disabled={admin.busy || resource.loading || resource.refreshing}
             onClick={resource.refresh}
           >
             Refresh ballot history
@@ -257,6 +258,7 @@ export function MapVotesPage() {
             data={resource.data}
             error={resource.error}
             loading={resource.loading}
+            refreshing={resource.refreshing}
             refresh={resource.refresh}
             onDirty={setBallotDirty}
           />
@@ -274,12 +276,14 @@ function EnabledMapVotes({
   data,
   error,
   loading,
+  refreshing,
   refresh,
   onDirty,
 }: {
   data: VoteList;
   error: string;
   loading: boolean;
+  refreshing: boolean;
   refresh: () => void;
   onDirty: (value: boolean) => void;
 }) {
@@ -374,9 +378,12 @@ function EnabledMapVotes({
                         className="button secondary small"
                         disabled={admin.busy}
                         aria-label={`Remove ${selectionLabel(choice)}`}
-                        onClick={() =>
-                          setChoices(choices.filter((entry) => voteChoiceKey(entry) !== voteChoiceKey(choice)))
-                        }
+                        onClick={() => {
+                          const next = choices.filter((entry) => voteChoiceKey(entry) !== voteChoiceKey(choice));
+                          setChoices(next);
+                          // An emptied ballot is a fresh start; the next choice pins the then-current revision.
+                          if (!next.length) setRevision(null);
+                        }}
                       >
                         Remove
                       </button>
@@ -506,7 +513,7 @@ function EnabledMapVotes({
       {review && (
         <VoteReview
           {...review}
-          statusUnavailable={loading || !!error || active}
+          statusUnavailable={loading || refreshing || !!error || active}
           close={() => setReview(null)}
           finished={() => {
             if (review.draft) clear();
