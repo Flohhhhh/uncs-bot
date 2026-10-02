@@ -312,7 +312,7 @@ export async function changeServerConfiguration(
         const status = statusSchema.parse(await game.request("GET", "/v1/status"));
         const position = await rotationPosition(game, status, existing, doc, capabilities);
         if (position.currentIndex === null) throw new RconError(position.positionNote);
-        if (position.currentIndex !== action.currentIndex || status.map !== action.currentMap)
+        if (position.currentIndex !== action.currentIndex || !sameMap(status.map, action.currentMap))
           throw new RconError("The current round changed. Reload before queuing a map.");
         if (
           scalarValue(doc.text, ROTATION, "bEnabled")?.toLowerCase() !== "true" ||

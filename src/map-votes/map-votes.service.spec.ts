@@ -132,6 +132,28 @@ function fixture(enabled = true, serverId = "primary") {
 }
 
 describe("durable Discord map voting", () => {
+  it("opens a ballot when status and configuration use known names for the same map", async () => {
+    const f = fixture();
+    const overview = await f.game.overview();
+    f.game.overview.mockResolvedValue({ ...overview, status: { ...overview.status, map: "Bakurani" } });
+    await expect(f.service.start(staff, f.input)).resolves.toMatchObject({ state: "open" });
+    expect(f.store.create).toHaveBeenCalledWith(expect.objectContaining({ currentMap: "Kavkazi" }));
+    expect(f.discord.publish).toHaveBeenCalledTimes(1);
+    expect(f.admin.act).not.toHaveBeenCalled();
+  });
+  it("queues a ballot winner when the same map is reported by its known in-game name", async () => {
+    const f = fixture();
+    f.closing();
+    const overview = await f.game.overview();
+    f.game.overview.mockResolvedValue({ ...overview, status: { ...overview.status, map: "Bakurani" } });
+    await f.service.tick();
+    expect(f.admin.act).toHaveBeenCalledTimes(1);
+    expect(f.admin.act).toHaveBeenCalledWith(
+      expect.objectContaining({ serverId: "primary" }),
+      expect.objectContaining({ currentMap: "Kavkazi", entry: f.input.choices[1] }),
+    );
+    expect(f.store.finish).toHaveBeenCalledWith(f.record.id, "queued", expect.any(String));
+  });
   it("reports current open-ballot totals without closing, publishing or touching the game", async () => {
     const { service, store, record, game, discord, admin } = fixture(true, "event");
     store.history.mockResolvedValue([{ ...record, state: "open", winner: null, counts: [0, 0] }]);
@@ -542,6 +564,20 @@ describe("durable Discord map voting", () => {
       await f.service.tick();
     }
   }
+  it("keeps automatic observation valid across known configuration/status map names", async () => {
+    const f = automatic();
+    f.game.overview.mockImplementation(async () => ({
+      observedAt: new Date().toISOString(),
+      status: { serverName: "Test", map: "Bakurani", matchSeconds: undefined },
+    }));
+    await observeForWindow(f);
+    expect(f.discord.publish).toHaveBeenCalledTimes(1);
+    expect(f.store.create).toHaveBeenCalledWith(
+      expect.objectContaining({ currentMap: "Kavkazi", choices: f.input.choices }),
+      null,
+    );
+    expect(f.admin.act).not.toHaveBeenCalled();
+  });
   it("opens an automatic ballot from validated rotation entries for the explicit server, without a game write", async () => {
     const f = automatic("event");
     await observeForWindow(f);
