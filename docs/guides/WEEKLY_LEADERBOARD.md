@@ -13,14 +13,14 @@ Not included, because the data does not exist:
 
 ## Configuration
 
-| Setting                          | Default  | Notes                                                                                                         |
-| -------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------- |
-| `WEEKLY_LEADERBOARD_ENABLED`     | `false`  | Turns on the automatic post and the staff post-now. Preview works either way.                                 |
+| Setting                          | Default  | Notes                                                                                                                   |
+| -------------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `WEEKLY_LEADERBOARD_ENABLED`     | `false`  | Turns on the automatic post and the staff post-now. Preview works either way.                                           |
 | `WEEKLY_LEADERBOARD_CHANNEL_ID`  | none     | A text or announcement channel in `ADMIN_GUILD_ID`. The bot needs View Channel, Send Messages and Read Message History. |
-| `WEEKLY_LEADERBOARD_DAY`         | `sunday` | Lowercase weekday.                                                                                            |
-| `WEEKLY_LEADERBOARD_TIME`        | `20:00`  | `HH:MM`, 24-hour, New York time. 01:00–02:59 is refused so a DST change can never skip or repeat a slot.      |
-| `WEEKLY_LEADERBOARD_MIN_KILLS`   | `100`    | Kills in the week (1–100,000).                                                                                |
-| `WEEKLY_LEADERBOARD_MIN_PLAYERS` | `10`     | Players with a kill or a death in the week (5–1,000).                                                         |
+| `WEEKLY_LEADERBOARD_DAY`         | `sunday` | Lowercase weekday.                                                                                                      |
+| `WEEKLY_LEADERBOARD_TIME`        | `20:00`  | `HH:MM`, 24-hour, New York time. 01:00–02:59 is refused so a DST change can never skip or repeat a slot.                |
+| `WEEKLY_LEADERBOARD_MIN_KILLS`   | `100`    | Kills in the week (1–100,000).                                                                                          |
+| `WEEKLY_LEADERBOARD_MIN_PLAYERS` | `10`     | Players with a kill or a death in the week (5–1,000).                                                                   |
 
 Fixed in code (`src/weekly-leaderboard/`):
 
@@ -33,7 +33,7 @@ Fixed in code (`src/weekly-leaderboard/`):
 
 - **Slot:** the configured day and time as New York wall-clock time. With the defaults, Sunday 20:00 ET, which is Monday 00:00 UTC in daylight time and 01:00 UTC in standard time.
 - **Week:** from the previous slot up to the slot, measured on receipt time like the website's rolling periods. A week spanning a DST change is 167 or 169 hours. Both queries use `since` = previous slot and `until` = slot − 1 ms (the store treats `until` as inclusive), so totals and shout-outs always agree.
-- **Week key:** the ISO year and week of the slot's New York date, for example `2026-W40` for Sunday, October 4, 2026. Moving the post day within the same Monday–Sunday week keeps the key, so a week is not posted twice.
+- **Week key:** the ISO year and week of the slot's New York date, for example `2026-W40` for Sunday, October 4, 2026. The posted check only reads the channel from the current slot onward, so change `WEEKLY_LEADERBOARD_DAY` right after a post; moving the day earlier within a week that was already posted can post that week again.
 - **First possible post:** Sunday, October 4, 2026, 20:00 EDT, covering from 2026-09-28 00:00 UTC.
 - **Worker:** checks shortly after startup (60 seconds) and then every five minutes, for each configured server. It acts only within six hours after the slot. Turning the feature on midweek or deploying on a Wednesday never causes a surprise post; that week is recorded as `missed posting window`, and an administrator can still post it.
 
@@ -84,13 +84,13 @@ Stretch, hydrate, run it back. Full board: https://theuncsgaming.com/leaderboard
 
 **Shout-outs.** A kill is a non-suicide event with a linked killer. Each line appears only when its minimum is met; the section is left out when none qualify.
 
-| Label                        | Rule                                                         | Shown only if                                                                                                  |
-| ---------------------------- | ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
-| Still got it                 | Best `kills / max(deaths, 1)`, then more kills               | Among players with at least 10 kills                                                                           |
-| Reading glasses not required | Most headshot kills                                          | At least 3                                                                                                     |
-| Long-distance call           | Longest single kill; the earliest wins a tie                 | 10–2,000 m. Above 2,000 m the line is left out, because the source's distance units are not yet verified      |
-| Old faithful                 | Most-used weapon/cause across all kills                      | A cause on at least half of the kills, at least 5 uses, and a readable name                                   |
-| Where the knees hurt most    | Map with the most kills (catalog ID and in-game name merged) | Kills on at least 2 maps, and at least 5 on the top map                                                        |
+| Label                        | Rule                                                         | Shown only if                                                                                            |
+| ---------------------------- | ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
+| Still got it                 | Best `kills / max(deaths, 1)`, then more kills               | Among players with at least 10 kills                                                                     |
+| Reading glasses not required | Most headshot kills                                          | At least 3                                                                                               |
+| Long-distance call           | Longest single kill; the earliest wins a tie                 | 10–2,000 m. Above 2,000 m the line is left out, because the source's distance units are not yet verified |
+| Old faithful                 | Most-used weapon/cause across all kills                      | A cause on at least half of the kills, at least 5 uses, and a readable name                              |
+| Where the knees hurt most    | Map with the most kills (catalog ID and in-game name merged) | Kills on at least 2 maps, and at least 5 on the top map                                                  |
 
 A weapon or cause that looks like an internal identifier (containing `/`, `.` or `\`, a `BP_` prefix or a `_C` suffix) is never shown. Team kills are not excluded, because no team-kill tag has been observed yet; add an exclusion once the first real batch shows one.
 
