@@ -51,7 +51,13 @@ const base = {
     .optional(),
 };
 const player = { ...base, steamId };
-const expectedRound = z.object({ map: selection, startedAt: z.number().finite().nonnegative() }).strict().optional();
+const reviewedRound = z
+  .object(
+    { map: selection, startedAt: z.number().finite().nonnegative() },
+    { error: "The reviewed round is missing. Refresh the dashboard and open a new review." },
+  )
+  .strict();
+const expectedRound = reviewedRound.optional();
 const revision = z
   .string()
   .min(1)
@@ -124,8 +130,17 @@ export const actionSchema = z.discriminatedUnion("action", [
     })
     .strict(),
   z.object({ ...base, action: z.literal("broadcast"), message }).strict(),
-  z.object({ ...base, action: z.literal("match-end"), confirm: z.literal("END MATCH") }).strict(),
-  z.object({ ...base, action: z.literal("match-restart"), confirm: z.literal("RESTART MATCH") }).strict(),
+  z
+    .object({ ...base, action: z.literal("match-end"), confirm: z.literal("END MATCH"), expectedRound: reviewedRound })
+    .strict(),
+  z
+    .object({
+      ...base,
+      action: z.literal("match-restart"),
+      confirm: z.literal("RESTART MATCH"),
+      expectedRound: reviewedRound,
+    })
+    .strict(),
   z
     .object({
       ...base,
@@ -135,6 +150,7 @@ export const actionSchema = z.discriminatedUnion("action", [
       lighting: selection.optional(),
       zoneAlternator: selection.optional(),
       confirm: z.literal("CHANGE MAP"),
+      expectedRound: reviewedRound,
     })
     .strict(),
   z.object({ ...base, action: z.literal("lighting"), lighting: selection }).strict(),

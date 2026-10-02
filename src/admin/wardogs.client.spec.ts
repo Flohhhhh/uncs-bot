@@ -520,6 +520,7 @@ describe("current server map catalogs", () => {
     map: "Kavkazi",
     experiences: ["NorthAmerica_KOTH_01"],
     confirm: "CHANGE MAP",
+    expectedRound: { map: "Kavkazi", startedAt: 1_800_000_000_000 - 600_000 },
     reason: "Next community match",
   };
   const catalogResponse = (path: string) => {
@@ -559,10 +560,13 @@ describe("current server map catalogs", () => {
     expect(request.mock.calls.every(([method]) => method === "GET")).toBe(true);
   });
   it("omits empty optional selections exactly as the official console does", async () => {
+    jest.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
     const client = new WardogsClient(settings);
     const request = jest.spyOn(client, "request").mockImplementation(async (_method, path) => {
       if (path === "/v1/capabilities") return { routes };
       if (path === "/v1/match/map") return { message: "OK" };
+      if (path === "/v1/status")
+        return { serverName: "Test", map: "Kavkazi", matchSeconds: 600, players: { current: 100, max: 100 } };
       return catalogResponse(path);
     });
     await expect(client.execute({ ...mapAction, experiences: [], zoneAlternator: "None" })).resolves.toMatchObject({
