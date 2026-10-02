@@ -133,12 +133,24 @@ function EventReview({
               : "Inspect the event and action receipts first. If an action was interrupted, stop the affected Gramps instance before continuing. This saves the original lock value without undoing player moves."}
           </p>
           {review.kind === "restore" && (
-            <p>
-              {settings.error ||
-                (settings.loading
-                  ? "Reading current settings…"
-                  : `Population lock: ${lock?.value === true ? "on" : lock?.value === false ? "off" : "unavailable"} → ${review.event.originalLock ? "on" : "off"}.`)}
-            </p>
+            <div>
+              <p>
+                {settings.error ||
+                  (settings.loading
+                    ? "Reading current settings…"
+                    : `Population lock: ${lock?.value === true ? "on" : lock?.value === false ? "off" : "unavailable"} → ${review.event.originalLock ? "on" : "off"}.`)}
+              </p>
+              {settings.error && !result && (
+                <button
+                  type="button"
+                  className="button secondary small"
+                  disabled={busy || settings.loading}
+                  onClick={settings.refresh}
+                >
+                  Retry lock settings
+                </button>
+              )}
+            </div>
           )}
         </>
       )}
@@ -223,9 +235,19 @@ function EventDraft({ review, statusUnavailable }: { review: (draft: Draft) => v
     <Card title="Optional 50v50" subtitle="Warn players, balance two teams, and review event actions.">
       <div className="card-body">
         {(settings.error || stale) && (
-          <p className="notice warning" role="alert">
-            {settings.error || "Server settings changed. Discard this draft and refresh."}
-          </p>
+          <div className="notice warning" role="alert">
+            <p>{settings.error || "Server settings changed. Discard this draft and refresh."}</p>
+            {settings.error && (
+              <button
+                type="button"
+                className="button secondary small"
+                disabled={admin.busy || settings.loading}
+                onClick={settings.refresh}
+              >
+                Retry server settings
+              </button>
+            )}
+          </div>
         )}
         <RoundTimingNotice resource={roster} busy={admin.busy} message={timingMessage} />
         <div className="settings-grid">
@@ -354,9 +376,13 @@ function EventOperations({ event, close }: { event: Event; close: () => void }) 
       <p>
         {event.options.teams.join(" vs ")} · {event.serverName}. Latest 100 actions.
       </p>
-      {resource.error && <p role="alert">{resource.error}</p>}
+      {resource.error && (
+        <p className="notice warning" role="alert">
+          {resource.error} {resource.data && "Showing the last received actions."}
+        </p>
+      )}
       {!resource.data ? (
-        <Empty title="Loading actions…" />
+        <Empty title={resource.error ? "Event actions unavailable" : "Loading actions…"} />
       ) : !resource.data.operations.length ? (
         <Empty title="No actions recorded yet" />
       ) : (
@@ -402,8 +428,25 @@ export function EventsPage() {
   const [review, setReview] = useState<Review | null>(null);
   const [inspect, setInspect] = useState<Event | null>(null);
   if (admin.me.role !== "admin") return <Empty title="Administrator access required" />;
+  const errorNotice = resource.error && (
+    <div className="notice error" role="alert">
+      <p>
+        {resource.data?.enabled
+          ? "Event history could not be refreshed. Showing the last received records. Refresh before starting or restoring an event; stopping remains available."
+          : "Event status could not be loaded. Retry to check whether optional events are enabled."}
+      </p>
+      <button
+        type="button"
+        className="button secondary small"
+        disabled={admin.busy || resource.loading}
+        onClick={resource.refresh}
+      >
+        Retry event status
+      </button>
+    </div>
+  );
   if (!resource.data || (resource.error && !resource.data.enabled))
-    return <Empty title={resource.error || "Loading events…"} />;
+    return errorNotice || <Empty title="Loading events…" />;
   if (!resource.data.enabled)
     return (
       <Empty
@@ -414,12 +457,7 @@ export function EventsPage() {
   const active = resource.data.events.some((event) => event.state !== "complete");
   return (
     <>
-      {resource.error && (
-        <p className="notice error" role="alert">
-          Event history could not be refreshed. Showing the last received records. Refresh before starting or restoring
-          an event; stopping remains available.
-        </p>
-      )}
+      {errorNotice}
       {!active && (
         <EventDraft
           statusUnavailable={resource.loading || !!resource.error}
