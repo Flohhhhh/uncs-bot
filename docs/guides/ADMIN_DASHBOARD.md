@@ -1,18 +1,22 @@
 # The UNCs staff dashboard — powered by Gramps
 
-The approved staff address is `https://admin.theuncsgaming.com`, with Gramps serving its protected `/admin` pages and API. Applicant sign-in uses the separate `APPLICATION_ORIGIN` on the public website; staff sign-in uses `ADMIN_ORIGIN`. This code supports the separation, but production routing and both login flows still need verification. Gramps exposes `/admin` on its existing HTTP listener. It adds Discord staff sign-in, a live player roster, kicks, permanent bans/unbans, private messages, forced respawn, team changes, whitelist add/remove, broadcasts, map changes, lighting, end/restart match, a read-only rotation view, and a persistent action history.
+Staff use [The UNCs dashboard](https://admin.theuncsgaming.com/admin). Players apply at [the public whitelist page](https://theuncsgaming.com/whitelist). These use separate staff and applicant sign-in routes; an applicant session does not grant dashboard access. Staff login, production routing and read-only game access are verified. A genuine application followed by staff approval and a confirmed game grant still needs end-to-end acceptance.
 
 ## Current delivery status
 
-The first production release (`aa2e7a06`, from main commit `6ba444`) deployed on September 30, 2026, and applied the combined launch migration through Railway's existing pre-deploy command. The following rebuild (`bbbad04a`) reported `process.version` as `v22.23.3`; Gramps logged in to one Discord guild and reloaded its commands. The database checks below passed with the new features initially disabled.
+Checked October 2, 2026. The React dashboard is deployed. The [release audit](ADMIN_RELEASE_AUDIT.md) holds exact commits, test results, deployment receipts and historical checkpoints; use its newest section when checking what is live.
 
-Later the same day, Railway showed Floh's deployment `2338a988` online, `ADMIN_ENABLED=true`, `WHITELIST_APPLICATIONS_ENABLED=true`, and populated OAuth/staff/RCON variable names. Secret values were not inspected. The last observed `ADMIN_ORIGIN` was the generated Railway hostname, not the approved staff subdomain. This verifies configuration presence, **not successful Discord login, a working game connection, or the desired public routing**. Supporter, telemetry and community-worker activation was not verified. Do not overwrite Floh's settings from an older setup note. See the [release audit](ADMIN_RELEASE_AUDIT.md) for remaining checks.
+| Area                              | Current state and remaining acceptance                                                                                                                                                     |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Players, moderation and whitelist | Deployed with per-action review and recorded outcomes. Read-only production checks pass; controlled live mutations are not certified by those reads.                                       |
+| Match & maps                      | Current map/layout, next-round queue, editable rotation, map/mode selectors and drag/keyboard reordering are deployed. Actual next-round adoption still needs a controlled check.          |
+| Server settings                   | Fifteen documented scalar settings, a scoring slider with exact numeric input, saved-value timing and identity readouts are deployed. Host controls are identified separately.             |
+| Server activity                   | Combines observed changes, action receipts and received native combat events. The feed receiver is configured but its first native batch remains unverified.                               |
+| Welcome messages                  | Two short, spaced messages are configured; naturally occurring joins produced accepted game receipts. In-game popup presentation and round-message delivery remain unverified.             |
+| Voting and 50v50                  | Remain off. Automatic map voting is deployed; draft #69's saved map/mode/reminder controls need a human-owned migration and controlled acceptance. 50v50 also needs verified round timing. |
+| Public onboarding                 | Website application routing, revised Discord instructions and analytics are deployed. Analytics page-view reception is observed; genuine submission/approval remains unverified.           |
 
-The React dashboard and origin-separation cleanup are review changes, not the deployed frontend. The isolated React preview is `http://127.0.0.1:4320/admin`; its samples cannot contact the live game. The older combined preview on port 4318 does not establish production readiness.
-
-All 13 initial loopback probes passed their expected status, body, cache, redirect and cookie checks: health and shell/assets returned 200; protected APIs/login, Patreon intake and combat-feed intake returned 503; the public leaderboard returned 200 with disabled, empty data. These results describe the initial disabled configuration, not later settings, public HTTPS routing or a completed staff sign-in.
-
-The existing whitelist remains in place. There is no import, bulk replacement, expiry job, queue-tier emulation, bounty system, or tactical map. No Gramps cutover of the third-party welcome messages has been verified. The Gramps community worker and private Patreon ledger exist in the deployed source; their later activation and end-to-end integrations have not been verified. Seeding rewards and automatic donation recognition are not implemented. See the integration details below before enabling these features.
+The QR banner is prepared and independently scan-tested but not applied to the game. Verified zone-layout images remain outstanding. No queue tiers, automatic seeding rewards, donation-to-access automation or Discord voice-based team assignment are enabled.
 
 ## Local preview and checks
 
@@ -22,6 +26,8 @@ npm run preview:admin
 # http://127.0.0.1:4317/admin
 
 npm run test:admin
+npm run test:frontend
+npm run test:storage # requires the disposable PostgreSQL test database
 npm run typecheck
 npm run format:check
 npm run lint -- src/admin src/database/schema.ts src/database/database.module.ts src/database/database.types.ts src/env/env.ts src/app.module.ts scripts/preview-admin.ts scripts/run-prettier.ts
@@ -41,7 +47,9 @@ On September 30, 2026, the owner explicitly authorized the agent to generate, re
 
 The session table stores SHA-256 hashes of random 256-bit session tokens, a CSRF token, Discord identity and an eight-hour expiry. Expired sessions are cleaned up at login; logout deletes the session. The audit table records the action ID, staff identity, reason, target, validated request, timestamps and outcome. Its request ID is unique: retries cannot repeat an action. An initial durable record is required before contacting the game. A crash or lost response leaves an explicitly unknown result for staff to reconcile. Action history lists the latest 100 entries and supports exact action-ID lookup for older stored receipts. Lookup reads the stored outcome; it does not resend the action or confirm the current game state.
 
-## Connection setup
+Existing `0003_lovely_caretaker.sql` contains the original voting/event tables; the production voting columns were read successfully on October 2. Do not generate another copy of those tables. Draft [#69](https://github.com/Flohhhhh/uncs-bot/pull/69) requires a distinct, human-generated migration for `map_vote_policies` and nullable `map_votes.automation`, followed by the disposable storage suite and migration-drift check. Keep voting and reminders off until controlled acceptance. See [voting release steps](SERVER_COMMUNITY.md#automatic-community-map-voting).
+
+## Connection setup for a new deployment
 
 1. Keep `ADMIN_ENABLED=false` until the reviewed migration and connection details are in place.
 2. In the existing Gramps Discord application, add an exact OAuth redirect URI of `https://admin.theuncsgaming.com/admin/auth/callback`. The flow requires a Discord account with two-factor authentication enabled and requests only `identify`; Gramps's bot token verifies guild membership and assigned role IDs server-side.
@@ -54,13 +62,21 @@ All mutations require an exact Origin and a session-bound CSRF header. Membershi
 
 ## Giving staff access
 
-After the production connection is verified, access is managed through Discord roles. Choose dedicated roles such as **UNC Server Admin**, **UNC Server Moderator**, and **UNC Server Viewer**, and map their exact Discord role IDs to `ADMIN_ADMIN_ROLE_IDS`, `ADMIN_MODERATOR_ROLE_IDS`, and `ADMIN_VIEWER_ROLE_IDS`. These are suggested names, not existing configured roles; names alone grant nothing. The roles do not need Discord's Administrator permission.
+Access is managed through Discord roles. Choose dedicated roles such as **UNC Server Admin**, **UNC Server Moderator**, and **UNC Server Viewer**, and map their exact Discord role IDs to `ADMIN_ADMIN_ROLE_IDS`, `ADMIN_MODERATOR_ROLE_IDS`, and `ADMIN_VIEWER_ROLE_IDS`. These are suggested names, not existing configured roles; names alone grant nothing. The roles do not need Discord's Administrator permission.
 
-- **Admin:** all game controls, plus private application and supporter records when those features are enabled.
+- **Admin:** all controls and private application records on an authorized game server. The community-wide admin role separately controls private supporter records.
 - **Moderator:** kick, permanent ban/unban, private messages, forced respawn, team changes, and broadcasts.
 - **Viewer:** general dashboard reads, without actions or private application/supporter records.
 
 Assign a trusted person the mapped role in the configured Discord server, then send them `https://admin.theuncsgaming.com/admin`. They sign in with their own Discord account, must have completed server membership screening, and must have Discord two-factor authentication enabled. There is no shared website password or separate website account to create. Remove the mapped role to revoke that access: the next mutation checks membership again, while read access can remain cached for up to 30 seconds. A person who also has another permitted role or a configured owner ID retains that separate access.
+
+## Selecting and adding game servers
+
+The current game selector targets the selected server's clients, reads, actions, receipts, applications, feed and automation. Confirm the server name in each action review. An explicit registry requires an explicit server selection; it never silently sends a request to the legacy default. A changed connection version refuses an old review until the page is reloaded.
+
+For another server, add its permanent ID, display name and separate RCON connection to `WARDOGS_SERVERS` in the deployment secret store, following `.env.example`. Preserve the existing server as `primary`; do not recycle an ID for a different server. Give each feed a distinct feed-only token and each Discord status card a distinct destination. Optional `staffRoles` may narrow community staff access but cannot elevate it; configured owners retain owner access. Present-but-empty role lists deny non-owners. Whitelist grants remain separate per server.
+
+Use one Gramps replica initially. Read caches and courtesy action limits are per process, while sessions, action deduplication and stored voting/event operations use the database. The community-message worker has no cross-process leader election; multiple replicas or overlapping third-party schedulers can duplicate messages.
 
 ## Live whitelist behavior
 
@@ -84,24 +100,26 @@ The Live players page offers a destination beside each player, plus checkboxes f
 
 The roster reports faction codes (`RED`, `BLU`, `GRN`), while the team-change endpoint accepts the faction's current name. Resolve those codes through the official color palette and the running status response rather than assuming a faction name is always Blue. Read the roster after each change and distinguish a confirmed assignment from an accepted request awaiting observation. A confirmed assignment may still require the player to respawn. No forced kill is sent with a team move.
 
-Group moves use the same authenticated and audited operation for each player, spaced to respect the dashboard's action limit. Results are shown individually; an error or uncertain result stops the remaining moves for review. This is a staff-operated sequence in the open browser, not an unattended background job. Refresh or closing the page does not resume a partially completed group.
+Group moves use the same authenticated and audited operation for each player, spaced to respect the dashboard's action limit. **Stop remaining moves** prevents unsent requests while an already-sent request finishes. Results remain separate per player; an error or uncertain result stops the rest for review. Unsent players remain selected for a new review after refreshing. This sequence runs in the open browser and is not resumed after closing it.
+
+For an uncertain action, expand **Action details → Check saved result** in the review or team result. This reads its stored receipt without sending another game command. No receipt does not prove that the game did nothing. The same control is available after saving settings or a map selection; Action history still supports exact-ID lookup after the dialog is closed.
 
 No built-in per-clan preferred-team or team-slot reservation setting was found in the September 30 public RCON client/configuration. The game's overpopulation lock is a separate general balance setting. Any future automatic UNC preference should use a verified Steam roster, allow a choice of destination, and respect the running game's restrictions. Display-name searches are only staff search aids; they do not establish membership or trigger automatic moves. No preference automation is active.
 
 ## Limits and operations
 
-The optional admin-only [Patreon supporter ledger](PATREON_SUPPORTERS.md) records signed membership observations, checked payment receipts, linked Discord/Steam accounts and permanent founder promises. Its approved campaign runs September 30 through October 14, 2026, Eastern time, for a $5/month supporter tier. Provider events never directly grant or remove game access. Its production schema is applied; the feature remains off and the creator webhook is not connected.
+The optional admin-only [Patreon supporter ledger](PATREON_SUPPORTERS.md) records signed membership observations, staff-checked payment evidence, account matches and permanent founder promises. Availability and webhook delivery require separate verification; a membership observation does not verify payment or account ownership. Provider events never directly grant or remove game access.
 
 Recorded player statistics, the public server leaderboard and staff combat history are described in [Combat history](COMBAT_HISTORY.md). The independently authenticated game-event feed is configured in production, but its first native batch is still unverified. Configuration alone does not make the history live.
 
-The optional [Gramps community worker](SERVER_COMMUNITY.md) adds game welcome messages, generic round-transition broadcasts and updates to one existing Discord status message. All switches default off. It uses observed roster/round changes because authoritative join/end events are not documented; it does not announce a verified winner or promise results-screen timing. Configure the literal messages and existing Discord message in deployment settings, then disable overlapping third-party announcements before activation. No production cutover has been performed.
+The [Gramps community worker](SERVER_COMMUNITY.md) is configured for the approved welcome sequence and round notice. Announcements shows its loaded messages, spacing and process-local acknowledgments. It uses observed roster/round changes because authoritative join/end events are not documented; it does not announce a verified winner or promise results-screen timing. The separate Discord status card remains off. New installations default off and must avoid overlapping third-party announcements.
 
 The browser refreshes every 20 seconds while visible, stops background requests when hidden or during a confirmation dialog, and shares short cached server observations across staff. The game does not currently provide a documented player-roster push event. RCON honors `Retry-After`; mutations are never blindly retried. Capabilities are refreshed every minute and after transport errors. Unknown routes are disabled.
 
-Messages and reasons are conservatively limited to 200 characters. Bans are permanent until removed. A team change does not silently kill the player's character. “Restart match” reloads the match, not the host process. Host restarts, host scheduling, raw configuration editing, rotation editing, and unsupported game routes remain outside this dashboard version.
+Messages and reasons are conservatively limited to 200 characters. Bans are permanent until removed. A team change does not silently kill the player's character. **Queue next map** preserves the current match; match end/restart and map-change reviews explain their effects. “Change map” requests travel after the end-of-match screen; “Restart match” does not restart the host process. Settings display Now, Next match or Server restart from the game's supplied timing; a saved value alone does not prove live adoption.
 
-The actions use a single configured game server. Use one Gramps replica initially; its short read cache and courtesy action throttle are per process, while sessions and request deduplication are database-backed. Do not let multiple tools manage an automatic welcome/announcement schedule at the same time when a later cutover is performed.
+Host process restarts, restart schedules, listener/security settings and feed destinations remain host-managed. The dashboard links the host's after-match restart instructions but does not operate that scheduler. No verified game-server description setting exists: the official console's description is local to that browser. Raw config editing and unsupported routes are not exposed.
 
 Protocol references: [Wardogs API observations](https://github.com/warcon-app/warcon/blob/main/docs/wardogs-api.md), [Discord OAuth2](https://docs.discord.com/developers/topics/oauth2). The connected game's capabilities and readback are authoritative.
 
-See [Security review](ADMIN_SECURITY.md) and [September 30 Wardogs compatibility](WARDOGS_2026-09-30.md) for the current implementation and deployment limits. The companion website checkout documents same-origin routing in its ADMIN-INTEGRATION.md.
+See [Security review](ADMIN_SECURITY.md) and [WARDOGS compatibility](WARDOGS_2026-09-30.md) for the current implementation and deployment limits. The companion website checkout documents same-origin routing in its ADMIN-INTEGRATION.md.
