@@ -3,7 +3,11 @@ import type { StaffRole } from "./admin-policy";
 
 export const LEGACY_SERVER_ID = "primary";
 export const gameServerId = z.string().regex(/^[a-z][a-z0-9-]{0,39}$/, "Use a stable lowercase server ID.");
-export type GameServerSummary = { id: string; name: string; version: string };
+export const gameServerJoinId = z.string().uuid("Use the public Wardogs Join by ID code.");
+export type GameServerSummary = { id: string; name: string; version: string; joinId?: string };
+export function publicGameServer({ id, name, joinId }: GameServerSummary) {
+  return { id, name, ...(joinId ? { joinId } : {}) };
+}
 const roleIds = z.array(z.string().regex(/^\d{17,20}$/)).max(100);
 export const serverAccess = z.object({ admin: roleIds, moderator: roleIds, viewer: roleIds }).strict();
 export function restrictedServerRole(
@@ -42,6 +46,7 @@ export const gameServerConnections = z
     z
       .object({
         id: gameServerId,
+        joinId: gameServerJoinId.optional(),
         name: z
           .string()
           .trim()
@@ -86,11 +91,22 @@ export const gameServerConnections = z
     const ids = new Set<string>(),
       endpoints = new Set<string>(),
       cards = new Set<string>(),
-      feedTokens = new Set<string>();
+      feedTokens = new Set<string>(),
+      joinIds = new Set<string>();
     servers.forEach((server, index) => {
       if (ids.has(server.id))
         context.addIssue({ code: "custom", path: [index, "id"], message: "Server IDs must be unique." });
       ids.add(server.id);
+      if (server.joinId) {
+        const joinId = server.joinId.toLowerCase();
+        if (joinIds.has(joinId))
+          context.addIssue({
+            code: "custom",
+            path: [index, "joinId"],
+            message: "Each server needs its own join code.",
+          });
+        joinIds.add(joinId);
+      }
       if (server.feedToken) {
         if (feedTokens.has(server.feedToken) || servers.some((entry) => entry.password === server.feedToken))
           context.addIssue({

@@ -107,21 +107,38 @@ function fixture(
       configurationAvailable: true,
     })),
   };
+  const servers = fixtureServers(game);
   return {
     service: new ApplicationsService(
       store as unknown as ApplicationsStore,
       admin as unknown as AdminService,
       env as unknown as EnvService,
-      fixtureServers(game),
+      servers,
     ),
     store,
     admin,
     game,
+    servers,
     current: () => current,
   };
 }
 
 describe("private website whitelist requests", () => {
+  it("returns configured joining details without exposing connection metadata or reading the game", async () => {
+    const { service, servers, game } = fixture();
+    const joinId = "11111111-1111-4111-8111-111111111111";
+    jest.spyOn(servers, "list").mockReturnValue([
+      { id: "primary", name: "The UNCs", version: "private-connection-hash", joinId },
+      { id: "event", name: "Events", version: "other-connection-hash" },
+    ]);
+    const get = jest.spyOn(servers, "get");
+    expect((await service.me(applicant)).servers).toEqual([
+      { id: "primary", name: "The UNCs", joinId },
+      { id: "event", name: "Events" },
+    ]);
+    expect(get).not.toHaveBeenCalled();
+    expect(game.whitelist).not.toHaveBeenCalled();
+  });
   it("stores Discord identity only from authentication and keeps claims unverified", async () => {
     const { service, store } = fixture();
     const result = await service.submit(applicant, input);

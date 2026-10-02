@@ -1,7 +1,7 @@
 import { nonEmptyString } from "../common/schemas/non-empty-string.schema";
 import { z } from "zod";
 import { jsonSetting } from "./json-setting";
-import { gameServerConnections } from "../common/game-server";
+import { gameServerConnections, gameServerJoinId } from "../common/game-server";
 
 const discordId = z.string().regex(/^\d{17,20}$/, "Use a Discord numeric ID.");
 const communityMessage = z
@@ -53,6 +53,8 @@ export const Env = z.object({
   ADMIN_VIEWER_ROLE_IDS: discordIds,
   WARDOGS_RCON_URL: z.url().optional(),
   WARDOGS_RCON_PASSWORD: nonEmptyString.optional(),
+  /** Public game join code, never an RCON credential. Registry entries use their own joinId instead. */
+  WARDOGS_SERVER_JOIN_ID: gameServerJoinId.optional(),
   /** Explicit server registry. Never expose connection fields through public APIs. */
   WARDOGS_SERVERS: jsonSetting(gameServerConnections, 65_536).optional(),
   /** Requires a human-reviewed map-vote migration and a configured guild channel. */
