@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { api } from "../../api/client";
 import { AdminContext } from "../../app/context";
@@ -49,18 +49,29 @@ it("combines observations and actual action outcomes while the native feed is st
   expect(screen.getByText("Alice joined")).toBeInTheDocument();
   expect(request.mock.calls.every(([, options]) => !options?.method)).toBe(true);
 });
-it("keeps working sources visible when another source fails", async () => {
+it("keeps working sources and the failed-source warning visible until a pending refresh succeeds", async () => {
   const fallback = request.getMockImplementation()!;
   request.mockImplementation((path, options) =>
     path === "audit" ? Promise.reject(new Error("Unavailable")) : fallback(path, options),
   );
-  render(
-    <AdminContext.Provider value={context()}>
+  const view = (refreshVersion: number) => (
+    <AdminContext.Provider value={context({ refreshVersion })}>
       <ActivityFeed />
-    </AdminContext.Provider>,
+    </AdminContext.Provider>
   );
+  const rendered = render(view(0));
   expect(await screen.findByRole("alert")).toHaveTextContent("Action receipts");
   expect(screen.getByText("Alice joined")).toBeInTheDocument();
+  let finishRead!: (value: never) => void;
+  const pendingRead = new Promise<never>((resolve) => (finishRead = resolve));
+  request.mockImplementation((path, options) => (path === "audit" ? pendingRead : fallback(path, options)));
+  rendered.rerender(view(1));
+  await waitFor(() => expect(request.mock.calls.filter(([path]) => path === "audit")).toHaveLength(2));
+  expect(screen.getByRole("alert")).toHaveTextContent("Action receipts");
+  expect(screen.getByText("Alice joined")).toBeInTheDocument();
+  await act(async () => finishRead([] as never));
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(request.mock.calls.every(([, options]) => !options?.method)).toBe(true);
 });
 it("freezes the display for reading and resumes with newer observations", async () => {
   const view = (refreshVersion: number) => (
