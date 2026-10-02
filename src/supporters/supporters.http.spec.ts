@@ -12,6 +12,7 @@ import { SupportersModule } from "./supporters.module";
 import { SupportersStore } from "./supporters.store";
 import { DiscordRolesDiscord } from "../discord-roles/discord-roles.discord";
 import { DiscordRolesStore } from "../discord-roles/discord-roles.store";
+import { PatreonSyncService } from "./patreon-sync.service";
 
 const secret = "separate-patreon-webhook-secret";
 const values: Record<string, unknown> = {
@@ -31,6 +32,7 @@ describe("private supporters HTTP boundary", () => {
   const store = { ingest: jest.fn(), list: jest.fn(), mutate: jest.fn(), register: jest.fn(), recordPaypal: jest.fn() };
   const adminStore = { session: jest.fn() };
   const game = { execute: jest.fn() };
+  const sync = { configured: jest.fn(), status: jest.fn(), staffSync: jest.fn() };
   const config = {
     origin: "https://theuncs.example",
     clientId: "123",
@@ -51,6 +53,9 @@ describe("private supporters HTTP boundary", () => {
     store.mutate.mockResolvedValue({ ok: true, replayed: false });
     store.register.mockResolvedValue({ ok: true, replayed: false });
     store.recordPaypal.mockResolvedValue({ ok: true, replayed: false });
+    sync.configured.mockReturnValue(true);
+    sync.status.mockReturnValue({ configured: true, running: false, members: 2, lastError: null });
+    sync.staffSync.mockResolvedValue({ joined: false, sync: { configured: true, running: false, members: 2 } });
     adminStore.session.mockImplementation(async (key) =>
       key === hash(sessionToken)
         ? { userId: "123456789012345678", displayName: "Admin", csrf: "csrf", expiresAt: new Date(Date.now() + 60_000) }
@@ -70,6 +75,8 @@ describe("private supporters HTTP boundary", () => {
       .useValue({})
       .overrideProvider(DiscordRolesDiscord)
       .useValue({ ready: () => false })
+      .overrideProvider(PatreonSyncService)
+      .useValue(sync)
       .compile();
     app = module.createNestApplication({ rawBody: true });
     await app.init();
@@ -204,6 +211,60 @@ describe("private supporters HTTP boundary", () => {
       .expect(200);
     expect(store.list).toHaveBeenCalledWith("123", expect.any(Object), undefined, "old%_member", undefined);
     expect(result.body).toMatchObject({ search: "old%_member", limit: 100 });
+  });
+  it("returns the additive Patreon sync status with the private list", async () => {
+    const result = await request(app.getHttpServer())
+      .get("/admin/api/supporters")
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .expect(200);
+    expect(result.body).toMatchObject({
+      configured: true,
+      webhookConfigured: true,
+      supporters: [],
+      sync: { configured: true, running: false, members: 2, lastError: null },
+    });
+  });
+  it("starts a Patreon sync only for a fresh admin with same-origin CSRF", async () => {
+    const endpoint = "/admin/api/supporters/sync";
+    await request(app.getHttpServer()).post(endpoint).expect(401);
+    await request(app.getHttpServer())
+      .post(endpoint)
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .expect(403);
+    await request(app.getHttpServer())
+      .post(endpoint)
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .set("Origin", "https://other.example")
+      .set("X-CSRF-Token", "csrf")
+      .expect(403);
+    jest.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ roles: ["moderator"] })));
+    await request(app.getHttpServer())
+      .post(endpoint)
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .set("Origin", config.origin)
+      .set("X-CSRF-Token", "csrf")
+      .expect(403);
+    expect(sync.staffSync).not.toHaveBeenCalled();
+    jest.mocked(fetch).mockImplementation(async () => new Response(JSON.stringify({ roles: ["staff"] })));
+    const result = await request(app.getHttpServer())
+      .post(endpoint)
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .set("Origin", config.origin)
+      .set("X-CSRF-Token", "csrf")
+      .expect(201);
+    expect(result.body).toEqual({ ok: true, joined: false, sync: { configured: true, running: false, members: 2 } });
+    expect(result.headers["cache-control"]).toBe("no-store");
+    expect(sync.staffSync).toHaveBeenCalledTimes(1);
+    sync.configured.mockReturnValue(false);
+    await request(app.getHttpServer())
+      .post(endpoint)
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .set("Origin", config.origin)
+      .set("X-CSRF-Token", "csrf")
+      .expect(503);
+    expect(sync.staffSync).toHaveBeenCalledTimes(1);
+    expect(store.mutate).not.toHaveBeenCalled();
+    expect(game.execute).not.toHaveBeenCalled();
   });
   it("requires admin, same-origin CSRF and campaign attestation for manual donor entry", async () => {
     const endpoint = "/admin/api/supporters/manual-member";

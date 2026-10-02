@@ -11,6 +11,7 @@ import {
   type SupporterProvider,
 } from "../database/supporters.schema";
 import type { Staff } from "../admin/admin.types";
+import { firstPaidEventId, type PatreonMemberSnapshot } from "./patreon.client";
 import {
   FOUNDER_PAYMENT_SOURCES,
   founderBlockedMessages,
@@ -27,20 +28,105 @@ import {
   type SupporterView,
 } from "./supporters.types";
 
+export const PATREON_SYNC_ACTOR = { id: "system:patreon-sync", name: "Patreon sync" } as const;
+export type ApiImportResult = {
+  memberId: string;
+  patreonMemberId: string;
+  created: boolean;
+  updated: boolean;
+  payments: number;
+  revoked: number;
+  discordLinked: boolean;
+  conflict: "discord-in-use" | "discord-differs" | null;
+};
+/** A founder promise for staff review, with the payment that is no longer verified. */
+export type FounderReview = {
+  supporterId: string;
+  patreonMemberId: string;
+  paymentId: string;
+  paymentSource: string;
+  reference: string;
+  unverifiedPaymentId: string;
+  unverifiedReference: string;
+};
+
 type Executor = Pick<Database, "select" | "execute">;
 type MemberRow = typeof supporterMembers.$inferSelect;
 type PaymentRow = typeof supporterPayments.$inferSelect;
 type Identity = { id: string; discordId: string | null; steamId: string | null };
 // Internal columns used to explain founder readiness; removed before a view leaves the store.
 type StoredSupporter = Omit<SupporterView, "founderBlockedReason" | "needsDiscordLink"> & {
-  founderCandidate: { payment: PaymentView; earlier: boolean } | null;
+  founderCandidate: { payment: PaymentView; earlier: boolean; copyUnverified: boolean } | null;
   otherFounder: boolean;
 };
+type ObservedFields = Pick<PatreonObservation, "displayName" | "patronStatus" | "lastChargeStatus" | "lastChargeAt">;
 
 const qualifyingSources = sql`(${sql.join(
   FOUNDER_PAYMENT_SOURCES.map((source) => sql`${source}`),
   sql`, `,
 )})`;
+
+// last_charge_date orders charge observations, not membership changes. An older charge never replaces
+// newer state, and an undated observation preserves the last known charge.
+function observedPatch(member: MemberRow, observation: ObservedFields) {
+  const olderCharge = member.lastChargeAt && observation.lastChargeAt && observation.lastChargeAt < member.lastChargeAt;
+  return !olderCharge
+    ? {
+        displayName: observation.displayName,
+        patronStatus: observation.patronStatus,
+        ...(observation.lastChargeAt || !member.lastChargeAt
+          ? { lastChargeStatus: observation.lastChargeStatus, lastChargeAt: observation.lastChargeAt }
+          : {}),
+      }
+    : {};
+}
+/**
+ * Staff estimate a receipt's time from Patreon's date-only payment history, so the imported row for the same charge
+ * can fall on either side of it. Monthly charges are weeks apart.
+ */
+const RECEIPT_COPY_TOLERANCE = "interval '36 hours'";
+/**
+ * Lateral subquery for the imported copy of the staff receipt aliased `receipt`: the patreon_api payment with the
+ * receipt's amount and currency nearest in time to it, within the tolerance. Yields no row for other sources.
+ */
+const receiptCopy = (receipt: string) =>
+  sql.raw(`(SELECT api.id, api.verification_state FROM supporter_payments api
+      WHERE ${receipt}.source = 'manual_receipt' AND api.member_id = ${receipt}.member_id AND api.source = 'patreon_api'
+      AND api.amount_cents = ${receipt}.amount_cents AND api.currency = ${receipt}.currency
+      AND api.paid_at BETWEEN ${receipt}.paid_at - ${RECEIPT_COPY_TOLERANCE} AND ${receipt}.paid_at + ${RECEIPT_COPY_TOLERANCE}
+      ORDER BY abs(extract(epoch FROM api.paid_at - ${receipt}.paid_at)), api.paid_at, api.id LIMIT 1)`);
+/**
+ * The founder rule's earlier-payment test for the payment aliased `p` and its receipt copy `dup`, for every provider.
+ * founderCheck applies the same test. The imported copy of a staff receipt's own charge is not an earlier payment, and
+ * webhook status rows (no amount, repeating charges the authenticated history covers) never block a Patreon API payment.
+ */
+const earlierPayment = sql.raw(`EXISTS (SELECT 1 FROM supporter_payments earlier
+            WHERE earlier.member_id = p.member_id AND earlier.paid_at < p.paid_at AND earlier.id IS DISTINCT FROM dup.id
+            AND (p.source <> 'patreon_api' OR earlier.source <> 'signed_status'))`);
+const sha256 = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+/** Canonical member snapshot: an unchanged Patreon record hashes the same and adds no observation. */
+export function apiSnapshotHash(campaignId: string, snapshot: PatreonMemberSnapshot) {
+  return sha256({
+    source: "patreon-api:v1",
+    campaignId,
+    patreonMemberId: snapshot.patreonMemberId,
+    displayName: snapshot.displayName,
+    patronStatus: snapshot.patronStatus,
+    lastChargeStatus: snapshot.lastChargeStatus,
+    lastChargeAt: snapshot.lastChargeAt?.toISOString() ?? null,
+    historyComplete: snapshot.historyComplete,
+    events: [...snapshot.events]
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .map((event) => [
+        event.id,
+        event.date.toISOString(),
+        event.amountCents,
+        event.currency,
+        event.paymentStatus,
+        event.type,
+      ]),
+  });
+}
 
 export function paymentView(row: PaymentRow): PaymentView {
   return {
@@ -154,25 +240,11 @@ export class SupportersStore {
         .onConflictDoNothing()
         .returning({ hash: supporterObservations.hash });
       if (!inserted) return { duplicate: true };
-      // last_charge_date orders charge observations, not membership changes. An
-      // undated/equal-date update is always pending review, never an entitlement.
-      const olderCharge =
-        member.lastChargeAt && observation.lastChargeAt && observation.lastChargeAt < member.lastChargeAt;
+      // An undated/equal-date update is always pending review, never an entitlement.
       await tx
         .update(supporterMembers)
         .set({
-          ...(!olderCharge
-            ? {
-                displayName: observation.displayName,
-                patronStatus: observation.patronStatus,
-                ...(observation.lastChargeAt || !member.lastChargeAt
-                  ? {
-                      lastChargeStatus: observation.lastChargeStatus,
-                      lastChargeAt: observation.lastChargeAt,
-                    }
-                  : {}),
-              }
-            : {}),
+          ...observedPatch(member, observation),
           observedAt: observation.receivedAt,
           reviewState: "pending",
           version: member.version + 1,
@@ -200,6 +272,194 @@ export class SupportersStore {
   }
 
   /**
+   * Imports one authenticated Patreon API member. Each Paid pledge event becomes one verified
+   * patreon_api payment keyed by its event ID; a later non-Paid status marks that payment unverified.
+   * Founder records are never touched here.
+   */
+  async importApiMember(campaignId: string, snapshot: PatreonMemberSnapshot, receivedAt: Date) {
+    const hash = apiSnapshotHash(campaignId, snapshot);
+    const firstId = firstPaidEventId(snapshot.events, snapshot.historyComplete);
+    return this.db.transaction(async (tx): Promise<ApiImportResult> => {
+      const [created] = await tx
+        .insert(supporterMembers)
+        .values({ id: randomUUID(), campaignId, patreonMemberId: snapshot.patreonMemberId, observedAt: receivedAt })
+        .onConflictDoNothing()
+        .returning({ id: supporterMembers.id });
+      const [member] = await tx
+        .select()
+        .from(supporterMembers)
+        .where(
+          and(
+            eq(supporterMembers.campaignId, campaignId),
+            eq(supporterMembers.patreonMemberId, snapshot.patreonMemberId),
+          ),
+        )
+        .for("update");
+      const [observed] = await tx
+        .insert(supporterObservations)
+        .values({
+          hash,
+          memberId: member.id,
+          receivedAt,
+          trigger: "api:sync",
+          patronStatus: snapshot.patronStatus,
+          lastChargeStatus: snapshot.lastChargeStatus,
+          lastChargeAt: snapshot.lastChargeAt,
+        })
+        .onConflictDoNothing()
+        .returning({ hash: supporterObservations.hash });
+      const result: ApiImportResult = {
+        memberId: member.id,
+        patreonMemberId: snapshot.patreonMemberId,
+        created: !!created,
+        updated: !!observed && !created,
+        payments: 0,
+        revoked: 0,
+        discordLinked: false,
+        conflict: null,
+      };
+      // An unchanged snapshot keeps the member's review state; a changed one needs review like a webhook.
+      const patch: Partial<typeof supporterMembers.$inferInsert> = observed
+        ? { ...observedPatch(member, snapshot), observedAt: receivedAt, reviewState: "pending" }
+        : {};
+      const actions: (typeof supporterActions.$inferInsert)[] = [];
+      let paymentsChanged = false;
+      const existing = new Map(
+        (
+          await tx
+            .select()
+            .from(supporterPayments)
+            .where(and(eq(supporterPayments.memberId, member.id), eq(supporterPayments.source, "patreon_api")))
+        ).map((row) => [row.reference, row]),
+      );
+      for (const event of [...snapshot.events].sort((a, b) => a.date.getTime() - b.date.getTime())) {
+        const row = existing.get(event.id);
+        const paid = event.paymentStatus === "Paid";
+        if (paid && !row) {
+          const [inserted] = await tx
+            .insert(supporterPayments)
+            .values({
+              id: randomUUID(),
+              memberId: member.id,
+              campaignId,
+              paidAt: event.date,
+              amountCents: event.amountCents,
+              currency: event.currency,
+              source: "patreon_api",
+              reference: event.id,
+              verificationState: "verified",
+              firstSuccessfulPaymentVerified: event.id === firstId,
+              verifiedBy: PATREON_SYNC_ACTOR.id,
+              recordedBy: PATREON_SYNC_ACTOR.id,
+              recordedAt: receivedAt,
+            })
+            .onConflictDoNothing()
+            .returning({ id: supporterPayments.id });
+          if (inserted) result.payments++;
+          continue;
+        }
+        if (!row) continue;
+        // A truncated history cannot prove or disprove the first payment, so it keeps the earlier answer.
+        const first = paid && (snapshot.historyComplete ? event.id === firstId : row.firstSuccessfulPaymentVerified);
+        const state = paid ? "verified" : "unverified";
+        if (row.verificationState === state && row.firstSuccessfulPaymentVerified === first) continue;
+        await tx
+          .update(supporterPayments)
+          .set({ verificationState: state, firstSuccessfulPaymentVerified: first })
+          .where(eq(supporterPayments.id, row.id));
+        paymentsChanged = true;
+        if (row.verificationState === state) continue;
+        if (!paid) result.revoked++;
+        actions.push({
+          id: randomUUID(),
+          memberId: member.id,
+          actorId: PATREON_SYNC_ACTOR.id,
+          actorName: PATREON_SYNC_ACTOR.name,
+          kind: "patreon-payment-status",
+          reason: `Patreon reported this payment as ${event.paymentStatus ?? "unknown"}.`,
+          fingerprint: sha256({ kind: "patreon-payment-status", paymentId: row.id, state, hash }),
+          details: {
+            paymentId: row.id,
+            reference: row.reference,
+            previousVerificationState: row.verificationState,
+            verificationState: state,
+            paymentStatus: event.paymentStatus,
+          },
+          createdAt: receivedAt,
+        });
+      }
+      if (snapshot.discordId && member.discordId !== snapshot.discordId) {
+        if (member.discordId) result.conflict = "discord-differs";
+        else {
+          const [other] = await tx
+            .select({ id: supporterMembers.id })
+            .from(supporterMembers)
+            .where(
+              and(
+                eq(supporterMembers.campaignId, campaignId),
+                eq(supporterMembers.discordId, snapshot.discordId),
+                ne(supporterMembers.id, member.id),
+              ),
+            )
+            .limit(1);
+          if (other) result.conflict = "discord-in-use";
+          else {
+            patch.discordId = snapshot.discordId;
+            result.discordLinked = true;
+            actions.push({
+              id: randomUUID(),
+              memberId: member.id,
+              actorId: PATREON_SYNC_ACTOR.id,
+              actorName: PATREON_SYNC_ACTOR.name,
+              kind: "patreon-discord-link",
+              reason: "Patreon reported the Discord account this patron connected.",
+              fingerprint: sha256({ kind: "patreon-discord-link", memberId: member.id, discordId: snapshot.discordId }),
+              details: {
+                discordId: snapshot.discordId,
+                previousDiscordId: null,
+                patreonMemberId: snapshot.patreonMemberId,
+              },
+              createdAt: receivedAt,
+            });
+          }
+        }
+      }
+      if (observed || result.payments || paymentsChanged || result.discordLinked)
+        await tx
+          .update(supporterMembers)
+          .set({ ...patch, version: member.version + 1 })
+          .where(eq(supporterMembers.id, member.id));
+      for (const action of actions) await tx.insert(supporterActions).values(action);
+      return result;
+    });
+  }
+
+  /**
+   * Permanent founder promises for staff review: the founder's own payment, or an imported payment dated inside the
+   * founder window (widened by the receipt-copy tolerance), is no longer verified. This also covers a founder awarded
+   * on a staff receipt whose charge Patreon later reports as refunded, declined or fraudulent.
+   */
+  async founderReviews(campaignId: string): Promise<FounderReview[]> {
+    const tolerance = sql.raw(RECEIPT_COPY_TOLERANCE);
+    const result = await this.db.execute<FounderReview>(sql`
+      SELECT f.member_id AS "supporterId", m.patreon_member_id AS "patreonMemberId", f.payment_id AS "paymentId",
+        q.source AS "paymentSource", q.reference,
+        unverified.id AS "unverifiedPaymentId", unverified.reference AS "unverifiedReference"
+      FROM supporter_founders f
+      JOIN supporter_members m ON m.id = f.member_id
+      JOIN supporter_payments q ON q.id = f.payment_id
+      JOIN LATERAL (SELECT x.id, x.reference FROM supporter_payments x
+        WHERE x.member_id = f.member_id AND x.verification_state <> 'verified'
+        AND (x.id = f.payment_id OR (x.source = 'patreon_api'
+          AND x.paid_at >= f.window_start - ${tolerance} AND x.paid_at < f.window_end + ${tolerance}))
+        ORDER BY (x.id = f.payment_id) DESC, x.paid_at, x.id LIMIT 1) unverified ON true
+      WHERE m.campaign_id = ${campaignId}
+      ORDER BY f.awarded_at, f.member_id LIMIT 50
+    `);
+    return result.rows;
+  }
+
+  /**
    * PayPal supporters are always listed. Patreon supporters are listed only for the configured
    * campaign, so a null campaign (Patreon not configured) returns the PayPal ledger alone.
    */
@@ -214,6 +474,8 @@ export class SupportersStore {
       sql.raw(
         `json_build_object('id', ${alias}.id, 'paidAt', ${alias}.paid_at, 'amountCents', ${alias}.amount_cents, 'currency', ${alias}.currency, 'source', ${alias}.source, 'reference', ${alias}.reference, 'verificationState', ${alias}.verification_state, 'firstSuccessfulPaymentVerified', ${alias}.first_successful_payment_verified, 'minimumConfirmed', ${alias}.minimum_confirmed, 'recordedBy', ${alias}.recorded_by)`,
       );
+    // The founder-eligible payment prefers a staff receipt over the imported copy of the same charge, because the
+    // current dashboard awards only on a receipt.
     const result = await this.db.execute<{ supporter: StoredSupporter }>(sql`
       SELECT json_build_object('id', m.id, 'provider', m.provider, 'patreonMemberId', m.patreon_member_id,
         'confirmKey', coalesce(m.patreon_member_id, m.id::text), 'displayName', m.display_name,
@@ -222,21 +484,25 @@ export class SupportersStore {
         'identityState', CASE WHEN m.discord_id IS NOT NULL AND m.steam_id IS NOT NULL THEN 'staff_linked' ELSE 'unlinked' END,
         'version', m.version,
         'latestPayment', (SELECT ${payment("p")} FROM supporter_payments p WHERE p.member_id = m.id
-          ORDER BY (p.source IN ${qualifyingSources}) DESC, p.paid_at DESC, p.recorded_at DESC LIMIT 1),
+          ORDER BY (p.verification_state = 'verified') DESC, (p.source IN ${qualifyingSources}) DESC, p.paid_at DESC,
+            (p.source = 'manual_receipt') DESC, p.recorded_at DESC LIMIT 1),
         'payments', (SELECT coalesce(json_agg(recent.payment ORDER BY recent.paid_at DESC, recent.recorded_at DESC), '[]'::json)
           FROM (SELECT ${payment("p")} AS payment, p.paid_at, p.recorded_at FROM supporter_payments p
             WHERE p.member_id = m.id ORDER BY p.paid_at DESC, p.recorded_at DESC LIMIT 20) recent),
-        'founderEligiblePayment', (SELECT ${payment("p")} FROM supporter_payments p WHERE p.member_id = m.id
+        'founderEligiblePayment', (SELECT ${payment("p")} FROM supporter_payments p
+          LEFT JOIN LATERAL ${receiptCopy("p")} dup ON true
+          WHERE p.member_id = m.id
           AND ${policy.configured} AND p.source IN ${qualifyingSources} AND p.verification_state = 'verified'
-          AND p.first_successful_payment_verified AND NOT EXISTS (SELECT 1 FROM supporter_payments earlier WHERE earlier.member_id = m.id AND earlier.paid_at < p.paid_at)
+          AND p.first_successful_payment_verified AND NOT ${earlierPayment}
+          AND (dup.id IS NULL OR dup.verification_state = 'verified')
           AND p.amount_cents IS NOT NULL
           AND ((p.currency = ${policy.currency} AND p.amount_cents >= ${policy.amountCents})
             OR (p.currency IS NOT NULL AND p.currency <> ${policy.currency} AND p.minimum_confirmed))
           AND p.paid_at >= ${policy.startsAt}::timestamptz AND p.paid_at < ${policy.endsAt}::timestamptz
-          ORDER BY p.paid_at DESC, p.recorded_at DESC LIMIT 1),
-        'founderCandidate', (SELECT json_build_object('payment', ${payment("p")}, 'earlier',
-            EXISTS (SELECT 1 FROM supporter_payments earlier WHERE earlier.member_id = m.id AND earlier.paid_at < p.paid_at))
-          FROM supporter_payments p WHERE p.member_id = m.id
+          ORDER BY (p.source = 'manual_receipt') DESC, p.paid_at DESC, p.recorded_at DESC LIMIT 1),
+        'founderCandidate', (SELECT json_build_object('payment', ${payment("p")}, 'earlier', ${earlierPayment},
+            'copyUnverified', coalesce(dup.verification_state <> 'verified', false))
+          FROM supporter_payments p LEFT JOIN LATERAL ${receiptCopy("p")} dup ON true WHERE p.member_id = m.id
           ORDER BY (p.source IN ${qualifyingSources}) DESC, p.paid_at ASC, p.recorded_at ASC LIMIT 1),
         'otherFounder', EXISTS (SELECT 1 FROM supporter_founders other_founder
           JOIN supporter_members other_member ON other_member.id = other_founder.member_id
@@ -278,6 +544,7 @@ export class SupportersStore {
           ? "no_payment"
           : founderBlocker(candidate, policy, {
               earlierPayment: eligible ? false : Boolean(founderCandidate?.earlier),
+              importedCopyUnverified: eligible ? false : Boolean(founderCandidate?.copyUnverified),
               hasIdentity: founderIdentity(supporter),
               otherFounder,
             });
@@ -323,14 +590,40 @@ export class SupportersStore {
     return Boolean(other);
   }
 
-  private async founderCheck(db: Executor, member: Identity, payment: FounderPaymentFacts, policy: FounderPolicy) {
+  /** The founder rule for one payment of any provider; list() applies the same rule in SQL. */
+  private async founderCheck(
+    db: Executor,
+    member: Identity,
+    payment: FounderPaymentFacts & { id: string },
+    policy: FounderPolicy,
+  ) {
+    // The imported copy of a receipt's own charge is not an earlier payment, but a refund of it disqualifies.
+    const [copy] =
+      payment.source === "manual_receipt"
+        ? (
+            await db.execute<{ id: string; verification_state: "verified" | "unverified" }>(
+              sql`SELECT dup.id, dup.verification_state FROM supporter_payments p
+                    CROSS JOIN LATERAL ${receiptCopy("p")} dup WHERE p.id = ${payment.id}`,
+            )
+          ).rows
+        : [];
     const [earlier] = await db
       .select({ id: supporterPayments.id })
       .from(supporterPayments)
-      .where(and(eq(supporterPayments.memberId, member.id), lt(supporterPayments.paidAt, new Date(payment.paidAt))))
+      .where(
+        and(
+          eq(supporterPayments.memberId, member.id),
+          lt(supporterPayments.paidAt, new Date(payment.paidAt)),
+          // Webhook status rows carry no amount and repeat charges the authenticated history already
+          // covers, so they cannot block a verified first payment imported from the Patreon API.
+          payment.source === "patreon_api" ? ne(supporterPayments.source, "signed_status") : undefined,
+          copy ? ne(supporterPayments.id, copy.id) : undefined,
+        ),
+      )
       .limit(1);
     return founderBlocker(payment, policy, {
       earlierPayment: Boolean(earlier),
+      importedCopyUnverified: Boolean(copy && copy.verification_state !== "verified"),
       hasIdentity: founderIdentity(member),
       otherFounder: await this.otherFounder(db, member),
     });

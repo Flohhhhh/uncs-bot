@@ -4,6 +4,7 @@ import type { EnvService } from "../env/env.service";
 import type { DiscordRolesService } from "../discord-roles/discord-roles.service";
 import { SupportersService } from "./supporters.service";
 import type { SupportersStore } from "./supporters.store";
+import type { PatreonSyncService } from "./patreon-sync.service";
 import { founderBlocker, linkSchema, parsePatreon, type FounderPolicy } from "./supporters.types";
 
 const secret = "dedicated-patreon-webhook-secret";
@@ -53,14 +54,21 @@ function fixture(overrides: Record<string, unknown> = {}) {
     recordPaypal: jest.fn().mockResolvedValue({ ok: true }),
   };
   const roles = { supporterChanged: jest.fn() };
+  const sync = {
+    configured: jest.fn().mockReturnValue(true),
+    status: jest.fn().mockReturnValue({ configured: true, running: false, members: 2 }),
+    staffSync: jest.fn().mockResolvedValue({ joined: false, sync: { configured: true, members: 2 } }),
+  };
   return {
     store,
     values,
     roles,
+    sync,
     service: new SupportersService(
       store as unknown as SupportersStore,
       { get: (key: string) => values[key] } as EnvService,
       roles as unknown as DiscordRolesService,
+      sync as unknown as PatreonSyncService,
     ),
   };
 }
@@ -153,6 +161,37 @@ describe("supporter reviews", () => {
     for (const query of ["x".repeat(101), ["one", "two"], {}, null])
       await expect(service.list(admin, query)).rejects.toMatchObject({ status: 400 });
     expect(store.list).not.toHaveBeenCalled();
+  });
+  it("adds the Patreon sync status to the private list without changing existing fields", async () => {
+    const { service } = fixture();
+    const result = await service.list(admin);
+    expect(Object.keys(result)).toEqual([
+      "enabled",
+      "configured",
+      "webhookConfigured",
+      "founderPolicy",
+      "paypal",
+      "supporters",
+      "search",
+      "provider",
+      "limit",
+      "sync",
+      "note",
+    ]);
+    expect(result.sync).toEqual({ configured: true, running: false, members: 2 });
+  });
+  it("lets only administrators start a configured Patreon sync", async () => {
+    const { service, sync } = fixture();
+    await expect(service.syncNow(admin)).resolves.toEqual({
+      ok: true,
+      joined: false,
+      sync: { configured: true, members: 2 },
+    });
+    for (const role of ["viewer", "moderator"] as const)
+      await expect(service.syncNow({ ...admin, role })).rejects.toMatchObject({ status: 403 });
+    sync.configured.mockReturnValue(false);
+    await expect(service.syncNow(admin)).rejects.toMatchObject({ status: 503 });
+    expect(sync.staffSync).toHaveBeenCalledTimes(1);
   });
   it("allows audited manual tracking before webhook setup without enabling webhook ingestion", async () => {
     const { service, store } = fixture({ PATREON_WEBHOOK_SECRET: undefined });

@@ -3,7 +3,7 @@
 Gramps can keep two community roles in step with its own records:
 
 - **UNC**: added when a website whitelist application with relationship `unc_member` reaches `approved`. That covers a real whitelist grant and a staff-confirmed registration of an entry that was already whitelisted. `friend_regular` and `new_player` applications never receive it automatically.
-- **Founder**: added for every founder record (Patreon or PayPal) whose supporter has a linked Discord account. It is never removed automatically.
+- **Founder**: added for every founder record (Patreon or PayPal) whose supporter has a linked Discord account, whether staff linked it, it was entered on the PayPal record, or the Patreon import filled it in from the patron's connected Discord account. It is never removed automatically.
 
 The feature is **off by default** (`DISCORD_ROLES_ENABLED=false`). While it is off, the status page and the dry-run preview still work, so the setup can be checked before anything changes in Discord.
 
@@ -70,8 +70,8 @@ The dashboard redesign owns the page itself. The intended panel shows each check
 ## When roles are checked
 
 - **Startup:** with the feature on, Gramps waits for Discord to connect and then checks everyone with a reason to hold or lose a role. This is also the **backfill**: the first start after enabling adds the UNC role for every existing approved UNC application and the Founder role for every founder with a linked Discord account.
-- **Events:** an approval, recheck or revocation, a founder award, a Discord link on a supporter, a new PayPal record, or someone joining the server queues a check for that person (batched for two seconds).
-- **Safety pass:** a full check every six hours. It also picks up Discord IDs filled in later, for example by the Patreon import.
+- **Events:** an approval, recheck or revocation, a founder award, a Discord link on a supporter (by staff or filled in by the Patreon import), a new PayPal record, or someone joining the server queues a check for that person (batched for two seconds).
+- **Safety pass:** a full check every six hours. It also covers anyone an event check missed.
 - **Staff:** the reconcile endpoint above.
 
 Each pass makes at most 50 role changes, waits 1.1 seconds between changes and leaves the rest for a follow-up a minute later (staff runs included). discord.js also honours Discord's rate limits and retries server errors three times. A single Gramps instance is assumed.

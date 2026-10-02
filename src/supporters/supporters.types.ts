@@ -198,7 +198,7 @@ export const founderBlockedMessages: Record<FounderBlockedReason | "no_payment",
   window_not_configured: "The founder window is not configured.",
   source_not_qualifying:
     "Only a checked Patreon receipt, a Patreon API payment or a PayPal payment can qualify. A signed status alone cannot.",
-  not_verified: "This payment has not been verified.",
+  not_verified: "This payment has not been verified, or Patreon no longer reports its charge as paid.",
   not_first_payment: "Staff have not confirmed this was the supporter's first successful payment.",
   earlier_payment:
     "An earlier payment is recorded. Review the first successful payment before recording a founder promise.",
@@ -222,17 +222,22 @@ export function founderIdentity(member: { discordId: string | null; steamId: str
   const steamValid = isPublicIndividualSteamId(member.steamId);
   return (Boolean(member.discordId) || steamValid) && (!member.steamId || steamValid);
 }
-/** The first reason this payment cannot make its member a founder, or null when it qualifies. */
+/**
+ * The first reason this payment cannot make its member a founder, or null when it qualifies. One rule for every
+ * provider: a verified first successful payment from a qualifying source, inside the end-exclusive window, worth at
+ * least US$5. `earlierPayment` ignores the imported copy of a staff receipt's own charge, and
+ * `importedCopyUnverified` means Patreon no longer reports that copy as paid.
+ */
 export function founderBlocker(
   payment: FounderPaymentFacts,
   policy: FounderPolicy,
-  context: { earlierPayment: boolean; hasIdentity: boolean; otherFounder: boolean },
+  context: { earlierPayment: boolean; importedCopyUnverified?: boolean; hasIdentity: boolean; otherFounder: boolean },
 ): FounderBlockedReason | null {
   const starts = policy.startsAt ? Date.parse(policy.startsAt) : NaN,
     ends = policy.endsAt ? Date.parse(policy.endsAt) : NaN;
   if (!policy.configured || !Number.isFinite(starts) || !Number.isFinite(ends)) return "window_not_configured";
   if (!(FOUNDER_PAYMENT_SOURCES as readonly string[]).includes(payment.source)) return "source_not_qualifying";
-  if (payment.verificationState !== "verified") return "not_verified";
+  if (payment.verificationState !== "verified" || context.importedCopyUnverified) return "not_verified";
   if (!payment.firstSuccessfulPaymentVerified) return "not_first_payment";
   if (context.earlierPayment) return "earlier_payment";
   const paidAt = new Date(payment.paidAt).getTime();

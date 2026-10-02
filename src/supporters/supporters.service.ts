@@ -9,6 +9,7 @@ import { z } from "zod";
 import { DiscordRolesService } from "../discord-roles/discord-roles.service";
 import { EnvService } from "../env/env.service";
 import type { Staff } from "../admin/admin.types";
+import { PatreonSyncService } from "./patreon-sync.service";
 import { SupportersStore } from "./supporters.store";
 import {
   founderSchema,
@@ -30,6 +31,7 @@ export class SupportersService {
     private readonly store: SupportersStore,
     private readonly env: EnvService,
     private readonly roles: DiscordRolesService,
+    private readonly patreonSync: PatreonSyncService,
   ) {}
   /** Lets the role service re-check this member. Fire-and-forget: a role problem never fails the request. */
   private notifyRoles(discordId: string | null | undefined) {
@@ -140,8 +142,18 @@ export class SupportersService {
       search: parsedSearch.data,
       provider: parsedProvider.data ?? null,
       limit: 100,
+      sync: this.patreonSync.status(),
       note: "Private supporter records for Patreon and PayPal. Membership changes need review; a tier or active membership is not proof of a completed payment. Founder records are permanent promises for future standard whitelist access. No game access is changed here. When Discord roles are switched on, founders with a linked Discord account receive the Founder role.",
     };
+  }
+  /** Staff-triggered Patreon import; concurrent requests join the running sync. */
+  async syncNow(staff: Staff) {
+    this.admin(staff);
+    if (!this.patreonSync.configured())
+      throw new ServiceUnavailableException(
+        "Patreon sync is not configured. Set PATREON_ENABLED, PATREON_CAMPAIGN_ID and PATREON_CREATOR_ACCESS_TOKEN.",
+      );
+    return { ok: true, ...(await this.patreonSync.staffSync()) };
   }
   async register(staff: Staff, body: unknown) {
     this.admin(staff);
