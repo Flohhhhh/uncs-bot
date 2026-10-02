@@ -195,6 +195,10 @@ function variantLines(name: string) {
 function whitelistCheck() {
   return screen.getByText(/Whitelist check:/).closest("p")!;
 }
+/** One welcome set under its heading. */
+function messageSet(heading: string) {
+  return screen.getByRole("heading", { name: heading }).closest("section")!;
+}
 
 it("lists every welcome variant, the whitelisted set with its check, and every round message", async () => {
   request.mockResolvedValue(loaded);
@@ -202,8 +206,17 @@ it("lists every welcome variant, the whitelisted set with its check, and every r
   expect(await screen.findByText("3 variants, 2 for whitelisted players · 10 s delay")).toBeInTheDocument();
   expect(screen.getByText("3 messages · after each observed round change")).toBeInTheDocument();
   fireEvent.click(screen.getByText("Welcome", { selector: ".message-name" }));
-  expect(screen.getByText(/at least 20 s apart\. Each join gets a random variant/)).toBeVisible();
+  expect(screen.getByText("Sent 10 s after an observed join, at least 20 s apart.")).toBeVisible();
   expect(screen.getByRole("heading", { name: "Everyone else" })).toBeVisible();
+  // Each set with several variants says one is picked at random.
+  expect(
+    within(messageSet("Everyone else")).getByText("Each join gets a random variant, never the player's previous one."),
+  ).toBeVisible();
+  expect(
+    within(messageSet("Players already on the whitelist")).getByText(
+      "Each join gets a random variant, never the player's previous one.",
+    ),
+  ).toBeVisible();
   expect(variantLines("Welcome variants for everyone else")).toEqual([
     ["Welcome to The UNCs", "Apply for a free whitelist on our website"],
     ["Grab a chair, the coffee is fresh", "The whitelist is free at theuncsgaming.com"],
@@ -223,7 +236,13 @@ it("lists every welcome variant, the whitelisted set with its check, and every r
       .querySelector("time"),
   ).toHaveAttribute("datetime", loaded.welcome.whitelist!.lastLoadedAt);
   expect(within(check).getByText("Reused for up to 5 min")).toBeInTheDocument();
-  expect(check).toHaveAttribute("title", expect.stringContaining("running whitelist (reserved slots)"));
+  // What the check reads is visible text, not a tooltip.
+  expect(check).not.toHaveAttribute("title");
+  expect(
+    screen.getByText(
+      "Reads the game's running whitelist (reserved slots), not the saved settings. Whitelist changes made through Gramps refresh it sooner.",
+    ),
+  ).toBeVisible();
   expect(screen.queryByText(/After a failed read/)).not.toBeInTheDocument();
   fireEvent.click(screen.getByText("Round notice", { selector: ".message-name" }));
   expect(screen.getByText("Each round gets a random message, never the previous round's.")).toBeVisible();
@@ -241,15 +260,11 @@ it("lists every welcome variant, the whitelisted set with its check, and every r
 
 it("says when the whitelist check failed or has not run yet", async () => {
   const failed = { ...loaded.welcome.whitelist!, lastLoadedAt: minutesAgo(10), lastFailedAt: minutesAgo(1) };
+  const unread = { ...failed, cacheSeconds: 45, lastLoadedAt: null, lastFailedAt: null };
   request
     .mockResolvedValueOnce({ ...loaded, welcome: { ...loaded.welcome, whitelist: failed } })
-    .mockResolvedValueOnce({
-      ...loaded,
-      welcome: {
-        ...loaded.welcome,
-        whitelist: { ...failed, cacheSeconds: 45, lastLoadedAt: null, lastFailedAt: null },
-      },
-    });
+    .mockResolvedValueOnce({ ...loaded, welcome: { ...loaded.welcome, whitelist: unread } })
+    .mockResolvedValueOnce({ ...loaded, welcome: { ...loaded.welcome, enabled: false, whitelist: unread } });
   const view = render(page());
   await screen.findByText("3 variants, 2 for whitelisted players · 10 s delay");
   fireEvent.click(screen.getByText("Welcome", { selector: ".message-name" }));
@@ -274,6 +289,12 @@ it("says when the whitelist check failed or has not run yet", async () => {
   expect(within(check).getByText("Reads on the next join")).toBeInTheDocument();
   expect(within(check).getByText("Reused for up to 45 s")).toBeInTheDocument();
   expect(screen.queryByText(/After a failed read/)).not.toBeInTheDocument();
+  // The worker reads the whitelist only to choose a welcome, so nothing reads it while the welcome is off.
+  view.rerender(page("primary", 2));
+  await waitFor(() => expect(status("Welcome")).toBe("Off"));
+  check = whitelistCheck();
+  expect(within(check).getByText("Not read while the welcome is off")).toBeInTheDocument();
+  expect(within(check).queryByText("Reads on the next join")).not.toBeInTheDocument();
 });
 
 it("shows one numbered list without a whitelist section when no whitelisted variants are set", async () => {
@@ -295,6 +316,7 @@ it("shows one numbered list without a whitelist section when no whitelisted vari
     ["Welcome to The UNCs", "Apply for a free whitelist on our website"],
     ["Grab a chair, the coffee is fresh", "The whitelist is free at theuncsgaming.com"],
   ]);
+  expect(screen.getByText("Each join gets a random variant, never the player's previous one.")).toBeVisible();
   expect(screen.queryByText("Players already on the whitelist")).not.toBeInTheDocument();
   expect(screen.queryByText("Everyone else")).not.toBeInTheDocument();
   expect(screen.queryByText(/Whitelist check:/)).not.toBeInTheDocument();
@@ -304,15 +326,50 @@ it("shows one numbered list without a whitelist section when no whitelisted vari
   expect(screen.queryByText(/random message/)).not.toBeInTheDocument();
 });
 
+/** The messages of a single-variant list, in send order. */
+function messageItems(name: string) {
+  return within(screen.getByRole("list", { name }))
+    .getAllByRole("listitem")
+    .map((item) => item.textContent);
+}
+
 it("keeps showing a single welcome sequence from a status without variants", async () => {
   request.mockResolvedValue(configured);
   render(page());
   await screen.findByText("2 messages · 10 s delay");
   fireEvent.click(screen.getByText("Welcome", { selector: ".message-name" }));
-  expect(variantLines("Welcome variants")).toEqual([
-    ["Welcome to The UNCs", "Apply for a free whitelist on our website"],
+  // One sequence lists its messages, as before variants, with no variant number.
+  expect(messageItems("Welcome messages")).toEqual([
+    "Welcome to The UNCs",
+    "Apply for a free whitelist on our website",
   ]);
+  expect(screen.queryByRole("list", { name: "Welcome variants" })).not.toBeInTheDocument();
   expect(screen.queryByText(/random variant/)).not.toBeInTheDocument();
   fireEvent.click(screen.getByText("Round notice", { selector: ".message-name" }));
   expect(screen.getByText("GG everyone")).toBeVisible();
+});
+
+it("says a variant is random only for a set that has several", async () => {
+  request.mockResolvedValue({
+    ...loaded,
+    welcome: { ...loaded.welcome, variants: loaded.welcome.variants!.slice(0, 1) },
+  });
+  render(page());
+  expect(await screen.findByText("1 variant, 2 for whitelisted players · 10 s delay")).toBeInTheDocument();
+  fireEvent.click(screen.getByText("Welcome", { selector: ".message-name" }));
+  const everyone = messageSet("Everyone else");
+  expect(within(everyone).queryByText(/random variant/)).not.toBeInTheDocument();
+  expect(messageItems("Welcome messages for everyone else")).toEqual([
+    "Welcome to The UNCs",
+    "Apply for a free whitelist on our website",
+  ]);
+  expect(
+    within(messageSet("Players already on the whitelist")).getByText(
+      "Each join gets a random variant, never the player's previous one.",
+    ),
+  ).toBeVisible();
+  expect(variantLines("Welcome variants for players already on the whitelist")).toEqual([
+    ["Welcome back, regular", "Thanks for being on the whitelist"],
+    ["Good to see you again"],
+  ]);
 });

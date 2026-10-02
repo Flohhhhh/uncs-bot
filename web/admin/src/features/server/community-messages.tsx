@@ -14,35 +14,53 @@ function State({ on, label }: { on: boolean; label?: string }) {
   return <Badge kind={label ? "warn" : on ? "good" : "neutral"}>{label ?? (on ? "On" : "Off")}</Badge>;
 }
 
-/** Numbered welcome variants. Each line of a variant is its own message, sent in order. */
-function Variants({ label, variants }: { label: string; variants: string[][] }) {
+/**
+ * One set of welcome variants. Each line of a variant is its own message, sent in order. A single variant lists its
+ * messages; several are numbered, and each join gets one of them at random.
+ */
+function Variants({ audience, variants }: { audience?: string; variants: string[][] }) {
+  const suffix = audience ? ` ${audience}` : "";
+  if (variants.length === 1)
+    return (
+      <ol aria-label={`Welcome messages${suffix}`}>
+        {variants[0].map((line, index) => (
+          <li key={index}>{line}</li>
+        ))}
+      </ol>
+    );
   return (
-    <ol className="message-variants" aria-label={label}>
-      {variants.map((lines, index) => (
-        <li key={index}>
-          {lines.map((line, part) => (
-            <span key={part} className="message-line">
-              {line}
-            </span>
-          ))}
-        </li>
-      ))}
-    </ol>
+    <>
+      <p className="muted">Each join gets a random variant, never the player's previous one.</p>
+      <ol className="message-variants" aria-label={`Welcome variants${suffix}`}>
+        {variants.map((lines, index) => (
+          <li key={index}>
+            {lines.map((line, part) => (
+              <span key={part} className="message-line">
+                {line}
+              </span>
+            ))}
+          </li>
+        ))}
+      </ol>
+    </>
   );
 }
 
 /** How the whitelisted welcome learns who is on the whitelist, and whether that last worked. */
-function WhitelistCheck({ whitelist }: { whitelist: NonNullable<Welcome["whitelist"]> }) {
+function WhitelistCheck({
+  whitelist,
+  welcomeOn,
+}: {
+  whitelist: NonNullable<Welcome["whitelist"]>;
+  welcomeOn: boolean;
+}) {
   const loaded = time(whitelist.lastLoadedAt);
   const failed = time(whitelist.lastFailedAt);
   // A failed read newer than the last good one sends these players the standard welcome for now.
   const failing = failed !== null && (loaded === null || Date.parse(failed) > Date.parse(loaded));
   return (
     <>
-      <p
-        className={`status-line ${failing ? "attention" : loaded ? "good" : "quiet"}`}
-        title="Reads the game's running whitelist (reserved slots), not the saved settings. Whitelist changes made through Gramps refresh it sooner."
-      >
+      <p className={`status-line ${failing ? "attention" : loaded ? "good" : "quiet"}`}>
         <span>
           Whitelist check: <strong>{failing ? "Last read failed" : loaded ? "Working" : "Not read yet"}</strong>
         </span>
@@ -56,9 +74,14 @@ function WhitelistCheck({ whitelist }: { whitelist: NonNullable<Welcome["whiteli
             Last read <When at={loaded} />
           </span>
         ) : (
-          !failing && <span>Reads on the next join</span>
+          // The whitelist is read only to choose a welcome.
+          !failing && <span>{welcomeOn ? "Reads on the next join" : "Not read while the welcome is off"}</span>
         )}
         <span>Reused for up to {seconds(whitelist.cacheSeconds)}</span>
+      </p>
+      <p className="muted">
+        Reads the game's running whitelist (reserved slots), not the saved settings. Whitelist changes made through
+        Gramps refresh it sooner.
       </p>
       {failing && <p className="muted">After a failed read, every joiner gets the standard welcome for a minute.</p>}
     </>
@@ -69,7 +92,6 @@ function WelcomeRow({ welcome }: { welcome: Welcome }) {
   const variants = welcome.variants?.length ? welcome.variants : [welcome.messages];
   const whitelisted = welcome.whitelistedVariants?.length ? welcome.whitelistedVariants : null;
   const spaced = [...variants, ...(whitelisted ?? [])].some((lines) => lines.length > 1);
-  const random = variants.length > 1 || (whitelisted?.length ?? 0) > 1;
   const count =
     variants.length === 1 && !whitelisted
       ? plural(variants[0].length, "message")
@@ -88,22 +110,21 @@ function WelcomeRow({ welcome }: { welcome: Welcome }) {
           <p className="muted">
             Sent {welcome.delaySeconds} s after an observed join
             {spaced ? `, at least ${welcome.spacingSeconds} s apart` : ""}.
-            {random ? " Each join gets a random variant, never the player's previous one." : ""}
           </p>
           {whitelisted ? (
             <>
               <section className="message-set">
                 <h4>Everyone else</h4>
-                <Variants label="Welcome variants for everyone else" variants={variants} />
+                <Variants audience="for everyone else" variants={variants} />
               </section>
               <section className="message-set">
                 <h4>Players already on the whitelist</h4>
-                {welcome.whitelist && <WhitelistCheck whitelist={welcome.whitelist} />}
-                <Variants label="Welcome variants for players already on the whitelist" variants={whitelisted} />
+                {welcome.whitelist && <WhitelistCheck whitelist={welcome.whitelist} welcomeOn={welcome.enabled} />}
+                <Variants audience="for players already on the whitelist" variants={whitelisted} />
               </section>
             </>
           ) : (
-            <Variants label="Welcome variants" variants={variants} />
+            <Variants variants={variants} />
           )}
         </div>
       </details>
