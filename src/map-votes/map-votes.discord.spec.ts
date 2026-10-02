@@ -52,7 +52,7 @@ it("shows choices and voting rules without private staff evidence or pinging mem
   const payload = ballotMessage(record);
   expect(payload.content).toContain("Ozeti");
   expect(payload.content).toContain("InfantryOnly Dusk");
-  expect(payload.components[0].toJSON().components[0]).toMatchObject({ label: "1. Ozeti · InfantryOnly" });
+  expect(payload.components[0].toJSON().components[0]).toMatchObject({ label: "1. Ozeti · InfantryOnly · Dusk" });
   expect(payload.content).toContain("A tie or no votes keeps the rotation");
   expect(payload.allowedMentions).toEqual({ parse: [], users: [], roles: [], repliedUser: false });
   expect(JSON.stringify(payload)).not.toContain("Private");
@@ -117,6 +117,35 @@ it("checks channel permissions without posting or editing a message", async () =
   expect(await service.check(record.guildId, record.channelId)).toEqual({ name: "map-voting" });
   expect(channel.send).not.toHaveBeenCalled();
   expect(channel.messages.fetch).not.toHaveBeenCalled();
+});
+it("identifies the layout and lighting when choices share a map and mode", async () => {
+  const { service, channel } = fixture();
+  const vote = {
+    ...record,
+    choices: [
+      {
+        map: "Europe",
+        experiences: ["KOTH", "KOTH_InfantryOnly"],
+        lighting: "DayEarlyClear",
+        zoneAlternator: "ZoneAlternator.Ozeti.Farmland.Circle",
+      },
+      {
+        map: "Europe",
+        experiences: ["KOTH", "KOTH_InfantryOnly"],
+        lighting: "DayEarlyFog",
+        zoneAlternator: "ZoneAlternator.Ozeti.Church.Circle",
+      },
+    ],
+    counts: [4, 7],
+  };
+  const buttons = ballotMessage(vote).components[0].toJSON().components;
+  expect(buttons[0]).toMatchObject({ label: expect.stringContaining("Farmland · Early day · clear") });
+  expect(buttons[1]).toMatchObject({ label: expect.stringContaining("Church · Early day · fog") });
+  await service.remind(vote, "final");
+  expect(channel.send.mock.calls[0][0].content).toContain("Farmland");
+  expect(channel.send.mock.calls[0][0].content).toContain("Church");
+  const result = ballotMessage({ ...vote, state: "queued", winner: 1 });
+  expect(result.content.split("Winner:")[1]).toContain("Church");
 });
 it.each(["guild", "channel_type", "permission", "missing", "not_ready"])(
   "refuses publication for %s",

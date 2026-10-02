@@ -1,4 +1,4 @@
-import { isModeModifier, mapLabel, modeLabel } from "./map-labels";
+import { isModeModifier, lightingLabel, mapLabel, modeLabel, zoneLabel } from "./map-labels";
 import type { MapSelection } from "./server-settings";
 
 export type VotingPolicy = {
@@ -47,7 +47,14 @@ export function voteModeKey(entry: MapSelection) {
 }
 export function voteChoiceTitle(entry: MapSelection) {
   const modifiers = entry.experiences.filter(isModeModifier).map((id) => modeLabel(id));
-  return `${mapLabel(entry.map)} · ${modifiers.join(" + ") || entry.experiences.map((id) => modeLabel(id)).join(" + ") || "Normal"}`;
+  return [
+    mapLabel(entry.map),
+    modifiers.join(" + ") || entry.experiences.map((id) => modeLabel(id)).join(" + ") || "Normal",
+    entry.zoneAlternator ? zoneLabel(entry.zoneAlternator) : "",
+    entry.lighting ? lightingLabel(entry.lighting) : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 // BULKHEAD's TOP QUESTIONS announcement specifies first to 100. These are score milestones, not time estimates.
