@@ -1,5 +1,13 @@
 # Dashboard release audit
 
+## October 1 21:36 EDT — simple confirmations and clock compatibility are live
+
+[Release #49](https://github.com/Flohhhhh/uncs-bot/pull/49) includes [#48](https://github.com/Flohhhhh/uncs-bot/pull/48), [#50](https://github.com/Flohhhhh/uncs-bot/pull/50) and [#51](https://github.com/Flohhhhh/uncs-bot/pull/51), merged normally to main `b612a49af4b3d53751bcd3d5e33ae1b630255d3b`. Railway `db9e07a6-b5ae-47c3-8013-170c1491e991` is Active. Production health returns 200 and `index-8SPtNwah.js` exactly matches the tested build (SHA-256 `8ec5766162ebd99f3aab2636048b67ae9806ef9e3df19501f40ae0a5ff27509a`). Release CI passed **640 backend, 241 dashboard and 32 PostgreSQL tests**, build, formatting, lint, typecheck, handler validation and migration checks.
+
+Read-only live acceptance confirms the restart review names **The UNCs (primary)**, **100 connected players** and **Zestafona**, explains the no-clock limitation, and has **zero text fields**. The separate Restart current match button is available; Cancel closes without sending anything. Disruptive controls were left collapsed. No browser errors or live game mutation occurred. Live saved and running banner reads both still report `https://files.catbox.moe/mcttle.png`; the prepared [QR banner](https://files.catbox.moe/o878uu.png) remains unapplied.
+
+The goal remains active. **Current live clock absence also prevents optional 50v50 from being armed:** `ServerEventsService.start` requires a verified clock, and that requirement has not been weakened. Next audit should surface that prerequisite before staff reach an event-start failure if events are enabled. Do not describe 50v50 as production-ready without a verified round signal and controlled rehearsal. Remaining work still includes feed forwarding while preserving xREALM, inactive welcome/round messages, genuine applicant acceptance, banner application/in-game rendering, six unsupported saved Bakurani River entries and real mobile-touch queue acceptance. Do not activate or change these on the occupied server without applicable authorization.
+
 ## October 1 21:30 EDT — use click confirmation, not phrase entry
 
 Dennis explicitly requested an extra confirmation step without retyping a phrase. The restart/end/map and event start/restoration reviews now remove those text fields and their validation state. Opening a review still sends nothing; only the separately named action button submits. Consequence warnings, explicit server/map targeting, duplicate-send prevention, stale-data checks and backend request validation remain. Returning from a definite rejection opens another review; it does not resend. This supersedes earlier instructions in this chronological audit to require a typed phrase.
