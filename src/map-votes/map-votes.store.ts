@@ -21,6 +21,14 @@ export class MapVotesStore {
       .orderBy(desc(mapVotes.createdAt))
       .limit(20);
   }
+  async liveCounts(ids: string[]) {
+    if (!ids.length) return [];
+    return this.db
+      .select({ voteId: mapVoteBallots.voteId, choice: mapVoteBallots.choice, total: sql<number>`count(*)::int` })
+      .from(mapVoteBallots)
+      .where(inArray(mapVoteBallots.voteId, ids))
+      .groupBy(mapVoteBallots.voteId, mapVoteBallots.choice);
+  }
   async create(input: typeof mapVotes.$inferInsert) {
     const [created] = await this.db.insert(mapVotes).values(input).onConflictDoNothing().returning();
     if (created) return { created: true, record: created };

@@ -1,7 +1,7 @@
 import { mapLabel, selectionLabel } from "../../../../../src/common/map-labels";
 import { useEffect, useRef, useState } from "react";
 import type { MapSelection, SettingsSnapshot } from "../../../../../src/common/server-settings";
-import type { mapVoteView } from "../../../../../src/map-votes/map-votes.types";
+import { VoteResults, voteStateLabels as stateLabels, type Vote, type VoteList } from "./vote-status";
 import { useGameApi } from "../../api/server-client";
 import { useResource } from "../../api/use-resource";
 import type { Catalog, Overview } from "../../api/types";
@@ -13,20 +13,9 @@ import { hasRoundTiming, RoundTimingNotice } from "../../components/round-timing
 import { MapPicker } from "../actions/map-picker";
 import { errorMessage } from "../actions/policy";
 
-type Vote = ReturnType<typeof mapVoteView>;
-type VoteList = { enabled: boolean; serverId: string; votes: Vote[] };
 type Draft = { serverId: string; revision: string; choices: MapSelection[]; minutes: number };
 const timingMessage =
   "Round timing is unavailable. Voting needs it to check that the winner still belongs to this round.";
-const stateLabels = {
-  publishing: "Creating ballot",
-  open: "Voting open",
-  closing: "Closing",
-  queued: "Winner queued",
-  no_votes: "No votes",
-  cancelled: "Closed by staff",
-  needs_review: "Needs review",
-};
 
 function VoteReview({
   draft,
@@ -212,7 +201,13 @@ function EnabledMapVotes({
           </button>
         </div>
       )}
-      <Card title="Choose the next map" subtitle="Publish a ballot in the community’s configured Discord channel.">
+      <p>
+        <Link className="text-button" to="/match">
+          ← Match &amp; maps
+        </Link>
+      </p>
+      <VoteResults data={data} error={error} />
+      <Card title="Ballot controls" subtitle="Publish a ballot in the community’s configured Discord channel.">
         <div className="card-body">
           {!active && <RoundTimingNotice resource={overview} busy={admin.busy} message={timingMessage} />}
           {active && (
@@ -293,7 +288,7 @@ function EnabledMapVotes({
                   />
                 </label>
               </div>
-              <p className="muted">Choose 2–5 maps. The current map is excluded. Results appear when voting closes.</p>
+              <p className="muted">Choose 2–5 maps. The current map is excluded.</p>
               <div className="dialog-actions">
                 {dirty && (
                   <button className="button secondary" disabled={admin.busy} onClick={clear}>

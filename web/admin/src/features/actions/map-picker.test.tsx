@@ -28,7 +28,7 @@ it("rechecks unavailable options without changing the staff selection", async ()
   fireEvent.click(await screen.findByRole("button", { name: "Retry map options" }));
   expect(ready).toHaveBeenLastCalledWith(false);
   await waitFor(() => expect(ready).toHaveBeenLastCalledWith(true));
-  expect(screen.getByRole("checkbox", { name: "King of the Hill" })).toBeChecked();
+  expect(screen.getByRole("combobox", { name: "Game mode" })).toHaveValue("KOTH");
   expect(screen.getByRole("combobox", { name: /Zone layout/ })).toHaveValue("Zone.Default");
   expect(change).not.toHaveBeenCalled();
   expect(request).toHaveBeenCalledTimes(2);
@@ -64,7 +64,7 @@ it("presents game names while preserving exact catalog IDs, and waits for valid 
   expect(screen.getByRole("option", { name: "Zestafona" })).toHaveValue("NorthAmerica");
   expect(screen.getByRole("option", { name: "New map" })).toHaveValue("Future");
   fireEvent.change(screen.getByRole("combobox", { name: "Map" }), { target: { value: "Europe" } });
-  fireEvent.click(await screen.findByRole("checkbox", { name: "Standard" }));
+  await screen.findByRole("option", { name: "King of the Hill" });
   fireEvent.click(screen.getByRole("checkbox", { name: "Hardcore" }));
   fireEvent.change(screen.getByRole("combobox", { name: /Zone layout/ }), {
     target: { value: "ZoneAlternator.Ozeti.Church.Circle" },
@@ -95,7 +95,7 @@ it("keeps unavailable saved values visible instead of silently displaying map de
   await screen.findByRole("option", { name: "Unavailable: Zone.River" });
   expect(screen.getByRole("combobox", { name: /Zone layout/ })).toHaveValue("Zone.River");
   expect(screen.getByRole("option", { name: "Unavailable: RemovedLight" })).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("checkbox", { name: "Unavailable: RemovedMode" }));
+  fireEvent.change(screen.getByRole("combobox", { name: "Game mode" }), { target: { value: "" } });
   expect(change).toHaveBeenCalledWith(expect.objectContaining({ experiences: [], zoneAlternator: "Zone.River" }));
   expect(screen.getByText(/This saved layout is not in the current catalog/)).toBeInTheDocument();
 });

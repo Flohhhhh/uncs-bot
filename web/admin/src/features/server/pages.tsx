@@ -1,5 +1,6 @@
 import { mapLabel, modeLabel, lightingLabel } from "../../../../../src/common/map-labels";
-import { useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import type { SettingsSnapshot } from "../../../../../src/common/server-settings";
 import { ServerLink as Link } from "../../app/server-link";
 import { useGameAdmin as useAdmin } from "../../app/context";
 import { useResource } from "../../api/use-resource";
@@ -12,6 +13,8 @@ import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 import { PlayerActions } from "../players/player-actions";
 import { GameLogView } from "./game-log";
 import { CommunityMessages } from "./community-messages";
+import { RotationEditor } from "./settings-page";
+import { MapVoteStatus } from "../map-votes/vote-status";
 function ActionButton({
   action,
   steamId,
@@ -397,14 +400,38 @@ export function AnnouncementsPage() {
     </div>
   );
 }
+function MatchMapControls() {
+  const admin = useAdmin();
+  const { data, error, refresh } = useResource<SettingsSnapshot>("settings");
+  const { setUnsavedChanges } = admin;
+  useEffect(() => () => setUnsavedChanges(false), [setUnsavedChanges]);
+  if (!data) return <Empty title={error || "Loading map controls…"} />;
+  return (
+    <RotationEditor
+      snapshot={data}
+      reload={refresh}
+      disabled={admin.busy || !!error}
+      active
+      initialView="next"
+      onUnsavedChange={setUnsavedChanges}
+    />
+  );
+}
 export function MatchPage() {
   const { overview, me } = useAdmin();
-  const { data: rotation, error, loading } = useResource<Rotation>("rotation");
+  const { data: rotation, error, loading } = useResource<Rotation>(me.role === "admin" ? null : "rotation");
   if (!overview) return <Empty title="Waiting for the server" />;
   const { status } = overview;
   return (
     <>
-      <div className="split">
+      {me.role === "admin" && (
+        <div className="toolbar">
+          <Link className="text-button" to="/events">
+            Optional event modes →
+          </Link>
+        </div>
+      )}
+      <div className={me.role === "admin" ? "match-management" : "split"}>
         <Card title="Current match" badge={<Badge>{mapLabel(status.map)}</Badge>}>
           <div className="card-body">
             <div className="info-row">
@@ -416,7 +443,7 @@ export function MatchPage() {
               <strong>{(status.lighting && lightingLabel(status.lighting)) || "Not supplied"}</strong>
             </div>
             <div className="info-row">
-              <span>Experience</span>
+              <span>Mode &amp; rules</span>
               <strong>{status.experiences?.map((id) => modeLabel(id)).join(", ") || "Not supplied"}</strong>
             </div>
             <div className="action-list">
@@ -441,41 +468,41 @@ export function MatchPage() {
             </details>
           </div>
         </Card>
-        <Card title="Map rotation" badge={<Badge>{error ? "UNAVAILABLE" : rotation?.mode || "LOADING"}</Badge>}>
-          {me.role === "admin" && (
-            <div className="card-body">
-              <Link className="button secondary" to="/settings#rotation">
-                Edit rotation & queue next map →
-              </Link>
-            </div>
-          )}
-          {error && (
-            <p className="notice error" role="alert">
-              {error}
-            </p>
-          )}
-          {error ? (
-            <Empty title="Rotation could not be loaded" detail="Refresh to try again." />
-          ) : !rotation ? (
-            <Empty title={loading ? "Loading rotation…" : "Rotation is unavailable"} />
-          ) : !rotation.entries.length ? (
-            <Empty title="No maps in the saved rotation" />
-          ) : (
-            <Table headers={["MAP", "LIGHTING", "STATUS"]}>
-              {rotation.entries.map((entry) => (
-                <tr key={entry.index}>
-                  <td>{mapLabel(entry.map)}</td>
-                  <td>{(entry.lighting && lightingLabel(entry.lighting)) || "—"}</td>
-                  <td>
-                    <Badge kind={entry.status === "now" ? "good" : "neutral"}>
-                      {entry.denied ? "Unavailable" : entry.status || "In rotation"}
-                    </Badge>
-                  </td>
-                </tr>
-              ))}
-            </Table>
-          )}
-        </Card>
+        {me.role === "admin" ? (
+          <>
+            <MapVoteStatus />
+            <MatchMapControls />
+          </>
+        ) : (
+          <Card title="Map rotation" badge={<Badge>{error ? "UNAVAILABLE" : rotation?.mode || "LOADING"}</Badge>}>
+            {error && (
+              <p className="notice error" role="alert">
+                {error}
+              </p>
+            )}
+            {error ? (
+              <Empty title="Rotation could not be loaded" detail="Refresh to try again." />
+            ) : !rotation ? (
+              <Empty title={loading ? "Loading rotation…" : "Rotation is unavailable"} />
+            ) : !rotation.entries.length ? (
+              <Empty title="No maps in the saved rotation" />
+            ) : (
+              <Table headers={["MAP", "LIGHTING", "STATUS"]}>
+                {rotation.entries.map((entry) => (
+                  <tr key={entry.index}>
+                    <td>{mapLabel(entry.map)}</td>
+                    <td>{(entry.lighting && lightingLabel(entry.lighting)) || "—"}</td>
+                    <td>
+                      <Badge kind={entry.status === "now" ? "good" : "neutral"}>
+                        {entry.denied ? "Unavailable" : entry.status || "In rotation"}
+                      </Badge>
+                    </td>
+                  </tr>
+                ))}
+              </Table>
+            )}
+          </Card>
+        )}
       </div>
       <div className="notice info">
         Server process restarts, host scheduling, and configuration outside the game remain in the hosting panel.
@@ -507,7 +534,7 @@ export function AuditPage() {
     </>
   );
 }
-function DashboardHistory() {
+export function DashboardHistory() {
   const [query, setQuery] = useState("");
   const lookupId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(query.trim())
     ? query.trim().toLowerCase()

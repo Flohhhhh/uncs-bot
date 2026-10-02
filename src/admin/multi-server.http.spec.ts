@@ -54,6 +54,7 @@ describe("two-server HTTP isolation", () => {
       id,
       {
         overview: jest.fn(async () => ({ status: { serverName: id }, players: [{ steamId, name: `${id} player` }] })),
+        activity: jest.fn(async () => ({ events: [{ id, message: `${id} player joined` }] })),
         whitelist: jest.fn(async () => ({ entries: [{ steamId, active: id === "east" }] })),
         gameLog: jest.fn(async () => ({ available: true, entries: [], serverMarker: id })),
         identity: jest.fn(async () => ({ serverId: { available: true, value: id } })),
@@ -142,6 +143,18 @@ describe("two-server HTTP isolation", () => {
   afterEach(async () => {
     await app.close();
     jest.restoreAllMocks();
+  });
+  it("keeps activity observations and their cached responses inside the selected server's access", async () => {
+    centralAccess = "viewer";
+    expect((await read("servers/central/activity").expect(200)).body.events[0].id).toBe("central");
+    expect((await read("servers/east/activity").expect(200)).body.events[0].id).toBe("east");
+    expect((await read("servers/central/activity").expect(200)).body.events[0].id).toBe("central");
+    expect(games.central.activity).toHaveBeenCalledTimes(1);
+    expect(games.east.activity).toHaveBeenCalledTimes(1);
+    await read("activity").expect(400);
+    centralAccess = "none";
+    await read("servers/central/activity").expect(403);
+    expect(games.central.activity).toHaveBeenCalledTimes(1);
   });
   it("scopes read-only community status to the selected accessible server", async () => {
     centralAccess = "viewer";

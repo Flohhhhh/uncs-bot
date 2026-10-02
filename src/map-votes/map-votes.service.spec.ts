@@ -51,6 +51,7 @@ function fixture(enabled = true, serverId = "primary") {
   const store = {
     get: jest.fn().mockResolvedValue(null),
     history: jest.fn().mockResolvedValue([record]),
+    liveCounts: jest.fn().mockResolvedValue([]),
     create: jest.fn().mockImplementation(async (values) => ({
       created: true,
       record: { ...record, ...values, messageId: null, state: "publishing" },
@@ -108,6 +109,28 @@ function fixture(enabled = true, serverId = "primary") {
 }
 
 describe("durable Discord map voting", () => {
+  it("reports current open-ballot totals without closing, publishing or touching the game", async () => {
+    const { service, store, record, game, discord, admin } = fixture(true, "event");
+    store.history.mockResolvedValue([{ ...record, state: "open", winner: null, counts: [0, 0] }]);
+    store.liveCounts.mockResolvedValue([
+      { voteId: record.id, choice: 0, total: 4 },
+      { voteId: record.id, choice: 1, total: 2 },
+    ]);
+    const result = await service.list({ ...staff, serverId: "event" });
+    expect(store.history).toHaveBeenCalledWith("event");
+    expect(store.liveCounts).toHaveBeenCalledWith([record.id]);
+    expect(result.votes[0]).toMatchObject({ state: "open", counts: [4, 2], counted: true, winner: null });
+    expect(result.observedAt).toBe(now.toISOString());
+    expect(game.overview).not.toHaveBeenCalled();
+    expect(admin.act).not.toHaveBeenCalled();
+    expect(discord.publish).not.toHaveBeenCalled();
+  });
+  it("does not replace an unreadable live tally with zero votes", async () => {
+    const { service, store, record } = fixture();
+    store.history.mockResolvedValue([{ ...record, state: "open" }]);
+    store.liveCounts.mockRejectedValue(new Error("Database unavailable"));
+    await expect(service.list(staff)).rejects.toThrow("Database unavailable");
+  });
   it("closes a non-primary ballot using that server and fresh server-specific authority", async () => {
     const { service, closing, admin, auth, store } = fixture(true, "event");
     closing();
@@ -138,12 +161,13 @@ describe("durable Discord map voting", () => {
   });
   it("does not touch storage, Discord or the game while disabled", async () => {
     const { service, store, game, discord, input } = fixture(false);
-    expect(await service.list(staff)).toEqual({ enabled: false, serverId: "primary", votes: [] });
+    expect(await service.list(staff)).toMatchObject({ enabled: false, serverId: "primary", votes: [] });
     await expect(service.start(staff, input)).rejects.toMatchObject({ status: 503 });
     service.onApplicationBootstrap();
     await service.tick();
     service.onModuleDestroy();
     expect(store.history).not.toHaveBeenCalled();
+    expect(store.liveCounts).not.toHaveBeenCalled();
     expect(store.due).not.toHaveBeenCalled();
     expect(game.configuration).not.toHaveBeenCalled();
     expect(discord.publish).not.toHaveBeenCalled();

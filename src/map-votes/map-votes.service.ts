@@ -54,10 +54,25 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
     this.requireStaff(staff);
     const serverId = this.servers.resolve(staff.serverId);
     const enabled = this.options().enabled;
+    const history = enabled ? await this.store.history(serverId) : [];
+    const open = history.filter((vote) => vote.state === "open").map((vote) => vote.id);
+    const totals = open.length ? await this.store.liveCounts(open) : [];
+    const observedAt = new Date().toISOString();
     return {
       enabled,
       serverId,
-      votes: enabled ? (await this.store.history(serverId)).map(mapVoteView) : [],
+      observedAt,
+      votes: history.map((vote) => ({
+        ...mapVoteView(vote),
+        ...(vote.state === "open"
+          ? {
+              counted: true,
+              counts: vote.choices.map(
+                (_, choice) => totals.find((row) => row.voteId === vote.id && row.choice === choice)?.total ?? 0,
+              ),
+            }
+          : {}),
+      })),
     };
   }
   async start(staff: Staff, input: unknown) {

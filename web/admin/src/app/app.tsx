@@ -22,17 +22,19 @@ import { SettingsPage, PermissionsPage } from "../features/server/settings-page"
 import { NavigationGuard } from "./navigation-guard";
 import { MapVotesPage } from "../features/map-votes/map-votes-page";
 import { EventsPage } from "../features/events/events-page";
+import { ActivityPage } from "../features/server/activity-page";
 
 const pages = {
   overview: ["◫", "Overview", "Server overview", "Current match and server status."],
   players: ["♟", "Live players", "Live players", "Player search and moderation."],
+  match: ["◇", "Match & maps", "Match & maps", "Current match, next round, rotation and community voting."],
+  activity: ["◷", "Server activity", "Server activity", "Game events, players, match changes and staff actions."],
   combat: ["⌁", "Combat history", "Combat history", "Recorded kills, player history, and the server leaderboard."],
   whitelist: ["☷", "Whitelist", "Community whitelist", "Manage community queue access."],
   applications: ["✉", "Applications", "Whitelist applications", "Review and approve community requests."],
   supporters: ["✳", "Supporters", "Community supporters", "Patreon records and founder promises."],
   bans: ["⊘", "Bans", "Server bans", "Review restrictions and keep moderation decisions accountable."],
   announcements: ["↗", "Announcements", "Announcements", "Send a message to the server."],
-  match: ["◇", "Match & maps", "Match & maps", "Control the current round using the options this server supports."],
   votes: ["✓", "Map votes", "Map votes", "Let the community choose the next map in Discord."],
   events: ["⚑", "Events", "Optional events", "Run supervised 50v50 events and review their actions."],
   audit: ["◷", "Action history", "Action history", "Dashboard receipts and recent game requests."],
@@ -209,14 +211,21 @@ function Dashboard({
   const location = useLocation();
   const navigate = useNavigate();
   const key = location.pathname.split("/").filter(Boolean)[0] || "overview";
+  const navigationKey = ["votes", "events"].includes(key)
+    ? "match"
+    : ["audit", "combat"].includes(key)
+      ? "activity"
+      : key;
   const page = Object.hasOwn(pages, key) ? (key as keyof typeof pages) : "overview";
-  const visiblePages = Object.entries(pages).filter(([id]) =>
-    id === "supporters"
-      ? me.role === "admin"
-      : ["applications", "settings", "votes", "events"].includes(id)
-        ? server.role === "admin"
-        : true,
-  );
+  const visiblePages = Object.entries(pages)
+    .filter(([id]) => !["combat", "audit", "votes", "events"].includes(id))
+    .filter(([id]) =>
+      id === "supporters"
+        ? me.role === "admin"
+        : ["applications", "settings", "votes", "events"].includes(id)
+          ? server.role === "admin"
+          : true,
+    );
   const gamePage = ["overview", "players", "whitelist", "bans", "announcements", "match"].includes(key);
   const [overview, setOverview] = useState<Overview | null>(null);
   const [stale, setStale] = useState(true);
@@ -345,7 +354,7 @@ function Dashboard({
           <label className="mobile-navigation">
             Dashboard section
             <select
-              value={visiblePages.some(([id]) => id === key) ? key : ""}
+              value={visiblePages.some(([id]) => id === navigationKey) ? navigationKey : ""}
               disabled={busy || dialogOpen}
               onChange={(event) => navigate({ pathname: `/${event.target.value}`, search: location.search })}
             >
@@ -364,7 +373,8 @@ function Dashboard({
               <NavLink
                 key={id}
                 to={{ pathname: `/${id}`, search: location.search }}
-                className={({ isActive }) => (isActive ? "active" : "")}
+                className={({ isActive }) => (isActive || id === navigationKey ? "active" : "")}
+                aria-current={id === navigationKey ? "page" : undefined}
                 onClick={(event) => {
                   if (busy || dialogOpen) event.preventDefault();
                 }}
@@ -503,6 +513,7 @@ function Dashboard({
                 <Route index element={<Navigate to={{ pathname: "/overview", search: location.search }} replace />} />
                 <Route path="overview" element={<OverviewPage />} />
                 <Route path="players" element={<PlayersPage />} />
+                <Route path="activity" element={<ActivityPage />} />
                 <Route path="whitelist" element={<WhitelistPage />} />
                 <Route path="bans" element={<BansPage />} />
                 <Route path="announcements" element={<AnnouncementsPage />} />
@@ -523,9 +534,7 @@ function Dashboard({
             </section>
             <footer>
               <span>THE UNCs ✳ POWERED BY GRAMPS</span>
-              <span>
-                {gamePage ? "Server status updates every 20 seconds while visible" : "Refresh for the latest records"}
-              </span>
+              <span>Updates every 20 seconds while visible</span>
             </footer>
           </div>
         </main>

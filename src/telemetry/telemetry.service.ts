@@ -96,7 +96,7 @@ export class TelemetryService {
       windowStartedAt: since.toISOString(),
       asOf: asOf.toISOString(),
       coverageNote: !enabled
-        ? "Game event tracking is not connected. Existing host feed settings have not been changed."
+        ? "Game event tracking is not enabled."
         : "Based on events received during this time window. Earlier matches, delayed events and delivery gaps may affect totals. A quiet feed can simply mean no deaths occurred.",
     };
   }

@@ -302,7 +302,7 @@ describe("server action review", () => {
     );
     await screen.findByRole("option", { name: "Harbor" });
     fireEvent.change(screen.getByRole("combobox", { name: "Map" }), { target: { value: "Harbor" } });
-    await screen.findByRole("checkbox", { name: "Conquest" });
+    await screen.findByRole("option", { name: "Conquest" });
     expect(screen.queryByLabelText("Reason")).not.toBeInTheDocument();
     expect(request.mock.calls.some(([path]) => path === "actions")).toBe(false);
     await waitFor(() => expect(screen.getByRole("button", { name: "Change map" })).toBeEnabled());

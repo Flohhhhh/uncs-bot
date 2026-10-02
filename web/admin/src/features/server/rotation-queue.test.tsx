@@ -55,7 +55,7 @@ it("keeps duplicate maps distinct and preserves exact mode and lighting IDs when
   expect(change).toHaveBeenCalledWith([sample[1], sample[0], sample[2]]);
   const rows = within(screen.getByRole("list", { name: "Rotation queue" })).getAllByRole("listitem");
   expect(rows[0]).toHaveTextContent("Hardcore · Early day · fog");
-  expect(rows[1]).toHaveTextContent("Standard · Day · clear");
+  expect(rows[1]).toHaveTextContent("King of the Hill · Day · clear");
 });
 it("supports a real keyboard drag and Escape cancellation without changing the draft", async () => {
   const change = vi.fn();
@@ -93,7 +93,7 @@ it("inserts a prepared card through keyboard dragging", async () => {
   );
   const view = render(page(sample));
   const user = userEvent.setup();
-  screen.getByRole("button", { name: "Drag Bakurani · Standard · Day · clear into rotation" }).focus();
+  screen.getByRole("button", { name: "Drag Bakurani · King of the Hill · Day · clear into rotation" }).focus();
   await user.keyboard("[Space]");
   await user.keyboard("[ArrowDown]");
   view.rerender(page(structuredClone(sample)));

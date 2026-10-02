@@ -12,7 +12,9 @@ const rotation = { enabled: true, mode: "Ordered", entries: [{ index: 0, map: "S
 function page(version = 0) {
   return (
     <MemoryRouter>
-      <AdminContext.Provider value={{ ...context(), refreshVersion: version }}>
+      <AdminContext.Provider
+        value={{ ...context(), me: { ...context().me, role: "moderator" }, refreshVersion: version }}
+      >
         <MatchPage />
       </AdminContext.Provider>
     </MemoryRouter>
@@ -22,7 +24,19 @@ beforeEach(() => {
   request.mockReset();
 });
 it("keeps disruptive controls collapsed and only opens a separate action review", async () => {
-  request.mockResolvedValue(rotation);
+  request.mockImplementation(
+    async (path) =>
+      (path === "map-votes"
+        ? { enabled: false, votes: [] }
+        : path === "settings"
+          ? {
+              revision: "r1",
+              writable: true,
+              fields: [],
+              rotation: { ...rotation, editable: true, entries: [], currentIndex: null, currentMap: "Harbor" },
+            }
+          : { maps: [], experiences: [], lightings: [] }) as never,
+  );
   const admin = context();
   render(
     <MemoryRouter>
@@ -33,7 +47,7 @@ it("keeps disruptive controls collapsed and only opens a separate action review"
   );
   const summary = screen.getByText("Change, end or restart the current match");
   expect(summary.closest("details")).not.toHaveAttribute("open");
-  expect(screen.getByRole("link", { name: "Edit rotation & queue next map →" })).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "Edit rotation" })).toBeInTheDocument();
   fireEvent.click(summary);
   fireEvent.click(screen.getByRole("button", { name: "Restart match" }));
   expect(admin.openAction).toHaveBeenCalledWith("match-restart", undefined);
