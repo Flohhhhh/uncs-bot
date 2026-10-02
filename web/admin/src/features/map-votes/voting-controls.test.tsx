@@ -118,3 +118,27 @@ it("retries a failed first controls read without enabling voting or losing the f
   expect(screen.getByRole("checkbox", { name: "Automatic community voting" })).toBeDisabled();
   expect(request.mock.calls.every(([path, options]) => path === "map-votes/controls" && !options?.method)).toBe(true);
 });
+it("keeps the switches editable while a background refresh is pending", async () => {
+  const state = context();
+  const view = (refreshVersion: number) => (
+    <AdminContext.Provider value={{ ...state, refreshVersion }}>
+      <VotingControlsPanel onDirty={vi.fn()} />
+    </AdminContext.Provider>
+  );
+  const page = render(view(0), { wrapper: MemoryRouter });
+  fireEvent.click(await screen.findByRole("checkbox", { name: /Score 85/ }));
+  const base = request.getMockImplementation()!;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  request.mockImplementation(async (path, options) => {
+    await held;
+    return base(path, options);
+  });
+  page.rerender(view(1));
+  await waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+  expect(screen.getByRole("checkbox", { name: /Score 50/ })).toBeEnabled();
+  expect(screen.getByRole("checkbox", { name: /Score 85/ })).toBeChecked();
+  await act(async () => release());
+  expect(screen.getByRole("checkbox", { name: /Score 85/ })).toBeChecked();
+  expect(request.mock.calls.some(([, options]) => options?.method === "POST")).toBe(false);
+});

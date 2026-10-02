@@ -38,6 +38,7 @@ export function VotingControlsPanel({ onDirty }: { onDirty: (value: boolean) => 
       changed ||
       uncertain ||
       resource.loading ||
+      resource.refreshing ||
       !data.available ||
       resource.error
     )
@@ -73,7 +74,7 @@ export function VotingControlsPanel({ onDirty }: { onDirty: (value: boolean) => 
         <button
           type="button"
           className="button secondary"
-          disabled={busy || resource.loading}
+          disabled={busy || resource.loading || resource.refreshing}
           onClick={resource.refresh}
         >
           Reload saved controls
@@ -137,6 +138,7 @@ export function VotingControlsPanel({ onDirty }: { onDirty: (value: boolean) => 
             disabled={
               busy ||
               resource.loading ||
+              resource.refreshing ||
               !data.available ||
               changed ||
               uncertain ||
@@ -151,7 +153,7 @@ export function VotingControlsPanel({ onDirty }: { onDirty: (value: boolean) => 
         {(draft || uncertain || resource.error) && (
           <button
             className="button secondary"
-            disabled={busy || resource.loading}
+            disabled={busy || resource.loading || resource.refreshing}
             onClick={() => {
               setDraft(null);
               setReview(false);

@@ -246,6 +246,8 @@ it("does not query settings or catalog when disabled", async () => {
   show();
   await screen.findByRole("heading", { name: "Discord map voting is off" });
   expect(screen.getByRole("link", { name: "Open match & maps" })).toHaveAttribute("href", "/match?server=primary");
+  await waitFor(() => expect(request.mock.calls.map(([path]) => path)).toEqual(["map-votes", "map-votes/controls"]));
+  await screen.findByText("Voting is off.");
   expect(request.mock.calls.map(([path]) => path)).toEqual(["map-votes", "map-votes/controls"]);
 });
 it("recovers an initial voting-status failure with a read-only local retry", async () => {
@@ -427,6 +429,39 @@ it("blocks a draft after settings change instead of silently adopting a new revi
   );
   await screen.findByText("Server settings changed. Discard this draft and refresh.");
   expect(screen.getByRole("button", { name: "Review ballot" })).toBeDisabled();
+});
+it("keeps the ballot builder editable while a background refresh is pending", async () => {
+  const { state, rerender } = show();
+  await choose("Europe");
+  const minutes = screen.getByRole("spinbutton", { name: "Voting duration (minutes)" });
+  fireEvent.change(minutes, { target: { value: "7" } });
+  fireEvent.change(screen.getByRole("combobox", { name: "Map" }), { target: { value: "Islands" } });
+  await waitFor(() => expect(screen.getByRole("button", { name: "Add map option" })).toBeEnabled());
+  const fallback = request.getMockImplementation()!;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  request.mockImplementation(async (path, init) => {
+    await held;
+    return fallback(path, init);
+  });
+  rerender(
+    <AdminContext.Provider value={{ ...state, refreshVersion: 1 }}>
+      <MapVotesPage />
+    </AdminContext.Provider>,
+  );
+  await waitFor(() =>
+    expect(
+      request.mock.calls.filter(([path]) => ["settings", "catalog", "catalog/maps/Islands"].includes(path)),
+    ).toHaveLength(6),
+  );
+  expect(minutes).toBeEnabled();
+  expect(screen.getByRole("combobox", { name: "Map" })).toBeEnabled();
+  expect(screen.getByRole("combobox", { name: "Game mode" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Add map option" })).toBeEnabled();
+  await act(async () => release());
+  expect(minutes).toHaveValue(7);
+  expect(screen.getByRole("combobox", { name: "Map" })).toHaveValue("Islands");
+  expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
 });
 it("shows saved results and closes an active ballot with a separate recorded request", async () => {
   votes = [ballot];
