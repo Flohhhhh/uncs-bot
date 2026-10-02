@@ -57,6 +57,7 @@ describe("two-server HTTP isolation", () => {
         whitelist: jest.fn(async () => ({ entries: [{ steamId, active: id === "east" }] })),
         gameLog: jest.fn(async () => ({ available: true, entries: [], serverMarker: id })),
         identity: jest.fn(async () => ({ serverId: { available: true, value: id } })),
+        checkRotation: jest.fn(async () => ({ revision: id, total: 0, issues: [] })),
         execute: jest.fn(async () => ({ state: "accepted", message: `Accepted by ${id}` })),
       },
     ]),
@@ -206,6 +207,18 @@ describe("two-server HTTP isolation", () => {
     expect(games.central.identity).toHaveBeenCalledTimes(1);
     expect(games.east.execute).not.toHaveBeenCalled();
     expect(games.central.execute).not.toHaveBeenCalled();
+  });
+  it("isolates read-only rotation checks and denies non-admins", async () => {
+    centralAccess = "admin";
+    expect((await read("servers/east/settings/rotation-check").expect(200)).body.revision).toBe("east");
+    expect((await read("servers/central/settings/rotation-check").expect(200)).body.revision).toBe("central");
+    await read("servers/east/settings/rotation-check").expect(200);
+    expect(games.east.checkRotation).toHaveBeenCalledTimes(1);
+    expect(games.central.checkRotation).toHaveBeenCalledTimes(1);
+    centralAccess = "viewer";
+    await read("servers/central/settings/rotation-check").expect(403);
+    await read("settings/rotation-check").expect(400);
+    expect(games.central.checkRotation).toHaveBeenCalledTimes(1);
   });
   it("keeps game log reads and caches server scoped and denies viewers", async () => {
     centralAccess = "admin";

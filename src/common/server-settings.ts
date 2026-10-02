@@ -168,6 +168,11 @@ export const settingFields: SettingField[] = [
   },
 ];
 export type MapSelection = { map: string; experiences: string[]; lighting?: string; zoneAlternator?: string };
+export type RotationCheck = {
+  revision: string;
+  total: number;
+  issues: { index: number; message: string; unavailable: boolean }[];
+};
 export type SettingsSnapshot = {
   revision: string;
   writable: boolean;
