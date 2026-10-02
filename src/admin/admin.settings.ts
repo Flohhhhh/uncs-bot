@@ -59,15 +59,21 @@ export class AdminSettings {
     };
   }
 
-  /** Labels only: a browser must never receive the endpoint or password. */
+  /** Public identity and connection version only; never expose an endpoint or password. */
   servers(): GameServerSummary[] {
     const configured = this.env.get("WARDOGS_SERVERS");
-    const definitions = configured ?? [
-      { id: LEGACY_SERVER_ID, name: "The UNCs", rconUrl: this.env.get("WARDOGS_RCON_URL") ?? "" },
+    const definitions: Array<{ id: string; name: string; rconUrl: string; joinId?: string }> = configured ?? [
+      {
+        id: LEGACY_SERVER_ID,
+        name: "The UNCs",
+        rconUrl: this.env.get("WARDOGS_RCON_URL") ?? "",
+        joinId: this.env.get("WARDOGS_SERVER_JOIN_ID"),
+      },
     ];
-    return definitions.map(({ id, name, rconUrl }) => ({
+    return definitions.map(({ id, name, rconUrl, joinId }) => ({
       id,
       name,
+      ...(joinId ? { joinId } : {}),
       version: createHash("sha256")
         .update(`${id}\n${rconUrl.replace(/\/+$/, "")}`)
         .digest("hex"),
