@@ -133,14 +133,29 @@ export async function checkSavedRotation(game: WardogsClient) {
   }
   return { revision: doc.revision, total: entries.length, issues };
 }
+// RconError text is written for staff and never forwards upstream bodies; a format
+// mismatch names only the field, so staff can report what the game changed.
+function rotationReadFailure(error: unknown) {
+  if (error instanceof RconError) return error.message;
+  if (!(error instanceof z.ZodError)) return "Refresh to try again.";
+  const [issue] = error.issues;
+  const field = issue.path.map((part) => (typeof part === "number" ? `#${part + 1}` : String(part))).join(" ");
+  const more = error.issues.length > 1 ? `; ${error.issues.length - 1} more` : "";
+  return `The game's reply was not in the expected format (${field || "reply"}: ${issue.message}${more}). Refresh to try again.`;
+}
+/**
+ * `nextIndex` is where a next-round choice is inserted: after the running entry, or,
+ * when the game names no running entry, the entry the game reports it will play next.
+ */
 async function rotationPosition(
   game: WardogsClient,
   status: z.infer<typeof statusSchema> | null,
   entries: MapSelection[],
   doc: ConfigDocument,
   capabilities: Capabilities,
-): Promise<{ currentIndex: number | null; positionNote: string }> {
-  const unavailable = (positionNote: string) => ({ currentIndex: null, positionNote });
+): Promise<{ currentIndex: number | null; nextIndex: number | null; positionNote: string }> {
+  const unavailable = (positionNote: string) => ({ currentIndex: null, nextIndex: null, positionNote });
+  const confirmed = (index: number) => ({ currentIndex: index, nextIndex: index + 1, positionNote: "" });
   if (!status) return unavailable("The running map could not be read. Refresh to try again.");
   const mapMismatch = (index: number, map: string) =>
     unavailable(
@@ -152,21 +167,15 @@ async function rotationPosition(
       return unavailable(
         `The game reports a position outside the ${entries.length} saved rotation entries. Refresh to check again.`,
       );
-    return sameMap(entries[index].map, status.map)
-      ? { currentIndex: index, positionNote: "" }
-      : mapMismatch(index, entries[index].map);
+    return sameMap(entries[index].map, status.map) ? confirmed(index) : mapMismatch(index, entries[index].map);
   }
   if (!serves(capabilities, "GET", "/v1/rotation"))
     return unavailable("The game has not supplied its place in the rotation. Refresh after the next round starts.");
   try {
     // The official console uses the rotation's `now` marker when status has no index.
     // Match the ordered rows, not just the map name: a map may appear more than once.
+    // Both positions below are numeric, so the running rows must match the saved rows first.
     const running = await game.rotation();
-    const now = running.entries.flatMap((entry, i) => (entry.status === "now" ? [i] : []));
-    if (now.length !== 1)
-      return unavailable(
-        "The game has not identified one current rotation entry. Refresh after the next round starts.",
-      );
     if (
       running.enabled !== (scalarValue(doc.text, ROTATION, "bEnabled")?.toLowerCase() === "true") ||
       running.mode.toLowerCase() !== scalarValue(doc.text, ROTATION, "RotationMode")?.toLowerCase()
@@ -193,12 +202,32 @@ async function rotationPosition(
           `Rotation entry ${i + 1} differs. Running: ${selectionLabel({ ...entry, experiences: entry.experiences ?? [] })}. Saved: ${selectionLabel(saved)}. Refresh to check again.`,
         );
     }
-    if (!sameMap(running.entries[now[0]].map, status.map)) return mapMismatch(now[0], running.entries[now[0]].map);
-    if (running.entries[now[0]].denied)
-      return unavailable(`The game marks current rotation entry ${now[0] + 1} unavailable. Refresh to check again.`);
-    return { currentIndex: now[0], positionNote: "" };
-  } catch {
-    return unavailable("The running rotation could not be read. Refresh to try again.");
+    const marked = (marker: string) => running.entries.flatMap((entry, i) => (entry.status === marker ? [i] : []));
+    const now = marked("now");
+    if (now.length === 1) {
+      if (!sameMap(running.entries[now[0]].map, status.map)) return mapMismatch(now[0], running.entries[now[0]].map);
+      if (running.entries[now[0]].denied)
+        return unavailable(`The game marks current rotation entry ${now[0] + 1} unavailable. Refresh to check again.`);
+      return confirmed(now[0]);
+    }
+    // With no running entry named (live status on October 2: nowIndex null, nextIndex 0),
+    // the game still reports which entry plays next. Queue into that slot, as the official
+    // console does, only when its marker in the rotation agrees or is absent.
+    const next = status.rotation?.nextIndex;
+    if (
+      now.length === 0 &&
+      typeof next === "number" &&
+      Number.isSafeInteger(next) &&
+      next >= 0 &&
+      next < entries.length &&
+      marked("next").every((i) => i === next)
+    )
+      return { currentIndex: null, nextIndex: next, positionNote: "" };
+    return unavailable(
+      "The game has not identified one current or next rotation entry. Refresh after the next round starts.",
+    );
+  } catch (error) {
+    return unavailable(`The running rotation could not be read. ${rotationReadFailure(error)}`);
   }
 }
 export async function readServerConfiguration(game: WardogsClient): Promise<SettingsSnapshot> {
@@ -270,6 +299,8 @@ export async function changeServerConfiguration(
   if (doc.revision !== action.revision)
     throw new RconError("Settings changed since you opened this page. Reload and review your changes.");
   let text = doc.text;
+  // Set only for a choice placed at the game's reported next entry (no running entry named).
+  let reportedNext: number | null = null;
   try {
     if (action.action === "settings-save") {
       for (const [id, input] of Object.entries(action.changes)) {
@@ -311,24 +342,33 @@ export async function changeServerConfiguration(
       if (action.action === "map-next") {
         const status = statusSchema.parse(await game.request("GET", "/v1/status"));
         const position = await rotationPosition(game, status, existing, doc, capabilities);
-        if (position.currentIndex === null) throw new RconError(position.positionNote);
-        if (position.currentIndex !== action.currentIndex || !sameMap(status.map, action.currentMap))
+        if (position.nextIndex === null) throw new RconError(position.positionNote);
+        if (
+          position.currentIndex !== action.currentIndex ||
+          (action.currentIndex === null && position.nextIndex !== action.nextIndex) ||
+          !sameMap(status.map, action.currentMap)
+        )
           throw new RconError("The current round changed. Reload before queuing a map.");
         if (
           scalarValue(doc.text, ROTATION, "bEnabled")?.toLowerCase() !== "true" ||
           scalarValue(doc.text, ROTATION, "RotationMode")?.toLowerCase() !== "ordered"
         )
           throw new RconError("Enable an ordered rotation before choosing the next map.");
-        if (!existing[action.currentIndex] || !sameMap(existing[action.currentIndex].map, status.map))
+        if (
+          action.currentIndex !== null &&
+          (!existing[action.currentIndex] || !sameMap(existing[action.currentIndex].map, status.map))
+        )
           throw new RconError("The running map does not match the saved rotation. Reload and review it.");
         entries = [...existing];
-        // Removing an earlier entry shifts the running numeric index onto another
-        // map. Only move a later entry; preserve the current position otherwise.
+        const slot = position.nextIndex;
+        if (action.currentIndex === null) reportedNext = slot;
+        // Removing an earlier entry shifts the game's numeric position onto another
+        // map. Only move a matching entry from the slot onward.
         const match = entries.findIndex(
-          (entry, index) => index > action.currentIndex && formatRotation(entry) === formatRotation(action.entry),
+          (entry, index) => index >= slot && formatRotation(entry) === formatRotation(action.entry),
         );
         if (match >= 0) entries.splice(match, 1);
-        entries.splice(action.currentIndex + 1, 0, action.entry);
+        entries.splice(slot, 0, action.entry);
       } else entries = action.entries;
       if (entries.length > 100) throw new RconError("Keep the rotation to 100 entries or fewer.");
       const catalog = await game.catalog();
@@ -393,11 +433,29 @@ export async function changeServerConfiguration(
     ...new Set<string>(outcomes.map((outcome: { state?: string }) => labels[outcome.state ?? ""]).filter(Boolean)),
   ];
   if (Array.isArray(result.shadowed) && result.shadowed.length) notes.push("Some values are overridden by the host.");
+  if (reportedNext !== null) {
+    // The game named this slot itself. Report success only if it still names the queued entry next.
+    let next: number | null | undefined;
+    try {
+      next = statusSchema.parse(await game.request("GET", "/v1/status")).rotation?.nextIndex;
+    } catch {
+      next = undefined;
+    }
+    if (next !== reportedNext)
+      return {
+        state: "unknown",
+        message:
+          typeof next === "number"
+            ? `Saved, but the game now reports rotation entry ${next + 1} as next. Review the rotation before this match ends.`
+            : "Saved, but the game did not confirm its next entry. Refresh before this match ends.",
+      };
+  }
+  const nextNote = reportedNext === null ? "" : `The game reports rotation entry ${reportedNext + 1} as next. `;
   // Saved does not establish that gameplay has already adopted the new values.
   return {
     state: "pending",
     ...(revision ? { revision } : {}),
-    message: `Settings saved and verified. ${notes.join(" ") || "Check the running game to confirm when they take effect."}`,
+    message: `Settings saved and verified. ${nextNote}${notes.join(" ") || "Check the running game to confirm when they take effect."}`,
   };
 }
 

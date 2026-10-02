@@ -98,11 +98,17 @@ export const actionSchema = z.discriminatedUnion("action", [
       ...base,
       action: z.literal("map-next"),
       revision,
-      currentIndex: z.number().int().min(0),
+      // The reviewed running entry, or null with the game's reported next entry.
+      currentIndex: z.number().int().min(0).nullable(),
+      nextIndex: z.number().int().min(0).optional(),
       currentMap: selection,
       entry: mapSelectionSchema,
     })
-    .strict(),
+    .strict()
+    .refine(
+      (action) => (action.currentIndex === null) === (action.nextIndex !== undefined),
+      "Review the rotation position again before queuing a map.",
+    ),
   z.object({ ...player, action: z.literal("kick") }).strict(),
   z.object({ ...player, action: z.literal("ban"), confirm: steamId }).strict(),
   z.object({ ...player, action: z.literal("unban"), confirm: steamId }).strict(),

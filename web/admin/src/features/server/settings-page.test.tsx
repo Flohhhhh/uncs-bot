@@ -36,6 +36,7 @@ const sample: SettingsSnapshot = {
     editable: true,
     note: "",
     currentIndex: 0,
+    nextIndex: 1,
     currentMap: "Kavkazi",
     enabled: true,
     mode: "Ordered",
@@ -252,6 +253,35 @@ it.each(["Kavkazi", "Bakurani"])(
     });
   },
 );
+it("shows and queues into the game's next entry when the game names no running entry", async () => {
+  const fallback = request.getMockImplementation()!;
+  request.mockImplementation(async (path, options) => {
+    if (path !== "settings") return fallback(path, options);
+    const snapshot = structuredClone(sample);
+    Object.assign(snapshot.rotation, { currentIndex: null, nextIndex: 0, currentMap: "Bakurani" });
+    return snapshot as never;
+  });
+  show("admin", "/settings#rotation");
+  fireEvent.click(await screen.findByRole("button", { name: "Next round" }));
+  expect(await screen.findByText("Bakurani · Map defaults")).toBeInTheDocument();
+  expect(screen.queryByText("Position not confirmed")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Refresh map position" })).not.toBeInTheDocument();
+  fireEvent.change(await screen.findByRole("combobox", { name: "Map" }), { target: { value: "Europe" } });
+  await screen.findByRole("checkbox", { name: "Infantry only" });
+  await waitFor(() => expect(screen.getByRole("button", { name: "Queue next map" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "Queue next map" }));
+  const dialog = screen.getByRole("dialog");
+  expect(dialog).toHaveTextContent("Placed at rotation entry 1, which the game reports it plays next.");
+  fireEvent.click(within(dialog).getByRole("button", { name: "Queue next map" }));
+  await waitFor(() => expect(request.mock.calls.some(([path]) => path === "actions")).toBe(true));
+  expect(JSON.parse(String(request.mock.calls.find(([path]) => path === "actions")![1]?.body))).toMatchObject({
+    action: "map-next",
+    currentMap: "Bakurani",
+    currentIndex: null,
+    nextIndex: 0,
+    entry: { map: "Europe" },
+  });
+});
 it("explains a missing position and refreshes it without losing the chosen map or sending an action", async () => {
   let available = false;
   const fallback = request.getMockImplementation()!;
@@ -260,6 +290,7 @@ it("explains a missing position and refreshes it without losing the chosen map o
     const snapshot = structuredClone(sample);
     if (!available) {
       snapshot.rotation.currentIndex = null;
+      snapshot.rotation.nextIndex = null;
       snapshot.rotation.positionNote = "The running rotation could not be read. Refresh to try again.";
     }
     return snapshot as never;
