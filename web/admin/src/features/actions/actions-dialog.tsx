@@ -70,7 +70,8 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
   const catalog = useResource<Catalog>(
     needsCatalog && allowed(action, admin.me, admin.overview, admin.stale, false) ? "catalog" : null,
   );
-  const catalogReady = !needsCatalog || Boolean(catalog.data && !catalog.loading && !catalog.error);
+  const catalogReady =
+    !needsCatalog || Boolean(catalog.data && !catalog.loading && !catalog.refreshing && !catalog.error);
   const player = admin.overview?.players.find((entry) => entry.steamId === steamId);
   const [title, description] = actionDefinitions[action];
   const requiresPlayer = playerActions.includes(action);

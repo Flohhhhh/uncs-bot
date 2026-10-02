@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
+import { HttpException } from "@nestjs/common";
 import { MapVotesService } from "./map-votes.service";
 import { MapVotesStore } from "./map-votes.store";
 import { MapVotesDiscord } from "./map-votes.discord";
 import { fixtureServers } from "../admin/game-server-fixture";
 import { AdminService } from "../admin/admin.service";
+import type { AdminStore } from "../admin/admin.store";
 import { AdminAuth } from "../admin/admin.auth";
 import { EnvService } from "../env/env.service";
 import type { Staff } from "../admin/admin.types";
@@ -401,7 +403,7 @@ describe("durable Discord map voting", () => {
     expect(auth.serverStaff).toHaveBeenCalledWith(expect.objectContaining({ id: staff.id }), "primary", true);
     expect(admin.act).toHaveBeenCalledTimes(1);
     expect(admin.act).toHaveBeenCalledWith(
-      expect.objectContaining({ id: staff.id, role: "admin" }),
+      expect.objectContaining({ id: `system:map-vote:${input.id}`, name: staff.name, role: "admin" }),
       expect.objectContaining({
         id: input.id,
         action: "map-next",
@@ -412,6 +414,43 @@ describe("durable Discord map voting", () => {
       }),
     );
     expect(store.finish).toHaveBeenCalledWith(input.id, "queued", expect.any(String));
+  });
+  it("closes under its own audit actor, so the creator's last dashboard action cannot throttle it", async () => {
+    const f = fixture();
+    const servers = fixtureServers({
+      ...f.game,
+      execute: jest.fn().mockResolvedValue({ state: "pending", message: "Saved" }),
+    });
+    const adminStore = { begin: jest.fn().mockResolvedValue({ created: true }), finish: jest.fn() };
+    const admin = new AdminService(servers, adminStore as unknown as AdminStore);
+    const service = new MapVotesService(
+      f.store as unknown as MapVotesStore,
+      servers,
+      admin,
+      f.auth as unknown as AdminAuth,
+      f.discord as unknown as MapVotesDiscord,
+      { get: (key: string) => f.environment[key] } as EnvService,
+    );
+    await admin.act(
+      { ...staff, serverId: "primary" },
+      { id: randomUUID(), action: "broadcast", reason: "Staff notice", message: "Hello" },
+    );
+    f.closing();
+    await service.tick();
+    expect(adminStore.begin).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: `system:map-vote:${f.record.id}`, name: staff.name }),
+      expect.objectContaining({ id: f.record.id, action: "map-next" }),
+      expect.any(String),
+    );
+    expect(f.store.finish).toHaveBeenCalledWith(f.record.id, "queued", expect.any(String));
+  });
+  it("closes as cancelled when the audited action path refuses the queue change before sending it", async () => {
+    const { service, closing, store, admin, input } = fixture();
+    closing();
+    admin.act.mockRejectedValue(new HttpException("Wait a moment before sending another action.", 429));
+    await service.tick();
+    expect(admin.act).toHaveBeenCalledTimes(1);
+    expect(store.finish).toHaveBeenCalledWith(input.id, "cancelled", expect.stringContaining("without sending"));
   });
   it("retains the rotation without game or role reads when nobody voted", async () => {
     const { service, store, record, admin, game, auth } = fixture();
@@ -1009,6 +1048,22 @@ describe("score-based voting controls and reminders", () => {
       expect(action.message).toContain("#map-voting");
     }
     expect(f.store.claimClose).not.toHaveBeenCalled();
+  });
+  it("broadcasts reminders as the ballot's audit actor and records a refused broadcast as not sent", async () => {
+    const f = scored();
+    f.admin.act.mockRejectedValue(new HttpException("Wait a moment before sending another action.", 429));
+    await f.service.tick();
+    expect(f.discord.remind).toHaveBeenCalledTimes(1);
+    expect(f.admin.act).toHaveBeenCalledWith(
+      expect.objectContaining({ id: `system:map-vote:${f.record.id}`, name: staff.name }),
+      expect.objectContaining({ action: "broadcast" }),
+    );
+    expect(f.store.finishReminder).toHaveBeenCalledWith(
+      f.record.id,
+      "midpoint",
+      "failed",
+      expect.stringContaining("not sent"),
+    );
   });
   it("skips the earlier reminder when scores jump to the final milestone", async () => {
     const f = scored();

@@ -19,6 +19,7 @@ import { ServerCommunityModule } from "./server-community/server-community.modul
 import { ServerEventsModule } from "./server-events/server-events.module";
 import { DiscordRolesModule } from "./discord-roles/discord-roles.module";
 import { WeeklyLeaderboardModule } from "./weekly-leaderboard/weekly-leaderboard.module";
+import { StaffAlertsMonitorModule } from "./staff-alerts/staff-alerts-monitor.module";
 
 @Module({
   imports: [
@@ -38,6 +39,7 @@ import { WeeklyLeaderboardModule } from "./weekly-leaderboard/weekly-leaderboard
     ServerEventsModule,
     DiscordRolesModule,
     WeeklyLeaderboardModule,
+    StaffAlertsMonitorModule,
   ],
   providers: [AppService, { provide: APP_FILTER, useClass: AppExceptionFilter }],
   controllers: [AppController],

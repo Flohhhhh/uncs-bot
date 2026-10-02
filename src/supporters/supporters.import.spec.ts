@@ -277,6 +277,31 @@ describe("Patreon API import persistence", () => {
     expect(update[0].text).not.toContain('"patron_status" =');
     expect(update[1]).toContain("pending");
   });
+  it("re-asserts an unchanged snapshot over member state a late webhook overwrote", async () => {
+    const { store, state, calls } = fixture();
+    state.observed = false;
+    state.payments = [payment()];
+    // A redelivered webhook with the same charge date set an older status after the sync stored this snapshot.
+    const result = await store.importApiMember(campaign, snapshot({ patronStatus: "former_patron" }), at);
+    expect(result).toMatchObject({ created: false, updated: true, payments: 0 });
+    const [update] = calls('update "supporter_members"');
+    expect(update[0].text).toContain('"patron_status" =');
+    expect(update[1]).toEqual(expect.arrayContaining(["former_patron", "pending", 5]));
+  });
+  it.each([
+    ["a newer webhook charge", { lastChargeAt: new Date("2026-11-01T12:00:00Z"), patronStatus: "former_patron" }, {}],
+    ["an undated snapshot", {}, { lastChargeStatus: null, lastChargeAt: null }],
+  ])(
+    "does not re-assert an unchanged snapshot against %s",
+    async (_case, member: Partial<ReturnType<typeof fixture>["state"]["member"]>, changes) => {
+      const { store, state, calls } = fixture();
+      state.observed = false;
+      state.payments = [payment()];
+      Object.assign(state.member, member);
+      expect(await store.importApiMember(campaign, snapshot(changes), at)).toMatchObject({ updated: false });
+      expect(calls("update")).toHaveLength(0);
+    },
+  );
   it("lists founder promises whose payment is no longer verified, scoped to the campaign", async () => {
     const { store, query } = fixture();
     await store.founderReviews(campaign);

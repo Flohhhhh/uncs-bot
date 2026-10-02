@@ -146,7 +146,13 @@ export function RotationEditor({
   initialView?: "next" | "rotation";
 }) {
   const [view, setView] = useState(initialView);
-  const { data: catalog, error, loading, refresh: refreshCatalog } = useResource<Catalog>(active ? "catalog" : null);
+  const {
+    data: catalog,
+    error,
+    loading,
+    refreshing,
+    refresh: refreshCatalog,
+  } = useResource<Catalog>(active ? "catalog" : null);
   const savedRows = useMemo(
     () => snapshot.rotation.entries.map((entry, index) => ({ id: snapshot.revision + ":" + index, entry })),
     [snapshot],
@@ -266,7 +272,7 @@ export function RotationEditor({
             <button
               type="button"
               className="button secondary small"
-              disabled={disabled || loading}
+              disabled={disabled || loading || refreshing}
               onClick={refreshCatalog}
             >
               Retry map choices
