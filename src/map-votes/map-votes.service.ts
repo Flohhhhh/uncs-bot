@@ -309,7 +309,7 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
     for (const choice of action.choices) await validateMapSelection(game, choice, capabilities, catalog);
     const overview = await game.overview();
     const observedAt = Date.parse(overview.observedAt);
-    if (!Number.isFinite(observedAt) || overview.status.map !== settings.rotation.currentMap)
+    if (!Number.isFinite(observedAt) || !sameMap(overview.status.map, settings.rotation.currentMap))
       throw new ConflictException("The current map could not be confirmed. Refresh before starting a vote.");
     const round = roundStamp(overview.status, observedAt);
     const score = automatic?.policy ? votingScore(overview.status) : null;
@@ -491,7 +491,7 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
       return;
     }
     const overview = await game.overview();
-    if (overview.status.map !== rotation.currentMap || !Number.isFinite(Date.parse(overview.observedAt)))
+    if (!sameMap(overview.status.map, rotation.currentMap) || !Number.isFinite(Date.parse(overview.observedAt)))
       throw new Error("Rotation observation changed.");
     const round = roundStamp(overview.status, Date.parse(overview.observedAt));
     const score = votingScore(overview.status);
@@ -757,7 +757,7 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
             (roundStart === null ||
               !Number.isFinite(roundStart) ||
               Math.abs(roundStart - vote.roundStartedAt.getTime()) > 30_000)) ||
-          current.status.map !== vote.currentMap ||
+          !sameMap(current.status.map, vote.currentMap) ||
           this.stopped
         )
           throw new Error("Round cannot be confirmed.");
