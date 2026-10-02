@@ -1,7 +1,7 @@
 import { AdminSettings } from "./admin.settings";
 import { AdminService } from "./admin.service";
 import type { AdminStore } from "./admin.store";
-import { RconError, serves, WardogsClient } from "./wardogs.client";
+import { RconError, RESERVED_SLOTS_CACHE_MS, serves, WardogsClient } from "./wardogs.client";
 import { actionSchema, playersSchema, type AdminAction } from "./admin.types";
 import { configuredWhitelist } from "./whitelist-document";
 import { randomUUID } from "node:crypto";
@@ -72,6 +72,93 @@ describe("shared dashboard and community observations", () => {
     await expect(client.overview()).rejects.toThrow("could not be reached");
     await dashboard.read("overview");
     expect(playerReads()).toBe(1);
+  });
+});
+
+describe("running whitelist for community welcomes", () => {
+  let now = 1_800_000_000_000;
+  beforeEach(() => jest.spyOn(Date, "now").mockImplementation(() => now));
+  afterEach(() => jest.restoreAllMocks());
+
+  function fixture() {
+    const running = [existing, "not-a-steam-id"];
+    const transport = jest.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      const body =
+        init?.method === "GET" && path === "/v1/reserved-slots"
+          ? { reservedSlots: [...running] }
+          : init?.method === "POST" && path === "/v1/reserved-slots"
+            ? (running.push(id), { ok: true })
+            : { ok: true };
+      return new Response(JSON.stringify(body));
+    });
+    const client = new WardogsClient(settings);
+    const reads = () =>
+      transport.mock.calls.filter(([url, init]) => init?.method === "GET" && String(url).endsWith("/v1/reserved-slots"))
+        .length;
+    return { transport, client, reads };
+  }
+
+  it("shares one read of valid SteamIDs for five minutes, then reads again", async () => {
+    const { client, reads } = fixture();
+    const [first, second] = await Promise.all([client.reservedSlots(), client.reservedSlots()]);
+    expect(first).toBe(second);
+    expect([...first.ids]).toEqual([existing]);
+    expect(Date.parse(first.loadedAt)).not.toBeNaN();
+    now += RESERVED_SLOTS_CACHE_MS - 1;
+    await expect(client.reservedSlots()).resolves.toBe(first);
+    expect(reads()).toBe(1);
+    now += 1;
+    await expect(client.reservedSlots()).resolves.not.toBe(first);
+    expect(reads()).toBe(2);
+    expect(RESERVED_SLOTS_CACHE_MS).toBe(300_000);
+  });
+
+  it("does not cache a failed or malformed read", async () => {
+    const { transport, client, reads } = fixture();
+    transport.mockRejectedValueOnce(new Error("Unavailable"));
+    await expect(client.reservedSlots()).rejects.toThrow("could not be reached");
+    transport.mockResolvedValueOnce(new Response(JSON.stringify({ reservedSlots: null })));
+    await expect(client.reservedSlots()).rejects.toThrow();
+    await expect(client.reservedSlots()).resolves.toMatchObject({ ids: new Set([existing]) });
+    expect(reads()).toBe(3);
+  });
+
+  it("reads again after a whitelist approval through the same connection", async () => {
+    const { transport, client } = fixture();
+    transport.mockImplementationOnce(async () => new Response(JSON.stringify({ routes: ["POST /v1/reserved-slots"] })));
+    await client.capabilities();
+    expect((await client.reservedSlots()).ids.has(id)).toBe(false);
+    await expect(
+      client.execute({ id: randomUUID(), action: "whitelist-add", steamId: id, reason: "Requested access" }),
+    ).resolves.toMatchObject({ state: "applied" });
+    expect((await client.reservedSlots()).ids.has(id)).toBe(true);
+  });
+
+  it.each([
+    ["DELETE", `/v1/reserved-slots/${id}`],
+    ["PUT", "/v1/config"],
+  ])("discards the cached copy after %s %s, even when it fails", async (method, path) => {
+    const { transport, client, reads } = fixture();
+    await client.reservedSlots();
+    transport.mockRejectedValueOnce(new Error("Lost response"));
+    await expect(client.request(method, path, method === "PUT" ? "text" : undefined)).rejects.toMatchObject({
+      unknownResult: true,
+    });
+    await client.reservedSlots();
+    expect(reads()).toBe(2);
+  });
+
+  it.each([
+    ["POST", `/v1/players/${id}/message`],
+    ["POST", "/v1/broadcast"],
+    ["POST", "/v1/config/validate"],
+  ])("keeps the cached copy after %s %s", async (method, path) => {
+    const { client, reads } = fixture();
+    await client.reservedSlots();
+    await client.request(method, path, { message: "Welcome" });
+    await client.reservedSlots();
+    expect(reads()).toBe(1);
   });
 });
 
