@@ -31,12 +31,13 @@ const event = {
   createdAt: "2026-10-01T10:00:00Z",
   endsAt: "2026-10-01T11:00:00Z",
 };
-let events: Array<typeof event>, enabled: boolean, revision: string;
+let events: Array<typeof event>, enabled: boolean, revision: string, matchSeconds: number | undefined;
 beforeEach(() => {
   vi.clearAllMocks();
   events = [];
   enabled = true;
   revision = "r1";
+  matchSeconds = 120;
   request.mockImplementation(async (path, init) => {
     if (init?.method === "POST") return { ...event, message: "Event request recorded" } as never;
     if (path === "events") return { enabled, events, serverId: "primary" } as never;
@@ -44,6 +45,7 @@ beforeEach(() => {
       return { revision, fields: [{ id: "lockOverpopulated", value: true, editable: true }] } as never;
     if (path === "overview") {
       const value = overview();
+      value.status.matchSeconds = matchSeconds;
       value.status.factionScores.push({ name: "Manticore", colorHex: "#7BC462", score: 10 });
       return value as never;
     }
@@ -89,6 +91,34 @@ it("defaults to no forced respawns and requires two different teams", async () =
     within(screen.getByRole("combobox", { name: "Team 2" })).queryByRole("option", { name: "Valkyra" }),
   ).not.toBeInTheDocument();
 });
+it("explains missing round timing before review and keeps the draft when timing is checked again", async () => {
+  matchSeconds = undefined;
+  show();
+  await selectTeams();
+  await screen.findByText(/Round timing is unavailable/);
+  expect(screen.getByRole("button", { name: "Review event" })).toBeDisabled();
+  expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+  matchSeconds = 125;
+  fireEvent.click(screen.getByRole("button", { name: "Check round timing" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Review event" })).toBeEnabled());
+  expect(screen.getByRole("combobox", { name: "Team 1" })).toHaveValue("Valkyra");
+  expect(screen.getByRole("combobox", { name: "Team 2" })).toHaveValue("Lonestar");
+});
+it("rechecks round timing when opening a start review and blocks a missing clock without a POST", async () => {
+  show();
+  await selectTeams();
+  matchSeconds = undefined;
+  fireEvent.click(screen.getByRole("button", { name: "Review event" }));
+  await screen.findByText(/Round timing is unavailable/);
+  const submit = screen.getByRole("button", { name: "Arm event" });
+  expect(submit).toBeDisabled();
+  fireEvent.submit(submit.closest("form")!);
+  expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+  matchSeconds = 125;
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Check round timing" }));
+  await waitFor(() => expect(submit).toBeEnabled());
+  expect(within(screen.getByRole("dialog")).queryByRole("textbox")).not.toBeInTheDocument();
+});
 it("reviews a frozen start request without typing and waits for the separate confirmation button", async () => {
   const { state } = show();
   await selectTeams();
@@ -101,6 +131,7 @@ it("reviews a frozen start request without typing and waits for the separate con
   const submit = within(dialog).getByRole("button", { name: "Arm event" });
   expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
   expect(within(dialog).queryByRole("textbox")).not.toBeInTheDocument();
+  await waitFor(() => expect(submit).toBeEnabled());
   fireEvent.click(submit);
   fireEvent.click(submit);
   await screen.findByText("Event request recorded");
@@ -119,6 +150,36 @@ it("reviews a frozen start request without typing and waits for the separate con
     confirm: "START 50V50",
   });
 });
+it("blocks submission while the review timing read is pending or failed and permits a read-only retry", async () => {
+  show();
+  await selectTeams();
+  const fallback = request.getMockImplementation()!;
+  let rejectTiming!: (error: Error) => void;
+  request.mockImplementation((path, init) =>
+    path === "overview"
+      ? new Promise((_, reject) => {
+          rejectTiming = reject;
+        })
+      : fallback(path, init),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Review event" }));
+  const dialog = within(screen.getByRole("dialog"));
+  const submit = dialog.getByRole("button", { name: "Arm event" });
+  expect(dialog.getByText("Checking round timing…")).toBeInTheDocument();
+  expect(submit).toBeDisabled();
+  fireEvent.submit(submit.closest("form")!);
+  rejectTiming(new Error("Game status could not be read"));
+  await dialog.findByText("Game status could not be read");
+  expect(submit).toBeDisabled();
+  fireEvent.submit(submit.closest("form")!);
+  expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+  request.mockImplementation(fallback);
+  fireEvent.click(dialog.getByRole("button", { name: "Check round timing" }));
+  await waitFor(() => expect(submit).toBeEnabled());
+  expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+  fireEvent.click(dialog.getByRole("button", { name: "Back" }));
+  expect(screen.getByRole("combobox", { name: "Team 1" })).toHaveValue("Valkyra");
+});
 it("does not retry an uncertain start response", async () => {
   const original = request.getMockImplementation()!;
   request.mockImplementation(async (path, init) => {
@@ -129,6 +190,7 @@ it("does not retry an uncertain start response", async () => {
   await selectTeams();
   fireEvent.click(screen.getByRole("button", { name: "Review event" }));
   expect(screen.queryByRole("textbox", { name: "Reason" })).not.toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Arm event" })).toBeEnabled());
   fireEvent.click(screen.getByRole("button", { name: "Arm event" }));
   await screen.findByText(/Connection lost.*will not be sent again/);
   expect(screen.queryByRole("button", { name: "Arm event" })).not.toBeInTheDocument();
@@ -167,6 +229,7 @@ it("loads the current lock only for explicit restoration review", async () => {
   show();
   fireEvent.click(await screen.findByRole("button", { name: "Review restoration" }));
   await screen.findByText("Population lock: on → on.");
+  expect(request.mock.calls.some(([path]) => path === "overview")).toBe(false);
   expect(screen.getByRole("dialog")).toHaveTextContent("stop the affected Gramps instance");
   expect(screen.queryByRole("textbox", { name: "Reason" })).not.toBeInTheDocument();
   expect(within(screen.getByRole("dialog")).queryByRole("textbox")).not.toBeInTheDocument();

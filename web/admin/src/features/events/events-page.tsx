@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { eventView, EventOptions } from "../../../../../src/server-events/server-events.types";
 import type { SettingsSnapshot } from "../../../../../src/common/server-settings";
+import { roundStamp } from "../../../../../src/common/game-round";
 import { useGameApi } from "../../api/server-client";
 import { useResource } from "../../api/use-resource";
 import type { Overview } from "../../api/types";
@@ -25,6 +26,23 @@ const labels = {
 const stateLabel = (event: Event) =>
   event.stop && !["complete", "needs_review"].includes(event.state) ? "Stop requested" : labels[event.state];
 
+function hasRoundTiming(overview: Overview | null) {
+  return !!overview && !!roundStamp(overview.status, Date.parse(overview.observedAt));
+}
+
+function RoundTimingNotice({ resource, busy }: { resource: ReturnType<typeof useResource<Overview>>; busy: boolean }) {
+  if (resource.loading) return <p role="status">Checking round timing…</p>;
+  if (!resource.error && hasRoundTiming(resource.data)) return null;
+  return (
+    <div className="notice warning" role="alert">
+      <p>{resource.error || "Round timing is unavailable. 50v50 needs it to start sorting at the right time."}</p>
+      <button type="button" className="button secondary" disabled={busy} onClick={resource.refresh}>
+        Check round timing
+      </button>
+    </div>
+  );
+}
+
 function EventReview({
   review,
   close,
@@ -42,6 +60,8 @@ function EventReview({
   const submitted = useRef(false);
   const [result, setResult] = useState<string | null>(null);
   const settings = useResource<SettingsSnapshot>(review.kind === "restore" ? "settings" : null);
+  const roster = useResource<Overview>(review.kind === "start" ? "overview" : null);
+  const canStart = review.kind !== "start" || (!roster.loading && !roster.error && hasRoundTiming(roster.data));
   const confirmation = review.kind === "start" ? "START 50V50" : review.kind === "restore" ? "RESTORE TEAM LOCK" : null;
   const lock = settings.data?.fields.find((field) => field.id === "lockOverpopulated");
   const canRestore =
@@ -49,7 +69,7 @@ function EventReview({
   const blocked = review.kind !== "stop" && statusUnavailable;
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (busy || submitted.current || !canRestore || blocked) return;
+    if (busy || submitted.current || !canStart || !canRestore || blocked) return;
     submitted.current = true;
     setBusy(true);
     let path = "events",
@@ -152,11 +172,12 @@ function EventReview({
       ) : (
         <form onSubmit={(event) => void submit(event)}>
           {blocked && <p role="alert">Refresh event history before continuing.</p>}
+          {review.kind === "start" && <RoundTimingNotice resource={roster} busy={busy} />}
           <div className="dialog-actions">
             <button type="button" className="button secondary" disabled={busy} onClick={close}>
               Back
             </button>
-            <button className="button primary" disabled={busy || !canRestore || blocked}>
+            <button className="button primary" disabled={busy || !canStart || !canRestore || blocked}>
               {busy
                 ? "Saving…"
                 : review.kind === "start"
@@ -201,6 +222,7 @@ function EventDraft({ review, statusUnavailable }: { review: (draft: Draft) => v
     statusUnavailable || settings.loading || roster.loading || !!settings.error || !!roster.error || admin.busy;
   const ready =
     !unavailable &&
+    hasRoundTiming(roster.data) &&
     !stale &&
     typeof lock?.value === "boolean" &&
     (!lock.value || lock.editable) &&
@@ -215,11 +237,12 @@ function EventDraft({ review, statusUnavailable }: { review: (draft: Draft) => v
   return (
     <Card title="Optional 50v50" subtitle="Warn players, balance two teams, and review event actions.">
       <div className="card-body">
-        {(settings.error || roster.error || stale) && (
+        {(settings.error || stale) && (
           <p className="notice warning" role="alert">
-            {settings.error || roster.error || "Server settings changed. Discard this draft and refresh."}
+            {settings.error || "Server settings changed. Discard this draft and refresh."}
           </p>
         )}
+        <RoundTimingNotice resource={roster} busy={admin.busy} />
         <div className="settings-grid">
           {([0, 1] as const).map((index) => (
             <label key={index}>
