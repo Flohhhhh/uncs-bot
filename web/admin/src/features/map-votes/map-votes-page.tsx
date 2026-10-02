@@ -1,4 +1,6 @@
-import { mapLabel, selectionLabel, sameMap } from "../../../../../src/common/map-labels";
+import { selectionLabel } from "../../../../../src/common/map-labels";
+import { voteChoiceKey } from "../../../../../src/common/voting-policy";
+import { VotingControlsPanel } from "./voting-controls";
 import { useEffect, useRef, useState } from "react";
 import type { MapSelection, SettingsSnapshot } from "../../../../../src/common/server-settings";
 import type { MapVoteSetup } from "../../../../../src/common/map-vote-automation";
@@ -74,7 +76,7 @@ function VoteReview({
         <>
           <ol className="change-summary">
             {draft.choices.map((choice) => (
-              <li key={choice.map}>{selectionLabel(choice)}</li>
+              <li key={voteChoiceKey(choice)}>{selectionLabel(choice)}</li>
             ))}
           </ol>
           <p>
@@ -193,37 +195,61 @@ function VotingSetupCheck() {
 
 export function MapVotesPage() {
   const admin = useAdmin();
+  const [policyDirty, setPolicyDirty] = useState(false);
+  const [ballotDirty, setBallotDirty] = useState(false);
+  const { setUnsavedChanges } = admin;
+  useEffect(() => {
+    setUnsavedChanges(policyDirty || ballotDirty);
+    return () => setUnsavedChanges(false);
+  }, [policyDirty, ballotDirty, setUnsavedChanges]);
   const resource = useResource<VoteList>(admin.me.role === "admin" ? "map-votes" : null);
   if (admin.me.role !== "admin") return <Empty title="Administrator access required" />;
   if (!resource.data) return <Empty title={resource.error || "Loading map votes…"} />;
   if (!resource.data.enabled)
     return (
-      <Card title="Discord map voting is off" subtitle="You can still choose maps manually." badge={<Badge>OFF</Badge>}>
-        <div className="card-body">
-          <p>
-            <Link className="button primary" to="/match">
-              Open match &amp; maps
-            </Link>
-          </p>
-          <details>
-            <summary>How to enable voting</summary>
+      <>
+        <Card
+          title="Discord map voting is off"
+          subtitle="You can still choose maps manually."
+          badge={<Badge>OFF</Badge>}
+        >
+          <div className="card-body">
             <p>
-              A server owner needs to choose a Discord voting channel and enable map voting in Gramps. This setup is not
-              available in the dashboard yet. Automatic voting also needs an explicit server policy and a confirmed
-              rotation position.
+              <Link className="button primary" to="/match">
+                Open match &amp; maps
+              </Link>
             </p>
-            <VotingSetupCheck />
-          </details>
-        </div>
-      </Card>
+            <details>
+              <summary>How to enable voting</summary>
+              <p>
+                Choose a Discord voting channel in Gramps and check its permissions. Prepare the switches below, then
+                enable live voting only after a controlled test.
+              </p>
+              <VotingSetupCheck />
+            </details>
+          </div>
+        </Card>
+        <Card title="Voting settings">
+          <div className="card-body">
+            <VotingControlsPanel onDirty={setPolicyDirty} />
+          </div>
+        </Card>
+      </>
     );
   return (
-    <EnabledMapVotes
-      data={resource.data}
-      error={resource.error}
-      loading={resource.loading}
-      refresh={resource.refresh}
-    />
+    <>
+      <EnabledMapVotes
+        data={resource.data}
+        error={resource.error}
+        loading={resource.loading}
+        refresh={resource.refresh}
+        onDirty={setBallotDirty}
+      />
+      <details>
+        <summary>Voting settings</summary>
+        <VotingControlsPanel onDirty={setPolicyDirty} />
+      </details>
+    </>
   );
 }
 
@@ -232,11 +258,13 @@ function EnabledMapVotes({
   error,
   loading,
   refresh,
+  onDirty,
 }: {
   data: VoteList;
   error: string;
   loading: boolean;
   refresh: () => void;
+  onDirty: (value: boolean) => void;
 }) {
   const admin = useAdmin();
   const active = data.votes.some((vote) => ["publishing", "open", "closing", "needs_review"].includes(vote.state));
@@ -249,11 +277,10 @@ function EnabledMapVotes({
   const [minutes, setMinutes] = useState(5);
   const [review, setReview] = useState<{ draft?: Draft; vote?: Vote } | null>(null);
   const dirty = !!choices.length || !!selection.map || !!selection.lighting || minutes !== 5;
-  const { setUnsavedChanges } = admin;
   useEffect(() => {
-    setUnsavedChanges(dirty);
-    return () => setUnsavedChanges(false);
-  }, [dirty, setUnsavedChanges]);
+    onDirty(dirty);
+    return () => onDirty(false);
+  }, [dirty, onDirty]);
   const rotation = settings.data?.rotation;
   const changed = revision !== null && revision !== settings.data?.revision;
   const unavailable =
@@ -310,13 +337,7 @@ function EnabledMapVotes({
                   change={setSelection}
                   onReadyChange={setSelectionReady}
                   disabled={!canEdit}
-                  catalog={{
-                    ...catalog.data,
-                    maps: catalog.data.maps.filter(
-                      (map) =>
-                        !sameMap(map.id, rotation?.currentMap) && !choices.some((choice) => choice.map === map.id),
-                    ),
-                  }}
+                  catalog={catalog.data}
                 />
                 <div className="dialog-actions">
                   <button
@@ -326,8 +347,7 @@ function EnabledMapVotes({
                       !canEdit ||
                       !selectionReady ||
                       choices.length >= 5 ||
-                      sameMap(selection.map, rotation?.currentMap) ||
-                      choices.some((choice) => choice.map === selection.map)
+                      choices.some((choice) => voteChoiceKey(choice) === voteChoiceKey(selection))
                     }
                     onClick={() => {
                       setRevision(revision ?? settings.data!.revision);
@@ -340,13 +360,15 @@ function EnabledMapVotes({
                 </div>
                 <ol className="rotation-editor" aria-label="Ballot choices">
                   {choices.map((choice) => (
-                    <li key={choice.map}>
+                    <li key={voteChoiceKey(choice)}>
                       <span>{selectionLabel(choice)}</span>
                       <button
                         className="button secondary small"
                         disabled={admin.busy}
-                        aria-label={`Remove ${mapLabel(choice.map)}`}
-                        onClick={() => setChoices(choices.filter((entry) => entry.map !== choice.map))}
+                        aria-label={`Remove ${selectionLabel(choice)}`}
+                        onClick={() =>
+                          setChoices(choices.filter((entry) => voteChoiceKey(entry) !== voteChoiceKey(choice)))
+                        }
                       >
                         Remove
                       </button>
@@ -367,7 +389,9 @@ function EnabledMapVotes({
                     />
                   </label>
                 </div>
-                <p className="muted">Choose 2–5 maps. The current map is excluded.</p>
+                <p className="muted">
+                  Choose 2–5 map, mode or layout combinations. The same map can appear with different modes.
+                </p>
                 <div className="dialog-actions">
                   {dirty && (
                     <button className="button secondary" disabled={admin.busy} onClick={clear}>

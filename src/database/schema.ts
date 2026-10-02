@@ -12,6 +12,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import type { MapVoteCancellation, MapVoteChoice, MapVoteState } from "../map-votes/map-votes.types";
+import type { VoteAutomation, VotingPolicy } from "../common/voting-policy";
 import type {
   EventOperation,
   EventOptions,
@@ -123,6 +124,17 @@ export const whitelistApplicationReviews = pgTable(
   (table) => [index("whitelist_application_reviews_application_idx").on(table.applicationId)],
 );
 
+// A human contributor must generate and review the migration for these voting controls.
+export const mapVotePolicies = pgTable("map_vote_policies", {
+  serverId: text("server_id").primaryKey(),
+  version: integer("version").notNull().default(1),
+  policy: jsonb("policy").$type<VotingPolicy>().notNull(),
+  actorId: text("actor_id").notNull(),
+  actorName: text("actor_name").notNull(),
+  connectionHash: text("connection_hash").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const mapVotes = pgTable(
   "map_votes",
   {
@@ -147,6 +159,7 @@ export const mapVotes = pgTable(
     counts: jsonb("counts").$type<number[]>().notNull(),
     message: text("message").notNull().default("Creating the Discord ballot."),
     cancellation: jsonb("cancellation").$type<MapVoteCancellation>(),
+    automation: jsonb("automation").$type<VoteAutomation>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     closesAt: timestamp("closes_at", { withTimezone: true }).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

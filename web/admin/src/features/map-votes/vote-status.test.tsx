@@ -24,6 +24,7 @@ const ballot: VoteList = {
       closesAt: "2026-10-02T04:05:00Z",
       message: "Voting open.",
       cancellation: null,
+      automation: null,
       messageUrl: null,
     },
   ],

@@ -14,6 +14,12 @@ export class MapVotesController {
   @Get("setup") setup(@Req() request: StaffRequest) {
     return this.service.setup(request.staff);
   }
+  @Get("controls") controls(@Req() request: StaffRequest) {
+    return this.service.controls(request.staff);
+  }
+  @Post("controls") saveControls(@Req() request: StaffRequest, @Body() body: unknown) {
+    return this.service.saveControls(request.staff, body);
+  }
   @Post() start(@Req() request: StaffRequest, @Body() body: unknown) {
     return this.service.start(request.staff, body);
   }

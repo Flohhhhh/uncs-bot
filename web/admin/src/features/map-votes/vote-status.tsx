@@ -54,7 +54,11 @@ export function VoteResults({ data, error = "" }: { data: VoteList; error?: stri
         ) : (
           <>
             <p>
-              {vote.state === "open" ? `Closes ${date(vote.closesAt)}` : vote.message}
+              {vote.state === "open"
+                ? vote.automation
+                  ? "Closes when the leading team reaches 95 points"
+                  : `Closes ${date(vote.closesAt)}`
+                : vote.message}
               {total !== null && ` · ${total} ${total === 1 ? "vote" : "votes"}`}
             </p>
             <ol className="vote-results" aria-label="Map vote totals">
@@ -80,6 +84,13 @@ export function VoteResults({ data, error = "" }: { data: VoteList; error?: stri
             {data.observedAt && (
               <small className="muted">Totals checked {date(data.observedAt)}. Refreshes with the dashboard.</small>
             )}
+            {vote.automation &&
+              Object.entries(vote.automation.reminders).map(([stage, reminder]) => (
+                <small className="muted" key={stage}>
+                  {stage === "midpoint" ? "Score 50 update" : "Score 85 reminder"}:{" "}
+                  {reminder.state === "accepted" || reminder.state === "applied" ? "sent" : reminder.message}
+                </small>
+              ))}
             {vote.messageUrl && (
               <p>
                 <a className="text-button" href={vote.messageUrl} target="_blank" rel="noreferrer">

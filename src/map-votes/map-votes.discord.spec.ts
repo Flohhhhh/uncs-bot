@@ -52,7 +52,7 @@ it("shows choices and voting rules without private staff evidence or pinging mem
   const payload = ballotMessage(record);
   expect(payload.content).toContain("Ozeti");
   expect(payload.content).toContain("InfantryOnly Dusk");
-  expect(payload.components[0].toJSON().components[0]).toMatchObject({ label: "1. Ozeti" });
+  expect(payload.components[0].toJSON().components[0]).toMatchObject({ label: "1. Ozeti · InfantryOnly" });
   expect(payload.content).toContain("A tie or no votes keeps the rotation");
   expect(payload.allowedMentions).toEqual({ parse: [], users: [], roles: [], repliedUser: false });
   expect(JSON.stringify(payload)).not.toContain("Private");
@@ -86,6 +86,31 @@ it("uses a stable nonce for Discord's duplicate-send protection", async () => {
   expect(first.enforceNonce).toBe(true);
   expect(first.nonce).toBe(second.nonce);
   expect(first.nonce.length).toBeLessThanOrEqual(25);
+});
+it("distinguishes two modes on the same map and sends totals without mentions or exposing staff data", async () => {
+  const { service, channel } = fixture();
+  const vote = {
+    ...record,
+    choices: [
+      { map: "Europe", experiences: ["KOTH"] },
+      { map: "Europe", experiences: ["KOTH", "KOTH_InfantryOnly"] },
+    ],
+    counts: [4, 7],
+  };
+  const buttons = ballotMessage(vote).components[0].toJSON().components;
+  expect(buttons[0]).toMatchObject({ label: "1. Ozeti · King of the Hill" });
+  expect(buttons[1]).toMatchObject({ label: "2. Ozeti · Infantry only" });
+  await service.remind(vote, "final");
+  await service.remind(vote, "final");
+  const first = channel.send.mock.calls[0][0];
+  expect(first.content).toContain("4 votes");
+  expect(first.content).toContain("7 votes");
+  expect(first.content).toContain("11 votes so far");
+  expect(first.content).toContain("Closes at 95 points");
+  expect(first.allowedMentions.parse).toEqual([]);
+  expect(first.nonce).toBe(channel.send.mock.calls[1][0].nonce);
+  expect(JSON.stringify(first)).not.toContain("Private staff");
+  expect(JSON.stringify(first)).not.toContain(record.connectionHash);
 });
 it("checks channel permissions without posting or editing a message", async () => {
   const { service, channel } = fixture();

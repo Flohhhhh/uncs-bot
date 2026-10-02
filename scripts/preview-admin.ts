@@ -780,13 +780,6 @@ const supporterStore = {
 };
 const previewEnvironment: Record<string, unknown> = {
   MAP_VOTES_ENABLED: process.env.PREVIEW_MAP_VOTES_ENABLED !== "false",
-  ...(process.env.PREVIEW_AUTOMATIC_VOTES === "true"
-    ? {
-        MAP_VOTES_AUTOMATIC: [
-          { serverId: "primary", actorId: "123456789012345678", delaySeconds: 60, minutes: 2, choices: 3 },
-        ],
-      }
-    : {}),
   SERVER_EVENTS_ENABLED: true,
   WARDOGS_RCON_URL: "https://game.example.test",
   ADMIN_GUILD_ID: "111111111111111111",
@@ -943,7 +936,74 @@ const eventStore = {
     /* Preview effects run in this one in-memory process only. */
   },
 };
+const demoVotePolicies = new Map<
+  string,
+  {
+    serverId: string;
+    version: number;
+    policy: import("../src/common/voting-policy").VotingPolicy;
+    actorId: string;
+    actorName: string;
+    connectionHash: string;
+  }
+>();
 const voteStore = {
+  async policy(serverId: string) {
+    return structuredClone(demoVotePolicies.get(serverId) ?? null);
+  },
+  async policies() {
+    return structuredClone([...demoVotePolicies.values()]);
+  },
+  async savePolicy(
+    serverId: string,
+    version: number,
+    policy: import("../src/common/voting-policy").VotingPolicy,
+    staff: Staff,
+    connectionHash: string,
+  ) {
+    if ((demoVotePolicies.get(serverId)?.version ?? 0) !== version)
+      throw new ConflictException("Voting controls changed. Reload saved controls.");
+    const saved = { serverId, version: version + 1, policy, actorId: staff.id, actorName: staff.name, connectionHash };
+    demoVotePolicies.set(serverId, structuredClone(saved));
+    const closed: MapVoteRecord[] = [];
+    if (!policy.enabled)
+      for (const vote of demoVotes.values())
+        if (vote.serverId === serverId && vote.automation && vote.state === "open") {
+          vote.state = "cancelled";
+          vote.message = "Automatic voting switched off.";
+          closed.push(structuredClone(vote));
+        }
+    return { saved, closed };
+  },
+  async automaticOpen() {
+    return structuredClone([...demoVotes.values()].filter((vote) => vote.state === "open" && vote.automation));
+  },
+  async observeScore(id: string, score: number) {
+    const vote = demoVotes.get(id);
+    if (!vote?.automation || vote.state !== "open" || score < vote.automation.highestScore) return false;
+    vote.automation.highestScore = score;
+    return true;
+  },
+  async claimReminder(id: string, stage: import("../src/common/voting-policy").VoteReminder, receiptId: string) {
+    const vote = demoVotes.get(id);
+    if (!vote?.automation || vote.state !== "open" || vote.automation.reminders[stage]) return null;
+    vote.automation.reminders[stage] = {
+      id: receiptId,
+      state: "started",
+      message: "Preview only",
+      at: new Date().toISOString(),
+    };
+    return structuredClone(vote);
+  },
+  async finishReminder(
+    id: string,
+    stage: import("../src/common/voting-policy").VoteReminder,
+    state: string,
+    message: string,
+  ) {
+    const reminder = demoVotes.get(id)?.automation?.reminders[stage];
+    if (reminder) Object.assign(reminder, { state, message });
+  },
   async checkSetup(serverId: string) {
     return {
       unfinished: [...demoVotes.values()].some(
@@ -1098,6 +1158,7 @@ async function main() {
       check: async () => ({ name: "simulated-voting" }),
       publish: async () => "333333333333333333",
       update: async () => undefined,
+      remind: async () => undefined,
     })
     .compile();
   const app = module.createNestApplication(adapter, { rawBody: true });

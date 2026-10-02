@@ -2,7 +2,6 @@ import { nonEmptyString } from "../common/schemas/non-empty-string.schema";
 import { z } from "zod";
 import { jsonSetting } from "./json-setting";
 import { gameServerConnections } from "../common/game-server";
-import { automaticMapVotes } from "../common/map-vote-automation";
 
 const discordId = z.string().regex(/^\d{17,20}$/, "Use a Discord numeric ID.");
 const communityMessage = z
@@ -62,8 +61,6 @@ export const Env = z.object({
     .default("false")
     .transform((value) => value === "true"),
   MAP_VOTES_CHANNEL_ID: discordId.optional(),
-  /** Explicit per-server opt-in; each configured actor must retain administrator access. */
-  MAP_VOTES_AUTOMATIC: jsonSetting(automaticMapVotes, 16_384).optional(),
   /** Optional event automation; requires a human-reviewed schema and controlled game rehearsal. */
   SERVER_EVENTS_ENABLED: z
     .enum(["true", "false"])
