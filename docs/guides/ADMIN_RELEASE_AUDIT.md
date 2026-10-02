@@ -1,5 +1,13 @@
 # Dashboard release audit
 
+## October 1 22:22 EDT — refresh approved; ballot readiness checked
+
+Dennis approved the formatted community refresh and asked to include welcome and end-of-match messaging, using the whitelist application to direct players to the website. He then corrected the wording: **do not advertise "free"; use "Get whitelisted"**. This supersedes the approval hold below for the document's specific changes. The local PDF has been updated to remove promotional "free" wording. Approval does not turn isolated test actions into permission to exercise disruptive game controls. Community rollout and its first real delivery still need verification.
+
+Four isolated regressions reproduced ballot review/publish remaining available with absent timing or failed history, and a failed history read unnecessarily blocking Close ballot. The dashboard now checks round timing both before review and when opening it, preserves draft choices during a read-only retry, blocks publishing while history is unavailable or another ballot is active, labels retained history, and leaves Close ballot available through its separate confirmation. Events and ballots share the existing round-timing notice instead of duplicating it. The backend's independent checks are unchanged.
+
+All **248 dashboard tests**, frontend production build/typecheck, touched-file lint, global formatting and whitespace checks pass. Browser checks against the isolated port-4320 preview verified disabled Review with no clock, preserved choices after retry, and a clock-enabled second server with the correct target and a separate enabled Publish button. Both sample drafts were discarded; no ballot was published and no browser errors were reported. The fix awaits its reviewable PR; live automatic voting remains disabled.
+
 ## October 1 22:10 EDT — community refresh prepared for Dennis's approval
 
 Dennis requested website-based whitelist intake, voting where feasible, refreshed Discord instructions and announcements, and a formatted review document **before any of those changes go live**. The three-page local approval copy is `C:/Users/denni/OneDrive/Documents/ChatGPT/TheUNCs/outputs/The-UNCs-Discord-Refresh-Review.pdf`. All pages were rendered and visually checked. It contains the actual proposed welcome/whitelist pins, channel topic, rollout announcement, shorter Gramps welcome, seeding post, spaced game welcomes and staff-run map-vote guide. No Discord post, channel, permission, game message or activation setting was changed. Preserve this approval hold across continuations.
