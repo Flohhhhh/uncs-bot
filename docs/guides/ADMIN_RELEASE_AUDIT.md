@@ -1,5 +1,11 @@
 # Dashboard release audit
 
+## October 1 21:55 EDT — event readiness feedback released
+
+[PR #52](https://github.com/Flohhhhh/uncs-bot/pull/52) and [release #53](https://github.com/Flohhhhh/uncs-bot/pull/53) merged normally. Main is `091d445ca921e4243d538ebd5186a7f55bd186bd`; Railway deployment `bbb1f281-0b88-43c3-85f3-5f838c92acb3` is Active. Production serves the exact tested `index-DHIFe0fQ.js` (SHA-256 `93d6dd9c82d6e4aa171e8a6b498354e26741119bb5c4d4f4be4b16424820640f`), and health returns 200. Release checks passed **640 backend, 244 dashboard and 32 PostgreSQL tests**, build, formatting, lint, typecheck, handler validation and migration checks. The operational event guide now describes the separate confirmation button instead of typed phrases.
+
+Read-only acceptance confirms live Events remains disabled, the released script loads, and no browser errors occur. The live restart review was also rechecked before this rollout: The UNCs (primary), 100 players, reviewed Bakurani, consequence warning, Cancel and Restart current match, with zero text fields. It was cancelled and the disruptive controls were collapsed again. No live game command, settings change, event activation or message was sent. Optional-event behavior was exercised only against isolated fixtures/preview. The overall goal remains active; the previously recorded feed, welcome, real-applicant, banner, event rehearsal, saved-rotation and touch-device acceptance work is still outstanding.
+
 ## October 1 21:46 EDT — event round-timing prerequisite surfaced
 
 Optional 50v50 previously allowed a start review when the game supplied no round clock, although the existing backend necessarily refused that start. The draft now explains the missing timing and disables Review. Opening a start review also reads the selected server overview and blocks Arm while that read is pending, failed or missing usable timing. A read-only Check round timing button preserves the chosen teams and other draft values. The shared round parser remains authoritative for clock validity; the backend still independently checks the actual start request. No extra polling or typed confirmation was added. Stop remains available without a game read, and restoration does not acquire a clock requirement.
