@@ -1,6 +1,6 @@
 # Combat history and server leaderboard
 
-The optional Wardogs feed stores combat events for this server and exposes rolling 24-hour, 7-day and 30-day views. The public website leaderboard contains game display names, SteamID64, recorded kills/deaths and K/D. Authenticated staff can inspect the recent killfeed and a selected player's events. Application emails, Discord account details and application review notes are never joined into this data.
+The optional Wardogs feed stores combat events for this server and exposes rolling 24-hour, 7-day and 30-day views. The public website leaderboard contains game display names, recorded kills/deaths, headshot kills and K/D, never SteamID64s; a SteamID shown in place of a missing name becomes "Unnamed player". Authenticated staff rankings keep SteamID64s for moderation and player history. Authenticated staff can inspect the recent killfeed and a selected player's events. Application emails, Discord account details and application review notes are never joined into this data.
 
 This is recorded game history for human review, not an anti-cheat verdict. There are no automatic bans, cheat scores, or automatic accusation messages.
 
@@ -28,7 +28,7 @@ Events are stored transactionally with a unique instance/event ID pair so repeat
 
 Routes:
 
-- `GET /community/api/leaderboard?period=day|week|month`: public game statistics only.
+- `GET /community/api/leaderboard?period=day|week|month`: public game statistics only, without SteamIDs.
 - `GET /admin/api/combat?period=...`: authenticated staff history.
 - `GET /admin/api/combat/players/:steamId?period=...`: authenticated staff player history.
 

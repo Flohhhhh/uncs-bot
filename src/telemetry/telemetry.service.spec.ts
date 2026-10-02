@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { EnvService } from "../env/env.service";
-import { TelemetryService } from "./telemetry.service";
+import { TelemetryService, UNNAMED_PLAYER } from "./telemetry.service";
 import type { TelemetryStore } from "./telemetry.store";
 import { emptyTotals, periodMilliseconds } from "./telemetry.types";
 import { fixtureServers } from "../admin/game-server-fixture";
@@ -10,6 +10,7 @@ import { AdminSettings } from "../admin/admin.settings";
 const token = "dedicated-feed-token-".repeat(3);
 const steamId = "76561198000000001";
 const now = new Date("2026-09-30T12:00:00.000Z");
+const publicKeys = ["deaths", "headshotKills", "kd", "kills", "name"];
 function fixture(enabled = true, secret = token, rcon = "different-rcon-password") {
   const values: Record<string, unknown> = {
     WARDOGS_FEED_ENABLED: enabled,
@@ -175,9 +176,48 @@ describe("telemetry authorization and reporting", () => {
     });
     const result = await service.leaderboard();
     expect(result.leaderboard).toHaveLength(100);
-    expect(result.leaderboard[0]).toEqual(stats);
+    expect(result.leaderboard[0]).toEqual({ name: "Player", kills: 2, deaths: 0, headshotKills: 1, kd: null });
     expect(JSON.stringify(result)).not.toMatch(/private|email|discordId|secret/);
     expect(result).not.toHaveProperty("events");
+    const staff = await service.combat();
+    expect(staff.leaderboard).toHaveLength(100);
+    expect(staff.leaderboard[0]).toEqual(stats);
+    expect(JSON.stringify(staff)).not.toMatch(/private|email|discordId|secret/);
+  });
+  it("never puts a SteamID in the public leaderboard while staff rankings keep them", async () => {
+    const { service, store } = fixture();
+    const unnamed = "76561198000000002",
+      embedded = "76561198000000003",
+      numeric = "76561198000000004";
+    store.snapshot.mockResolvedValue({
+      leaderboard: [
+        { steamId, name: "Player", kills: 3, deaths: 1, headshotKills: 1, kd: 3 },
+        // Storage uses the SteamID as the name when the game never sent one.
+        { steamId: unnamed, name: unnamed, kills: 2, deaths: 1, headshotKills: 0, kd: 2 },
+        { steamId: embedded, name: `Tag ${embedded}`, kills: 1, deaths: 1, headshotKills: 0, kd: 1 },
+        { steamId: numeric, name: "76561198999999999", kills: 0, deaths: 1, headshotKills: 0, kd: 0 },
+      ],
+      totals: { ...emptyTotals(), players: 4 },
+    });
+    const result = await service.leaderboard("week");
+    const json = JSON.stringify(result);
+    for (const id of [steamId, unnamed, embedded, numeric, "76561198999999999"]) expect(json).not.toContain(id);
+    expect(json).not.toMatch(/steamId|7656119\d{10}/i);
+    expect(result.leaderboard).toEqual([
+      { name: "Player", kills: 3, deaths: 1, headshotKills: 1, kd: 3 },
+      { name: UNNAMED_PLAYER, kills: 2, deaths: 1, headshotKills: 0, kd: 2 },
+      { name: UNNAMED_PLAYER, kills: 1, deaths: 1, headshotKills: 0, kd: 1 },
+      { name: UNNAMED_PLAYER, kills: 0, deaths: 1, headshotKills: 0, kd: 0 },
+    ]);
+    for (const row of result.leaderboard) expect(Object.keys(row).sort()).toEqual(publicKeys);
+    const staff = await service.combat("week");
+    expect(staff.leaderboard.map((row) => row.steamId)).toEqual([steamId, unnamed, embedded, numeric]);
+    expect(staff.leaderboard[1].name).toBe(unnamed);
+    // Both views read the same 10-second snapshot.
+    expect(store.snapshot).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(10_001);
+    await service.leaderboard("week");
+    expect(store.snapshot).toHaveBeenCalledTimes(2);
   });
   it("scopes player queries and rejects malformed periods and identities before querying", async () => {
     const { service, store } = fixture();

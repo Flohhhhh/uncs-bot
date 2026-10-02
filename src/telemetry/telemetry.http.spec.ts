@@ -100,6 +100,32 @@ describe("telemetry HTTP boundaries", () => {
     await request(app.getHttpServer()).get("/admin/api/combat/players/76561198000000001").expect(401);
     expect(store.events).not.toHaveBeenCalled();
   });
+  it("serves public leaderboards without SteamIDs on both routes while staff keep them", async () => {
+    const steamId = "76561198000000001",
+      unnamed = "76561198000000002";
+    store.snapshot.mockResolvedValue({
+      leaderboard: [
+        { steamId, name: "Player", kills: 2, deaths: 1, headshotKills: 1, kd: 2 },
+        { steamId: unnamed, name: unnamed, kills: 1, deaths: 2, headshotKills: 0, kd: 0.5 },
+      ],
+      totals: { ...emptyTotals(), kills: 3, deaths: 3, players: 2 },
+    });
+    for (const path of ["/community/api/leaderboard", "/community/api/servers/primary/leaderboard"]) {
+      const result = await request(app.getHttpServer()).get(`${path}?period=week`).expect(200);
+      expect(result.text).not.toContain(steamId);
+      expect(result.text).not.toContain(unnamed);
+      expect(result.text).not.toMatch(/steamId/i);
+      expect(result.body.leaderboard).toEqual([
+        { name: "Player", kills: 2, deaths: 1, headshotKills: 1, kd: 2 },
+        { name: "Unnamed player", kills: 1, deaths: 2, headshotKills: 0, kd: 0.5 },
+      ]);
+    }
+    const staff = await request(app.getHttpServer())
+      .get("/admin/api/combat?period=week")
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .expect(200);
+    expect(staff.body.leaderboard.map((row: { steamId: string }) => row.steamId)).toEqual([steamId, unnamed]);
+  });
   it("allows staff viewers to read combat history through the existing staff guard", async () => {
     await request(app.getHttpServer())
       .get("/admin/api/combat?period=month")

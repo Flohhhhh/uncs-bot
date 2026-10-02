@@ -72,6 +72,8 @@ export type CombatStats = {
   headshotKills: number;
   kd: number | null;
 };
+// Public leaderboard rows carry game statistics only: no SteamID and no other account identifier.
+export type PublicCombatStats = Omit<CombatStats, "steamId">;
 export type CombatTotals = { events: number; kills: number; deaths: number; headshotKills: number; players: number };
 export type CombatAggregate = { leaderboard: CombatStats[]; totals: CombatTotals };
 export type TrackingRecord = { firstReceivedAt: Date; lastReceivedAt: Date } | null;

@@ -11,9 +11,21 @@ import {
   periodSchema,
   telemetrySteamId,
   type CombatAggregate,
+  type CombatStats,
+  type PublicCombatStats,
   type TelemetryPeriod,
   type TrackingRecord,
 } from "./telemetry.types";
+
+export const UNNAMED_PLAYER = "Unnamed player";
+
+// Storage falls back to the SteamID when no display name was observed, so a public row
+// replaces any name that is, or contains, a SteamID with a neutral label.
+export function publicStats({ steamId, name, kills, deaths, headshotKills, kd }: CombatStats): PublicCombatStats {
+  const label = typeof name === "string" ? name.trim() : "";
+  const identifying = !label || /^\d{17}$/.test(label) || (!!steamId && label.includes(steamId));
+  return { name: identifying ? UNNAMED_PLAYER : name, kills, deaths, headshotKills, kd };
+}
 
 @Injectable()
 export class TelemetryService {
@@ -103,7 +115,8 @@ export class TelemetryService {
   }
 
   private summary(aggregate: CombatAggregate): CombatAggregate {
-    // Public output contains only game statistics, even if storage gains fields.
+    // Output contains only game statistics, even if storage gains fields. SteamIDs stay here for
+    // staff; the public leaderboard() strips them.
     return {
       leaderboard: aggregate.leaderboard.slice(0, 100).map(({ steamId, name, kills, deaths, headshotKills, kd }) => ({
         steamId,
@@ -123,7 +136,14 @@ export class TelemetryService {
     };
   }
 
+  /** Public leaderboard: display names and game statistics, never SteamIDs. */
   async leaderboard(input?: unknown, id?: string) {
+    const result = await this.ranking(input, id);
+    return { ...result, leaderboard: result.leaderboard.map(publicStats) };
+  }
+
+  /** Staff ranking with SteamIDs. Shares the snapshot cache with the public leaderboard. */
+  private async ranking(input?: unknown, id?: string) {
     const serverId = this.servers.resolve(id);
     const period = this.period(input);
     if (!this.configured(serverId)) {
@@ -142,7 +162,7 @@ export class TelemetryService {
   }
 
   async combat(input?: unknown, id?: string) {
-    const result = await this.leaderboard(input, id);
+    const result = await this.ranking(input, id);
     const events = result.enabled
       ? await this.store.events(new Date(result.windowStartedAt), new Date(result.asOf), undefined, result.serverId)
       : [];
@@ -155,7 +175,7 @@ export class TelemetryService {
     if (!playerId.success) throw new BadRequestException("Enter a valid SteamID64.");
     const period = this.period(input);
     if (!this.configured(serverId)) {
-      const { leaderboard: _leaderboard, ...base } = await this.leaderboard(period, serverId);
+      const { leaderboard: _leaderboard, ...base } = await this.ranking(period, serverId);
       return { ...base, steamId: playerId.data, player: null, events: [] };
     }
     const snapshot = await this.snapshot(serverId, period, playerId.data);
