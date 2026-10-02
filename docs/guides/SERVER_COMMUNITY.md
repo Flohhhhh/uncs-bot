@@ -56,7 +56,7 @@ Precedence: `SERVER_COMMUNITY_WELCOME_VARIANTS` replaces `SERVER_COMMUNITY_WELCO
 
 A choice is recorded when the welcome or round notice is queued, so a welcome that is later skipped or not confirmed still counts as that player's last variant. Rotation history is in memory and per server. It remembers the 2,048 most recently welcomed players and is lost on restart, so a player can see a repeat after a restart, after a long absence from a busy server, or on another server. Duplicate variants or round messages are rejected, as are values longer than 32,768 characters (variants) or 8,192 characters (round messages); twenty full-length entries fit within those limits.
 
-The staff status endpoint keeps `welcome.messages` (the first variant) and `round.message` (the first round message) for the current dashboard, and adds `welcome.variants` and `round.messages` listing every configured entry.
+The staff status endpoint keeps `welcome.messages` (the first variant) and `round.message` (the first round message) for the current dashboard, and adds `welcome.variants` and `round.messages` listing every configured entry. The dashboard does not read the new fields yet: with variants set, it shows only the first variant as the welcome sequence and the first round message as the round message, with no sign of rotation. Until it does, confirm the configured entries in the status response itself while signed in as staff: `/admin/api/servers/ID/community-messages`, fields `welcome.variants` and `round.messages`.
 
 ### Recommended rotating UNCs copy
 
