@@ -45,6 +45,25 @@ const services: DiscordRolesService[] = [];
 afterEach(() => {
   for (const service of services.splice(0)) service.onModuleDestroy();
   jest.restoreAllMocks();
+  jest.useRealTimers();
+});
+const transient = () => Object.assign(new Error("Service Unavailable"), { status: 503 });
+/** A ledger row written by an earlier pass. */
+const history = (overrides: Partial<LedgerRow> & Pick<LedgerRow, "discordUserId">): LedgerRow => ({
+  id: randomUUID(),
+  trigger: "event",
+  requestedBy: null,
+  guildId: GUILD,
+  roleKind: "member",
+  roleId: UNC,
+  operation: "add",
+  basisType: "application",
+  basisId: "application-a",
+  state: "applied",
+  changed: true,
+  message: "Recorded",
+  createdAt: new Date(),
+  ...overrides,
 });
 
 function fixture(env: Record<string, unknown> = {}) {
@@ -71,12 +90,13 @@ function fixture(env: Record<string, unknown> = {}) {
       founder: only(state.founder, users),
     })),
     revokedBasis: jest.fn(async (users?: string[]) => only(state.revoked, users)),
-    lastEffective: jest.fn(async (guildId: string, userId: string, kind: string) => {
+    lastEffective: jest.fn(async (guildId: string, userId: string, kind: string, roleId?: string) => {
       const rows = ledger.filter(
         (row) =>
           row.guildId === guildId &&
           row.discordUserId === userId &&
           row.roleKind === kind &&
+          (roleId === undefined || row.roleId === roleId) &&
           ["applied", "unknown", "started"].includes(row.state),
       );
       const row = rows.at(-1);
@@ -104,7 +124,7 @@ function fixture(env: Record<string, unknown> = {}) {
         createdAt: new Date(),
       });
     }),
-    confirm: jest.fn(async (id: string) => {
+    confirm: jest.fn(async (id: string, _operation?: "add" | "remove") => {
       Object.assign(ledger.find((row) => row.id === id)!, { state: "applied", changed: true });
     }),
     summary: jest.fn(async () => ({ memberEligible: state.member.size, founders: 2, foundersWithoutDiscord: 1 })),
@@ -385,6 +405,141 @@ describe("Discord role passes", () => {
     await service.tick();
     expect(member.add).toHaveBeenCalledTimes(2);
     expect((await status()).nextRetryAt).toBe(new Date(now + 300_000).toISOString());
+  });
+
+  it("retries an unconfirmed UNC removal after the backoff until the role is gone", async () => {
+    const { service, state, addMember, ledger } = fixture();
+    state.member.set(A, "application-a");
+    const member = addMember(A);
+    let now = Date.parse("2026-10-02T12:00:00Z");
+    jest.spyOn(Date, "now").mockImplementation(() => now);
+    service.applicationChanged(A);
+    await service.tick();
+    state.member.delete(A);
+    state.revoked.set(A, "application-a");
+    member.remove.mockRejectedValueOnce(transient());
+    service.applicationChanged(A);
+    await service.tick();
+    expect(ledger.at(-1)).toMatchObject({ operation: "remove", state: "unknown" });
+    expect(member.roles.has(UNC)).toBe(true);
+    now += 61_000;
+    await service.tick();
+    expect(member.remove).toHaveBeenCalledTimes(2);
+    expect(member.roles.has(UNC)).toBe(false);
+    expect(ledger.at(-1)).toMatchObject({ operation: "remove", state: "applied", changed: true });
+  });
+
+  it("confirms an unconfirmed UNC removal that took effect instead of removing again", async () => {
+    const { service, state, addMember, ledger, status } = fixture();
+    state.revoked.set(A, "application-a");
+    const member = addMember(A, [UNC]);
+    ledger.push(history({ discordUserId: A }));
+    member.remove.mockImplementationOnce(async (roleId: string) => {
+      member.roles.delete(roleId);
+      throw transient();
+    });
+    let now = Date.parse("2026-10-02T12:00:00Z");
+    jest.spyOn(Date, "now").mockImplementation(() => now);
+    service.applicationChanged(A);
+    await service.tick();
+    expect(ledger.at(-1)).toMatchObject({ operation: "remove", state: "unknown" });
+    now += 61_000;
+    await service.tick();
+    expect(member.remove).toHaveBeenCalledTimes(1);
+    expect(ledger).toHaveLength(2);
+    expect(ledger.at(-1)).toMatchObject({ operation: "remove", state: "applied", changed: true });
+    expect((await status()).lastPass).toMatchObject({ confirmed: 1, failed: 0 });
+  });
+
+  it("ignores ledger history recorded for a different role ID", async () => {
+    const OLD_UNC = "200000000000000009";
+    const { service, state, addMember, ledger } = fixture();
+    state.member.set(A, "application-a");
+    state.revoked.set(B, "application-b");
+    const first = addMember(A);
+    const second = addMember(B, [UNC]);
+    ledger.push(history({ discordUserId: A, roleId: OLD_UNC }));
+    ledger.push(history({ discordUserId: B, roleId: OLD_UNC, basisId: "application-b" }));
+    service.applicationChanged(A);
+    service.applicationChanged(B);
+    await service.tick();
+    // A's add under the old role is not a manual removal of the new one.
+    expect(first.add).toHaveBeenCalledWith(UNC, "Gramps: UNC member application approved");
+    // Gramps never added the new role for B, so revocation leaves it alone.
+    expect(second.remove).not.toHaveBeenCalled();
+    expect(second.roles.has(UNC)).toBe(true);
+  });
+
+  it("runs the follow-up for people left over by a staff run without waiting for another event", async () => {
+    jest.useFakeTimers({ now: Date.parse("2026-10-02T12:00:00Z") });
+    const { service, state, addMember, ledger } = fixture();
+    const users = Array.from({ length: 52 }, (_, index) => `3000000000000003${String(index).padStart(2, "0")}`);
+    for (const user of users) {
+      state.member.set(user, `application-${user}`);
+      addMember(user);
+    }
+    const ticks: Promise<void>[] = [];
+    const tick = service.tick.bind(service);
+    jest.spyOn(service, "tick").mockImplementation(() => {
+      const run = tick();
+      ticks.push(run);
+      return run;
+    });
+    expect((await service.reconcile(admin, reconcile())).summary).toMatchObject({ added: 50, deferred: 2 });
+    await jest.advanceTimersByTimeAsync(59_000);
+    expect(ledger).toHaveLength(50);
+    await jest.advanceTimersByTimeAsync(1_000);
+    await Promise.all(ticks);
+    expect(ticks.length).toBeGreaterThan(0);
+    expect(ledger).toHaveLength(52);
+    expect(ledger.every((row) => row.state === "applied")).toBe(true);
+  });
+
+  it("keeps earlier failures in the attention list until that person is checked again", async () => {
+    const { service, state, addMember, status } = fixture();
+    state.member.set(A, "application-a");
+    const member = addMember(A);
+    member.add.mockRejectedValueOnce(Object.assign(new Error("Invalid Form Body"), { code: 50035, status: 400 }));
+    state.founder.set(B, "supporter-b");
+    await service.reconcile(admin, reconcile());
+    // Someone with no application joins: a check with no candidates.
+    service.memberJoined(GUILD, "300000000000000099");
+    await service.tick();
+    let view = await status();
+    expect(view.attention).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "failed", discordUserId: A, roleKind: "member" }),
+        expect.objectContaining({ kind: "not_in_server", discordUserId: B }),
+      ]),
+    );
+    expect(view.lastPass).toMatchObject({ trigger: "admin", failed: 1 });
+    expect(view.lastFullPass).toMatchObject({ trigger: "admin", failed: 1 });
+    // A later successful check for A clears A's item and keeps B's.
+    service.applicationChanged(A);
+    await service.tick();
+    view = await status();
+    expect(member.roles.has(UNC)).toBe(true);
+    expect(view.attention).not.toContainEqual(expect.objectContaining({ kind: "failed", discordUserId: A }));
+    expect(view.attention).toContainEqual(expect.objectContaining({ kind: "not_in_server", discordUserId: B }));
+    expect(view.lastPass).toMatchObject({ trigger: "event", added: 1 });
+    expect(view.lastFullPass).toMatchObject({ trigger: "admin" });
+  });
+
+  it("logs a fixed warning without database or Discord error text when a pass stops early", async () => {
+    const warn = jest.spyOn(Logger.prototype, "warn").mockImplementation(() => undefined);
+    const { service, state, store } = fixture();
+    state.member.set(A, "application-a");
+    store.desired.mockRejectedValueOnce(
+      new Error(`Failed query: select discord_user_id from whitelist_applications\nparams: ${A},${admin.id}`),
+    );
+    service.applicationChanged(A);
+    await service.tick();
+    expect(warn).toHaveBeenCalledTimes(1);
+    const [message] = warn.mock.calls[0] as [string];
+    expect(message).toContain("Discord role pass (event) did not finish");
+    expect(message).not.toContain(A);
+    expect(message).not.toContain(admin.id);
+    expect(message).not.toContain("Failed query");
   });
 
   it("processes a role whose setup passes while another role is refused by the checks", async () => {

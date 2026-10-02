@@ -70,7 +70,13 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
   /** Users left over by the write budget or waiting out a backoff, with the earliest time to retry. */
   private readonly deferredUsers = new Map<string, { trigger: DiscordRoleTrigger; at: number }>();
   private readonly backoff = new Map<string, { failures: number; until: number }>();
+  /**
+   * Attention items kept across passes, one per person and role ("" for the person), so a later check of
+   * someone else never hides them. An item is replaced or cleared when that person and role are checked.
+   */
+  private readonly attentionItems = new Map<string, AttentionItem>();
   private lastPass: PassSummary | null = null;
+  private lastFullPass: PassSummary | null = null;
   private lastAdminAt = 0;
   private readonly adminResults = new Map<string, { actorId: string; fingerprint: string; summary: PassSummary }>();
 
@@ -139,8 +145,8 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
       if (this.pendingUsers.size >= MAX_QUEUED_USERS) return;
       if (this.pendingUsers.get(discordUserId) !== "member-join") this.pendingUsers.set(discordUserId, trigger);
       this.wake(EVENT_DEBOUNCE_MS);
-    } catch (error) {
-      this.logger.warn(`Could not queue a Discord role check: ${error instanceof Error ? error.message : error}`);
+    } catch {
+      this.logger.warn("Could not queue a Discord role check. The six-hour safety pass will cover it.");
     }
   }
 
@@ -155,6 +161,12 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
       void this.tick();
     }, delay);
     this.timer.unref?.();
+  }
+
+  /** Arms the timer for the earliest person left over by the write budget or waiting out a backoff. */
+  private wakeForDeferred() {
+    const next = Math.min(...[...this.deferredUsers.values()].map((entry) => entry.at));
+    if (Number.isFinite(next)) this.wake(Math.max(0, next - Date.now()));
   }
 
   private scheduleSafetyPass() {
@@ -199,8 +211,7 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
     } finally {
       if (this.pendingUsers.size) this.wake(EVENT_DEBOUNCE_MS);
       if (this.fullPending) this.wake(Math.max(0, this.fullNotBefore - Date.now()));
-      const next = Math.min(...[...this.deferredUsers.values()].map((entry) => entry.at));
-      if (Number.isFinite(next)) this.wake(Math.max(0, next - Date.now()));
+      this.wakeForDeferred();
     }
   }
 
@@ -216,6 +227,11 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
   private defer(userId: string, trigger: DiscordRoleTrigger, at: number) {
     const existing = this.deferredUsers.get(userId);
     if (!existing || existing.at > at) this.deferredUsers.set(userId, { trigger, at });
+  }
+
+  /** Clears kept attention items for a person: the person-level slot ("") and/or role slots. */
+  private forgetAttention(userId: string, slots: readonly (DiscordRoleKind | "")[] = ["", ...ROLE_KINDS]) {
+    for (const slot of slots) this.attentionItems.delete(`${userId}:${slot}`);
   }
 
   private retryLater(userId: string, trigger: DiscordRoleTrigger) {
@@ -255,7 +271,12 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
     };
     const plan = summary.plan;
     const attention = (item: AttentionItem) => {
-      if (summary.attention.length < MAX_ATTENTION) summary.attention.push({ ...item, at: new Date().toISOString() });
+      const stamped = { ...item, at: new Date().toISOString() };
+      if (summary.attention.length < MAX_ATTENTION) summary.attention.push(stamped);
+      if (dryRun || !item.discordUserId) return;
+      const slot = `${item.discordUserId}:${item.roleKind ?? ""}`;
+      this.attentionItems.delete(slot);
+      if (this.attentionItems.size < MAX_QUEUED_USERS) this.attentionItems.set(slot, stamped);
     };
     if (!dryRun) this.running = true;
     const blockedKinds = new Set<DiscordRoleKind>();
@@ -274,6 +295,13 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
       const list = users ? [...users.keys()] : undefined;
       const [desired, revoked] = await Promise.all([this.store.desired(list), this.store.revokedBasis(list)]);
       const candidates = [...new Set([...desired.member.keys(), ...desired.founder.keys(), ...revoked.keys()])];
+      if (!dryRun) {
+        // People this pass covers who no longer have a reason to hold or lose a role need no attention.
+        const covered = new Set(candidates);
+        for (const [slot, item] of this.attentionItems)
+          if (!covered.has(item.discordUserId!) && (!users || users.has(item.discordUserId!)))
+            this.attentionItems.delete(slot);
+      }
       if (plan && list)
         for (const userId of list)
           if (!candidates.includes(userId))
@@ -293,6 +321,7 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
           continue;
         }
         summary.users++;
+        if (!dryRun) this.forgetAttention(userId, [""]);
         let member: RoleMember | null;
         try {
           member = await this.discord.member(guildId, userId);
@@ -303,12 +332,14 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
           continue;
         }
         if (!member) {
+          if (!dryRun) this.forgetAttention(userId);
           attention({ kind: "not_in_server", discordUserId: userId });
           plan?.push({ discordUserId: userId, roleKind: null, op: "none", why: "not-in-server" });
           continue;
         }
         for (const kind of usable) {
           if (blockedKinds.has(kind)) continue;
+          if (!dryRun) this.forgetAttention(userId, [kind]);
           const roleId = options.roleIds[kind]!;
           const desiredBasis = desired[kind].get(userId) ?? null;
           const revokedBasis = kind === "member" ? (revoked.get(userId) ?? null) : null;
@@ -319,7 +350,7 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
             revokedBasis,
             hasRole: member.has(roleId),
             joinedAt: member.joinedAt,
-            lastEffective: await this.store.lastEffective(guildId, userId, kind),
+            lastEffective: await this.store.lastEffective(guildId, userId, kind, roleId),
           });
           if (decision.op === "none" && decision.why === "removed-in-discord")
             attention({ kind: "removed_in_discord", discordUserId: userId, roleKind: kind, basisId: desiredBasis! });
@@ -339,8 +370,9 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
             basisType: kind === "member" ? ("application" as const) : ("founder" as const),
           };
           if (decision.op === "confirm") {
-            await this.store.confirm(decision.entryId);
+            await this.store.confirm(decision.entryId, decision.why === "unknown-add-present" ? "add" : "remove");
             summary.confirmed++;
+            this.backoff.delete(userId);
             continue;
           }
           if (decision.op === "note") {
@@ -395,9 +427,12 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
         error instanceof SetupProblem
           ? `Setup: ${error.message}`
           : "The role pass stopped early because Discord or the database was unavailable.";
+      // Database and Discord error text can carry SQL parameters, member IDs or tokens: log fixed text only.
       if (!dryRun)
         this.logger.warn(
-          `Discord role pass (${trigger}) did not finish: ${error instanceof Error ? error.message : String(error)}`,
+          `Discord role pass (${trigger}) did not finish: ${
+            error instanceof SetupProblem ? error.message : "Discord or the database was unavailable."
+          } Recorded changes are kept.`,
         );
     } finally {
       if (!dryRun) this.running = false;
@@ -407,7 +442,13 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
       this.logger.warn(
         `Discord role pass (${trigger}) skipped the ${[...blockedKinds].join(" and ")} role: check the role setup on the Discord roles page.`,
       );
-    if (!dryRun) this.lastPass = summary;
+    if (!dryRun) {
+      // An event check that found nothing to do (for example someone with no application joining) does not
+      // replace the last meaningful result.
+      const idle = trigger === "event" && !summary.users && !summary.deferred && !summary.blocked && !summary.error;
+      if (!idle) this.lastPass = summary;
+      if (!users) this.lastFullPass = summary;
+    }
     return summary;
   }
 
@@ -474,6 +515,8 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
       ready: Boolean(check) && configuredKinds.length > 0 && configuredKinds.every((kind) => roles[kind].assignable),
       running: this.running,
       lastPass: this.lastPass,
+      /** The last check of everyone (startup, the six-hour safety pass or an untargeted staff run). */
+      lastFullPass: this.lastFullPass,
       queued: this.pendingUsers.size + this.deferredUsers.size,
       fullPassQueued: this.fullPending !== null,
       nextRetryAt: Number.isFinite(next) ? new Date(next).toISOString() : null,
@@ -488,7 +531,7 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
             at: new Date(founder.awardedAt).toISOString(),
           }),
         ),
-        ...(this.lastPass?.attention ?? []),
+        ...[...this.attentionItems.values()].slice(0, MAX_ATTENTION),
       ],
       recent,
       note: "Gramps adds the UNC role for approved UNC member applications and the Founder role for founders with a linked Discord account. It removes only a UNC role it added itself, after that application is revoked. Founder roles are never removed automatically.",
@@ -518,6 +561,8 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
     this.lastAdminAt = Date.now();
     const users = input.discordUserId ? new Map([[input.discordUserId, "admin" as const]]) : null;
     const summary = await this.pass("admin", users, staff.id, input.dryRun === true, input.reason);
+    // People left over by the write budget or a backoff get their follow-up like any other pass.
+    if (!input.dryRun) this.wakeForDeferred();
     if (this.adminResults.size >= 100) this.adminResults.clear();
     this.adminResults.set(input.id, { actorId: staff.id, fingerprint, summary });
     return { ok: true, replayed: false, summary };

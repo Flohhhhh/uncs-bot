@@ -27,6 +27,8 @@ const unknownAdd = entry("add", "unknown", false);
 const startedAdd = entry("add", "started", false);
 const note = entry("note", "applied", false);
 const removal = entry("remove", "applied", true);
+const unknownRemove = entry("remove", "unknown", false);
+const startedRemove = entry("remove", "started", false);
 const beforeJoin = (value: LedgerEntry) => ({ ...value, createdAt: new Date("2026-09-30T00:00:00Z") });
 
 describe("deciding one role for one member", () => {
@@ -115,6 +117,36 @@ describe("deciding one role for one member", () => {
       "removes after an unfinished add",
       { revokedBasis: "app", hasRole: true, lastEffective: startedAdd },
       { op: "remove" },
+    ],
+    [
+      "retries an unknown removal while the role is still present",
+      { revokedBasis: "app", hasRole: true, lastEffective: unknownRemove },
+      { op: "remove", basisId: "app", why: "retry-unknown-remove" },
+    ],
+    [
+      "retries an unfinished removal while the role is still present",
+      { revokedBasis: "app", hasRole: true, lastEffective: startedRemove },
+      { op: "remove", basisId: "app", why: "retry-unknown-remove" },
+    ],
+    [
+      "confirms an unknown removal when the role is gone",
+      { revokedBasis: "app", lastEffective: unknownRemove },
+      { op: "confirm", entryId: unknownRemove.id, why: "unknown-remove-absent" },
+    ],
+    [
+      "confirms an unfinished removal when the role is gone",
+      { revokedBasis: "app", lastEffective: startedRemove },
+      { op: "confirm", entryId: startedRemove.id },
+    ],
+    [
+      "never retries a removal from an earlier membership",
+      { revokedBasis: "app", hasRole: true, lastEffective: beforeJoin(unknownRemove) },
+      { op: "none", why: "not-ours" },
+    ],
+    [
+      "never removes a role given back after a confirmed removal",
+      { revokedBasis: "app", hasRole: true, lastEffective: removal },
+      { op: "none", why: "not-ours" },
     ],
     [
       "never removes a noted role",

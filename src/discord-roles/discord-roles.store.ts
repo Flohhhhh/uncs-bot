@@ -104,8 +104,16 @@ export class DiscordRolesStore {
     return result.rows[0] ?? { memberEligible: 0, founders: 0, foundersWithoutDiscord: 0 };
   }
 
-  /** The newest applied, unknown or unfinished row. A "started" row is an unknown result. */
-  async lastEffective(guildId: string, discordUserId: string, roleKind: DiscordRoleKind): Promise<LedgerEntry | null> {
+  /**
+   * The newest applied, unknown or unfinished row for the configured role. A "started" row is an unknown
+   * result. Rows for another role ID (the role was recreated or the setting corrected) are not history.
+   */
+  async lastEffective(
+    guildId: string,
+    discordUserId: string,
+    roleKind: DiscordRoleKind,
+    roleId: string,
+  ): Promise<LedgerEntry | null> {
     const [row] = await this.db
       .select({
         id: discordRoleActions.id,
@@ -120,6 +128,7 @@ export class DiscordRolesStore {
           eq(discordRoleActions.guildId, guildId),
           eq(discordRoleActions.discordUserId, discordUserId),
           eq(discordRoleActions.roleKind, roleKind),
+          eq(discordRoleActions.roleId, roleId),
           inArray(discordRoleActions.state, ["applied", "unknown", "started"]),
         ),
       )
@@ -159,17 +168,29 @@ export class DiscordRolesStore {
       .where(eq(discordRoleActions.id, id));
   }
 
-  /** The role is present after an unknown add: record that the add took effect. */
-  async confirm(id: string) {
+  /**
+   * The role is present after an unknown add, or absent after an unknown removal: record that the change
+   * took effect.
+   */
+  async confirm(id: string, operation: "add" | "remove") {
     await this.db
       .update(discordRoleActions)
       .set({
         state: "applied",
         changed: true,
-        message: "Confirmed later: the role is present after an unconfirmed add.",
+        message:
+          operation === "add"
+            ? "Confirmed later: the role is present after an unconfirmed add."
+            : "Confirmed later: the role is absent after an unconfirmed removal.",
         completedAt: new Date(),
       })
-      .where(and(eq(discordRoleActions.id, id), inArray(discordRoleActions.state, ["unknown", "started"])));
+      .where(
+        and(
+          eq(discordRoleActions.id, id),
+          eq(discordRoleActions.operation, operation),
+          inArray(discordRoleActions.state, ["unknown", "started"]),
+        ),
+      );
   }
 
   async recent(limit = 25) {

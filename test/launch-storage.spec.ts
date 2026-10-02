@@ -1350,24 +1350,24 @@ describe("launch storage on isolated PostgreSQL", () => {
       basisType: "application" as const,
       basisId: member.id,
     };
+    const last = (roleKind: "member" | "founder" = "member", roleId = base.roleId) =>
+      roles.lastEffective(base.guildId, base.discordUserId, roleKind, roleId);
     const added = await roles.begin({ ...base, operation: "add" });
-    expect(await roles.lastEffective(base.guildId, base.discordUserId, "member")).toMatchObject({
-      id: added,
-      state: "started",
-    });
+    expect(await last()).toMatchObject({ id: added, state: "started" });
+    // History recorded for another role ID (a recreated role or a corrected setting) does not count.
+    expect(await last("member", "789012345678901299")).toBeNull();
     await roles.finish(added, "unknown", false, "Lost response");
-    await roles.confirm(added);
-    expect(await roles.lastEffective(base.guildId, base.discordUserId, "member")).toMatchObject({
-      id: added,
-      state: "applied",
-      changed: true,
-    });
+    // Confirming it as the wrong operation changes nothing.
+    await roles.confirm(added, "remove");
+    expect(await last()).toMatchObject({ id: added, state: "unknown" });
+    await roles.confirm(added, "add");
+    expect(await last()).toMatchObject({ id: added, state: "applied", changed: true });
     const failed = await roles.begin({ ...base, operation: "remove" });
     await roles.finish(failed, "failed", false, "Refused");
     // A failed attempt never replaces the latest effective change.
-    expect((await roles.lastEffective(base.guildId, base.discordUserId, "member"))?.id).toBe(added);
+    expect((await last())?.id).toBe(added);
     await roles.note({ ...base, roleKind: "founder" });
-    expect(await roles.lastEffective(base.guildId, base.discordUserId, "founder")).toMatchObject({
+    expect(await last("founder")).toMatchObject({
       operation: "note",
       changed: false,
       state: "applied",

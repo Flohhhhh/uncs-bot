@@ -21,7 +21,9 @@ Gramps removes a role in exactly one case: the **UNC** role, when **all** of the
 2. the role ledger shows Gramps itself added the role during the person's current membership, and
 3. no other approved `unc_member` application remains for that person on any server.
 
-Nothing is ever approved automatically. Approving a SteamID that is already on the running whitelist needs an explicit staff confirmation that this Discord member owns it (see [Whitelist applications](WHITELIST_APPLICATIONS.md#existing-whitelist-members)).
+Ledger history is kept per Discord role ID. If `DISCORD_MEMBER_ROLE_ID` or `DISCORD_FOUNDER_ROLE_ID` changes (the role was recreated, or a wrong ID was corrected), history recorded for the old role does not count for the new one: earned roles are added, and a new role someone already holds is only noted.
+
+Nothing is ever approved automatically. Staff can confirm that a Discord member owns a SteamID that is already on the running whitelist; that confirmation is only enforced when `WHITELIST_APPLICATION_EXISTING_CONFIRMATION_REQUIRED=true` (see [Whitelist applications](WHITELIST_APPLICATIONS.md#existing-whitelist-members)).
 
 ## Discord setup
 
@@ -35,12 +37,12 @@ Copy each role ID with Developer Mode on (right-click the role → **Copy Role I
 
 ## Configuration
 
-| Variable | Value |
-| --- | --- |
-| `DISCORD_ROLES_ENABLED` | `false` until the dry run looks right, then `true` (restart to apply). |
-| `DISCORD_MEMBER_ROLE_ID` | The UNC role ID. |
-| `DISCORD_FOUNDER_ROLE_ID` | The Founder role ID. |
-| `ADMIN_GUILD_ID` | The community server (already used by staff sign-in). |
+| Variable                  | Value                                                                  |
+| ------------------------- | ---------------------------------------------------------------------- |
+| `DISCORD_ROLES_ENABLED`   | `false` until the dry run looks right, then `true` (restart to apply). |
+| `DISCORD_MEMBER_ROLE_ID`  | The UNC role ID.                                                       |
+| `DISCORD_FOUNDER_ROLE_ID` | The Founder role ID.                                                   |
+| `ADMIN_GUILD_ID`          | The community server (already used by staff sign-in).                  |
 
 A role that is not configured is simply skipped. Founder awards also need the founder window; see [Supporter records](PATREON_SUPPORTERS.md#founder-window-settings).
 
@@ -51,9 +53,9 @@ A role that is not configured is simply skipped. Founder awards also need the fo
 - `enabled`, `configured` (guild and both role IDs), `discordReady`, and `bot: {manageRoles, highestRolePosition}`;
 - `roles.member` and `roles.founder`: `{id, name, exists, position, managed, privileged, staffRole, assignable, problem, candidates?}`, where `problem` is a plain-English fix;
 - `ready`: every configured role passes its checks;
-- `lastPass` (trigger, times, `added`, `removed`, `noted`, `confirmed`, `failed`, `blocked`, `deferred`, `attention`), `running`, `queued`, `fullPassQueued` and `nextRetryAt`;
+- `lastPass` (trigger, times, `added`, `removed`, `noted`, `confirmed`, `failed`, `blocked`, `deferred`, `attention`), `lastFullPass` (the same for the last check of everyone: startup, the safety pass or an untargeted staff run), `running`, `queued`, `fullPassQueued` and `nextRetryAt`. An event check that found nothing to do does not replace `lastPass`;
 - `summary: {memberEligible, founders, foundersWithoutDiscord}`;
-- `attention`: founders without a linked Discord account, people who are not in the server, roles removed in Discord, and failed changes;
+- `attention`: founders without a linked Discord account, people who are not in the server, roles removed in Discord, and failed changes. Items stay listed across checks until that person (and role) is checked again, so a later check of someone else never hides them;
 - `recent`: the latest 25 role ledger rows.
 
 `POST /admin/api/discord-roles/reconcile` (administrators only, same-origin CSRF) takes `{id, reason, discordUserId?, dryRun?}`:
@@ -72,19 +74,19 @@ The dashboard redesign owns the page itself. The intended panel shows each check
 - **Safety pass:** a full check every six hours. It also picks up Discord IDs filled in later, for example by the Patreon import.
 - **Staff:** the reconcile endpoint above.
 
-Each pass makes at most 50 role changes, waits 1.1 seconds between changes and leaves the rest for a follow-up a minute later. discord.js also honours Discord's rate limits and retries server errors three times. A single Gramps instance is assumed.
+Each pass makes at most 50 role changes, waits 1.1 seconds between changes and leaves the rest for a follow-up a minute later (staff runs included). discord.js also honours Discord's rate limits and retries server errors three times. A single Gramps instance is assumed.
 
 ## The role ledger and failures
 
 Every add, remove and note is a `discord_role_actions` row by `system:discord-roles` ("Gramps Discord roles"), written **before** Discord is contacted and completed afterwards. Rows record the trigger, the requesting staff member for admin runs, the guild, member, role, operation, the application or supporter record that justified it, whether anything changed, and the result. Role changes are kept out of the per-server game action history on purpose because they are not tied to one game server. Discord's audit log shows a fixed reason such as "Gramps: UNC member application approved" with no private data.
 
-| Discord result | Effect |
-| --- | --- |
-| Missing permissions (50013) or unknown role (10011) | Row `failed`. That role is skipped for the rest of the pass and one warning is logged. |
-| Member left during the pass (10007) | Row `failed`. |
-| Server error, timeout or network error | Row `unknown`. The person is retried after 1 minute, then 5 minutes, 30 minutes, 2 hours and every 6 hours. If the role turns out to be present, the row is confirmed instead of adding it again. |
+| Discord result                                      | Effect                                                                                                                                                                                                                                                                                                                                                                       |
+| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Missing permissions (50013) or unknown role (10011) | Row `failed`. That role is skipped for the rest of the pass and one warning is logged.                                                                                                                                                                                                                                                                                       |
+| Member left during the pass (10007)                 | Row `failed`.                                                                                                                                                                                                                                                                                                                                                                |
+| Server error, timeout or network error              | Row `unknown`. The person is retried after 1 minute, then 5 minutes, 30 minutes, 2 hours and every 6 hours. If an unknown add turns out to be present, or an unknown UNC removal turns out to be gone, the row is confirmed instead of repeating the change. A removal is repeated while the role is still present. A `started` row left by a crash is treated the same way. |
 
-Gramps logs a warning only for blocked or failed passes. It never logs each change and never logs the Discord event again (the event interceptor already does).
+Gramps logs a warning only for blocked or failed passes, with fixed text: database and Discord error messages can carry member IDs or query parameters, so they are never logged. It never logs each change and never logs the Discord event again (the event interceptor already does).
 
 ## Recording PayPal supporters and founders
 

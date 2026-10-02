@@ -37,9 +37,9 @@ export type RoleFacts = {
 };
 export type RoleDecision =
   | { op: "add"; basisId: string; why: "desired" | "retry-unknown-add" }
-  | { op: "remove"; basisId: string; why: "application-revoked" }
+  | { op: "remove"; basisId: string; why: "application-revoked" | "retry-unknown-remove" }
   | { op: "note"; basisId: string; why: "already-present" }
-  | { op: "confirm"; entryId: string; why: "unknown-add-present" }
+  | { op: "confirm"; entryId: string; why: "unknown-add-present" | "unknown-remove-absent" }
   | {
       op: "none";
       why: "already-recorded" | "removed-in-discord" | "not-ours" | "not-present" | "no-basis" | "founder-kept";
@@ -48,9 +48,10 @@ export type RoleDecision =
 const uncertain = (entry: LedgerEntry) => entry.state === "unknown" || entry.state === "started";
 
 /**
- * Decides one role for one member. Manual Discord changes win: a role that was already present is only
- * noted, a role staff removed is not re-added during the same membership, and only a role Gramps added
- * during the current membership can be removed, and only the UNC role after its application is revoked.
+ * Decides one role for one member from the ledger history of the configured role. Manual Discord changes
+ * win: a role that was already present is only noted, a role staff removed is not re-added during the same
+ * membership, and only a role Gramps added during the current membership can be removed, and only the UNC
+ * role after its application is revoked.
  */
 export function decide(facts: RoleFacts): RoleDecision {
   // Ledger history from an earlier membership no longer applies after the person left and rejoined.
@@ -75,6 +76,12 @@ export function decide(facts: RoleFacts): RoleDecision {
   }
   if (facts.kind === "founder") return { op: "none", why: "founder-kept" };
   if (!facts.revokedBasis) return { op: "none", why: "no-basis" };
+  // A removal is only ever started for a role Gramps added, so an unconfirmed one is still Gramps' own:
+  // confirm it once the role is gone, and remove again while it is present.
+  if (current?.operation === "remove" && uncertain(current))
+    return facts.hasRole
+      ? { op: "remove", basisId: facts.revokedBasis, why: "retry-unknown-remove" }
+      : { op: "confirm", entryId: current.id, why: "unknown-remove-absent" };
   if (!facts.hasRole) return { op: "none", why: "not-present" };
   if (current?.operation === "add" && (current.changed || uncertain(current)))
     return { op: "remove", basisId: facts.revokedBasis, why: "application-revoked" };
@@ -178,6 +185,7 @@ export type PassSummary = {
   /** People left for a follow-up pass because this pass reached its write budget. */
   deferred: number;
   error: string | null;
+  /** What this pass found. The status attention list also keeps items from earlier passes. */
   attention: AttentionItem[];
   plan?: PlanEntry[];
 };

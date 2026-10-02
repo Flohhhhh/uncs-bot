@@ -43,15 +43,40 @@ describe("Discord role records", () => {
     expect(text(query.mock.calls[0])).toContain("revoked.status = 'revoked' AND revoked.relationship = 'unc_member'");
     expect(text(query.mock.calls[0])).toContain("NOT EXISTS (SELECT 1 FROM whitelist_applications approved");
   });
-  it("treats applied, unknown and unfinished rows as the latest effective change", async () => {
+  it("treats applied, unknown and unfinished rows for the configured role as the latest effective change", async () => {
     const { store, query } = fixture();
-    await store.lastEffective("100000000000000001", "300000000000000001", "member");
+    await store.lastEffective("100000000000000001", "300000000000000001", "member", "200000000000000001");
     const [statement, params] = query.mock.calls[0] as [{ text: string }, unknown[]];
+    expect(statement.text).toContain('"discord_role_actions"."role_id" = $');
     expect(statement.text).toContain('order by "discord_role_actions"."created_at" desc limit');
     expect(params).toEqual(
-      expect.arrayContaining(["100000000000000001", "300000000000000001", "member", "applied", "unknown", "started"]),
+      expect.arrayContaining([
+        "100000000000000001",
+        "300000000000000001",
+        "member",
+        "200000000000000001",
+        "applied",
+        "unknown",
+        "started",
+      ]),
     );
     expect(params).not.toContain("failed");
+  });
+  it("confirms only an unfinished or unknown row of the expected operation", async () => {
+    const { store, query } = fixture();
+    await store.confirm("00000000-0000-4000-8000-000000000001", "remove");
+    const [statement, params] = query.mock.calls[0] as [{ text: string }, unknown[]];
+    expect(statement.text).toContain('update "discord_role_actions"');
+    expect(statement.text).toContain('"discord_role_actions"."operation" = $');
+    expect(params).toEqual(
+      expect.arrayContaining([
+        "applied",
+        "Confirmed later: the role is absent after an unconfirmed removal.",
+        "remove",
+        "unknown",
+        "started",
+      ]),
+    );
   });
   it("writes every row as the Gramps Discord roles system actor before Discord is called", async () => {
     const { store, query } = fixture((sql) => (sql.startsWith("insert") ? [["row-id"]] : []));
