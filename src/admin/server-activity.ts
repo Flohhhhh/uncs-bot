@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Overview } from "./wardogs.client";
 import { roundStamp, sameRound } from "../common/game-round";
-import { lightingLabel, mapLabel, modeLabel, zoneLabel } from "../common/map-labels";
+import { lightingLabel, mapLabel, modeLabel, sameMap, zoneLabel } from "../common/map-labels";
 
 export type ServerActivityEvent = {
   id: string;
@@ -54,7 +54,8 @@ export class ServerActivity {
       this.append("connection", "Observation gap · changes during this interval are unknown", at);
       return;
     }
-    if (current.status.map !== previous.status.map) {
+    const mapChanged = !sameMap(current.status.map, previous.status.map);
+    if (mapChanged) {
       this.append("match", `Map changed: ${mapLabel(previous.status.map)} → ${mapLabel(current.status.map)}`, at);
     } else {
       const before = roundStamp(previous.status, Date.parse(previous.observedAt));
@@ -89,7 +90,7 @@ export class ServerActivity {
       !value.unlinkedPlayerCount &&
       value.players.length === value.status.players.current &&
       new Set(value.players.map((player) => player.steamId)).size === value.players.length;
-    if (!complete(previous) || !complete(current) || current.status.map !== previous.status.map) return;
+    if (!complete(previous) || !complete(current) || mapChanged) return;
     const beforePlayers = new Map(previous.players.map((player) => [player.steamId, player]));
     const afterPlayers = new Map(current.players.map((player) => [player.steamId, player]));
     for (const player of current.players) {
