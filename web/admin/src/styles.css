@@ -992,17 +992,22 @@ main {
   font-size: 19px;
   color: var(--orange);
 }
+/* Search first, its filters beside it, and the primary action at the end of the row. */
 .toolbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--space-4);
+  justify-content: flex-start;
+  gap: var(--space-2) var(--space-3);
   margin-bottom: var(--space-4);
   flex-wrap: wrap;
 }
+.toolbar > .primary,
+.toolbar > .toolbar-end {
+  margin-left: auto;
+}
 .search {
-  max-width: 340px;
-  width: 100%;
+  flex: 0 1 340px;
+  min-width: min(100%, 220px);
   position: relative;
 }
 .search input {
@@ -1129,6 +1134,108 @@ td strong {
   gap: var(--space-2);
   justify-content: flex-end;
   flex-wrap: wrap;
+}
+.table-sort-select {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 650;
+}
+.table-sort-select select {
+  flex: 1;
+  min-width: 0;
+}
+/* Card rows on phones: each cell is labelled from its column heading (see Table in ui.tsx). */
+@media (max-width: 700px) {
+  .table-wrap.scrollable {
+    max-height: none;
+  }
+  [data-mobile="cards"] table,
+  [data-mobile="cards"] tbody {
+    display: block;
+    width: 100%;
+    white-space: normal;
+  }
+  [data-mobile="cards"] thead {
+    display: none;
+  }
+  [data-mobile="cards"] tbody tr {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-3) var(--space-4);
+    padding: var(--space-4);
+    border-top: 1px solid var(--line);
+  }
+  [data-mobile="cards"] tbody tr:first-child {
+    border-top: 0;
+  }
+  [data-mobile="cards"] td {
+    min-width: 0;
+    max-width: none;
+    padding: 0;
+    border: 0;
+    overflow-wrap: anywhere;
+  }
+  [data-mobile="cards"] td:empty {
+    display: none;
+  }
+  /* The first cell titles the card; long text and row actions take the full width. */
+  [data-mobile="cards"] td:first-child,
+  [data-mobile="cards"] td.wide,
+  [data-mobile="cards"] td.audit-detail,
+  [data-mobile="cards"] td:has(.audit-detail, .row-actions, .action-list, details) {
+    grid-column: 1 / -1;
+  }
+  [data-mobile="cards"] td .audit-detail {
+    min-width: 0;
+    max-width: none;
+  }
+  [data-mobile="cards"] td:has(.row-actions) .row-actions {
+    justify-content: flex-start;
+  }
+  [data-mobile="cards"] td::before {
+    display: block;
+    margin-bottom: var(--space-1);
+    color: var(--muted);
+    font-size: var(--text-xs);
+    font-weight: 650;
+  }
+  [data-mobile="cards"] td:nth-child(2)::before {
+    content: var(--cell-label-2, none);
+  }
+  [data-mobile="cards"] td:nth-child(3)::before {
+    content: var(--cell-label-3, none);
+  }
+  [data-mobile="cards"] td:nth-child(4)::before {
+    content: var(--cell-label-4, none);
+  }
+  [data-mobile="cards"] td:nth-child(5)::before {
+    content: var(--cell-label-5, none);
+  }
+  [data-mobile="cards"] td:nth-child(6)::before {
+    content: var(--cell-label-6, none);
+  }
+  [data-mobile="cards"] td:nth-child(7)::before {
+    content: var(--cell-label-7, none);
+  }
+  [data-mobile="cards"] td:nth-child(8)::before {
+    content: var(--cell-label-8, none);
+  }
+  [data-mobile="cards"] td:nth-child(9)::before {
+    content: var(--cell-label-9, none);
+  }
+  [data-mobile="cards"] td:nth-child(10)::before {
+    content: var(--cell-label-10, none);
+  }
+  /* A selection checkbox or an unlabelled actions column needs no heading. */
+  [data-mobile="cards"] td:has(> input[type="checkbox"]:only-child)::before,
+  [data-mobile="cards"] td:has(.row-actions)::before {
+    content: none;
+  }
 }
 .player-name {
   display: flex;
@@ -2495,6 +2602,9 @@ dialog.sheet {
     align-items: stretch;
     gap: var(--space-2);
   }
+  .toolbar .search {
+    flex-basis: 100%;
+  }
   .toolbar .button {
     padding-inline: var(--space-3);
   }
@@ -2556,15 +2666,6 @@ dialog.sheet {
   }
   .card-header {
     flex-wrap: wrap;
-  }
-  .toolbar {
-    flex-wrap: wrap;
-  }
-  .toolbar .search {
-    max-width: none;
-  }
-  .toolbar .button {
-    margin-left: auto;
   }
   .login-card h1 {
     font-size: 59px;

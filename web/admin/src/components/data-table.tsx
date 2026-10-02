@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Table, type TableHeader } from "./ui";
 
 type SortValue = string | number | boolean | null | undefined;
@@ -21,19 +21,38 @@ export function compareValues(left: SortValue, right: SortValue, direction: Dire
   return direction === "ascending" ? comparison : -comparison;
 }
 
+/** Phones show card rows; this matches the card breakpoint in styles.css. */
+const narrowQuery = "(max-width: 700px)";
+function subscribeNarrow(change: () => void) {
+  if (typeof window.matchMedia !== "function") return () => {};
+  const query = window.matchMedia(narrowQuery);
+  query.addEventListener("change", change);
+  return () => query.removeEventListener("change", change);
+}
+function readNarrow() {
+  return typeof window.matchMedia === "function" && window.matchMedia(narrowQuery).matches;
+}
+export function useNarrowScreen() {
+  return useSyncExternalStore(subscribeNarrow, readNarrow, () => false);
+}
+
 export function DataTable<T>({
   label,
   columns,
   rows,
   renderRow,
+  cards = true,
 }: {
   label: string;
   columns: Column<T>[];
   rows: T[];
   renderRow: (row: T) => ReactNode;
+  /** Card rows on phones. Turn off only for a table that must keep its columns. */
+  cards?: boolean;
 }) {
   // Keep the server's original order until a heading is selected. The third click restores it.
   const [sort, setSort] = useState<{ index: number; direction: Direction } | null>(null);
+  const narrow = useNarrowScreen();
   const value = sort && columns[sort.index]?.value;
   const ordered = sort && value ? [...rows].sort((a, b) => compareValues(value(a), value(b), sort.direction)) : rows;
   const headers: TableHeader[] = columns.map((column, index) =>
@@ -52,10 +71,40 @@ export function DataTable<T>({
         }
       : column.label,
   );
+  const sortable = columns.flatMap((column, index) =>
+    column.value
+      ? (column.firstDirection === "descending"
+          ? (["descending", "ascending"] as const)
+          : (["ascending", "descending"] as const)
+        ).map((direction) => ({ index, direction, label: `${column.label} (${direction})` }))
+      : [],
+  );
   return (
-    <Table headers={headers} label={label} scrollable>
-      {ordered.map(renderRow)}
-    </Table>
+    <>
+      {cards && narrow && sortable.length > 0 && (
+        // Card rows have no column headings, so one select replaces the heading buttons.
+        <label className="table-sort-select">
+          Sort by
+          <select
+            value={sort ? `${sort.index}:${sort.direction}` : ""}
+            onChange={(event) => {
+              const [index, direction] = event.target.value.split(":");
+              setSort(index ? { index: Number(index), direction: direction as Direction } : null);
+            }}
+          >
+            <option value="">Server order</option>
+            {sortable.map((option) => (
+              <option key={`${option.index}:${option.direction}`} value={`${option.index}:${option.direction}`}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      <Table headers={headers} label={label} scrollable cards={cards}>
+        {ordered.map(renderRow)}
+      </Table>
+    </>
   );
 }
 

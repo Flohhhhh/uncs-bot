@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
-import { expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import { compareValues, CopyValue, DataTable } from "./data-table";
 
@@ -51,7 +51,56 @@ it("keeps the chosen sort across new snapshots and is keyboard operable", async 
   await user.keyboard("{Enter}");
   view.rerender(table([...rows, { id: "five", score: 5 }]));
   expect(order()).toEqual(["two", "five", "ten", "missing"]);
-  expect(screen.getByRole("region")).toHaveAttribute("tabindex", "0");
+});
+it("scrolls inside the table only above 25 rows", () => {
+  const many = (count: number) => Array.from({ length: count }, (_, index) => ({ id: `p${index}`, score: index }));
+  const view = render(table(many(25)));
+  expect(screen.queryByRole("region")).not.toBeInTheDocument();
+  view.rerender(table(many(26)));
+  expect(screen.getByRole("region", { name: "Results scroll area" })).toHaveAttribute("tabindex", "0");
+});
+it("labels card cells from the column headings", () => {
+  render(table());
+  const wrapper = screen.getByRole("table").parentElement!;
+  expect(wrapper).toHaveAttribute("data-mobile", "cards");
+  expect(wrapper.style.getPropertyValue("--cell-label-1")).toBe('"Player"');
+  expect(wrapper.style.getPropertyValue("--cell-label-2")).toBe('"Score"');
+});
+describe("on a phone", () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn((query: string) => ({
+        matches: query === "(max-width: 700px)",
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
+  });
+  afterEach(() => vi.unstubAllGlobals());
+  it("sorts card rows from one select and returns to the server's order", () => {
+    render(table());
+    const select = screen.getByRole("combobox", { name: "Sort by" });
+    expect([...select.querySelectorAll("option")].map((option) => option.textContent)).toEqual([
+      "Server order",
+      "Player (ascending)",
+      "Player (descending)",
+      "Score (ascending)",
+      "Score (descending)",
+    ]);
+    fireEvent.change(select, { target: { value: "1:descending" } });
+    expect(order()).toEqual(["ten", "two", "missing"]);
+    expect(screen.getByRole("button", { name: "Sort by Score" }).closest("th")).toHaveAttribute(
+      "aria-sort",
+      "descending",
+    );
+    fireEvent.change(select, { target: { value: "" } });
+    expect(order()).toEqual(["missing", "ten", "two"]);
+  });
+});
+it("keeps column headings and no extra select on a wide screen", () => {
+  render(table());
+  expect(screen.queryByRole("combobox", { name: "Sort by" })).not.toBeInTheDocument();
 });
 it("compares SteamIDs without numeric rounding and handles missing or non-finite data", () => {
   expect(compareValues("76561198000000001", "76561198000000002", "ascending")).toBeLessThan(0);

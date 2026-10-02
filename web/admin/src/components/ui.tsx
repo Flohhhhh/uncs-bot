@@ -1,4 +1,14 @@
-import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import {
+  Children,
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 import { useSearchParams } from "react-router-dom";
 import { useAdmin, useGameAdmin } from "../app/context";
 import type { ActionName, ActionResult } from "../api/types";
@@ -437,23 +447,41 @@ export function date(value?: string | null) {
 }
 
 export type TableHeader = string | { label: string; sort: "none" | "ascending" | "descending"; onSort: () => void };
+/** Rows above this count scroll inside the table on wide screens instead of lengthening the page. */
+export const scrollRowLimit = 25;
 export function Table({
   headers,
   children,
   label,
   scrollable = false,
+  cards = false,
 }: {
   headers: TableHeader[];
   children: ReactNode;
   label?: string;
+  /** Allow an inner scroller; it applies only above `scrollRowLimit` rows. */
   scrollable?: boolean;
+  /** On phones, show each row as a card that labels its cells with the column headers. */
+  cards?: boolean;
 }) {
+  const scrolls = scrollable && Children.count(children) > scrollRowLimit;
+  // CSS reads each column's label from these variables; JSON quoting is valid CSS string syntax.
+  const labels = cards
+    ? Object.fromEntries(
+        headers.map((header, index) => [
+          `--cell-label-${index + 1}`,
+          JSON.stringify(typeof header === "string" ? header : header.label),
+        ]),
+      )
+    : undefined;
   return (
     <div
-      className={`table-wrap${scrollable ? " scrollable" : ""}`}
-      tabIndex={scrollable ? 0 : undefined}
-      role={scrollable ? "region" : undefined}
-      aria-label={scrollable ? `${label} scroll area` : undefined}
+      className={`table-wrap${scrolls ? " scrollable" : ""}`}
+      data-mobile={cards ? "cards" : undefined}
+      style={labels as CSSProperties | undefined}
+      tabIndex={scrolls ? 0 : undefined}
+      role={scrolls ? "region" : undefined}
+      aria-label={scrolls ? `${label} scroll area` : undefined}
     >
       <table aria-label={label}>
         <thead>
