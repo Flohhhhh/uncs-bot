@@ -19,7 +19,7 @@ beforeEach(() => {
     async (path) =>
       (path === "activity"
         ? { events: [event], limit: 300, connection: "available", startedAt: event.observedAt }
-        : path === "audit"
+        : path === "audit-notable"
           ? [
               {
                 id: "receipt",
@@ -52,7 +52,7 @@ it("combines observations and actual action outcomes while the native feed is st
 it("keeps working sources and the failed-source warning visible until a pending refresh succeeds", async () => {
   const fallback = request.getMockImplementation()!;
   request.mockImplementation((path, options) =>
-    path === "audit" ? Promise.reject(new Error("Unavailable")) : fallback(path, options),
+    path === "audit-notable" ? Promise.reject(new Error("Unavailable")) : fallback(path, options),
   );
   const view = (refreshVersion: number) => (
     <AdminContext.Provider value={context({ refreshVersion })}>
@@ -64,9 +64,9 @@ it("keeps working sources and the failed-source warning visible until a pending 
   expect(screen.getByText("Alice joined")).toBeInTheDocument();
   let finishRead!: (value: never) => void;
   const pendingRead = new Promise<never>((resolve) => (finishRead = resolve));
-  request.mockImplementation((path, options) => (path === "audit" ? pendingRead : fallback(path, options)));
+  request.mockImplementation((path, options) => (path === "audit-notable" ? pendingRead : fallback(path, options)));
   rendered.rerender(view(1));
-  await waitFor(() => expect(request.mock.calls.filter(([path]) => path === "audit")).toHaveLength(2));
+  await waitFor(() => expect(request.mock.calls.filter(([path]) => path === "audit-notable")).toHaveLength(2));
   expect(screen.getByRole("alert")).toHaveTextContent("Action receipts");
   expect(screen.getByText("Alice joined")).toBeInTheDocument();
   await act(async () => finishRead([] as never));
@@ -96,4 +96,34 @@ it("freezes the display for reading and resumes with newer observations", async 
   expect(screen.queryByText("Alice left")).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Resume display" }));
   expect(await screen.findByText("Alice left")).toBeInTheDocument();
+});
+it("reads notable receipts for the selected server and keeps unconfirmed automatic messages beside staff messages", async () => {
+  const fallback = request.getMockImplementation()!;
+  const welcome = {
+    actorName: "Gramps community messages",
+    action: "message",
+    target: "76561198000000002",
+    createdAt: event.observedAt,
+    details: { reason: "Automatic observed-join welcome." },
+  };
+  request.mockImplementation((path, options) =>
+    path === "servers/east/audit-notable"
+      ? Promise.resolve([
+          { ...welcome, id: "failed", state: "failed", message: "Automatic message was not confirmed." },
+          { ...welcome, id: "lost", state: "started", message: "Action started; result not yet recorded." },
+          { ...welcome, id: "manual", actorName: "Mod", state: "accepted", message: "Accepted" },
+        ] as never)
+      : fallback(path.replace(/^servers\/east\//, ""), options),
+  );
+  render(
+    <AdminContext.Provider
+      value={{ ...context(), server: { id: "east", name: "East", version: "1".repeat(64), role: "admin" } }}
+    >
+      <ActivityFeed />
+    </AdminContext.Provider>,
+  );
+  expect(await screen.findByText("Gramps community messages · Message player · failed")).toBeInTheDocument();
+  expect(screen.getByText("Gramps community messages · Message player · Unconfirmed")).toBeInTheDocument();
+  expect(screen.getByText("Mod · Message player · accepted")).toBeInTheDocument();
+  expect(request.mock.calls.map(([path]) => path)).not.toContain("servers/east/audit");
 });

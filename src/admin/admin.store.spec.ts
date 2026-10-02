@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { Client } from "pg";
 import type { Database } from "../database/database.types";
-import { AdminStore } from "./admin.store";
+import { AdminStore, COMMUNITY_MESSAGES_ACTOR_ID } from "./admin.store";
 
 describe("stored action receipt lookup", () => {
   it("reads directly by bound UUID with exactly the recent-history projection", async () => {
@@ -42,6 +42,28 @@ describe("stored action receipt lookup", () => {
     expect(record).not.toHaveProperty("actorId");
     expect(record).not.toHaveProperty("requestHash");
     expect(query.mock.calls.every(([config]) => config.text.startsWith("select "))).toBe(true);
+  });
+  it("excludes only acknowledged automatic messages, inside the query before its row limit", async () => {
+    const query = jest.fn(async (_config: { text: string }, _params: unknown[]) => ({ rows: [] as unknown[][] }));
+    const store = new AdminStore(drizzle({ query } as unknown as Client) as Database);
+    await store.history("east");
+    await store.history("east", { notable: true });
+    const [[all, allParams], [notable, params]] = query.mock.calls;
+    expect(notable.text.split(" from ")[0]).toBe(all.text.split(" from ")[0]);
+    expect(allParams).toEqual(["primary", "east", 100]);
+    expect(params).toEqual([
+      "primary",
+      "east",
+      COMMUNITY_MESSAGES_ACTOR_ID,
+      "message",
+      "broadcast",
+      "accepted",
+      "applied",
+      100,
+    ]);
+    expect(notable.text.split(" where ")[1].split(" order by ")[0]).toContain(
+      'not ("admin_actions"."actor_id" = $3 and "admin_actions"."action" in ($4, $5) and "admin_actions"."state" in ($6, $7))',
+    );
   });
   it("returns null when no stored receipt exists", async () => {
     const query = jest.fn(async () => ({ rows: [] }));

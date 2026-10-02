@@ -18,7 +18,7 @@ export function useGameApi(): typeof api {
 export function isGameResource(path: string | null) {
   return (
     !!path &&
-    /^(overview|activity|bans|whitelist|catalog|rotation|audit|game-log|server-identity|community-messages|settings|events|map-votes|combat|applications)(\/|\?|$)/.test(
+    /^(overview|activity|bans|whitelist|catalog|rotation|audit|audit-notable|game-log|server-identity|community-messages|settings|events|map-votes|combat|applications)(\/|\?|$)/.test(
       path,
     )
   );

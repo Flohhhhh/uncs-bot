@@ -13,8 +13,8 @@ import type {
   SupporterMutation,
   SupporterView,
 } from "../src/supporters/supporters.types";
-import { AdminStore } from "../src/admin/admin.store";
-import type { Staff } from "../src/admin/admin.types";
+import { AdminStore, COMMUNITY_MESSAGES_ACTOR_ID } from "../src/admin/admin.store";
+import type { ActionResult, AdminAction, Staff } from "../src/admin/admin.types";
 import { MapVotesStore } from "../src/map-votes/map-votes.store";
 import { ServerEventsStore } from "../src/server-events/server-events.store";
 import { eventFixture, eventStaff } from "../src/server-events/event-fixtures";
@@ -309,6 +309,59 @@ describe("launch storage on isolated PostgreSQL", () => {
     expect(await admin.receipt(eastId, "central")).toBeNull();
     expect(await admin.receipt(oldId, "east")).toBeNull();
     expect((await admin.receipt(oldId, "primary"))?.state).toBe("accepted");
+  });
+
+  it("keeps acknowledged automatic messages from crowding notable receipts out of the activity feed", async () => {
+    const community: Staff = {
+      id: COMMUNITY_MESSAGES_ACTOR_ID,
+      name: "Gramps community messages",
+      role: "admin",
+      csrf: "",
+    };
+    const voting: Staff = { ...staff, name: "Gramps automatic voting" };
+    const steamId = "76561198000000001";
+    const record = async (actor: Staff, action: AdminAction, state?: ActionResult["state"]) => {
+      await admin.begin(actor, action, action.id);
+      if (state) await admin.finish(action.id, { state, message: `Recorded ${state}` });
+      return action.id;
+    };
+    const welcome = (): AdminAction => ({
+      id: randomUUID(),
+      action: "message",
+      steamId,
+      message: "Welcome",
+      reason: "Automatic observed-join welcome.",
+    });
+    const roundMessage = (): AdminAction => ({
+      id: randomUUID(),
+      action: "broadcast",
+      message: "GG",
+      reason: "Automatic observed round-transition message.",
+    });
+    const notable = [
+      await record(staff, { id: randomUUID(), action: "kick", steamId, reason: "Reviewed report" }, "applied"),
+      await record(staff, { id: randomUUID(), action: "message", steamId, message: "Hi", reason: "Rules" }, "accepted"),
+      await record(community, welcome(), "failed"),
+      await record(community, welcome(), "unknown"),
+      await record(community, welcome()),
+      await record(community, roundMessage(), "pending"),
+    ];
+    for (let i = 0; i < 101; i++)
+      await record(community, i % 2 ? welcome() : roundMessage(), i % 3 ? "accepted" : "applied");
+    const vote = {
+      id: randomUUID(),
+      action: "broadcast",
+      message: "Totals",
+      reason: "Map vote midpoint totals",
+    } as const;
+    notable.push(await record(voting, vote, "accepted"));
+
+    const recent = await admin.history("primary");
+    expect(recent).toHaveLength(100);
+    expect(recent.filter((r) => notable.includes(r.id)).map((r) => r.id)).toEqual([vote.id]);
+    expect((await admin.history("primary", { notable: true })).map((r) => r.id)).toEqual([...notable].reverse());
+    expect(await admin.history("east", { notable: true })).toEqual([]);
+    expect((await admin.receipt(notable[0], "primary"))?.state).toBe("applied");
   });
 
   it("deduplicates and aggregates the same game event independently on two configured servers", async () => {
