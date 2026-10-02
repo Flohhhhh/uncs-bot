@@ -337,6 +337,26 @@ describe("health inference from RCON reads", () => {
     expect(h.alerts.map((alert) => alert.suppressed ?? null)).toEqual([null, "restart limit", null]);
   });
 
+  it("records a second posted restart that starts in the same half hour as the first", () => {
+    const h = harness({}, "2026-10-02T08:00:00Z");
+    h.read(h.good());
+    h.read(h.fail(), 15_000);
+    h.read(h.fail(), 30_000);
+    h.read(h.good({ map: "Europe" }), 30_000);
+    // The game fails again at 08:19:45 and is back on another map at 08:33, past the 30-minute limit.
+    for (let read = 0; read < 71; read++) h.read(h.good({ map: "Europe" }), 15_000);
+    h.read(h.fail(), 30_000);
+    h.read(h.fail(), 8 * 60_000);
+    h.read(h.good({ map: "Kavkazi" }), 5 * 60_000 + 15_000);
+    expect(new Date(h.now).toISOString()).toBe("2026-10-02T08:33:00.000Z");
+    expect(h.alerts.map((alert) => [alert.kind, alert.suppressed ?? null])).toEqual([
+      ["game-restart", null],
+      ["game-restart", null],
+    ]);
+    // Distinct keys, so the alert service records the second restart instead of treating it as a repeat.
+    expect(h.alerts[0].key).not.toBe(h.alerts[1].key);
+  });
+
   it("alerts once per build change after a silent baseline, and once more on a change back", () => {
     const h = harness();
     h.read(h.good({ build: null }));

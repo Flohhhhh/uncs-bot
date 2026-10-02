@@ -266,16 +266,17 @@ function restartAlert(
   const withPlayers = playersBefore >= options.restartPlayers;
   // A scheduled restart below the threshold is recorded only, so it uses up no restart limit. A
   // restart the limit holds back is recorded too. Each gets its own key, so neither repeats a post.
+  // Keys name the restart time, not its half hour: the limit already spaces posts, and a later
+  // restart that starts in the same half hour must not look like a repeat of the earlier one.
   const recordOnly = scheduled && !withPlayers;
   const held = !recordOnly && state.lastRestartAlertAt !== null && now - state.lastRestartAlertAt < RESTART_ALERT_MS;
   if (!recordOnly && !held) state.lastRestartAlertAt = now;
-  const bucket = Math.floor(restartAt / RESTART_ALERT_MS);
   const text = signals.join(", ");
   return [
     {
       kind: "game-restart",
       severity: withPlayers ? "warning" : "info",
-      key: recordOnly ? `restart-scheduled:${bucket}` : held ? `restart-held:${restartAt}` : `restart:${bucket}`,
+      key: `${recordOnly ? "restart-scheduled" : held ? "restart-held" : "restart"}:${restartAt}`,
       title: withPlayers ? "Likely restart with players on" : "Likely restart",
       lines: [
         `${text.charAt(0).toUpperCase()}${text.slice(1)} (${scheduled ? "scheduled" : "unscheduled"}).`,
