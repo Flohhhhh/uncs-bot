@@ -1185,6 +1185,11 @@ td strong {
   .player-roster [data-mobile="cards"] td.player-team::before {
     content: none;
   }
+  /* Short stat labels sit inline: "Kills 18". */
+  .player-roster [data-mobile="cards"] td::before {
+    display: inline;
+    margin: 0 var(--space-1) 0 0;
+  }
   .player-roster .select-cell {
     position: absolute;
     top: 2px;
