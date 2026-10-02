@@ -2,7 +2,7 @@
 
 The main website's `/whitelist` page lets a Discord member request access and check their own request. Gramps stores the application and provides an admin-only review queue. This is the existing free whitelist application process; it does not activate donations, queue tiers, seeding rewards, or paid benefits.
 
-The feature is **disabled by default in code and enabled on production**. The website worker, Discord identity sign-in, selected-server return and joining instructions are deployed and read-verified. A genuine application followed by staff approval and a confirmed game grant still needs end-to-end acceptance. The [release audit](ADMIN_RELEASE_AUDIT.md) records deployment and acceptance evidence. No whitelist access was changed by release checks.
+The feature is **disabled by default in code and enabled on production**. The website worker, Discord identity sign-in, selected-server return and joining instructions are deployed and read-verified. October 2 read-only inspection matched one genuine saved application and applied staff approval to the same active, saved game whitelist entry. The applicant's own returned status screen and actual queue experience remain unobserved. The [release audit](ADMIN_RELEASE_AUDIT.md) records deployment and acceptance evidence. No whitelist access was changed by release checks.
 
 ## Information collected
 
@@ -26,7 +26,7 @@ The website serves the page; Gramps serves these routes through the same website
 | `GET /admin/api/applications`              | Admin-only private review list: `{applications}`.                                                                |
 | `POST /admin/api/applications/:id/approve` | Reviews a pending application and requests its stored SteamID be added.                                          |
 | `POST /admin/api/applications/:id/decline` | Declines a pending application without contacting the game.                                                      |
-| `POST /admin/api/applications/:id/recheck` | Rechecks a `processing` or `needs_review` application's running whitelist membership without changing the game. |
+| `POST /admin/api/applications/:id/recheck` | Rechecks a `processing` or `needs_review` application's running whitelist membership without changing the game.  |
 
 Staff decisions accept `{id: <new review UUID>, reason: <3–200 characters>}` and return `{application, outcome: {id, state, message}}`. The URL ID identifies the application; the body ID identifies that review attempt. The private list includes email and review notes; moderator/viewer roles cannot read it. It returns at most 100 records: unresolved requests first, oldest first, followed by recent resolved records. Counts describe this returned batch, not the entire database. Refresh after processing a batch to advance the queue.
 
