@@ -637,7 +637,13 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
         return 30_000;
       }
       const game = this.servers.get(serverId);
-      const settings = await game.configuration();
+      let settings: Configuration;
+      try {
+        settings = await game.configuration();
+      } catch {
+        await this.unreadableSettings(event);
+        return 30_000;
+      }
       const lock = settings.fields.find((field) => field.id === "lockOverpopulated");
       let snapshot: EventSnapshot | null = null;
       let track: RoundTrack | null = null;
@@ -666,6 +672,49 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
     } finally {
       this.running.delete(serverId);
     }
+  }
+  /** Gramps switched the team lock off, may have (an unconfirmed attempt), or is putting it back. */
+  private lockMayBeOff(event: EventRecord) {
+    const progress = event.progress;
+    return (
+      event.originalLock &&
+      (progress.lockDisabledAt !== undefined || event.restoreRevision !== null || (progress.disableAttempts ?? 0) > 0)
+    );
+  }
+  /**
+   * A failed settings read. While the team lock may be off it escalates like an unreadable lock field:
+   * an alert after five minutes and staff review after 30. Otherwise the next pass simply retries.
+   */
+  private async unreadableSettings(event: EventRecord) {
+    this.logger.warn(`Optional event ${event.id}: the game settings could not be read. Retrying.`);
+    if (!this.lockMayBeOff(event)) return;
+    const now = Date.now();
+    const progress = structuredClone(event.progress);
+    const since = progress.lockIssueSince ?? now;
+    if (now - since >= LOCK_REVIEW_MS) {
+      await this.problem(
+        event,
+        "The game settings could not be read for 30 minutes. Check 'Lock overpopulated teams' and restore it manually if it is still off.",
+        progress,
+        {
+          key: `event-lock-restore:${event.id}`,
+          message: `Team lock may still be OFF on ${event.serverName}: the game settings could not be read for 30 minutes during the 50v50. Check 'Lock overpopulated teams' now.`,
+        },
+      );
+      return;
+    }
+    progress.lockIssueSince = since;
+    if (now - since >= LOCK_ALERT_MS)
+      await this.alert(
+        event.serverId,
+        `event-lock-unreadable:${event.id}`,
+        `Team lock may still be OFF on ${event.serverName}: the game settings could not be read for 5 minutes. Gramps keeps retrying.`,
+      );
+    await this.store.observe(event.id, event.version, {
+      state: event.state,
+      progress,
+      message: "The game settings could not be read. Retrying; the team lock may still be off.",
+    });
   }
   /**
    * An interrupted action is never replayed. A vote-started event stops itself and restores the lock;

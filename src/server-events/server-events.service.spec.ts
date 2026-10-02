@@ -478,6 +478,45 @@ describe("durable optional event service", () => {
       expect.stringContaining("for 30 minutes"),
     );
   });
+  it.each([
+    ["a voted 50v50 is running", false],
+    ["a voted 50v50 is restoring the lock", true],
+  ])("alerts, then asks staff, when the game settings cannot be read while %s", async (_, stopping) => {
+    const f = fixture("primary", voteEventFixture);
+    if (stopping) await f.service.stop(eventStaff, f.record.id, { id: randomUUID(), reason: "Finished event" });
+    f.game.configuration.mockRejectedValue(new Error("Unavailable"));
+    await f.service.tick();
+    expect(f.current()).toMatchObject({ state: stopping ? "stopping" : "active" });
+    expect(f.current()?.progress.lockIssueSince).toBe(eventNow);
+    expect(f.alerts.send).not.toHaveBeenCalled();
+    jest.setSystemTime(eventNow + 5 * 60_000);
+    await f.service.tick();
+    expect(f.alerts.send).toHaveBeenCalledWith(
+      "primary",
+      `event-lock-unreadable:${f.record.id}`,
+      expect.stringContaining("Team lock may still be OFF"),
+    );
+    jest.setSystemTime(eventNow + 30 * 60_000);
+    await f.service.tick();
+    expect(f.current()?.state).toBe("needs_review");
+    expect(f.alerts.send).toHaveBeenLastCalledWith(
+      "primary",
+      `event-lock-restore:${f.record.id}`,
+      expect.stringContaining("for 30 minutes"),
+    );
+    expect(f.admin.act).not.toHaveBeenCalled();
+  });
+  it("only retries a failed settings read while the team lock was never changed", async () => {
+    const f = fixture("primary", voteEventFixture);
+    f.set({ ...f.record, state: "preparing", progress: { ...f.record.progress, lockDisabledAt: undefined } });
+    f.game.configuration.mockRejectedValue(new Error("Unavailable"));
+    jest.setSystemTime(eventNow + 60_000);
+    await f.service.tick();
+    jest.setSystemTime(eventNow + 40 * 60_000);
+    await f.service.tick();
+    expect(f.current()?.state).toBe("preparing");
+    expect(f.alerts.send).not.toHaveBeenCalled();
+  });
   it("restores the team lock even when the status read fails", async () => {
     const f = fixture();
     await f.service.stop(eventStaff, f.record.id, { id: randomUUID(), reason: "Finished event" });
