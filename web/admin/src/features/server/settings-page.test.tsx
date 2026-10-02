@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, within, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import { SettingsPage, PermissionsPage } from "./settings-page";
@@ -160,51 +160,6 @@ it.each(["pending", "unknown", "invalid-state", "timeout"])(
   },
 );
 
-it("preserves reordered maps after a rejected rotation save", async () => {
-  show("admin", "/settings#rotation");
-  fireEvent.click(await screen.findByRole("button", { name: "Move Ozeti up" }));
-  fireEvent.click(screen.getByRole("button", { name: "Review rotation" }));
-  const fallback = request.getMockImplementation()!;
-  request.mockImplementation(async (path, options) =>
-    path === "actions" ? ({ state: "failed", message: "Rotation rejected" } as never) : fallback(path, options),
-  );
-  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Save rotation" }));
-  await screen.findByText("Rotation rejected");
-  fireEvent.click(screen.getByRole("button", { name: "Back to edits" }));
-  expect(screen.getByRole("button", { name: "Review rotation" })).toBeEnabled();
-  fireEvent.click(screen.getByRole("button", { name: "Review rotation" }));
-  const changes = within(screen.getByRole("dialog")).getAllByRole("listitem");
-  expect(changes[0]).toHaveTextContent("Ozeti");
-});
-it("retries failed map choices without discarding the rotation draft or sending changes", async () => {
-  const fallback = request.getMockImplementation()!;
-  request.mockImplementation(async (path, options) => {
-    if (path === "catalog") throw new Error("Catalog read failed");
-    return fallback(path, options);
-  });
-  show("admin", "/settings#rotation");
-  fireEvent.click(await screen.findByRole("button", { name: "Move Ozeti up" }));
-  const retry = await screen.findByRole("button", { name: "Retry map choices" });
-  expect(screen.queryByRole("combobox", { name: "Map" })).not.toBeInTheDocument();
-  let finish!: (value: unknown) => void;
-  request.mockImplementation(
-    async (path, options) =>
-      (path === "catalog"
-        ? new Promise((resolve) => {
-            finish = resolve;
-          })
-        : fallback(path, options)) as never,
-  );
-  fireEvent.click(retry);
-  expect(retry).toBeDisabled();
-  expect(screen.getByText("Catalog read failed")).toBeInTheDocument();
-  await act(async () => finish(await fallback("catalog")));
-  expect(await screen.findByRole("combobox", { name: "Map" })).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "Retry map choices" })).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Review rotation" }));
-  expect(within(screen.getByRole("dialog")).getAllByRole("listitem")[0]).toHaveTextContent("Ozeti");
-  expect(request.mock.calls.every(([, options]) => !options?.method)).toBe(true);
-});
 it("shows the running scoring interval and server range", async () => {
   show();
   await screen.findByRole("button", { name: "Gameplay" });
@@ -223,82 +178,6 @@ it("keeps join passwords out of review text", async () => {
   expect(screen.getByRole("dialog")).not.toHaveTextContent("test-password-not-real");
   expect(screen.getByRole("dialog")).toHaveTextContent("Password updated");
 });
-it.each(["Kavkazi", "Bakurani"])(
-  "queues a map with live %s independently of ending the current match",
-  async (currentMap) => {
-    const fallback = request.getMockImplementation()!;
-    request.mockImplementation(async (path, options) => {
-      if (path !== "settings") return fallback(path, options);
-      const snapshot = structuredClone(sample);
-      snapshot.rotation.currentMap = currentMap;
-      return snapshot as never;
-    });
-    show();
-    await screen.findByRole("button", { name: "Rotation" });
-    fireEvent.click(screen.getByRole("button", { name: "Rotation" }));
-    fireEvent.click(screen.getByRole("button", { name: "Next round" }));
-    fireEvent.change(await screen.findByRole("combobox", { name: "Map" }), { target: { value: "Europe" } });
-    await screen.findByRole("checkbox", { name: "Infantry only" });
-    await waitFor(() => expect(screen.getByRole("button", { name: "Queue next map" })).toBeEnabled());
-    fireEvent.click(screen.getByRole("button", { name: "Queue next map" }));
-    const dialog = screen.getByRole("dialog");
-    expect(screen.queryByRole("textbox", { name: "Reason" })).not.toBeInTheDocument();
-    fireEvent.click(within(dialog).getByRole("button", { name: "Queue next map" }));
-    await waitFor(() => expect(request.mock.calls.some(([path]) => path === "actions")).toBe(true));
-    expect(JSON.parse(String(request.mock.calls.find(([path]) => path === "actions")![1]?.body))).toMatchObject({
-      action: "map-next",
-      currentMap,
-      currentIndex: 0,
-      entry: { map: "Europe" },
-    });
-  },
-);
-it("shows the game's own next entry and keeps queuing until that round starts", async () => {
-  const note =
-    "This match was not started from the rotation, so the game will play entry 1 next. Queue a map once that round starts.";
-  const fallback = request.getMockImplementation()!;
-  request.mockImplementation(async (path, options) => {
-    if (path !== "settings") return fallback(path, options);
-    const snapshot = structuredClone(sample);
-    Object.assign(snapshot.rotation, { currentIndex: null, nextIndex: 0, currentMap: "Bakurani", positionNote: note });
-    return snapshot as never;
-  });
-  show("admin", "/settings#rotation");
-  fireEvent.click(await screen.findByRole("button", { name: "Next round" }));
-  expect(await screen.findByText("Bakurani · Map defaults")).toBeInTheDocument();
-  expect(screen.getByText(note)).toBeInTheDocument();
-  fireEvent.change(await screen.findByRole("combobox", { name: "Map" }), { target: { value: "Europe" } });
-  await screen.findByRole("checkbox", { name: "Infantry only" });
-  expect(screen.getByRole("button", { name: "Queue next map" })).toBeDisabled();
-  expect(request.mock.calls.some(([path]) => path === "actions")).toBe(false);
-});
-it("explains a missing position and refreshes it without losing the chosen map or sending an action", async () => {
-  let available = false;
-  const fallback = request.getMockImplementation()!;
-  request.mockImplementation(async (path, options) => {
-    if (path !== "settings") return fallback(path, options);
-    const snapshot = structuredClone(sample);
-    if (!available) {
-      snapshot.rotation.currentIndex = null;
-      snapshot.rotation.nextIndex = null;
-      snapshot.rotation.positionNote = "The running rotation could not be read. Refresh to try again.";
-    }
-    return snapshot as never;
-  });
-  show("admin", "/settings#rotation");
-  fireEvent.click(await screen.findByRole("button", { name: "Next round" }));
-  fireEvent.change(await screen.findByRole("combobox", { name: "Map" }), { target: { value: "Europe" } });
-  fireEvent.click(await screen.findByRole("checkbox", { name: "Infantry only" }));
-  expect(screen.getByText("The running rotation could not be read. Refresh to try again.")).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Queue next map" })).toBeDisabled();
-  available = true;
-  fireEvent.click(screen.getByRole("button", { name: "Refresh map position" }));
-  await waitFor(() => expect(screen.getByRole("button", { name: "Queue next map" })).toBeEnabled());
-  expect(screen.getByRole("combobox", { name: "Map" })).toHaveValue("Europe");
-  expect(screen.getByRole("checkbox", { name: "Infantry only" })).toBeChecked();
-  expect(screen.queryByText("Position not confirmed")).not.toBeInTheDocument();
-  expect(request.mock.calls.some(([path]) => path === "actions")).toBe(false);
-});
 it("shows permissions without reading the live game", () => {
   render(
     <AdminContext.Provider value={context()}>
@@ -308,67 +187,6 @@ it("shows permissions without reading the live game", () => {
   expect(screen.getByText("Staff permissions")).toBeInTheDocument();
   expect(request).not.toHaveBeenCalled();
 });
-it("preserves a rotation draft across setting groups and edits the original position", async () => {
-  show();
-  fireEvent.click(await screen.findByRole("button", { name: "Rotation" }));
-  await screen.findByRole("combobox", { name: "Map" });
-  fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
-  expect(screen.getByRole("button", { name: "Remove Ozeti" })).toBeDisabled();
-  expect(screen.getByRole("button", { name: "Move Ozeti up" })).toBeDisabled();
-  fireEvent.change(screen.getByRole("combobox", { name: "Lighting" }), { target: { value: "DayClear" } });
-  await waitFor(() => expect(screen.getByRole("button", { name: "Update entry" })).toBeEnabled());
-  fireEvent.click(screen.getByRole("button", { name: "Update entry" }));
-  fireEvent.click(screen.getByRole("button", { name: "Identity" }));
-  fireEvent.click(screen.getByRole("button", { name: "Rotation" }));
-  fireEvent.click(screen.getByRole("button", { name: "Review rotation" }));
-  const dialog = screen.getByRole("dialog");
-  expect(within(dialog).getByText("1. Bakurani · Day · clear")).toBeInTheDocument();
-  expect(within(dialog).getByText("2. Ozeti · Infantry only")).toBeInTheDocument();
-  expect(request.mock.calls.some(([path]) => path === "actions")).toBe(false);
-});
-it.each([false, true])(
-  "retains Infantry Only edits across a refresh and blocks only a changed rotation (%s)",
-  async (rotationChanged) => {
-    const state = context();
-    const view = (refreshVersion: number) => (
-      <AdminContext.Provider value={{ ...state, refreshVersion }}>
-        <MemoryRouter initialEntries={["/settings#rotation"]}>
-          <SettingsPage />
-        </MemoryRouter>
-      </AdminContext.Provider>
-    );
-    const page = render(view(0));
-    await screen.findByRole("combobox", { name: "Map" });
-    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
-    fireEvent.click(await screen.findByRole("checkbox", { name: "Infantry only" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Update entry" })).toBeEnabled());
-    fireEvent.click(screen.getByRole("button", { name: "Update entry" }));
-    const fallback = request.getMockImplementation()!;
-    request.mockImplementation(async (path, options) => {
-      if (path !== "settings") return fallback(path, options);
-      const refreshed = structuredClone(sample);
-      refreshed.revision = "r2";
-      if (rotationChanged) refreshed.rotation.entries.reverse();
-      return refreshed as never;
-    });
-    page.rerender(view(1));
-    await screen.findByText(rotationChanged ? /The saved rotation changed/ : /Other settings changed/);
-    expect(screen.getByRole("list", { name: "Rotation queue" })).toHaveTextContent("Infantry only");
-    const review = screen.getByRole("button", { name: "Review rotation" });
-    if (rotationChanged) expect(review).toBeDisabled();
-    else {
-      expect(review).toBeEnabled();
-      fireEvent.click(review);
-      fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Save rotation" }));
-      await screen.findByText("Saved for next match.");
-      const sent = request.mock.calls.find(([path]) => path === "actions")!;
-      expect(JSON.parse(String(sent[1]?.body))).toMatchObject({
-        revision: "r2",
-        entries: [{ map: "Kavkazi", experiences: ["KOTH_InfantryOnly"] }, sample.rotation.entries[1]],
-      });
-    }
-  },
-);
 it("retains an unknown receipt without resending after a lost settings response", async () => {
   const original = request.getMockImplementation()!;
   request.mockImplementation((path, options) =>
@@ -428,16 +246,13 @@ it("clearing a replacement leaves the password unchanged; removing it is explici
     serverPassword: "",
   });
 });
-it("opens the rotation shortcut and does not save a cancelled or reversed edit", async () => {
+it("keeps the rotation editor out of Settings and links to it on the selected server", async () => {
   show("admin", "/settings?server=primary#rotation");
-  await screen.findByRole("combobox", { name: "Map" });
+  expect(await screen.findByRole("link", { name: "Edit maps in Match & maps →" })).toHaveAttribute(
+    "href",
+    "/match?server=primary&view=rotation",
+  );
   expect(screen.getByRole("button", { name: "Rotation" })).toHaveAttribute("aria-pressed", "true");
-  fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
-  expect(screen.getByRole("button", { name: "Next round" })).toBeDisabled();
-  fireEvent.click(screen.getByRole("button", { name: "Cancel entry edit" }));
-  expect(screen.queryByRole("button", { name: "Review rotation" })).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Move Ozeti up" }));
-  expect(screen.getByRole("button", { name: "Review rotation" })).toBeEnabled();
-  fireEvent.click(screen.getByRole("button", { name: "Move Ozeti down" }));
-  expect(screen.queryByRole("button", { name: "Review rotation" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("list", { name: "Rotation queue" })).not.toBeInTheDocument();
+  expect(request.mock.calls.map(([path]) => path)).toEqual(["settings"]);
 });

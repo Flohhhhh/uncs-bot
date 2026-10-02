@@ -6,7 +6,7 @@ import { useGameAdmin as useAdmin } from "../../app/context";
 import { useResource } from "../../api/use-resource";
 import type { Overview, Rotation } from "../../api/types";
 import { ActionButton, Badge, Card, Empty, Table, Tabs } from "../../components/ui";
-import { RotationEditor } from "./settings-page";
+import { RotationEditor } from "./rotation-editor";
 import { nextRoundSummary, roundLabel, runningRotationSnapshot } from "./next-round";
 import { voteSummary, type VoteList } from "../map-votes/vote-status";
 import { MapVotesPage } from "../map-votes/map-votes-page";

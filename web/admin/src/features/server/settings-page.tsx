@@ -1,5 +1,5 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { useLocation } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
+import { Link, useLocation } from "react-router-dom";
 import {
   settingFields,
   settingValue,
@@ -11,17 +11,11 @@ import { canAct } from "../../../../../src/common/admin-policy";
 import { useGameAdmin as useAdmin } from "../../app/context";
 import { useResource } from "../../api/use-resource";
 import { useGameApi } from "../../api/server-client";
-import type { ActionResult, Catalog } from "../../api/types";
+import type { ActionResult } from "../../api/types";
 import { Badge, Card, Empty, Modal, Table } from "../../components/ui";
 import { ActionReceipt } from "../actions/action-receipt";
 import { errorMessage, rejectionState } from "../actions/policy";
-import { MapPicker } from "../actions/map-picker";
 import { ServerIdentityReadout } from "./server-identity";
-import { SavedRotationCheck } from "./rotation-check";
-import { nextRoundSummary } from "./next-round";
-import type { RotationRow } from "./rotation-queue";
-import { mapLabel, selectionLabel, sameMap } from "../../../../../src/common/map-labels";
-const RotationQueue = lazy(() => import("./rotation-queue").then((module) => ({ default: module.RotationQueue })));
 
 const timing: Record<string, string> = {
   live: "Now",
@@ -34,7 +28,7 @@ const timing: Record<string, string> = {
 };
 const timingSymbol: Record<string, string> = { live: "⚡", applied: "⚡", "next-match": "⏭", "next-restart": "↻" };
 const saveLabels = { "settings-save": "Save settings", "rotation-save": "Save rotation", "map-next": "Queue next map" };
-type DraftAction =
+export type DraftAction =
   | { action: "settings-save"; revision: string; changes: Record<string, SettingValue> }
   | { action: "rotation-save"; revision: string; entries: MapSelection[] }
   | {
@@ -44,7 +38,8 @@ type DraftAction =
       currentMap: string;
       entry: MapSelection;
     };
-function ReviewChanges({
+/** The single review for settings, rotation and next-round saves. */
+export function ReviewChanges({
   action,
   summary,
   close,
@@ -131,311 +126,6 @@ function ReviewChanges({
     </Modal>
   );
 }
-export function RotationEditor({
-  snapshot,
-  reload,
-  disabled,
-  active,
-  onUnsavedChange,
-  initialView = "rotation",
-  view: chosenView,
-  onEditingChange,
-}: {
-  snapshot: SettingsSnapshot;
-  reload: () => void;
-  disabled: boolean;
-  active: boolean;
-  onUnsavedChange: (value: boolean) => void;
-  initialView?: "next" | "rotation";
-  /** Set when the page switches views itself, as Match & maps does; hides the editor's own switch and summary. */
-  view?: "next" | "rotation";
-  /** Reports an entry edit in progress, which keeps the next-round view closed. */
-  onEditingChange?: (editing: boolean) => void;
-}) {
-  const [ownView, setView] = useState(initialView);
-  const embedded = chosenView !== undefined;
-  const view = chosenView ?? ownView;
-  const { data: catalog, error, loading, refresh: refreshCatalog } = useResource<Catalog>(active ? "catalog" : null);
-  const savedRows = useMemo(
-    () => snapshot.rotation.entries.map((entry, index) => ({ id: snapshot.revision + ":" + index, entry })),
-    [snapshot],
-  );
-  const [draft, setDraft] = useState<{ revision: string; baseEntries: string; rows: RotationRow[] } | null>(null);
-  const [selection, setSelection] = useState<MapSelection>({ map: "", experiences: [] });
-  const [ready, setReady] = useState(false);
-  const [editIndex, setEditIndex] = useState<number | null>(null);
-  const [editBase, setEditBase] = useState<string | null>(null);
-  const [review, setReview] = useState<{ action: DraftAction; summary: string[] } | null>(null);
-  const rows = draft?.rows ?? savedRows;
-  const entries = rows.map((row) => row.entry);
-  const savedEntries = JSON.stringify(snapshot.rotation.entries);
-  const changedElsewhere = (draft?.baseEntries ?? editBase ?? savedEntries) !== savedEntries;
-  const locked = disabled || !snapshot.rotation.editable || changedElsewhere || !!review;
-  const selectionChanged = editIndex !== null && JSON.stringify(selection) !== JSON.stringify(entries[editIndex]);
-  useEffect(() => onUnsavedChange(!!draft || selectionChanged), [draft, selectionChanged, onUnsavedChange]);
-  useEffect(() => onEditingChange?.(editIndex !== null), [editIndex, onEditingChange]);
-  function update(next: RotationRow[]) {
-    if (locked) return;
-    setDraft(
-      JSON.stringify(next.map((row) => row.entry)) === JSON.stringify(snapshot.rotation.entries)
-        ? null
-        : {
-            revision: draft?.revision ?? snapshot.revision,
-            baseEntries: draft?.baseEntries ?? savedEntries,
-            rows: next,
-          },
-    );
-  }
-  const canAdd = !locked && !loading && !error && ready && editIndex === null && rows.length < 100;
-  const { currentIndex } = snapshot.rotation;
-  const ordered = snapshot.rotation.enabled && snapshot.rotation.mode === "Ordered";
-  const currentMatches =
-    currentIndex !== null && sameMap(snapshot.rotation.entries[currentIndex]?.map, snapshot.rotation.currentMap);
-  // With no running entry named, the game still reports its own next entry; queuing waits for that round.
-  const nextEntry = nextRoundSummary(snapshot).entry;
-  function add(index: number) {
-    if (!canAdd) return;
-    const next = [...rows];
-    next.splice(index, 0, { id: crypto.randomUUID(), entry: structuredClone(selection) });
-    update(next);
-  }
-  return (
-    <Card
-      title={view === "next" ? "Queue the next round" : "Map rotation"}
-      subtitle={
-        view === "next"
-          ? "Choose what plays after this match."
-          : "Edit the ongoing schedule. Changes stay in a draft until saved."
-      }
-      badge={<Badge>{snapshot.rotation.mode || "Unknown"}</Badge>}
-    >
-      <div className="card-body">
-        {!embedded && (
-          <>
-            <div className="settings-tabs" role="group" aria-label="Map planning">
-              <button
-                type="button"
-                className="button secondary"
-                aria-pressed={view === "next"}
-                disabled={editIndex !== null}
-                onClick={() => setView("next")}
-              >
-                Next round
-              </button>
-              <button
-                type="button"
-                className="button secondary"
-                aria-pressed={view === "rotation"}
-                onClick={() => setView("rotation")}
-              >
-                Edit rotation
-              </button>
-            </div>
-            <div className="map-plan-summary">
-              <div>
-                <span>Playing now</span>
-                <strong>{mapLabel(snapshot.rotation.currentMap) || "Not supplied"}</strong>
-              </div>
-              <div>
-                <span>Saved next round</span>
-                <strong>
-                  {nextEntry ? selectionLabel(nextEntry) : ordered ? "Position not confirmed" : "No fixed next round"}
-                </strong>
-              </div>
-            </div>
-          </>
-        )}
-        {snapshot.rotation.note && <p className="notice warning">{snapshot.rotation.note}</p>}
-        {ordered && !currentMatches && (
-          <div className="notice warning">
-            <p>
-              {snapshot.rotation.positionNote ||
-                "The current place in the rotation is unavailable. Refresh to try again."}
-            </p>
-            <button type="button" className="button secondary" disabled={disabled || !!review} onClick={reload}>
-              Refresh map position
-            </button>
-          </div>
-        )}
-        {active && view === "rotation" && <SavedRotationCheck revision={snapshot.revision} />}
-        {changedElsewhere && (
-          <p className="notice warning">
-            The saved rotation changed. Your draft is kept, but cannot overwrite a newer rotation. Compare it before
-            discarding and reloading.
-          </p>
-        )}
-        {draft && !changedElsewhere && draft.revision !== snapshot.revision && (
-          <p className="notice info">
-            Other settings changed. Your map edits are kept and will use the latest settings.
-          </p>
-        )}
-        {error && (
-          <div className="notice warning" role="alert">
-            <p>{error}</p>
-            <button
-              type="button"
-              className="button secondary small"
-              disabled={disabled || loading}
-              onClick={refreshCatalog}
-            >
-              Retry map choices
-            </button>
-          </div>
-        )}
-        {!catalog && !error && loading && <p role="status">Loading map choices…</p>}
-        {(draft || changedElsewhere) && view === "rotation" && (
-          <div className="settings-savebar rotation-savebar">
-            <strong>Unsaved rotation · {rows.length} rounds</strong>
-            <button
-              type="button"
-              className="button secondary"
-              disabled={disabled}
-              onClick={() => {
-                setDraft(null);
-                setEditIndex(null);
-                setEditBase(null);
-                reload();
-              }}
-            >
-              Discard draft
-            </button>
-            <button
-              type="button"
-              className="button primary"
-              disabled={locked || entries.length === 0 || editIndex !== null}
-              onClick={() =>
-                setReview({
-                  action: { action: "rotation-save", revision: snapshot.revision, entries: structuredClone(entries) },
-                  summary: entries.map((entry, index) => index + 1 + ". " + selectionLabel(entry)),
-                })
-              }
-            >
-              Review rotation
-            </button>
-          </div>
-        )}
-        <Suspense fallback={<p>Loading rotation editor…</p>}>
-          <RotationQueue
-            rows={rows}
-            change={update}
-            disabled={locked || editIndex !== null}
-            selection={selection}
-            canAdd={canAdd}
-            add={add}
-            showQueue={view === "rotation"}
-            edit={(index) => {
-              setSelection(entries[index]);
-              setEditIndex(index);
-              setEditBase(draft?.baseEntries ?? savedEntries);
-            }}
-          >
-            {catalog && (
-              <>
-                <MapPicker
-                  value={selection}
-                  change={setSelection}
-                  catalog={catalog}
-                  disabled={locked || loading || !!error}
-                  onReadyChange={setReady}
-                />
-                <div className="toolbar">
-                  {view === "rotation" && (
-                    <button
-                      type="button"
-                      className="button secondary"
-                      disabled={editIndex === null ? !canAdd : locked || !ready || loading || !!error}
-                      onClick={() => {
-                        if (editIndex === null) add(rows.length);
-                        else if (!locked && ready) {
-                          update(
-                            rows.map((row, index) =>
-                              index === editIndex ? { ...row, entry: structuredClone(selection) } : row,
-                            ),
-                          );
-                          setEditIndex(null);
-                          setEditBase(null);
-                        }
-                      }}
-                    >
-                      {editIndex === null ? "Add to rotation" : "Update entry"}
-                    </button>
-                  )}
-                  {editIndex !== null && (
-                    <button
-                      type="button"
-                      className="button secondary"
-                      disabled={disabled}
-                      onClick={() => {
-                        setEditIndex(null);
-                        setEditBase(null);
-                        setSelection({ map: "", experiences: [] });
-                      }}
-                    >
-                      Cancel entry edit
-                    </button>
-                  )}
-                  {view === "next" && (
-                    <button
-                      type="button"
-                      className="button primary"
-                      disabled={
-                        locked ||
-                        !ready ||
-                        loading ||
-                        !!error ||
-                        !!draft ||
-                        editIndex !== null ||
-                        !snapshot.rotation.enabled ||
-                        snapshot.rotation.mode !== "Ordered" ||
-                        !currentMatches
-                      }
-                      onClick={() =>
-                        setReview({
-                          action: {
-                            action: "map-next",
-                            revision: snapshot.revision,
-                            currentIndex: currentIndex!,
-                            currentMap: snapshot.rotation.currentMap,
-                            entry: structuredClone(selection),
-                          },
-                          summary: [
-                            "Next round: " + selectionLabel(selection),
-                            "Updates the saved ordered rotation. The current match continues.",
-                          ],
-                        })
-                      }
-                    >
-                      Queue next map
-                    </button>
-                  )}
-                </div>
-                {view === "next" && (
-                  <p className={draft ? "notice warning" : "muted"}>
-                    {draft
-                      ? "Your rotation has unsaved edits. Save or discard them in Edit rotation before choosing the next round."
-                      : !ordered
-                        ? "Enable an ordered rotation in Server settings to choose the next round."
-                        : "Queues for the next round. Does not end or restart this match."}
-                  </p>
-                )}
-              </>
-            )}
-          </RotationQueue>
-        </Suspense>
-      </div>
-      {review && (
-        <ReviewChanges
-          {...review}
-          close={() => setReview(null)}
-          finished={(state) => {
-            if (state !== "failed") setDraft(null);
-            reload();
-          }}
-        />
-      )}
-    </Card>
-  );
-}
 export function SettingsPage() {
   const admin = useAdmin();
   const location = useLocation();
@@ -449,9 +139,8 @@ export function SettingsPage() {
   );
   const [review, setReview] = useState<{ action: DraftAction; summary: string[] } | null>(null);
   const [validation, setValidation] = useState("");
-  const [rotationUnsaved, setRotationUnsaved] = useState(false);
   const { setUnsavedChanges } = admin;
-  useEffect(() => setUnsavedChanges(!!draft || rotationUnsaved), [draft, rotationUnsaved, setUnsavedChanges]);
+  useEffect(() => setUnsavedChanges(!!draft), [draft, setUnsavedChanges]);
   useEffect(() => () => setUnsavedChanges(false), [setUnsavedChanges]);
   if (admin.me.role !== "admin") return <Empty title="Administrator access required" />;
   if (!resource.data) return <Empty title={resource.error || "Loading server settings…"} />;
@@ -459,6 +148,8 @@ export function SettingsPage() {
   const disabled = admin.busy || !!resource.error || document.hidden;
   const outdated = !!draft && draft.snapshot.revision !== resource.data.revision;
   const counts = Object.keys(draft?.changes ?? {}).length;
+  const server = new URLSearchParams(location.search).get("server");
+  const rotationLink = `/match?${new URLSearchParams(server ? { server, view: "rotation" } : { view: "rotation" })}`;
   const update = (id: string, value: SettingValue, clearPassword = false) => {
     setValidation("");
     setDraft((old) => {
@@ -667,6 +358,11 @@ export function SettingsPage() {
                   </div>
                 );
               })}
+            {group === "Rotation" && (
+              <p className="settings-link">
+                <Link to={rotationLink}>Edit maps in Match &amp; maps →</Link>
+              </p>
+            )}
           </div>
         </Card>
       )}
@@ -696,15 +392,6 @@ export function SettingsPage() {
           {validation}
         </p>
       )}
-      <div hidden={group !== "Rotation"}>
-        <RotationEditor
-          snapshot={resource.data}
-          reload={resource.refresh}
-          disabled={disabled || !!draft}
-          active={group === "Rotation"}
-          onUnsavedChange={setRotationUnsaved}
-        />
-      </div>
       {group === "Host controls" && (
         <Card
           className="host-controls"
