@@ -1,13 +1,15 @@
 import { lightingLabel, mapLabel } from "../../../../../src/common/map-labels";
 import { roundStamp } from "../../../../../src/common/game-round";
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { Link, useLocation, type To } from "react-router-dom";
 import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
-import type { MapSelection } from "../../../../../src/common/server-settings";
+import type { MapSelection, SettingsSnapshot } from "../../../../../src/common/server-settings";
 import { useGameApi } from "../../api/server-client";
 import type { ActionName, ActionResult, Catalog } from "../../api/types";
 import { useResource } from "../../api/use-resource";
 import { useGameAdmin as useAdmin } from "../../app/context";
-import { Modal, ReasonField } from "../../components/ui";
+import { Modal, OutcomeBadge, ReasonField } from "../../components/ui";
+import { nextRoundSummary } from "../server/next-round";
 import { ActionReceipt } from "./action-receipt";
 import { TeamMoveDialog } from "../players/team-move";
 import { MapPicker } from "./map-picker";
@@ -27,12 +29,15 @@ export function ActionsDialog({
   steamId,
   initialMessage,
   onClose,
+  onNavigate,
 }: {
   action: ActionName;
   steamId?: string;
   /** Prefills the message of a broadcast or player message; staff still review and send it. */
   initialMessage?: string;
   onClose: () => void;
+  /** Closes the dialog and then opens `to`; navigation is held while a dialog is open. */
+  onNavigate?: (to: To) => void;
 }) {
   const admin = useAdmin();
   if (action === "team") {
@@ -45,7 +50,25 @@ export function ActionsDialog({
       </Modal>
     );
   }
-  return <ActionForm action={action} steamId={steamId} initialMessage={initialMessage} onClose={onClose} />;
+  return (
+    <ActionForm
+      action={action}
+      steamId={steamId}
+      initialMessage={initialMessage}
+      onClose={onClose}
+      onNavigate={onNavigate}
+    />
+  );
+}
+
+/** One line on what plays after an ended match, only as far as the saved rotation confirms it. */
+function nextRoundLine(settings: { data: SettingsSnapshot | null; loading: boolean }) {
+  if (settings.loading && !settings.data) return "Next: checking the rotation…";
+  const valid = Array.isArray(settings.data?.rotation?.entries) ? settings.data : null;
+  const next = nextRoundSummary(valid);
+  if (next.state === "saved") return `Next: ${next.label} (saved rotation).`;
+  if (next.state === "game-next") return `Next: ${next.label} (the game's next rotation entry).`;
+  return "Next map not confirmed.";
 }
 
 function ActionForm({
@@ -53,14 +76,17 @@ function ActionForm({
   steamId,
   initialMessage,
   onClose,
+  onNavigate,
 }: {
   action: ActionName;
   steamId?: string;
   initialMessage?: string;
   onClose: () => void;
+  onNavigate?: (to: To) => void;
 }) {
   const api = useGameApi();
   const admin = useAdmin();
+  const location = useLocation();
   const [id, setId] = useState(() => crypto.randomUUID());
   const readRound = () => {
     const snapshot = admin.overview;
@@ -84,6 +110,10 @@ function ActionForm({
     needsCatalog && allowed(action, admin.me, admin.overview, admin.stale, false) ? "catalog" : null,
   );
   const catalogReady = !needsCatalog || Boolean(catalog.data && !catalog.loading && !catalog.error);
+  // Only an ended match follows the rotation; reading it never blocks the review.
+  const settings = useResource<SettingsSnapshot>(
+    action === "match-end" && allowed(action, admin.me, admin.overview, false, false) ? "settings" : null,
+  );
   const player = admin.overview?.players.find((entry) => entry.steamId === steamId);
   const [title, description] = actionDefinitions[action];
   const requiresPlayer = playerActions.includes(action);
@@ -94,6 +124,39 @@ function ActionForm({
   const roundReady = !phrase || !!reviewedRound;
   const affectsEveryone = !!phrase || action === "lighting";
   const warnLiveImpact = affectsEveryone || ["kick", "ban", "kill"].includes(action);
+  const connected = admin.overview?.status.players.current;
+  const audience = connected === undefined ? "everyone connected" : `${connected} player${connected === 1 ? "" : "s"}`;
+  const reviewedMap = reviewedRound && mapLabel(reviewedRound.map);
+  const impact =
+    reviewedMap && (action === "match-end" || action === "map")
+      ? `Ends ${reviewedMap} for ${audience}.`
+      : reviewedMap && action === "match-restart"
+        ? `Restarts ${reviewedMap} for ${audience}.`
+        : `Affects everyone · ${connected ?? "Unknown number of"} players connected`;
+  const uncertain = !!result && ["unknown", "pending", "accepted"].includes(result.state);
+  const selectedServer = new URLSearchParams(location.search).get("server");
+  const history: To = {
+    pathname: "/activity",
+    search: `?${new URLSearchParams([
+      ...(selectedServer ? [["server", selectedServer]] : []),
+      ["view", "actions"],
+      ["id", id],
+    ])}`,
+  };
+  const historyLink = (text: string) => (
+    <Link
+      to={history}
+      onClick={(event) => {
+        // A plain click closes this result first; a modified click opens a new tab as usual.
+        if (!onNavigate || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
+          return;
+        event.preventDefault();
+        onNavigate(history);
+      }}
+    >
+      {text}
+    </Link>
+  );
   useEffect(() => {
     if (!result && returningToEdits.current) {
       returningToEdits.current = false;
@@ -197,18 +260,14 @@ function ActionForm({
           role="note"
           aria-label={affectsEveryone ? "Live match warning" : "Player action warning"}
         >
-          {affectsEveryone && (
-            <strong>
-              Affects everyone · {admin.overview?.status.players.current ?? "Unknown number of"} players connected
-            </strong>
-          )}
+          {affectsEveryone && <strong>{impact}</strong>}
+          {action === "match-end" && reviewedRound && <p>{nextRoundLine(settings)}</p>}
           <p>{description}</p>
           {phrase && reviewedRound && (
             <p>
-              Reviewed match: {mapLabel(reviewedRound.map)}.{" "}
               {reviewedRound.startedAt === null
-                ? "This server can detect a changed map, but not a new round on the same map."
-                : "The round is checked again before sending."}
+                ? `Checked again before sending: still ${reviewedMap}. A new round on the same map can't be detected.`
+                : `Checked again before sending: still this round of ${reviewedMap}.`}
             </p>
           )}
           {phrase && !reviewedRound && (
@@ -222,25 +281,20 @@ function ActionForm({
       <form ref={form} onSubmit={(event) => void submit(event)}>
         {result && (
           <div
-            className={`notice ${result.state === "failed" ? "error" : ["unknown", "pending", "accepted"].includes(result.state) ? "warning" : "info"}`}
+            className={`notice ${result.state === "failed" ? "error" : result.state === "applied" ? "success" : "warning"}`}
             role="status"
             aria-label="Action result"
           >
-            <strong>
-              {result.state === "applied"
-                ? "Applied"
-                : result.state === "accepted"
-                  ? "Accepted · not verified"
-                  : result.state === "pending"
-                    ? "Pending"
-                    : result.state === "failed"
-                      ? "Failed"
-                      : "Unconfirmed"}
-            </strong>
+            <p className="action-result-outcome">
+              <OutcomeBadge state={result.state} />
+            </p>
             <p>{result.message}</p>
-            {["unknown", "pending", "accepted"].includes(result.state) && !/action history/i.test(result.message) && (
-              <p>Check Action history for confirmation before repeating this action.</p>
-            )}
+            {uncertain &&
+              (/action history/i.test(result.message) ? (
+                <p>{historyLink("Open this action in Action history")}</p>
+              ) : (
+                <p>Check {historyLink("Action history")} for confirmation before repeating this action.</p>
+              ))}
             <ActionReceipt id={id} />
           </div>
         )}

@@ -15,9 +15,10 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
+let router: ReturnType<typeof createMemoryRouter>;
 function mount(path = "/overview", role = "admin") {
   const fetcher = vi.fn(
-    async (url: string) =>
+    async (url: string, _init?: RequestInit) =>
       new Response(
         JSON.stringify(
           url.endsWith("/me")
@@ -31,9 +32,8 @@ function mount(path = "/overview", role = "admin") {
       ),
   );
   vi.stubGlobal("fetch", fetcher);
-  render(
-    <RouterProvider router={createMemoryRouter([{ path: "/*", element: <App /> }], { initialEntries: [path] })} />,
-  );
+  router = createMemoryRouter([{ path: "/*", element: <App /> }], { initialEntries: [path] });
+  render(<RouterProvider router={router} />);
   return fetcher;
 }
 describe("React staff shell", () => {
@@ -156,6 +156,31 @@ describe("React staff shell", () => {
     expect(fetcher.mock.calls.filter(([url]) => url.endsWith("/overview"))).toHaveLength(2);
     expect(screen.getByText("Live", pill)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Send an announcement/ })).toBeEnabled();
+  });
+  it("opens Action history for an unconfirmed result only after the review closes", async () => {
+    const fetcher = mount("/overview?server=primary");
+    await screen.findByText("Live", pill);
+    const original = fetcher.getMockImplementation()!;
+    fetcher.mockImplementation(async (url: string, init?: RequestInit) =>
+      url.endsWith("/actions")
+        ? new Response(JSON.stringify({ state: "unknown", message: "The game did not answer." }))
+        : original(url, init),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Send an announcement/ }));
+    fireEvent.change(screen.getByRole("textbox", { name: /In-game message/ }), { target: { value: "GG" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send announcement" }));
+    const outcome = await screen.findByRole("status", { name: "Action result" });
+    const [, init] = fetcher.mock.calls.find(([url]) => url.endsWith("/actions"))!;
+    const { id } = JSON.parse(String(init?.body));
+    fireEvent.click(within(outcome).getByRole("link", { name: "Action history" }));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/activity"));
+    expect(Object.fromEntries(new URLSearchParams(router.state.location.search))).toEqual({
+      server: "primary",
+      view: "actions",
+      id,
+    });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(fetcher.mock.calls.filter(([url]) => url.endsWith("/actions"))).toHaveLength(1);
   });
   it("keeps access, the game build and sign-out in the account menu", async () => {
     const fetcher = mount();

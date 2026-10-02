@@ -2044,6 +2044,14 @@ dialog .supporter-check input {
 .notice strong {
   color: inherit;
 }
+.notice a {
+  font-weight: 650;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.notice a:hover {
+  color: var(--cream);
+}
 .split {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -2146,6 +2154,9 @@ dialog .supporter-check input {
   flex-wrap: wrap;
   gap: var(--space-2);
   margin-block: var(--space-2);
+}
+.action-result-outcome {
+  margin: 0 0 var(--space-2);
 }
 .action-receipt-outcome {
   display: flex;

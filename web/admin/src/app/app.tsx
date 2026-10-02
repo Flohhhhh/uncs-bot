@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { NavLink, Navigate, Route, Routes, useLocation, useNavigate, type To } from "react-router-dom";
 import { api, configureSession, isReadPending } from "../api/client";
 import { validateOverview, validateStaff, validateServers } from "../api/validation";
 import type { ActionName, Overview, Staff } from "../api/types";
@@ -235,6 +235,8 @@ function Dashboard({
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [logoutError, setLogoutError] = useState("");
   const [moreOpen, setMoreOpen] = useState(false);
+  // A link inside a review waits until the review has closed, so the navigation guard lets it through.
+  const [afterDialog, setAfterDialog] = useState<To | null>(null);
   const [action, setAction] = useState<{
     action: ActionName;
     steamId?: string;
@@ -261,6 +263,11 @@ function Dashboard({
     heading.current?.focus();
   }, [location.pathname, page]);
   useEffect(() => setMoreOpen(false), [location.pathname, location.search]);
+  useEffect(() => {
+    if (!afterDialog || locked) return;
+    setAfterDialog(null);
+    navigate(afterDialog);
+  }, [afterDialog, locked, navigate]);
   useEffect(() => {
     const tick = () => {
       if (!document.hidden && !pause.current && !isReadPending()) refresh();
@@ -537,6 +544,10 @@ function Dashboard({
           steamId={action.steamId}
           initialMessage={action.initialMessage}
           onClose={() => setAction(null)}
+          onNavigate={(to) => {
+            setAction(null);
+            setAfterDialog(to);
+          }}
         />
       )}
       <NavigationGuard

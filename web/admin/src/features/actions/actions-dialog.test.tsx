@@ -1,4 +1,6 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render as renderTree, screen, waitFor, within } from "@testing-library/react";
+import type { ReactElement } from "react";
+import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../../api/client";
 import { AdminContext } from "../../app/context";
@@ -11,14 +13,23 @@ const request = vi.mocked(api);
 beforeEach(() => {
   request.mockReset();
 });
+/** Reviews link to Action history, so they render inside a router, as in the app. */
+function render(ui: ReactElement, path = "/match?server=primary") {
+  return renderTree(ui, {
+    wrapper: ({ children }) => <MemoryRouter initialEntries={[path]}>{children}</MemoryRouter>,
+  });
+}
+/** Only POSTs to `actions` change the game; an ended-match review also reads the saved rotation. */
+const sent = () =>
+  request.mock.calls.filter(([path]) => path === "actions").map(([, options]) => JSON.parse(String(options?.body)));
 
 describe("server action review", () => {
   it.each([
-    ["match-restart", "Restart current match", "RESTART MATCH"],
-    ["match-end", "End current match", "END MATCH"],
+    ["match-restart", "Restart current match", "RESTART MATCH", "Restarts Harbor for 3 players."],
+    ["match-end", "End current match", "END MATCH", "Ends Harbor for 3 players."],
   ] as const)(
     "reviews %s without typing and sends only after the confirmation button is clicked",
-    async (action, label, phrase) => {
+    async (action, label, phrase, impact) => {
       request.mockResolvedValue({ state: "accepted", message: "Game acknowledged the request." });
       const close = vi.fn();
       render(
@@ -26,22 +37,84 @@ describe("server action review", () => {
           <ActionsDialog action={action} onClose={close} />
         </AdminContext.Provider>,
       );
-      expect(screen.getByRole("note", { name: "Live match warning" })).toHaveTextContent(
-        "Affects everyone · 3 players connected",
-      );
+      const warning = screen.getByRole("note", { name: "Live match warning" });
+      expect(warning).toHaveTextContent(impact);
+      expect(warning).toHaveTextContent("Checked again before sending: still this round of Harbor.");
       const send = screen.getByRole("button", { name: label });
       expect(send).toHaveClass("danger");
       expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
-      expect(request).not.toHaveBeenCalled();
+      expect(sent()).toHaveLength(0);
       expect(send).toBeEnabled();
       fireEvent.click(send);
       fireEvent.submit(send.closest("form")!);
       await screen.findByText("Game acknowledged the request.");
-      expect(request).toHaveBeenCalledTimes(1);
-      expect(JSON.parse(String(request.mock.calls[0][1]?.body))).toMatchObject({ action, confirm: phrase });
+      expect(sent()).toHaveLength(1);
+      expect(sent()[0]).toMatchObject({ action, confirm: phrase });
       expect(close).not.toHaveBeenCalled();
     },
   );
+  it.each([
+    [
+      "names the saved next round",
+      { enabled: true, mode: "Ordered", currentIndex: 0, nextIndex: 1, currentMap: "Harbor" },
+      "Next: Ozeti · King of the Hill (saved rotation).",
+    ],
+    [
+      "does not guess the next round when the rotation is off",
+      { enabled: false, mode: "Ordered", currentIndex: 0, nextIndex: 1, currentMap: "Harbor" },
+      "Next map not confirmed.",
+    ],
+    [
+      "does not guess the next round when the running entry is unknown",
+      { enabled: true, mode: "Ordered", currentIndex: 1, nextIndex: null, currentMap: "Harbor" },
+      "Next map not confirmed.",
+    ],
+  ])("%s before ending a match", async (_name, rotation, line) => {
+    request.mockImplementation(async (path) =>
+      path === "settings"
+        ? {
+            revision: "r1",
+            fields: [],
+            rotation: {
+              editable: true,
+              note: "",
+              entries: [
+                { map: "Harbor", experiences: [] },
+                { map: "Europe", experiences: ["KOTH"] },
+              ],
+              ...rotation,
+            },
+          }
+        : new Promise(() => {}),
+    );
+    render(
+      <AdminContext.Provider value={context()}>
+        <ActionsDialog action="match-end" onClose={vi.fn()} />
+      </AdminContext.Provider>,
+    );
+    const warning = screen.getByRole("note", { name: "Live match warning" });
+    expect(warning).toHaveTextContent("Next: checking the rotation…");
+    await waitFor(() => expect(warning).toHaveTextContent(line));
+    // Reading the rotation sends nothing and never holds back the review.
+    expect(sent()).toHaveLength(0);
+    expect(screen.getByRole("button", { name: "End current match" })).toBeEnabled();
+  });
+  it("still allows ending a match when the saved rotation cannot be read", async () => {
+    request.mockImplementation(async (path) => {
+      if (path === "settings") throw new Error("Settings unavailable");
+      return { state: "accepted", message: "End requested" };
+    });
+    render(
+      <AdminContext.Provider value={context()}>
+        <ActionsDialog action="match-end" onClose={vi.fn()} />
+      </AdminContext.Provider>,
+    );
+    const warning = screen.getByRole("note", { name: "Live match warning" });
+    await waitFor(() => expect(warning).toHaveTextContent("Next map not confirmed."));
+    fireEvent.click(screen.getByRole("button", { name: "End current match" }));
+    await screen.findByText("End requested");
+    expect(sent()).toHaveLength(1);
+  });
   it("requires a fresh disruptive-action confirmation after returning from a definite rejection", async () => {
     request.mockResolvedValue({ state: "failed", message: "The game refused the restart." });
     render(
@@ -67,7 +140,9 @@ describe("server action review", () => {
     );
     const { rerender } = render(tree(first));
     rerender(tree(later));
-    expect(screen.getByRole("note", { name: "Live match warning" })).toHaveTextContent("Reviewed match: Harbor");
+    expect(screen.getByRole("note", { name: "Live match warning" })).toHaveTextContent(
+      "Restarts Harbor for 3 players.",
+    );
     fireEvent.click(screen.getByRole("button", { name: "Restart current match" }));
     await screen.findByText("The round changed. Nothing was sent.");
     expect(JSON.parse(String(request.mock.calls[0][1]?.body)).expectedRound).toEqual({
@@ -75,7 +150,7 @@ describe("server action review", () => {
       startedAt: Date.parse(first.observedAt) - 120_000,
     });
     fireEvent.click(screen.getByRole("button", { name: "Back to edits" }));
-    expect(screen.getByRole("note", { name: "Live match warning" })).toHaveTextContent("Reviewed match: Ozeti");
+    expect(screen.getByRole("note", { name: "Live match warning" })).toHaveTextContent("Restarts Ozeti for 3 players.");
     expect(request).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole("button", { name: "Restart current match" }));
     await screen.findByText("The round changed. Nothing was sent.");
@@ -118,7 +193,7 @@ describe("server action review", () => {
       </AdminContext.Provider>,
     );
     expect(screen.getByRole("note", { name: "Live match warning" })).toHaveTextContent(
-      "not a new round on the same map",
+      "Checked again before sending: still Harbor. A new round on the same map can't be detected.",
     );
     expect(request).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "Restart current match" })).toBeEnabled();
@@ -172,12 +247,58 @@ describe("server action review", () => {
     await screen.findByRole("status", { name: "Action result" });
     // The result screen is no longer a review.
     expect(screen.queryByText("STAFF REVIEW")).not.toBeInTheDocument();
+    const outcome = screen.getByRole("status", { name: "Action result" });
+    expect(outcome.textContent!.match(/Check Action history/g)).toHaveLength(1);
     expect(
-      screen.getByRole("status", { name: "Action result" }).textContent!.match(/Check Action history/g),
-    ).toHaveLength(1);
+      within(outcome).getByText(
+        state === "accepted" ? "Accepted · not verified" : state === "pending" ? "Pending" : "Unconfirmed",
+      ),
+    ).toHaveClass("pill", "warn");
+    const id = sent()[0].id;
+    expect(within(outcome).getByRole("link", { name: "Open this action in Action history" })).toHaveAttribute(
+      "href",
+      `/activity?server=primary&view=actions&id=${id}`,
+    );
     expect(screen.queryByRole("button", { name: "Back to edits" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Add whitelist access" })).not.toBeInTheDocument();
     expect(request).toHaveBeenCalledTimes(1);
+  });
+  it("links an unconfirmed result to its receipt and closes the review before leaving", async () => {
+    request.mockResolvedValue({ state: "unknown", message: "The game did not answer." });
+    const close = vi.fn();
+    const navigate = vi.fn();
+    render(
+      <AdminContext.Provider value={context()}>
+        <ActionsDialog action="broadcast" initialMessage="Welcome" onClose={close} onNavigate={navigate} />
+      </AdminContext.Provider>,
+      "/overview",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Send announcement" }));
+    const outcome = await screen.findByRole("status", { name: "Action result" });
+    expect(outcome).toHaveTextContent("Check Action history for confirmation before repeating this action.");
+    const id = sent()[0].id;
+    const link = within(outcome).getByRole("link", { name: "Action history" });
+    // Without a server in the address, the link adds none.
+    expect(link).toHaveAttribute("href", `/activity?view=actions&id=${id}`);
+    fireEvent.click(link);
+    expect(navigate).toHaveBeenCalledWith({ pathname: "/activity", search: `?view=actions&id=${id}` });
+    expect(sent()).toHaveLength(1);
+  });
+  it.each([
+    ["applied", "Applied", "good", "success"],
+    ["failed", "Failed", "bad", "error"],
+  ] as const)("shows a %s result with the shared outcome label", async (state, label, kind, notice) => {
+    request.mockResolvedValue({ state, message: "Recorded." });
+    render(
+      <AdminContext.Provider value={context()}>
+        <ActionsDialog action="broadcast" initialMessage="Welcome" onClose={vi.fn()} />
+      </AdminContext.Provider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Send announcement" }));
+    const outcome = await screen.findByRole("status", { name: "Action result" });
+    expect(outcome).toHaveClass("notice", notice);
+    expect(within(outcome).getByText(label)).toHaveClass("pill", kind);
+    expect(within(outcome).queryByRole("link")).not.toBeInTheDocument();
   });
   it("accepts a structural SteamID64 beyond the old prefix while preserving its exact string", async () => {
     const steamId = "76561200000000000";
