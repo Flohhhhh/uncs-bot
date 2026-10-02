@@ -77,6 +77,19 @@ describe("staff alert local time", () => {
     expect(formatLocal(at("2026-10-02T08:00:00Z"), zone)).toBe("04:00 ET");
   });
 
+  it("moves a wall time skipped by the spring-forward jump to after the jump, never before it", () => {
+    // 2026-03-08 jumps from 02:00 EST (07:00Z) to 03:00 EDT; 02:00-02:59 never happens.
+    expect(localInstant("2026-03-08", 120, zone)).toBe(at("2026-03-08T07:00:00Z"));
+    expect(localInstant("2026-03-08", 150, zone)).toBe(at("2026-03-08T07:30:00Z"));
+    // Valid and repeated (fall-back) times are unchanged.
+    expect(localInstant("2026-03-08", 90, zone)).toBe(at("2026-03-08T06:30:00Z"));
+    expect(localInstant("2026-03-08", 210, zone)).toBe(at("2026-03-08T07:30:00Z"));
+    expect(localInstant("2026-11-01", 90, zone)).toBe(at("2026-11-01T05:30:00Z"));
+    // A prime window from 02:30 opens no earlier than the jump, so it never counts time that did not exist.
+    const early = parseWindows("02:30-08:00")!;
+    expect(windowAt(at("2026-03-08T07:00:00Z"), early, zone)).toMatchObject({ start: at("2026-03-08T07:00:00Z") });
+  });
+
   it("matches scheduled restarts within 20 minutes, across midnight", () => {
     const scheduled = parseClockList("04:00,23:50")!;
     expect(scheduledMatch(at("2026-10-02T08:00:00Z"), scheduled, zone)).toBe(240);
