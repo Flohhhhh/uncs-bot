@@ -47,6 +47,16 @@ describe("welcome template versions", () => {
     ]);
   });
 
+  it("keeps one copy of a version repeated with the same text, in first-seen order", () => {
+    expect(parseWelcomeVersions("Hi {user} --- Hi {user}")).toEqual(["Hi {user}"]);
+    expect(parseWelcomeVersions("A {user}\n---\nB {user} ---  A {user}  --- B {user} --- C {user}")).toEqual([
+      "A {user}",
+      "B {user}",
+      "C {user}",
+    ]);
+    expect(welcomeVersions("Hi --- Hi --- Hi")).toEqual(["Hi"]);
+  });
+
   it("ignores empty versions, including leading, trailing and doubled separators", () => {
     expect(parseWelcomeVersions("--- Hi {user} --- --- \n---\n Yo {user} ---")).toEqual(["Hi {user}", "Yo {user}"]);
     expect(parseWelcomeVersions(" --- \n---\n --- ")).toEqual([]);
@@ -151,13 +161,24 @@ describe("welcome template view", () => {
 
   it("numbers every version and says how many there are", () => {
     const view = describeWelcomeTemplate(DEFAULT_WELCOME_MESSAGE);
-    expect(view).toContain("**Current welcome message:** 5 versions.");
+    expect(view).toContain(
+      "**Current welcome message:** 5 versions. Each new member gets one at random, skipping the one sent last unless the bot has restarted since.",
+    );
+    expect(view).not.toContain("never the same");
     DEFAULT_WELCOME_VERSIONS.forEach((version, index) => {
       expect(view).toContain(`**Version ${index + 1}**\n${version}`);
     });
     expect(view).not.toContain("not shown");
     expect(view.length).toBeLessThanOrEqual(MAX_DISCORD_CONTENT_LENGTH);
     expect(view.endsWith("Stored in Neon PostgreSQL.")).toBe(true);
+  });
+
+  it("shows versions that all have the same text as one version, without promising variety", () => {
+    expect(describeWelcomeTemplate("Hi {user} --- Hi {user}")).toBe(describeWelcomeTemplate("Hi {user}"));
+    const view = describeWelcomeTemplate("A {user} --- A {user} --- B {user}");
+    expect(view).toContain("**Current welcome message:** 2 versions.");
+    expect(view).toContain("**Version 1**\nA {user}\n\n**Version 2**\nB {user}");
+    expect(view).not.toContain("**Version 3**");
   });
 
   it("explains when the stored template has no text and the default is used", () => {

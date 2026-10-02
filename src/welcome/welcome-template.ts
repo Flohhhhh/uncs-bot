@@ -28,15 +28,24 @@ export const DEFAULT_WELCOME_VERSIONS = [
 export const DEFAULT_WELCOME_MESSAGE = DEFAULT_WELCOME_VERSIONS.join("\n---\n");
 
 /**
- * Splits a stored template into its versions. Each version is trimmed and empty ones are dropped. A template
+ * What staff are told about how versions rotate. The last pick is kept only in memory (see `WelcomeService`),
+ * so the first join after a restart can get the version sent just before it.
+ */
+export const WELCOME_ROTATION_NOTE =
+  "Each new member gets one at random, skipping the one sent last unless the bot has restarted since.";
+
+/**
+ * Splits a stored template into its versions. Each version is trimmed, empty ones are dropped and a repeat of an
+ * earlier version's text is dropped, because a join can only tell versions apart by their text. A template
  * without a separator is returned unchanged as its only version, exactly as it was sent before versions existed.
  */
 export function parseWelcomeVersions(template: string): string[] {
   if (!VERSION_SEPARATOR.test(template)) return template.trim() ? [template] : [];
-  return template
+  const versions = template
     .split(VERSION_SEPARATOR)
     .map((version) => version.trim())
     .filter(Boolean);
+  return [...new Set(versions)];
 }
 
 /** The versions a join can receive: the template's, or the built-in default's when the template has no text. */
@@ -72,7 +81,7 @@ export function describeWelcomeTemplate(template: string, limit = MAX_DISCORD_CO
     ? `**Current welcome message:** the saved template has no text, so new members get the built-in default (${count}).`
     : versions.length === 1
       ? "**Current welcome message:** 1 version. Add more by separating them with ` --- ` (see `/welcome help`)."
-      : `**Current welcome message:** ${count}. Each new member gets one at random, never the same one twice in a row.`;
+      : `**Current welcome message:** ${count}. ${WELCOME_ROTATION_NOTE}`;
   const footer = "Stored in Neon PostgreSQL.";
   const blocks = versions.map((version, index) =>
     versions.length === 1 ? version : `**Version ${index + 1}**\n${version}`,

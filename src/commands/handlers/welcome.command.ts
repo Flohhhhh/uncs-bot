@@ -11,7 +11,7 @@ import {
 } from "necord";
 import { RequiredMemberPermission } from "../../common/guards/require-member-permission.guard";
 import { config } from "../../config";
-import { describeWelcomeTemplate, welcomeVersions } from "../../welcome/welcome-template";
+import { describeWelcomeTemplate, WELCOME_ROTATION_NOTE, welcomeVersions } from "../../welcome/welcome-template";
 import { WelcomeService } from "../../welcome/welcome.service";
 
 class WelcomeMessageOptions {
@@ -70,7 +70,7 @@ export class WelcomeCommandHandler {
       content:
         versions === 1
           ? "✅ Welcome message updated and saved."
-          : `✅ Welcome message updated and saved with ${versions} versions. Each new member gets one at random, never the same one twice in a row.`,
+          : `✅ Welcome message updated and saved with ${versions} versions. ${WELCOME_ROTATION_NOTE}`,
     });
   }
 
@@ -101,7 +101,7 @@ export class WelcomeCommandHandler {
         "Use `/welcome enable enabled:true` or `enabled:false` to toggle welcome messages.",
         "",
         "**Versions**",
-        "Separate versions with ` --- ` (three dashes with a space on each side), all on one line. Each new member gets one at random, never the same one twice in a row.",
+        `Separate versions with \` --- \` (three dashes with a space on each side), all on one line. ${WELCOME_ROTATION_NOTE}`,
         "Saving replaces every version, so include all of them each time.",
         "Example: `{user} just pulled up. --- Look who made it, {user}.`",
         "",

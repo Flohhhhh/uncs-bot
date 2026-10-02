@@ -85,8 +85,9 @@ export class WelcomeService {
   }
 
   /**
-   * Builds the welcome embed from one of the template's versions, picked at random and never the version this
-   * guild was sent last when another is available. Call it once per join: it records the pick.
+   * Builds the welcome embed from one of the template's versions, picked at random and, when another is
+   * available, never the version this guild was sent last since the bot started. Call it once per join: it
+   * records the pick.
    */
   createEmbed(member: GuildMember, settings: WelcomeSettings): EmbedBuilder {
     const guildId = member.guild.id;

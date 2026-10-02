@@ -43,13 +43,20 @@ describe("/welcome message", () => {
     expect(content.length).toBeLessThanOrEqual(2000);
   });
 
-  it("confirms how many versions were saved", async () => {
+  it("confirms how many versions were saved without promising more than the in-memory rotation does", async () => {
     const { handler, service, interaction, context } = fixture();
     await handler.handleMessage(context, { message: "Hi {user} --- Yo {user} --- Sup {user}" });
     expect(service.setMessage).toHaveBeenCalledWith("guild-1", "Hi {user} --- Yo {user} --- Sup {user}");
     expect(interaction.editReply).toHaveBeenCalledWith({
-      content: expect.stringContaining("saved with 3 versions"),
+      content:
+        "✅ Welcome message updated and saved with 3 versions. Each new member gets one at random, skipping the one sent last unless the bot has restarted since.",
     });
+  });
+
+  it("counts versions with the same text once, so identical copies are not reported as variety", async () => {
+    const { handler, interaction, context } = fixture();
+    await handler.handleMessage(context, { message: "Hi {user} --- Hi {user}" });
+    expect(interaction.editReply).toHaveBeenCalledWith({ content: "✅ Welcome message updated and saved." });
   });
 
   it("keeps the confirmation for a single-version message unchanged", async () => {
@@ -67,7 +74,10 @@ describe("/welcome help", () => {
     expect(flags).toBe(MessageFlags.Ephemeral);
     expect(allowedMentions).toEqual({ parse: [] });
     expect(content).toContain("` --- `");
-    expect(content).toContain("never the same one twice in a row");
+    expect(content).toContain(
+      "Each new member gets one at random, skipping the one sent last unless the bot has restarted since.",
+    );
+    expect(content).not.toContain("never the same");
     expect(content).toContain("`{squad-up}`");
     expect(content.length).toBeLessThanOrEqual(2000);
   });
