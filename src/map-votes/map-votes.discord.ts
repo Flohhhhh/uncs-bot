@@ -4,7 +4,19 @@ import { plainLabel } from "../server-community/community-state";
 import { createHash } from "node:crypto";
 import { hasVoteCounts, type MapVoteRecord } from "./map-votes.types";
 import { mapLabel, selectionDetails } from "../common/map-labels";
-import { voteChoiceTitle, type VoteReminder } from "../common/voting-policy";
+import { automationSettings, voteChoiceTitle, type VoteReminder } from "../common/voting-policy";
+
+const ballotPrefix = (id: string) => `uncs-map-vote/${id}/`;
+function closingRule(vote: MapVoteRecord) {
+  if (!vote.automation) return `Closes <t:${Math.floor(vote.closesAt.getTime() / 1000)}:R>.`;
+  const close = automationSettings(vote.automation).closeAtScore;
+  return `Closes when the leading team reaches ${close} points (100-point match).`;
+}
+function tieRule(vote: MapVoteRecord) {
+  return vote.automation && automationSettings(vote.automation).tieRule === "first_option"
+    ? "A tie goes to the first tied option (never 50v50); no votes keeps the rotation."
+    : "A tie or no votes keeps the rotation.";
+}
 
 export function ballotMessage(vote: MapVoteRecord) {
   const open = vote.state === "open";
@@ -15,25 +27,35 @@ export function ballotMessage(vote: MapVoteRecord) {
   );
   const winner =
     vote.winner === null ? "" : `\nWinner: ${plainLabel(voteChoiceTitle(vote.choices[vote.winner]), 150)}.`;
+  const next = vote.automation?.rotation?.nextLabel;
   return {
-    content: `**Next map · ${plainLabel(vote.serverName)}**\n${choices.join("\n")}\n\n${
+    content: `**Next round · ${plainLabel(vote.serverName)}**\n${choices.join("\n")}${
+      next ? `\nRotation next: ${plainLabel(next, 80)}` : ""
+    }\n\n${
       open
-        ? `${vote.automation ? "Closes when the leading team reaches 95 points (100-point match)." : `Closes <t:${Math.floor(vote.closesAt.getTime() / 1000)}:R>.`} One vote per Discord member; choosing again changes your vote. A tie or no votes keeps the rotation.\nThe winning map and mode queue only if the match and settings still match. Staff can override the choice.`
+        ? `${closingRule(vote)} One vote per Discord member; choosing again changes your vote. ${tieRule(vote)}\nThe winning map and mode queue only if the match and settings still match. Staff can override the choice.`
         : `${winner}\n${plainLabel(vote.message, 350)}`
     }`,
     components: [
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         vote.choices.map((choice, index) =>
           new ButtonBuilder()
-            .setCustomId(`uncs-map-vote/${vote.id}/${index}`)
+            .setCustomId(`${ballotPrefix(vote.id)}${index}`)
             .setLabel(`${index + 1}. ${voteChoiceTitle(choice)}`.slice(0, 80))
-            .setStyle(ButtonStyle.Secondary)
+            .setStyle(choice.event === "50v50" ? ButtonStyle.Danger : ButtonStyle.Secondary)
             .setDisabled(!open),
         ),
       ),
     ],
     allowedMentions: { parse: [] as [], users: [], roles: [], repliedUser: false },
   };
+}
+/** Every component custom ID in a message's serialized rows. */
+function customIds(value: unknown): string[] {
+  if (Array.isArray(value)) return value.flatMap(customIds);
+  if (!value || typeof value !== "object") return [];
+  const item = value as { custom_id?: unknown; components?: unknown };
+  return [...(typeof item.custom_id === "string" ? [item.custom_id] : []), ...customIds(item.components)];
 }
 
 @Injectable()
@@ -73,14 +95,26 @@ export class MapVotesDiscord {
     });
     return message.id;
   }
+  /** Finds this bot's ballot message among the channel's latest 50 messages, without posting. */
+  async findBallotMessage(vote: MapVoteRecord) {
+    const channel = await this.channel(vote);
+    const messages = await channel.messages.fetch({ limit: 50 });
+    const found = [...messages.values()].find(
+      (message) =>
+        message.author.id === this.discord.user!.id &&
+        customIds(message.components.map((row) => row.toJSON())).some((id) => id.startsWith(ballotPrefix(vote.id))),
+    );
+    return found?.id ?? null;
+  }
   async remind(vote: MapVoteRecord, stage: VoteReminder) {
     const channel = await this.channel(vote);
     const choices = vote.choices.map(
       (choice, index) => `${index + 1}. ${plainLabel(voteChoiceTitle(choice), 120)} — ${vote.counts[index] ?? 0} votes`,
     );
     const total = vote.counts.reduce((sum, count) => sum + count, 0);
+    const close = vote.automation ? automationSettings(vote.automation).closeAtScore : 95;
     await channel.send({
-      content: `**${stage === "final" ? "Last chance to vote" : "Next round vote update"} · ${plainLabel(vote.serverName)}**\n${choices.join("\n")}\n\n${total} votes so far. You can change your vote. Closes at 95 points.\nhttps://discord.com/channels/${vote.guildId}/${vote.channelId}/${vote.messageId}`,
+      content: `**${stage === "final" ? "Last chance to vote" : "Next round vote update"} · ${plainLabel(vote.serverName)}**\n${choices.join("\n")}\n\n${total} votes so far. You can change your vote. Closes at ${close} points.\nhttps://discord.com/channels/${vote.guildId}/${vote.channelId}/${vote.messageId}`,
       allowedMentions: { parse: [], users: [], roles: [], repliedUser: false },
       nonce: createHash("sha256").update(`${vote.id}:${stage}`).digest("hex").slice(0, 24),
       enforceNonce: true,

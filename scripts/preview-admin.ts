@@ -32,7 +32,9 @@ import { SupportersStore } from "../src/supporters/supporters.store";
 import { MapVotesModule } from "../src/map-votes/map-votes.module";
 import { MapVotesStore } from "../src/map-votes/map-votes.store";
 import { MapVotesDiscord } from "../src/map-votes/map-votes.discord";
-import type { MapVoteRecord } from "../src/map-votes/map-votes.types";
+import { ballotWinner, type MapVoteRecord } from "../src/map-votes/map-votes.types";
+import { automationSettings, closeReached } from "../src/common/voting-policy";
+import { StaffAlerts } from "../src/staff-alerts/staff-alerts.service";
 import { ServerEventsModule } from "../src/server-events/server-events.module";
 import { ServerCommunityController } from "../src/server-community/server-community.controller";
 import { ServerCommunityService } from "../src/server-community/server-community.service";
@@ -48,8 +50,14 @@ import type {
 } from "../src/supporters/supporters.types";
 
 const previewPort = Number(process.env.PREVIEW_PORT || 4317);
+// PREVIEW_GAME_MODE=pre-round reproduces the 2 October waiting sample (1/100 players, scores 0);
+// full-server shows 100/100 players and a 100-point match in progress. PREVIEW_CLOCK=false hides
+// the match clock on every server, as the live build did on 2 October.
+const previewMode = process.env.PREVIEW_GAME_MODE ?? "live";
+const previewClock = process.env.PREVIEW_CLOCK !== "false";
 function createPreviewGame(name: string, reportsClock: boolean) {
   let previewRoundStart = Date.now() - 600_000;
+  const clock = reportsClock && previewClock && previewMode !== "pre-round";
 
   const players = [
     { name: "UncDap", steamId: "76561198066952872", faction: "RED", kills: 18, deaths: 7, cash: 14300, pingMs: 32 },
@@ -186,14 +194,26 @@ function createPreviewGame(name: string, reportsClock: boolean) {
         return {
           serverName: scalarValue(text, SESSION, "ServerName") || "Local preview",
           map: mapLabel(currentMap),
-          ...(reportsClock ? { matchSeconds: (Date.now() - previewRoundStart) / 1000 } : {}),
+          ...(clock ? { matchSeconds: (Date.now() - previewRoundStart) / 1000 } : {}),
           lighting,
           alternator: currentMap === "Kavkazi" ? "ZoneAlternator.Bakurani.Farmland.Circle" : "None",
           experiences: ["KOTH"],
           scoreTick: { current: 24, min: 18, max: 30 },
           ...(reportsClock ? { rotation: { nowIndex: 0, nextIndex: 1 } } : {}),
-          players: { current: players.length, max: 100 },
-          factionScores: factions.map(({ name, colorHex, score }) => ({ name, colorHex, score })),
+          players: {
+            current: previewMode === "pre-round" ? 1 : previewMode === "full-server" ? 100 : players.length,
+            max: 100,
+          },
+          factionScores: factions.map(({ name, colorHex, score }, index) => ({
+            name,
+            colorHex,
+            score:
+              previewMode === "pre-round"
+                ? 0
+                : previewMode === "full-server"
+                  ? Math.min(99, Math.floor(((Date.now() - previewRoundStart) / 18_000) * (1 - index * 0.2)))
+                  : score,
+          })),
         };
       if (path === "/v1/players") return { players };
       if (path === "/v1/server-id") return { serverId: `preview-${name}` };
@@ -966,7 +986,7 @@ const demoVotePolicies = new Map<
   {
     serverId: string;
     version: number;
-    policy: import("../src/common/voting-policy").VotingPolicy;
+    policy: import("../src/common/voting-policy").StoredVotingPolicy;
     actorId: string;
     actorName: string;
     connectionHash: string;
@@ -982,12 +1002,18 @@ const voteStore = {
   async savePolicy(
     serverId: string,
     version: number,
-    policy: import("../src/common/voting-policy").VotingPolicy,
+    next:
+      | import("../src/common/voting-policy").StoredVotingPolicy
+      | ((
+          previous: import("../src/common/voting-policy").StoredVotingPolicy | null,
+        ) => import("../src/common/voting-policy").StoredVotingPolicy),
     staff: Staff,
     connectionHash: string,
   ) {
-    if ((demoVotePolicies.get(serverId)?.version ?? 0) !== version)
+    const previous = demoVotePolicies.get(serverId);
+    if ((previous?.version ?? 0) !== version)
       throw new ConflictException("Voting controls changed. Reload saved controls.");
+    const policy = typeof next === "function" ? next(structuredClone(previous?.policy ?? null)) : next;
     const saved = { serverId, version: version + 1, policy, actorId: staff.id, actorName: staff.name, connectionHash };
     demoVotePolicies.set(serverId, structuredClone(saved));
     const closed: MapVoteRecord[] = [];
@@ -1003,11 +1029,42 @@ const voteStore = {
   async automaticOpen() {
     return structuredClone([...demoVotes.values()].filter((vote) => vote.state === "open" && vote.automation));
   },
-  async observeScore(id: string, score: number) {
+  async observeScore(id: string, score: number, step: number | null = null) {
     const vote = demoVotes.get(id);
     if (!vote?.automation || vote.state !== "open" || score < vote.automation.highestScore) return false;
+    if (score > vote.automation.highestScore && vote.automation.settings) {
+      vote.automation.maxStep = Math.max(vote.automation.maxStep ?? 0, step ?? 0);
+      vote.automation.lastScoreAt = new Date().toISOString();
+    }
     vote.automation.highestScore = score;
     return true;
+  },
+  async patchAutomation(
+    id: string,
+    patch: Partial<import("../src/common/voting-policy").VoteAutomation>,
+    states: MapVoteRecord["state"][] = ["open", "closing"],
+  ) {
+    const vote = demoVotes.get(id);
+    if (!vote?.automation || !states.includes(vote.state)) return null;
+    Object.assign(vote.automation, structuredClone(patch));
+    return structuredClone(vote);
+  },
+  async resolveReview(
+    id: string,
+    to: "queued" | "cancelled",
+    message: string,
+    patch: Partial<import("../src/common/voting-policy").VoteAutomation>,
+    messageId?: string,
+  ) {
+    const vote = demoVotes.get(id);
+    if (!vote?.automation || vote.state !== "needs_review") return null;
+    Object.assign(vote, { state: to, message, updatedAt: new Date() });
+    Object.assign(vote.automation, structuredClone(patch));
+    if (messageId && !vote.messageId) vote.messageId = messageId;
+    return structuredClone(vote);
+  },
+  async needsReview() {
+    return structuredClone([...demoVotes.values()].filter((vote) => vote.state === "needs_review" && vote.automation));
   },
   async claimReminder(id: string, stage: import("../src/common/voting-policy").VoteReminder, receiptId: string) {
     const vote = demoVotes.get(id);
@@ -1083,15 +1140,28 @@ const voteStore = {
   async due(now: Date) {
     return structuredClone([...demoVotes.values()].filter((vote) => vote.state === "open" && vote.closesAt <= now));
   },
-  async claimClose(id: string) {
+  async claimClose(id: string, scoreReached = false) {
     const vote = demoVotes.get(id);
     if (!vote || vote.state !== "open") return null;
+    if (!scoreReached && vote.closesAt.getTime() > Date.now()) return null;
+    if (scoreReached && (!vote.automation || !closeReached(vote.automation, vote.automation.highestScore))) return null;
     vote.state = "closing";
+    vote.winner = ballotWinner(
+      vote.counts,
+      vote.automation ? automationSettings(vote.automation).tieRule : "keep_rotation",
+      vote.choices.findIndex((choice) => choice.event === "50v50"),
+    );
     return structuredClone(vote);
   },
-  async finish(id: string, state: MapVoteRecord["state"], message: string) {
+  async finish(
+    id: string,
+    state: MapVoteRecord["state"],
+    message: string,
+    patch?: Partial<import("../src/common/voting-policy").VoteAutomation>,
+  ) {
     const vote = demoVotes.get(id)!;
     Object.assign(vote, { state, message });
+    if (patch && vote.automation) Object.assign(vote.automation, structuredClone(patch));
     return structuredClone(vote);
   },
   async cancel(id: string, requestId: string, staff: Staff, reason: string) {
@@ -1185,8 +1255,16 @@ async function main() {
     .useValue({
       check: async () => ({ name: "simulated-voting" }),
       publish: async () => "333333333333333333",
+      findBallotMessage: async () => null,
       update: async () => undefined,
       remind: async () => undefined,
+    })
+    .overrideProvider(StaffAlerts)
+    .useValue({
+      send: async (serverId: string, _key: string, message: string) => {
+        console.info(`Preview staff alert (${serverId}): ${message}`);
+        return false;
+      },
     })
     .compile();
   const app = module.createNestApplication(adapter, { rawBody: true });

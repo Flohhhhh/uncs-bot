@@ -4,7 +4,9 @@ import type { ButtonContext } from "necord";
 import { MapVotesComponent } from "./map-votes.component";
 import { MapVotesService } from "../../map-votes/map-votes.service";
 function fixture() {
-  const service = { cast: jest.fn().mockResolvedValue({ map: "Europe" }) };
+  const service = {
+    cast: jest.fn().mockResolvedValue({ selection: { map: "Europe", experiences: ["KOTH"] }, closeAtScore: 95 }),
+  };
   const component = new MapVotesComponent(service as unknown as MapVotesService);
   const interaction = {
     deferReply: jest.fn(),
@@ -27,9 +29,25 @@ it("acknowledges privately before saving the vote and privately confirms the cho
   expect(interaction.deferReply.mock.invocationCallOrder[0]).toBeLessThan(service.cast.mock.invocationCallOrder[0]);
   expect(service.cast).toHaveBeenCalledWith("vote", "0", interaction.user.id, "guild", "channel", "message", true);
   expect(interaction.editReply).toHaveBeenCalledWith({
-    content: expect.stringContaining("Europe"),
+    content: "Your vote is now Ozeti · King of the Hill. You can choose again until it closes at 95 points.",
     allowedMentions: { parse: [] },
   });
+});
+it("names the community map, not its catalog ID, and the 50v50 option", async () => {
+  const { component, service, interaction, context } = fixture();
+  service.cast.mockResolvedValue({ selection: { map: "Kavkazi", experiences: [] }, closeAtScore: 90 });
+  await component.vote(context, "vote", "0");
+  expect(interaction.editReply.mock.calls[0][0].content).toContain("Bakurani");
+  expect(interaction.editReply.mock.calls[0][0].content).not.toContain("Kavkazi");
+  service.cast.mockResolvedValue({
+    selection: { map: "NorthAmerica", experiences: ["KOTH"], event: "50v50" },
+    closeAtScore: 95,
+  });
+  await component.vote(context, "vote", "1");
+  expect(interaction.editReply.mock.calls[1][0].content).toContain("Zestafona · King of the Hill · 50v50");
+  service.cast.mockResolvedValue({ selection: { map: "Europe", experiences: [] }, closeAtScore: null });
+  await component.vote(context, "vote", "1");
+  expect(interaction.editReply.mock.calls[2][0].content).toContain("until the ballot closes");
 });
 it.each(["screening", "bot", "outside_guild"])("refuses eligibility for %s", async (reason) => {
   const { component, service, interaction, context } = fixture();

@@ -1,4 +1,5 @@
-import { ChannelType, Client } from "discord.js";
+import { ButtonStyle, ChannelType, Client } from "discord.js";
+import { defaultVotingPolicy, defaultVotingSettings } from "../common/voting-policy";
 import { ballotMessage, MapVotesDiscord } from "./map-votes.discord";
 import type { MapVoteRecord } from "./map-votes.types";
 import { mapVoteView } from "./map-votes.types";
@@ -170,4 +171,81 @@ it("edits only the saved bot-owned message and never creates a replacement", asy
   await service.update({ ...record, messageId: null });
   expect(message.edit).toHaveBeenCalledTimes(1);
   expect(channel.send).not.toHaveBeenCalled();
+});
+
+describe("customizable automatic ballots", () => {
+  const settings = {
+    ...defaultVotingSettings,
+    closeAtScore: 90,
+    tieRule: "first_option" as const,
+  };
+  const automatic: MapVoteRecord = {
+    ...record,
+    automation: {
+      policy: defaultVotingPolicy,
+      highestScore: 20,
+      reminders: {},
+      settings,
+      rotation: {
+        fingerprint: "f",
+        length: 3,
+        currentIndex: 0,
+        nextSlot: 1,
+        nextKey: null,
+        nextLabel: "Zestafona · King of the Hill",
+      },
+    },
+  };
+  it("names the next round, the configured close score, the tie rule and what plays otherwise", () => {
+    const payload = ballotMessage(automatic);
+    expect(payload.content).toMatch(/^\*\*Next round · /);
+    expect(payload.content).toContain("Closes when the leading team reaches 90 points");
+    expect(payload.content).toContain("A tie goes to the first tied option (never 50v50)");
+    expect(payload.content).toContain("Rotation next: Zestafona King of the Hill");
+    expect(ballotMessage(record).content).toContain("A tie or no votes keeps the rotation");
+    expect(
+      ballotMessage({ ...record, automation: { policy: defaultVotingPolicy, highestScore: 0, reminders: {} } }).content,
+    ).toContain("reaches 95 points");
+  });
+  it("shows a marked 50v50 option as a red button and keeps labels within Discord's limit", () => {
+    const long = {
+      map: "Europe",
+      experiences: ["KOTH", "KOTH_InfantryOnly", "KOTH_Hardcore"],
+      lighting: "DayLateGrayFog",
+      zoneAlternator: "ZoneAlternator.Ozeti.WaterTreatment.Circle",
+    };
+    const buttons = ballotMessage({
+      ...automatic,
+      choices: [long, { map: "NorthAmerica", experiences: ["KOTH"], event: "50v50" }],
+    }).components[0].toJSON().components;
+    expect(buttons[0]).toMatchObject({ style: ButtonStyle.Secondary });
+    expect(buttons[1]).toMatchObject({ style: ButtonStyle.Danger, label: "2. Zestafona · King of the Hill · 50v50" });
+    expect(buttons.every((button) => "label" in button && (button.label ?? "").length <= 80)).toBe(true);
+    expect(buttons.map((button) => ("custom_id" in button ? button.custom_id : ""))).toEqual([
+      `uncs-map-vote/${record.id}/0`,
+      `uncs-map-vote/${record.id}/1`,
+    ]);
+  });
+  it("uses the configured close score in reminders", async () => {
+    const { service, channel } = fixture();
+    await service.remind({ ...automatic, counts: [1, 2] }, "midpoint");
+    expect(channel.send.mock.calls[0][0].content).toContain("Closes at 90 points");
+  });
+  it("finds only this bot's message carrying this ballot's buttons, without posting", async () => {
+    const { service, channel } = fixture();
+    const row = (id: string) => ({ toJSON: () => ({ type: 1, components: [{ type: 2, custom_id: id }] }) });
+    channel.messages.fetch.mockImplementation(
+      async () =>
+        new Map([
+          ["1", { id: "1", author: { id: "other" }, components: [row(`uncs-map-vote/${record.id}/0`)] }],
+          ["2", { id: "2", author: { id: "bot" }, components: [row("uncs-map-vote/another/0")] }],
+          ["3", { id: "3", author: { id: "bot" }, components: [row(`uncs-map-vote/${record.id}/1`)] }],
+        ]),
+    );
+    expect(await service.findBallotMessage(record)).toBe("3");
+    expect(channel.messages.fetch).toHaveBeenCalledWith({ limit: 50 });
+    channel.messages.fetch.mockImplementation(async () => new Map());
+    expect(await service.findBallotMessage(record)).toBeNull();
+    expect(channel.send).not.toHaveBeenCalled();
+  });
 });

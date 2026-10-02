@@ -2,6 +2,7 @@ import { HttpException, Injectable } from "@nestjs/common";
 import { MessageFlags } from "discord.js";
 import { Button, ComponentParam, Context, type ButtonContext } from "necord";
 import { MapVotesService } from "../../map-votes/map-votes.service";
+import { voteChoiceTitle } from "../../common/voting-policy";
 
 @Injectable()
 export class MapVotesComponent {
@@ -15,7 +16,7 @@ export class MapVotesComponent {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     let message: string;
     try {
-      const selection = await this.votes.cast(
+      const { selection, closeAtScore } = await this.votes.cast(
         id,
         choice,
         interaction.user.id,
@@ -24,7 +25,9 @@ export class MapVotesComponent {
         interaction.message.id,
         interaction.inCachedGuild() && !interaction.member.pending && !interaction.user.bot,
       );
-      message = `Your vote is now ${selection.map}. You can choose again until the ballot closes.`;
+      message = `Your vote is now ${voteChoiceTitle(selection)}. You can choose again until ${
+        closeAtScore === null ? "the ballot closes" : `it closes at ${closeAtScore} points`
+      }.`;
     } catch (error) {
       message =
         error instanceof HttpException
