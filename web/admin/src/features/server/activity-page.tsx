@@ -134,7 +134,7 @@ export function ActivityFeed() {
           ))}
         </select>
       </Search>
-      <Card title="Server activity" subtitle={`${rows.length} recent entries · newest first`}>
+      <Card title="Server activity" subtitle={`${rows.length} recent entries`}>
         {loading ? (
           <Empty title="Loading server activity…" />
         ) : rows.length ? (

@@ -10,7 +10,7 @@ Welcomes and round messages share wording and feature flags, but each server has
 
 Each server may have a unique `feedToken`, separate from every game password. Deliver to `/api/ingest/servers/ID/events`. The receiver derives the stable identity from that authenticated route, never the payload's per-boot UUID or display name. Public labels use `/community/api/servers`; rankings use `/community/api/servers/ID/leaderboard`. Staff routes use `/admin/api/servers/ID/...` with ordinary session/role checks; mutations also require the endpoint version from the staff server list. Registry credentials never belong in website files.
 
-The [release audit](ADMIN_RELEASE_AUDIT.md#multiple-server-implementation--draft-review-and-isolated-validation) records migration and cutover requirements. Applications and combat need reviewed schema changes even for a single server. An application approval is scoped to its server; supporter status grants no game access. New website selectors depend on this backend release. No live expansion or feature activation has been performed.
+The [release audit](ADMIN_RELEASE_AUDIT.md) records the current deployed state and earlier migration/cutover evidence. Applications, combat and website selectors use the server-aware schema. An application approval is scoped to its server; supporter status grants no game access. A new deployment must apply the checked-in migrations before use. No additional live server has been configured.
 
 ## Host restart schedules
 
@@ -22,7 +22,7 @@ The provider documents an early restart below 20 players with all scores zero, a
 
 ## Configuration
 
-The worker uses the existing `WardogsClient` and requires RCON connection settings. Its own flags control activation; it does not require staff OAuth or `ADMIN_ENABLED`. The Discord card additionally requires `ADMIN_GUILD_ID` and the configured bot-owned message. The `admin_actions` table was deployed and checked through the combined production launch migration on September 30; see [Database prerequisite](ADMIN_DASHBOARD.md#database-prerequisite--launch-migration-applied). The worker remains off, pending connection checks and announcement cutover. Other deployments still need the reviewed schema. This module adds no database tables or migrations.
+The worker uses the existing `WardogsClient` and requires RCON connection settings. Its own flags control activation; it does not require staff OAuth or `ADMIN_ENABLED`. The Discord card additionally requires `ADMIN_GUILD_ID` and the configured bot-owned message. The `admin_actions` table was deployed and checked through the combined production launch migration on September 30; see [Database prerequisite](ADMIN_DASHBOARD.md#database-prerequisite--launch-migration-applied). UNCs welcome and round messages are configured; accepted, spaced welcome requests were observed on October 2. Round delivery and in-game popup presentation remain unverified. Other deployments still need the reviewed schema. This module adds no database tables or migrations.
 
 | Variable                                   | Default / purpose                                                |
 | ------------------------------------------ | ---------------------------------------------------------------- |
@@ -42,15 +42,14 @@ Messages are literal, single-line text, 1–200 characters. There is no placehol
 
 ### Newcomer wording and launch state
 
-The disabled example in `.env.example` works before website intake opens: welcome, free whitelist information/Discord at the website, then seeding. It does not claim that the application flow is already available. After website publication, both OAuth callbacks and a controlled application rehearsal are verified, the second message can become:
+The approved UNCs welcome sequence is two short messages, starting after the loading delay and spaced at least twenty seconds apart:
 
-`Free whitelist: apply at theuncsgaming.com/whitelist. Sign in with Discord, then finish on the website. Staff review is required; donating is optional.`
+1. `Welcome to The UNCs! Website: theuncsgaming.com`
+2. `Get whitelisted: theuncsgaming.com/whitelist. Sign in with Discord and apply on the website.`
 
-The seeding message is:
+The approved round message is `GG! Get whitelisted at theuncsgaming.com/whitelist. Thanks for playing on The UNCs.` It may arrive as the next round loads; it does not announce a winner or claim an exact match-end trigger. Voting copy stays out of live welcomes while voting is off.
 
-`Quiet server? Help seed: join, play a round and invite a friend. Thanks for getting the match going!`
-
-Seeding means helping an initially quiet server gain enough real players for a match. This wording does not promise points, automatic whitelist rewards, a queue tier or a current XP/cash bonus. The legacy whitelist stays intact. Discord is the identity/community step; new applications are completed on the website, not handed back to a Discord request channel. Check the live flow before changing the welcome text.
+Dennis removed promotional “free” wording and the seeding welcome line. Seeding remains a separate community activity: joining a quiet server to help a match get going. Do not promise points, automatic whitelist rewards, queue tiers or XP/cash bonuses. Existing whitelist grants stay intact. Discord is the identity/community step; applications are completed on the website. The site and sign-in routing are deployed; a genuine applicant submission and staff approval still need acceptance.
 
 Import `ServerCommunityModule` in `AppModule`; export `AdminStore` from `AdminModule`. The existing global Necord module supplies its Discord `Client`. No new gateway listener, intent, or slash command is registered.
 
@@ -132,7 +131,7 @@ The loopback preview uses in-memory ballots and simulated publication only. Set 
 
 ## Optional 50v50 events
 
-`SERVER_EVENTS_ENABLED=false` is the default. It neither queries event tables nor contacts the game while off. Source definitions for `server_events` and `server_event_operations` require a **human-generated and reviewed combined migration** before enabling. The PostgreSQL suite's disposable schema fixture is not a deployment migration. Enabling the feature alone creates no event. Administrators must review and arm one in **Events**; moderators, viewers and community members receive no event controls.
+`SERVER_EVENTS_ENABLED=false` is the default and remains off on production. It neither queries event tables nor contacts the game while off. The existing committed `0003_lovely_caretaker.sql` contains `server_events` and `server_event_operations`; verify its application to the target database and controlled event behavior before activation, rather than requesting a duplicate migration. The PostgreSQL suite executes the checked-in migrations in a disposable database. Enabling the feature alone creates no event. Administrators must review and arm one in **Events**; moderators, viewers and community members receive no event controls.
 
 This is supervised two-team automation using the documented faction PATCH and game messages, not a native 50v50 switch. Select two of the game's three current faction names. Server capacity must be at most 100; the worker checks a target-team limit of 50 before moving. It never kicks players to make room. There is no atomic reservation or team-move transaction exposed by the game: another player can switch between the check and the request. The next observation reassesses the roster. Disable overlapping third-party team balancers before a controlled activation.
 

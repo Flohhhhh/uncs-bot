@@ -1,5 +1,5 @@
 import type { WardogsClient } from "../admin/wardogs.client";
-import { mapLabel } from "../common/map-labels";
+import { mapLabel, sameMap } from "../common/map-labels";
 
 export type CommunitySnapshot = Awaited<ReturnType<WardogsClient["overview"]>>;
 type Status = CommunitySnapshot["status"];
@@ -25,7 +25,7 @@ export const initialCommunityState = (): CommunityState => ({
 });
 
 function changedRound(previous: Status, next: Status) {
-  if (previous.map !== next.map) return true;
+  if (!sameMap(previous.map, next.map)) return true;
   const hasClock =
     Number.isFinite(previous.matchSeconds) &&
     Number.isFinite(next.matchSeconds) &&

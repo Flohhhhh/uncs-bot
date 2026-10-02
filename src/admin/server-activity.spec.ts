@@ -44,6 +44,14 @@ it("does not manufacture departures during a partial roster or a map transition"
   feed.observe(snapshot(15, [], { map: "Kavkazi" }));
   expect(feed.view().events.filter((event) => event.category === "players")).toEqual([]);
 });
+it("recognizes a known map alias without inventing a map or clock change or hiding a join", () => {
+  const feed = new ServerActivity();
+  feed.observe(snapshot(0));
+  feed.observe(snapshot(5, [a, b], { map: "Ozeti" }));
+  expect(feed.view().events.map((event) => event.message)).toEqual(["Bob joined", "Game connection observed"]);
+  feed.observe(snapshot(10, [a, b], { map: "Europe", matchSeconds: 2 }));
+  expect(feed.view().events[0].message).toBe("Round clock changed");
+});
 it("marks gaps and lost connections, then baselines without inventing missed events", () => {
   const feed = new ServerActivity();
   feed.observe(snapshot(0));
