@@ -79,7 +79,10 @@ it("reviews changed values and records the save without extra typing", async () 
   expect(request.mock.calls.some(([path]) => path === "actions")).toBe(false);
   fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
   const dialog = screen.getByRole("dialog");
-  expect(within(dialog).getByText("Server name: The UNCs → The UNCs Events · Next match")).toBeInTheDocument();
+  expect(within(within(dialog).getByRole("list", { name: "Next match" })).getByRole("listitem")).toHaveTextContent(
+    "Server name: The UNCs → The UNCs Events",
+  );
+  expect(dialog).not.toHaveTextContent(/Changes marked Now/);
   expect(screen.queryByRole("textbox", { name: "Reason" })).not.toBeInTheDocument();
   fireEvent.click(within(dialog).getByRole("button", { name: "Save settings" }));
   await screen.findByText("Saved for next match.");
@@ -162,8 +165,7 @@ it.each(["pending", "unknown", "invalid-state", "timeout"])(
 
 it("shows the running scoring interval and server range", async () => {
   show();
-  await screen.findByRole("button", { name: "Gameplay" });
-  fireEvent.click(screen.getByRole("button", { name: "Gameplay" }));
+  fireEvent.click(await screen.findByRole("tab", { name: "Gameplay" }));
   const input = screen.getByRole("spinbutton", { name: /Scoring interval/ });
   expect(input).toHaveAttribute("min", "18");
   expect(input).toHaveAttribute("max", "30");
@@ -171,8 +173,7 @@ it("shows the running scoring interval and server range", async () => {
 });
 it("keeps join passwords out of review text", async () => {
   show();
-  await screen.findByRole("button", { name: "Joining" });
-  fireEvent.click(screen.getByRole("button", { name: "Joining" }));
+  fireEvent.click(await screen.findByRole("tab", { name: "Joining" }));
   fireEvent.change(screen.getByPlaceholderText("Leave unchanged"), { target: { value: "test-password-not-real" } });
   fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
   expect(screen.getByRole("dialog")).not.toHaveTextContent("test-password-not-real");
@@ -206,7 +207,7 @@ it("retains an unknown receipt without resending after a lost settings response"
 });
 it("keeps slider and exact value together and removes changes when restored", async () => {
   show();
-  fireEvent.click(await screen.findByRole("button", { name: "Gameplay" }));
+  fireEvent.click(await screen.findByRole("tab", { name: "Gameplay" }));
   const slider = screen.getByRole("slider", { name: "Scoring interval slider" });
   const number = screen.getByRole("spinbutton", { name: "Scoring interval (seconds)" });
   fireEvent.change(slider, { target: { value: "25" } });
@@ -215,7 +216,9 @@ it("keeps slider and exact value together and removes changes when restored", as
   fireEvent.change(number, { target: { value: "26" } });
   expect(slider).toHaveValue("26");
   fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
-  expect(screen.getByRole("dialog")).toHaveTextContent("24s → 26s · Next match");
+  expect(within(screen.getByRole("dialog")).getByRole("list", { name: "Next match" })).toHaveTextContent(
+    "Scoring interval (seconds): 24s → 26s",
+  );
   fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
   fireEvent.change(number, { target: { value: "24" } });
   expect(screen.queryByRole("button", { name: "Review changes" })).not.toBeInTheDocument();
@@ -223,7 +226,7 @@ it("keeps slider and exact value together and removes changes when restored", as
 });
 it("rejects exact scoring values outside the server's range", async () => {
   show();
-  fireEvent.click(await screen.findByRole("button", { name: "Gameplay" }));
+  fireEvent.click(await screen.findByRole("tab", { name: "Gameplay" }));
   fireEvent.change(screen.getByRole("spinbutton", { name: /Scoring interval/ }), { target: { value: "31" } });
   fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
   expect(screen.getByRole("alert")).toHaveTextContent("18 to 30 seconds");
@@ -231,7 +234,7 @@ it("rejects exact scoring values outside the server's range", async () => {
 });
 it("clearing a replacement leaves the password unchanged; removing it is explicit", async () => {
   show();
-  fireEvent.click(await screen.findByRole("button", { name: "Joining" }));
+  fireEvent.click(await screen.findByRole("tab", { name: "Joining" }));
   const password = screen.getByLabelText("Join password");
   fireEvent.change(password, { target: { value: "sample-not-a-secret" } });
   fireEvent.change(password, { target: { value: "" } });
@@ -246,13 +249,86 @@ it("clearing a replacement leaves the password unchanged; removing it is explici
     serverPassword: "",
   });
 });
-it("keeps the rotation editor out of Settings and links to it on the selected server", async () => {
+it("uses switches for on/off settings and marks changed fields and their group", async () => {
+  show();
+  fireEvent.click(await screen.findByRole("tab", { name: "Gameplay" }));
+  const lock = screen.getByRole("switch", { name: "Lock overpopulated teams" });
+  expect(lock).toBeChecked();
+  expect(screen.queryByRole("combobox", { name: "Lock overpopulated teams" })).not.toBeInTheDocument();
+  const field = lock.closest(".setting-field")!;
+  expect(field.querySelector(".setting-head")).toHaveTextContent("Lock overpopulated teams⏭ Next match");
+  expect(field).not.toHaveClass("is-changed");
+  fireEvent.click(lock);
+  expect(lock).not.toBeChecked();
+  expect(field).toHaveClass("is-changed");
+  expect(within(field as HTMLElement).getByText("was On")).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "Gameplay, unsaved", selected: true })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "Identity" })).toBeInTheDocument();
+  fireEvent.click(lock);
+  expect(field).not.toHaveClass("is-changed");
+  expect(screen.getByRole("tab", { name: "Gameplay" })).toBeInTheDocument();
+  expect(request.mock.calls.some(([path]) => path === "actions")).toBe(false);
+});
+it("groups the review by when each change applies", async () => {
+  const fallback = request.getMockImplementation()!;
+  request.mockImplementation(async (path, options) => {
+    if (path !== "settings") return fallback(path, options);
+    const snapshot = structuredClone(sample);
+    const states: Record<string, string> = {
+      lockOverpopulated: "live",
+      minRequiredPlayers: "next-match",
+      scorePeriod: "next-restart",
+    };
+    snapshot.fields = snapshot.fields.map((field) => ({ ...field, state: states[field.id] ?? field.state }));
+    return snapshot as never;
+  });
+  show();
+  fireEvent.click(await screen.findByRole("tab", { name: "Gameplay" }));
+  fireEvent.change(screen.getByRole("spinbutton", { name: "Scoring interval (seconds)" }), { target: { value: "26" } });
+  fireEvent.change(screen.getByRole("spinbutton", { name: /Players to start a match/ }), { target: { value: "60" } });
+  fireEvent.click(screen.getByRole("switch", { name: "Lock overpopulated teams" }));
+  expect(screen.getByText("was 0")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
+  const dialog = within(screen.getByRole("dialog"));
+  expect(dialog.getAllByRole("heading", { level: 3 }).map((heading) => heading.textContent)).toEqual([
+    "Applies now",
+    "Next match",
+    "After restart",
+  ]);
+  expect(dialog.getByRole("list", { name: "Applies now" })).toHaveTextContent("Lock overpopulated teams: On → Off");
+  expect(dialog.getByRole("list", { name: "Next match" })).toHaveTextContent("Players to start a match: 0 → 60");
+  expect(dialog.getByRole("list", { name: "After restart" })).toHaveTextContent(
+    "Scoring interval (seconds): 24s → 26s",
+  );
+  expect(request.mock.calls.some(([path]) => path === "actions")).toBe(false);
+});
+it("keeps only the rotation switches in Settings and links to the editor on the selected server", async () => {
   show("admin", "/settings?server=primary#rotation");
-  expect(await screen.findByRole("link", { name: "Edit maps in Match & maps →" })).toHaveAttribute(
+  expect(await screen.findByRole("tab", { name: "Rotation", selected: true })).toBeInTheDocument();
+  expect(screen.getByRole("switch", { name: "Enable map rotation" })).toBeChecked();
+  expect(screen.getByRole("combobox", { name: "Rotation order" })).toBeInTheDocument();
+  expect(screen.queryByRole("list", { name: "Rotation queue" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Edit rotation" })).not.toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Edit maps in Match & maps →" })).toHaveAttribute(
     "href",
     "/match?server=primary&view=rotation",
   );
-  expect(screen.getByRole("button", { name: "Rotation" })).toHaveAttribute("aria-pressed", "true");
-  expect(screen.queryByRole("list", { name: "Rotation queue" })).not.toBeInTheDocument();
   expect(request.mock.calls.map(([path]) => path)).toEqual(["settings"]);
+});
+it("lists host-managed controls one per line with the restart guide", async () => {
+  show();
+  fireEvent.click(await screen.findByRole("tab", { name: "Host controls" }));
+  expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  const list = screen.getAllByRole("listitem");
+  expect(list.map((item) => item.querySelector("strong")?.textContent)).toEqual([
+    "Daily restart time",
+    "Restart after the match",
+    "RCON hosts, port, password and TLS",
+    "Game-event feed",
+    "Server description",
+  ]);
+  expect(screen.getByRole("link", { name: "Setup guide ↗" })).toHaveAttribute(
+    "href",
+    "https://www.xrealm.com/en/blog/wardogs-server-restart-after-match-end",
+  );
 });

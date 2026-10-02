@@ -772,14 +772,6 @@ textarea::placeholder {
   position: relative;
   overflow: auto;
 }
-.host-controls table {
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-.host-controls td {
-  vertical-align: top;
-  line-height: 1.6;
-}
 .table-wrap.scrollable {
   max-height: min(70vh, 720px);
   scrollbar-gutter: stable;
@@ -2289,9 +2281,10 @@ dialog.sheet {
   flex-direction: column;
   gap: 8px;
   min-width: 0;
-}
-.setting-field > label {
-  font: inherit;
+  /* The changed-field edge sits in the card gutter, so fields stay aligned with the rest of the card. */
+  margin-left: calc(-1 * var(--space-3) - 3px);
+  padding-left: var(--space-3);
+  border-left: 3px solid transparent;
 }
 .setting-range {
   display: flex;
@@ -2317,9 +2310,16 @@ dialog.sheet {
   line-height: 1.5;
 }
 .setting-timing {
-  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
   color: var(--muted);
+  font-size: var(--text-xs);
   font-weight: 400;
+  white-space: nowrap;
 }
 .settings-savebar {
   position: sticky;
@@ -2649,121 +2649,6 @@ dialog .map-picker-fields > label {
   overflow-wrap: anywhere;
 }
 
-@media (max-width: 680px) {
-  .map-picker-fields,
-  dialog .map-picker-fields {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  .rule-chips {
-    grid-column: auto;
-  }
-}
-
-/* Map picker: map, mode and layout, then rules and lighting; the chosen round sits beside its button. */
-.map-picker-fields {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  grid-auto-flow: row dense;
-  gap: var(--space-4);
-}
-dialog .map-picker-fields {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  margin-top: var(--space-5);
-}
-dialog .map-picker-fields > label {
-  margin-top: 0;
-}
-.map-picker-fields > label {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  min-width: 0;
-  font-size: var(--text-sm);
-  font-weight: 650;
-}
-.rule-chips {
-  grid-column: span 2;
-  min-width: 0;
-  margin: 0;
-  padding: 0;
-  border: 0;
-}
-.rule-chips legend {
-  margin-bottom: var(--space-2);
-  padding: 0;
-  font-size: var(--text-sm);
-  font-weight: 650;
-}
-.rule-chips > div {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-}
-.map-picker .rule-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-height: 40px;
-  margin: 0;
-  padding: 0 var(--space-3);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--surface-2);
-  font-size: var(--text-sm);
-  font-weight: 600;
-  cursor: pointer;
-}
-.map-picker .rule-chip input {
-  display: inline-block;
-  width: auto;
-  margin: 0;
-  padding: 0;
-  accent-color: var(--accent);
-}
-.map-picker .rule-chip:has(input:checked) {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-.map-picker .rule-chip:has(input:disabled) {
-  opacity: 0.6;
-  cursor: default;
-}
-.map-picker .rule-chip:focus-within {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-.map-picker-status {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-3);
-  margin: var(--space-3) 0 0;
-  color: var(--muted);
-  font-size: var(--text-sm);
-}
-.map-picker-footer {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-4);
-  margin-top: var(--space-4);
-}
-.map-picker-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-}
-.map-picker-chip {
-  display: inline-flex;
-  align-items: center;
-  min-height: 32px;
-  padding: var(--space-1) var(--space-3);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--surface-2);
-  font-size: var(--text-sm);
-  overflow-wrap: anywhere;
-}
-
 /* Rotation queue: ordered list first, the editor opens under its row. */
 .rotation-row {
   display: flex;
@@ -2841,6 +2726,94 @@ dialog .map-picker-fields > label {
 .settings-link a:hover {
   text-decoration: underline;
 }
+.setting-field.is-changed {
+  border-left-color: var(--accent);
+}
+.setting-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.setting-head label {
+  font-size: var(--text-sm);
+  font-weight: 650;
+}
+.setting-was {
+  max-width: 100%;
+  margin-left: auto;
+  overflow: hidden;
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-grid .setting-was {
+  color: var(--accent);
+}
+.setting-switch {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 44px;
+  font-size: var(--text-sm);
+}
+.settings-grid input.switch {
+  flex: none;
+  width: 44px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: radial-gradient(circle at 11px 50%, var(--muted) 7px, transparent 8px) var(--surface-2);
+  appearance: none;
+  cursor: pointer;
+}
+.settings-grid input.switch:checked {
+  border-color: var(--accent);
+  background: radial-gradient(circle at calc(100% - 11px) 50%, var(--ink-deep) 7px, transparent 8px) var(--accent);
+}
+.settings-grid input.switch:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.tab-dot {
+  margin-left: var(--space-1);
+  color: var(--accent);
+}
+.change-group h3 {
+  margin: var(--space-4) 0 var(--space-2);
+  font-size: var(--text-sm);
+}
+.change-group .change-summary {
+  margin: 0;
+}
+.host-controls-list {
+  margin: 0;
+  list-style: none;
+}
+.host-controls-list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-4);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--line);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+.host-controls-list li:last-child {
+  border-bottom: 0;
+}
+.host-controls-list strong {
+  flex: 0 0 240px;
+}
+.host-controls-list span {
+  flex: 1 1 280px;
+  color: var(--muted);
+}
+.host-controls-list a {
+  color: var(--accent);
+}
+
 @media (max-width: 680px) {
   .map-picker-fields,
   dialog .map-picker-fields {
@@ -2848,6 +2821,9 @@ dialog .map-picker-fields > label {
   }
   .rule-chips {
     grid-column: auto;
+  }
+  .host-controls-list strong {
+    flex-basis: 100%;
   }
 }
 

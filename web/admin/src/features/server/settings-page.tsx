@@ -4,6 +4,7 @@ import {
   settingFields,
   settingValue,
   type MapSelection,
+  type SettingField,
   type SettingsSnapshot,
   type SettingValue,
 } from "../../../../../src/common/server-settings";
@@ -12,7 +13,7 @@ import { useGameAdmin as useAdmin } from "../../app/context";
 import { useResource } from "../../api/use-resource";
 import { useGameApi } from "../../api/server-client";
 import type { ActionResult } from "../../api/types";
-import { Badge, Card, Empty, Modal, Table } from "../../components/ui";
+import { Card, Empty, Modal, Table, Tabs } from "../../components/ui";
 import { ActionReceipt } from "../actions/action-receipt";
 import { errorMessage, rejectionState } from "../actions/policy";
 import { ServerIdentityReadout } from "./server-identity";
@@ -27,6 +28,16 @@ const timing: Record<string, string> = {
   unknown: "Checked on save",
 };
 const timingSymbol: Record<string, string> = { live: "⚡", applied: "⚡", "next-match": "⏭", "next-restart": "↻" };
+/** Review headings by when a change takes effect, in the order staff read them. */
+const reviewTiming: [string, string[]][] = [
+  ["Applies now", ["live", "applied"]],
+  ["Next match", ["next-match"]],
+  ["After restart", ["next-restart"]],
+  ["Pending", ["pending"]],
+  ["Host override", ["overridden"]],
+];
+const groups = ["Identity", "Joining", "Gameplay", "Rotation", "Host controls"] as const;
+type Group = (typeof groups)[number];
 const saveLabels = { "settings-save": "Save settings", "rotation-save": "Save rotation", "map-next": "Queue next map" };
 export type DraftAction =
   | { action: "settings-save"; revision: string; changes: Record<string, SettingValue> }
@@ -38,15 +49,30 @@ export type DraftAction =
       currentMap: string;
       entry: MapSelection;
     };
+export type ReviewGroup = { title: string; items: string[] };
+
+function shown(id: string, input: SettingValue | null | undefined) {
+  return input === null || input === undefined || input === ""
+    ? "Not set"
+    : typeof input === "boolean"
+      ? input
+        ? "On"
+        : "Off"
+      : `${input}${id === "scorePeriod" ? "s" : ""}`;
+}
+
 /** The single review for settings, rotation and next-round saves. */
 export function ReviewChanges({
   action,
   summary,
+  groups,
   close,
   finished,
 }: {
   action: DraftAction;
   summary: string[];
+  /** Settings changes grouped by when they take effect; replaces `summary`. */
+  groups?: ReviewGroup[];
   close: () => void;
   finished: (state: ActionResult["state"]) => void;
 }) {
@@ -86,17 +112,25 @@ export function ReviewChanges({
   }
   return (
     <Modal serverScoped title={saveLabels[action.action]} onClose={close} busy={admin.busy}>
-      {!result && action.action === "settings-save" && (
-        <p className="notice warning">
-          Changes marked Now affect the running server when saved. Other changes follow the timing shown below.
-        </p>
-      )}
       {!result && action.action === "rotation-save" && <p>Saves the ongoing rotation. The current match continues.</p>}
-      <ul className="change-summary">
-        {summary.map((item, index) => (
-          <li key={index}>{item}</li>
-        ))}
-      </ul>
+      {groups ? (
+        groups.map((group, index) => (
+          <div className="change-group" key={group.title}>
+            <h3 id={`${id}-group-${index}`}>{group.title}</h3>
+            <ul className="change-summary" aria-labelledby={`${id}-group-${index}`}>
+              {group.items.map((item, index) => (
+                <li key={index}>{item}</li>
+              ))}
+            </ul>
+          </div>
+        ))
+      ) : (
+        <ul className="change-summary">
+          {summary.map((item, index) => (
+            <li key={index}>{item}</li>
+          ))}
+        </ul>
+      )}
       {result ? (
         <>
           <p
@@ -126,18 +160,179 @@ export function ReviewChanges({
     </Modal>
   );
 }
+
+function SettingInput({
+  field,
+  snapshot,
+  value,
+  locked,
+  removing,
+  update,
+}: {
+  field: SettingField;
+  snapshot: SettingsSnapshot;
+  value: SettingValue;
+  locked: boolean;
+  /** The join password is marked for removal. */
+  removing: boolean;
+  update: (id: string, value: SettingValue, clearPassword?: boolean) => void;
+}) {
+  const controlId = `setting-${field.id}`;
+  const help = `${controlId}-help`;
+  const range = field.id === "scorePeriod" ? snapshot.scoreTick : null;
+  if (field.type === "boolean")
+    return (
+      <div className="setting-switch">
+        <input
+          id={controlId}
+          type="checkbox"
+          role="switch"
+          className="switch"
+          aria-describedby={help}
+          checked={value === true}
+          disabled={locked}
+          onChange={(event) => update(field.id, event.target.checked)}
+        />
+        {typeof value === "boolean" ? (
+          <span aria-hidden="true">{value ? "On" : "Off"}</span>
+        ) : (
+          <span>Not set in file</span>
+        )}
+      </div>
+    );
+  if (field.type === "select")
+    return (
+      <select
+        id={controlId}
+        aria-describedby={help}
+        value={String(value)}
+        disabled={locked}
+        onChange={(event) => update(field.id, event.target.value)}
+      >
+        <option value="" disabled>
+          Not set in file
+        </option>
+        {field.options!.map((option) => (
+          <option key={option} value={option}>
+            {option}
+          </option>
+        ))}
+      </select>
+    );
+  if (range)
+    return (
+      <div className="setting-range">
+        <input
+          type="range"
+          aria-label="Scoring interval slider"
+          aria-describedby={help}
+          min={range.min}
+          max={range.max}
+          step={1}
+          value={typeof value === "number" ? Math.max(range.min, Math.min(range.max, value)) : range.current}
+          aria-valuetext={`${typeof value === "number" ? Math.max(range.min, Math.min(range.max, value)) : range.current} seconds`}
+          disabled={locked}
+          onChange={(event) => update(field.id, Number(event.target.value))}
+        />
+        <input
+          id={controlId}
+          type="number"
+          min={range.min}
+          max={range.max}
+          step={1}
+          aria-describedby={help}
+          value={String(value)}
+          disabled={locked}
+          onChange={(event) => update(field.id, event.target.value === "" ? "" : Number(event.target.value))}
+        />
+        <span aria-hidden="true">s</span>
+      </div>
+    );
+  return (
+    <input
+      id={controlId}
+      aria-describedby={help}
+      type={
+        field.type === "password"
+          ? "password"
+          : field.type === "number"
+            ? "number"
+            : field.type === "url"
+              ? "url"
+              : "text"
+      }
+      autoComplete={field.secret ? "new-password" : "off"}
+      value={String(value)}
+      placeholder={field.secret ? (removing ? "Password will be removed" : "Leave unchanged") : "Not set in file"}
+      disabled={locked}
+      min={field.id === "scorePeriod" ? snapshot.scoreTick?.min : field.min}
+      max={field.id === "scorePeriod" ? snapshot.scoreTick?.max : field.type === "number" ? field.max : undefined}
+      maxLength={field.type !== "number" ? field.max : undefined}
+      step={field.type === "number" ? 1 : undefined}
+      onChange={(event) =>
+        update(
+          field.id,
+          field.type === "number" ? (event.target.value === "" ? "" : Number(event.target.value)) : event.target.value,
+        )
+      }
+    />
+  );
+}
+
+/** Controls the host manages, one line each. */
+function HostControls() {
+  return (
+    <Card
+      className="host-controls"
+      title="Managed through the host"
+      subtitle="Change these in the selected server's host panel."
+    >
+      <ul className="card-body host-controls-list">
+        <li>
+          <strong>Daily restart time</strong>
+          <span>xREALM Settings. Enter local time; the host stores UTC. Restart the server to apply.</span>
+        </li>
+        <li>
+          <strong>Restart after the match</strong>
+          <span>
+            xREALM match-end restart task.{" "}
+            <a
+              href="https://www.xrealm.com/en/blog/wardogs-server-restart-after-match-end"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Setup guide ↗
+            </a>
+          </span>
+        </li>
+        <li>
+          <strong>RCON hosts, port, password and TLS</strong>
+          <span>Host configuration. Credentials stay out of this dashboard.</span>
+        </li>
+        <li>
+          <strong>Game-event feed</strong>
+          <span>Set the destination in the host panel; check delivery after the next normal start.</span>
+        </li>
+        <li>
+          <strong>Server description</strong>
+          <span>The official console keeps it in that browser; the server listing is unchanged.</span>
+        </li>
+      </ul>
+    </Card>
+  );
+}
 export function SettingsPage() {
   const admin = useAdmin();
   const location = useLocation();
   const resource = useResource<SettingsSnapshot>(admin.me.role === "admin" ? "settings" : null);
-  const [group, setGroup] = useState(location.hash === "#rotation" ? "Rotation" : "Identity");
+  const [group, setGroup] = useState<Group>(location.hash === "#rotation" ? "Rotation" : "Identity");
   useEffect(() => {
     if (location.hash === "#rotation") setGroup("Rotation");
   }, [location.hash]);
   const [draft, setDraft] = useState<{ snapshot: SettingsSnapshot; changes: Record<string, SettingValue> } | null>(
     null,
   );
-  const [review, setReview] = useState<{ action: DraftAction; summary: string[] } | null>(null);
+  const [review, setReview] = useState<{ action: DraftAction; summary: string[]; groups: ReviewGroup[] } | null>(null);
   const [validation, setValidation] = useState("");
   const { setUnsavedChanges } = admin;
   useEffect(() => setUnsavedChanges(!!draft), [draft, setUnsavedChanges]);
@@ -147,7 +342,11 @@ export function SettingsPage() {
   const snapshot = draft?.snapshot ?? resource.data;
   const disabled = admin.busy || !!resource.error || document.hidden;
   const outdated = !!draft && draft.snapshot.revision !== resource.data.revision;
-  const counts = Object.keys(draft?.changes ?? {}).length;
+  const changes = draft?.changes ?? {};
+  const counts = Object.keys(changes).length;
+  const changedGroups = new Set(
+    Object.keys(changes).map((id) => settingFields.find((field) => field.id === id)?.group),
+  );
   const server = new URLSearchParams(location.search).get("server");
   const rotationLink = `/match?${new URLSearchParams(server ? { server, view: "rotation" } : { view: "rotation" })}`;
   const update = (id: string, value: SettingValue, clearPassword = false) => {
@@ -168,7 +367,7 @@ export function SettingsPage() {
   function reviewSettings() {
     if (!draft) return;
     try {
-      const summary = Object.entries(draft.changes).map(([id, value]) => {
+      const lines = Object.entries(draft.changes).map(([id, value]) => {
         const field = settingFields.find((entry) => entry.id === id)!;
         settingValue(field, value);
         if (
@@ -181,19 +380,17 @@ export function SettingsPage() {
           );
         }
         const before = draft.snapshot.fields.find((entry) => entry.id === id);
-        const display = (input: SettingValue | null | undefined) =>
-          input === null || input === undefined
-            ? "Not set"
-            : typeof input === "boolean"
-              ? input
-                ? "On"
-                : "Off"
-              : `${input}${id === "scorePeriod" ? "s" : ""}`;
-        return `${field.label}: ${field.secret ? (value === "" ? "Password removed" : "Password updated") : `${display(before?.value)} → ${display(value)}`} · ${timing[before?.state ?? "unknown"] || timing.unknown}`;
+        const line = `${field.label}: ${field.secret ? (value === "" ? "Password removed" : "Password updated") : `${shown(id, before?.value)} → ${shown(id, value)}`}`;
+        const state = before?.state ?? "unknown";
+        return { line, title: reviewTiming.find(([, states]) => states.includes(state))?.[0] ?? timing.unknown };
       });
+      const titles = [...reviewTiming.map(([title]) => title), timing.unknown];
       setReview({
         action: { action: "settings-save", revision: draft.snapshot.revision, changes: draft.changes },
-        summary,
+        summary: lines.map(({ line }) => line),
+        groups: titles
+          .map((title) => ({ title, items: lines.filter((entry) => entry.title === title).map(({ line }) => line) }))
+          .filter(({ items }) => items.length),
       });
     } catch (error) {
       setValidation(errorMessage(error));
@@ -210,162 +407,96 @@ export function SettingsPage() {
       {outdated && (
         <p className="notice warning">Settings changed on the server. Discard your draft and reload before saving.</p>
       )}
-      <div className="settings-tabs" role="group" aria-label="Setting groups">
-        {["Identity", "Joining", "Gameplay", "Rotation", "Host controls"].map((name) => (
-          <button key={name} aria-pressed={group === name} onClick={() => setGroup(name)} className="button secondary">
-            {name}
-          </button>
-        ))}
-      </div>
-      {group !== "Host controls" && (
-        <Card title={group} badge={<Badge>{counts ? `${counts} unsaved` : "Saved configuration"}</Badge>}>
-          <div className="card-body settings-grid">
-            {group === "Identity" && <ServerIdentityReadout />}
-            {settingFields
-              .filter((field) => field.group === group)
-              .map((field) => {
-                const observed = snapshot.fields.find((entry) => entry.id === field.id);
-                const value = draft?.changes[field.id] ?? observed?.value ?? "";
-                const locked = disabled || !observed?.editable;
-                const controlId = `setting-${field.id}`;
-                const range = field.id === "scorePeriod" ? snapshot.scoreTick : null;
-                const removingPassword = field.secret && draft?.changes[field.id] === "";
-                return (
-                  <div className="setting-field" key={field.id}>
-                    <label htmlFor={controlId}>{field.label}</label>
-                    <span className="setting-timing">
-                      {observed?.editable && timingSymbol[observed.state] && (
-                        <span aria-hidden="true">{timingSymbol[observed.state]} </span>
-                      )}
-                      {observed?.editable ? timing[observed.state] || timing.unknown : "Read-only"}
-                    </span>
-                    {field.type === "boolean" || field.type === "select" ? (
-                      <select
-                        id={controlId}
-                        aria-describedby={`${controlId}-help`}
-                        value={String(value)}
-                        disabled={locked}
-                        onChange={(event) =>
-                          update(
-                            field.id,
-                            field.type === "boolean" ? event.target.value === "true" : event.target.value,
-                          )
-                        }
-                      >
-                        <option value="" disabled>
-                          Not set in file
-                        </option>
-                        {(field.type === "boolean" ? ["true", "false"] : field.options!).map((option) => (
-                          <option key={option} value={option}>
-                            {option === "true" ? "On" : option === "false" ? "Off" : option}
-                          </option>
-                        ))}
-                      </select>
-                    ) : range ? (
-                      <div className="setting-range">
-                        <input
-                          type="range"
-                          aria-label="Scoring interval slider"
-                          aria-describedby={`${controlId}-help`}
-                          min={range.min}
-                          max={range.max}
-                          step={1}
-                          value={
-                            typeof value === "number" ? Math.max(range.min, Math.min(range.max, value)) : range.current
-                          }
-                          aria-valuetext={`${typeof value === "number" ? Math.max(range.min, Math.min(range.max, value)) : range.current} seconds`}
-                          disabled={locked}
-                          onChange={(event) => update(field.id, Number(event.target.value))}
+      <Tabs
+        label="Setting groups"
+        tabs={groups.map((name) => ({
+          id: name,
+          label: changedGroups.has(name) ? (
+            <>
+              {name}
+              <span className="tab-dot" aria-hidden="true">
+                •
+              </span>
+              <span className="sr-only">, unsaved</span>
+            </>
+          ) : (
+            name
+          ),
+        }))}
+        value={group}
+        onChange={setGroup}
+      >
+        {(selected) =>
+          selected === "Host controls" ? (
+            <HostControls />
+          ) : (
+            <div className="card">
+              <div className="card-body settings-grid">
+                {selected === "Identity" && <ServerIdentityReadout />}
+                {settingFields
+                  .filter((field) => field.group === selected)
+                  .map((field) => {
+                    const observed = snapshot.fields.find((entry) => entry.id === field.id);
+                    const value = changes[field.id] ?? observed?.value ?? "";
+                    const controlId = `setting-${field.id}`;
+                    const changed = Object.hasOwn(changes, field.id);
+                    const removingPassword = !!field.secret && changes[field.id] === "";
+                    const was = shown(field.id, observed?.value);
+                    return (
+                      <div className={`setting-field${changed ? " is-changed" : ""}`} key={field.id}>
+                        <div className="setting-head">
+                          <label htmlFor={controlId}>{field.label}</label>
+                          <span className="setting-timing">
+                            {observed?.editable && timingSymbol[observed.state] && (
+                              <span aria-hidden="true">{timingSymbol[observed.state]} </span>
+                            )}
+                            {observed?.editable ? timing[observed.state] || timing.unknown : "Read-only"}
+                          </span>
+                          {changed && !field.secret && (
+                            <small className="setting-was" title={`Saved value: ${was}`}>
+                              was {was}
+                            </small>
+                          )}
+                        </div>
+                        <SettingInput
+                          field={field}
+                          snapshot={snapshot}
+                          value={value}
+                          locked={disabled || !observed?.editable}
+                          removing={removingPassword}
+                          update={update}
                         />
-                        <input
-                          id={controlId}
-                          type="number"
-                          min={range.min}
-                          max={range.max}
-                          step={1}
-                          aria-describedby={`${controlId}-help`}
-                          value={String(value)}
-                          disabled={locked}
-                          onChange={(event) =>
-                            update(field.id, event.target.value === "" ? "" : Number(event.target.value))
-                          }
-                        />
-                        <span aria-hidden="true">s</span>
+                        <small id={`${controlId}-help`}>{observed?.note || field.help}</small>
+                        {field.id === "scorePeriod" && snapshot.scoreTick && (
+                          <small>
+                            Running: {snapshot.scoreTick.current}s · Allowed: {snapshot.scoreTick.min}–
+                            {snapshot.scoreTick.max}s
+                          </small>
+                        )}
+                        {field.secret && (
+                          <button
+                            type="button"
+                            className="button secondary small"
+                            disabled={disabled || !observed?.editable}
+                            onClick={() => update(field.id, "", true)}
+                          >
+                            Clear join password
+                          </button>
+                        )}
+                        {removingPassword && <small role="status">Join password will be removed on save.</small>}
                       </div>
-                    ) : (
-                      <input
-                        id={controlId}
-                        aria-describedby={`${controlId}-help`}
-                        type={
-                          field.type === "password"
-                            ? "password"
-                            : field.type === "number"
-                              ? "number"
-                              : field.type === "url"
-                                ? "url"
-                                : "text"
-                        }
-                        autoComplete={field.secret ? "new-password" : "off"}
-                        value={String(value)}
-                        placeholder={
-                          field.secret
-                            ? removingPassword
-                              ? "Password will be removed"
-                              : "Leave unchanged"
-                            : "Not set in file"
-                        }
-                        disabled={locked}
-                        min={field.id === "scorePeriod" ? snapshot.scoreTick?.min : field.min}
-                        max={
-                          field.id === "scorePeriod"
-                            ? snapshot.scoreTick?.max
-                            : field.type === "number"
-                              ? field.max
-                              : undefined
-                        }
-                        maxLength={field.type !== "number" ? field.max : undefined}
-                        step={field.type === "number" ? 1 : undefined}
-                        onChange={(event) =>
-                          update(
-                            field.id,
-                            field.type === "number"
-                              ? event.target.value === ""
-                                ? ""
-                                : Number(event.target.value)
-                              : event.target.value,
-                          )
-                        }
-                      />
-                    )}
-                    <small id={`${controlId}-help`}>{observed?.note || field.help}</small>
-                    {field.id === "scorePeriod" && snapshot.scoreTick && (
-                      <small>
-                        Running: {snapshot.scoreTick.current}s · Allowed: {snapshot.scoreTick.min}–
-                        {snapshot.scoreTick.max}s
-                      </small>
-                    )}
-                    {field.secret && (
-                      <button
-                        type="button"
-                        className="button secondary small"
-                        disabled={locked}
-                        onClick={() => update(field.id, "", true)}
-                      >
-                        Clear join password
-                      </button>
-                    )}
-                    {removingPassword && <small role="status">Join password will be removed on save.</small>}
-                  </div>
-                );
-              })}
-            {group === "Rotation" && (
-              <p className="settings-link">
-                <Link to={rotationLink}>Edit maps in Match &amp; maps →</Link>
-              </p>
-            )}
-          </div>
-        </Card>
-      )}
+                    );
+                  })}
+                {selected === "Rotation" && (
+                  <p className="settings-link">
+                    <Link to={rotationLink}>Edit maps in Match &amp; maps →</Link>
+                  </p>
+                )}
+              </div>
+            </div>
+          )
+        }
+      </Tabs>
       {counts > 0 && (
         <div className="settings-savebar">
           <strong>
@@ -391,59 +522,6 @@ export function SettingsPage() {
         <p className="notice error" role="alert">
           {validation}
         </p>
-      )}
-      {group === "Host controls" && (
-        <Card
-          className="host-controls"
-          title="Managed through the host"
-          subtitle="These controls do not have a verified dashboard connection."
-        >
-          <div className="card-body">
-            <Table label="Host controls" headers={["CONTROL", "WHERE IT BELONGS"]} scrollable>
-              <tr>
-                <td>Daily restart time</td>
-                <td>
-                  xREALM Settings → daily restart time. Enter your local time, save, then restart the server to apply
-                  it. The host stores it in UTC.
-                </td>
-              </tr>
-              <tr>
-                <td>Restart after the match</td>
-                <td>
-                  xREALM has a match-end restart task with announcements.{" "}
-                  <a
-                    href="https://www.xrealm.com/en/blog/wardogs-server-restart-after-match-end"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    Setup guide ↗
-                  </a>
-                </td>
-              </tr>
-              <tr>
-                <td>RCON AllowedHosts, listener, port, password and TLS</td>
-                <td>Host configuration. Credentials and network access stay out of this dashboard.</td>
-              </tr>
-              <tr>
-                <td>Game-event feed destination</td>
-                <td>
-                  Configure the feed destination in the host panel. Verify delivery after the next normal server start.
-                </td>
-              </tr>
-              <tr>
-                <td>Server description</td>
-                <td>
-                  The official console saves its description in that browser only. It does not change the game server
-                  listing.
-                </td>
-              </tr>
-            </Table>
-            <p className="muted">
-              Use the selected server's host panel. This dashboard does not read or change host schedules. Restart match
-              only reloads the round.
-            </p>
-          </div>
-        </Card>
       )}
       {review && (
         <ReviewChanges
