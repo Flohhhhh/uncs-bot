@@ -356,10 +356,10 @@ function AdminApplications() {
     return (
       <Empty
         title={resource.error ? "Applications could not be loaded" : "Loading applications…"}
-        detail={resource.error ? "Use Refresh to try again. No empty list has been assumed." : undefined}
+        detail={resource.error ? "Use Refresh to try again." : undefined}
       />
     );
-  const needle = query.toLocaleLowerCase();
+  const needle = query.trim().toLocaleLowerCase();
   const rows = records.filter(
     (record) =>
       (!status || record.status === status) &&
@@ -448,7 +448,7 @@ function AdminApplications() {
           />
         ) : (
           <Empty
-            title="No matching applications"
+            title={query.trim() || status ? "No matching applications" : "No applications yet"}
             detail={records.length ? "Try another Discord name or SteamID." : "New website requests will appear here."}
           />
         )}

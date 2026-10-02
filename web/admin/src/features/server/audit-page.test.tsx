@@ -75,7 +75,7 @@ describe("stored action receipt recovery", () => {
       .mockResolvedValueOnce({ record: null })
       .mockRejectedValueOnce(new Error("The action receipt could not be loaded."));
     mount();
-    await screen.findByText("No matching staff actions");
+    await screen.findByText("No recorded staff actions");
     search(id);
     expect(await screen.findByText("No stored receipt for this action ID")).toBeInTheDocument();
     expect(screen.getByText(/does not establish whether the game acted/)).toBeInTheDocument();
@@ -96,7 +96,7 @@ describe("stored action receipt recovery", () => {
       )
       .mockResolvedValueOnce({ record: { ...older, id: otherId, actorName: "Selected staff" } });
     mount();
-    await screen.findByText("No matching staff actions");
+    await screen.findByText("No recorded staff actions");
     search(id);
     expect(screen.getByText("Looking up action receipt…")).toBeInTheDocument();
     search(otherId);

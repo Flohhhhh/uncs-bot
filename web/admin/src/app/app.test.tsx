@@ -93,7 +93,7 @@ describe("React staff shell", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
-    expect(screen.getByText("No matching staff actions")).toBeInTheDocument();
+    expect(screen.getByText("No recorded staff actions")).toBeInTheDocument();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(20_000);
     });
@@ -110,7 +110,7 @@ describe("React staff shell", () => {
     await screen.findByText("Simulated UNCs");
     fireEvent.click(screen.getByRole("link", { name: /Server activity/ }));
     fireEvent.click(await screen.findByRole("button", { name: "Action history" }));
-    await screen.findByText("No matching staff actions");
+    await screen.findByText("No recorded staff actions");
     let finish!: (value: Response) => void;
     fetcher.mockImplementation(
       () =>
