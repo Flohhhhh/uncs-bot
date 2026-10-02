@@ -1508,6 +1508,7 @@ dialog .supporter-check input {
   margin-top: 16px;
   border: 1px solid var(--line);
   border-radius: 3px;
+  max-height: 300px;
 }
 .team-progress {
   padding: 12px 14px;
