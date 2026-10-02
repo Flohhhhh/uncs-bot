@@ -121,6 +121,11 @@ export function MapPicker({
                 : "Only options advertised by this server."
               : "Choose a map to see its modes.")}
         </small>
+        {options.error && (
+          <button type="button" className="button secondary" disabled={disabled} onClick={options.refresh}>
+            Retry map options
+          </button>
+        )}
       </fieldset>
       <label>
         Zone layout

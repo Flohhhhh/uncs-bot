@@ -65,8 +65,28 @@ function show(role: "admin" | "viewer" | "moderator" = "admin") {
 }
 async function choose(map: string) {
   fireEvent.change(await screen.findByRole("combobox", { name: "Map" }), { target: { value: map } });
+  await waitFor(() => expect(screen.getByRole("button", { name: "Add map option" })).toBeEnabled());
   fireEvent.click(screen.getByRole("button", { name: "Add map option" }));
 }
+it("cannot add a ballot choice while its map options are pending or unavailable", async () => {
+  const original = request.getMockImplementation()!;
+  let reject!: (error: Error) => void;
+  request.mockImplementation((path, init) =>
+    path.startsWith("catalog/maps/")
+      ? new Promise((_resolve, fail) => {
+          reject = fail;
+        })
+      : original(path, init),
+  );
+  show();
+  fireEvent.change(await screen.findByRole("combobox", { name: "Map" }), { target: { value: "Europe" } });
+  const add = screen.getByRole("button", { name: "Add map option" });
+  expect(add).toBeDisabled();
+  reject(new Error("Map options unavailable"));
+  await screen.findByText("Map options unavailable");
+  expect(add).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Review ballot" })).toBeDisabled();
+});
 it.each(["viewer", "moderator"] as const)("does not read private votes for %s", (role) => {
   show(role);
   expect(screen.getByText("Administrator access required")).toBeInTheDocument();

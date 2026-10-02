@@ -1,5 +1,5 @@
 import { lightingLabel } from "../../../../../src/common/map-labels";
-import { useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 import type { MapSelection } from "../../../../../src/common/server-settings";
 import { useGameApi } from "../../api/server-client";
@@ -7,6 +7,7 @@ import type { ActionName, ActionResult, Catalog } from "../../api/types";
 import { useResource } from "../../api/use-resource";
 import { useGameAdmin as useAdmin } from "../../app/context";
 import { Modal, ReasonField } from "../../components/ui";
+import { CopyValue } from "../../components/data-table";
 import { TeamMoveDialog } from "../players/team-move";
 import { MapPicker } from "./map-picker";
 import {
@@ -46,12 +47,15 @@ export function ActionsDialog({
 function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?: string; onClose: () => void }) {
   const api = useGameApi();
   const admin = useAdmin();
-  const [id] = useState(() => crypto.randomUUID());
+  const [id, setId] = useState(() => crypto.randomUUID());
+  const form = useRef<HTMLFormElement>(null);
+  const returningToEdits = useRef(false);
   const submitted = useRef(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<ActionResult | null>(null);
   const [selection, setSelection] = useState<MapSelection>({ map: "", experiences: [] });
+  const [mapReady, setMapReady] = useState(false);
   const permitted = allowed(action, admin.me, admin.overview, admin.stale, admin.busy);
   const needsCatalog = action === "map" || action === "lighting";
   const catalog = useResource<Catalog>(
@@ -64,10 +68,21 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
   const phrase = confirmationPhrases[action];
   const requiresConfirmation = confirmedActions.includes(action);
   const requiresReason = ["kick", "ban", "unban", "whitelist-remove"].includes(action);
+  const choicesReady = catalogReady && (action !== "map" || mapReady);
+  useEffect(() => {
+    if (!result && returningToEdits.current) {
+      returningToEdits.current = false;
+      form.current
+        ?.querySelector<HTMLElement>(
+          "input:not(:disabled), textarea:not(:disabled), select:not(:disabled), button[type=submit]",
+        )
+        ?.focus();
+    }
+  }, [result]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (submitted.current || !permitted || !catalogReady) return;
+    if (submitted.current || !permitted || !choicesReady) return;
     const values = new FormData(event.currentTarget);
     const reason = requiresReason ? String(values.get("reason") ?? "").trim() : `Staff action: ${title}.`;
     const target = steamId || String(values.get("steamId") ?? "");
@@ -136,7 +151,7 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
       setResult({
         id,
         state: rejectionState(failure),
-        message: `${errorMessage(failure)} Check Action history before repeating this action; the connection can fail after the game acts.`,
+        message: errorMessage(failure),
       });
       admin.invalidateOverview();
     } finally {
@@ -148,11 +163,12 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
 
   return (
     <Modal serverScoped title={title} description={description} onClose={onClose} busy={sending}>
-      <form onSubmit={(event) => void submit(event)}>
-        {result ? (
+      <form ref={form} onSubmit={(event) => void submit(event)}>
+        {result && (
           <div
             className={`notice ${result.state === "failed" ? "error" : ["unknown", "pending", "accepted"].includes(result.state) ? "warning" : "info"}`}
             role="status"
+            aria-label="Action result"
           >
             <strong>
               {result.state === "applied"
@@ -166,15 +182,18 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
                       : "Unconfirmed"}
             </strong>
             <p>{result.message}</p>
-            {result.state !== "applied" && <p>Check Action history before trying again.</p>}
+            {["unknown", "pending", "accepted"].includes(result.state) && !/action history/i.test(result.message) && (
+              <p>Check Action history for confirmation before repeating this action.</p>
+            )}
             <details>
               <summary>Action details</summary>
-              <small>Action ID: {id}</small>
+              <CopyValue value={id} label="action ID" />
             </details>
           </div>
-        ) : (
-          <>
-            <fieldset disabled={sending}>
+        )}
+        {(!result || result.state === "failed") && (
+          <div hidden={!!result}>
+            <fieldset disabled={sending || !!result}>
               {requiresPlayer &&
                 (steamId ? (
                   <div className="target-box">
@@ -213,6 +232,7 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
                   change={setSelection}
                   catalog={catalog.data}
                   disabled={!catalogReady || sending}
+                  onReadyChange={setMapReady}
                 />
               )}
               {action === "lighting" && catalog.data && (
@@ -245,19 +265,31 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
                 {error}
               </p>
             )}
-          </>
+          </div>
         )}
         <div className="dialog-actions">
           <button type="button" className="button secondary" onClick={onClose} disabled={sending}>
             {result ? "Close" : "Cancel"}
           </button>
+          {result?.state === "failed" && (
+            <button
+              type="button"
+              className="button primary"
+              onClick={() => {
+                submitted.current = false;
+                returningToEdits.current = true;
+                setId(crypto.randomUUID());
+                setResult(null);
+              }}
+            >
+              Back to edits
+            </button>
+          )}
           {!result && (
             <button
               type="submit"
               className="button primary"
-              disabled={
-                !permitted || sending || submitted.current || !catalogReady || (action === "map" && !selection.map)
-              }
+              disabled={!permitted || sending || submitted.current || !choicesReady}
             >
               {sending ? "Sending…" : title}
             </button>

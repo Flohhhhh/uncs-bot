@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../../api/client";
 import { AdminContext } from "../../app/context";
-import { alice, context } from "../players/test-fixtures";
+import { alice, bob, context } from "../players/test-fixtures";
 import { ActionsDialog } from "./actions-dialog";
 import { actionSchema } from "../../../../../src/admin/admin.types";
 
@@ -13,6 +13,53 @@ beforeEach(() => {
 });
 
 describe("server action review", () => {
+  it.each(["receipt", "http"])(
+    "preserves entries after a definite %s rejection and records a reviewed retry separately",
+    async (kind) => {
+      const failure = { state: "failed", message: "The whitelist is locked by the host." };
+      if (kind === "receipt") request.mockResolvedValueOnce(failure);
+      else request.mockRejectedValueOnce(Object.assign(new Error(failure.message), { status: 422 }));
+      request.mockResolvedValueOnce({ state: "applied", message: "Whitelist saved" });
+      render(
+        <AdminContext.Provider value={context()}>
+          <ActionsDialog action="whitelist-add" onClose={vi.fn()} />
+        </AdminContext.Provider>,
+      );
+      fireEvent.change(screen.getByLabelText("SteamID64"), { target: { value: alice.steamId } });
+      fireEvent.click(screen.getByRole("button", { name: "Add whitelist access" }));
+      await screen.findByText(failure.message);
+      expect(screen.getByRole("status", { name: "Action result" })).not.toHaveTextContent(/Check Action history/);
+      expect(screen.queryByRole("textbox", { name: "SteamID64" })).not.toBeInTheDocument();
+      expect(request).toHaveBeenCalledTimes(1);
+      fireEvent.click(screen.getByRole("button", { name: "Back to edits" }));
+      expect(screen.getByLabelText("SteamID64")).toHaveValue(alice.steamId);
+      expect(screen.getByLabelText("SteamID64")).toHaveFocus();
+      expect(request).toHaveBeenCalledTimes(1);
+      fireEvent.change(screen.getByLabelText("SteamID64"), { target: { value: bob.steamId } });
+      fireEvent.click(screen.getByRole("button", { name: "Add whitelist access" }));
+      await screen.findByText("Whitelist saved");
+      const [first, second] = request.mock.calls.map(([, options]) => JSON.parse(String(options?.body)));
+      expect(first.steamId).toBe(alice.steamId);
+      expect(second.steamId).toBe(bob.steamId);
+      expect(second.id).not.toBe(first.id);
+    },
+  );
+  it.each(["accepted", "pending", "unknown"])("offers no resend for a %s result", async (state) => {
+    request.mockResolvedValue({ state, message: "Check Action history before repeating this action." });
+    render(
+      <AdminContext.Provider value={context()}>
+        <ActionsDialog action="whitelist-add" steamId={alice.steamId} onClose={vi.fn()} />
+      </AdminContext.Provider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Add whitelist access" }));
+    await screen.findByRole("status", { name: "Action result" });
+    expect(
+      screen.getByRole("status", { name: "Action result" }).textContent!.match(/Check Action history/g),
+    ).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Back to edits" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add whitelist access" })).not.toBeInTheDocument();
+    expect(request).toHaveBeenCalledTimes(1);
+  });
   it("accepts a structural SteamID64 beyond the old prefix while preserving its exact string", async () => {
     const steamId = "76561200000000000";
     request.mockResolvedValue({ state: "applied", message: "Whitelist saved" });
@@ -43,7 +90,7 @@ describe("server action review", () => {
     const form = screen.getByRole("button", { name: "Ban player" }).closest("form")!;
     fireEvent.submit(form);
     fireEvent.submit(form);
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Ban saved"));
+    await waitFor(() => expect(screen.getByRole("status", { name: "Action result" })).toHaveTextContent("Ban saved"));
     expect(request).toHaveBeenCalledTimes(1);
     const body = JSON.parse(String(request.mock.calls[0][1]?.body));
     expect(body).toMatchObject({
@@ -65,9 +112,10 @@ describe("server action review", () => {
     );
     fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "Resolve stuck connection" } });
     fireEvent.click(screen.getByRole("button", { name: "Kick player" }));
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Unconfirmed"));
+    await waitFor(() => expect(screen.getByRole("status", { name: "Action result" })).toHaveTextContent("Unconfirmed"));
     const body = JSON.parse(String(request.mock.calls[0][1]?.body));
-    expect(screen.getByRole("status")).toHaveTextContent(body.id);
+    expect(screen.getByRole("status", { name: "Action result" })).toHaveTextContent(body.id);
+    expect(screen.queryByRole("button", { name: "Back to edits" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Confirm|resubmit/i })).not.toBeInTheDocument();
     expect(admin.invalidateOverview).toHaveBeenCalledOnce();
     expect(request).toHaveBeenCalledTimes(1);
@@ -139,10 +187,13 @@ describe("server action review", () => {
     await screen.findByRole("option", { name: "Harbor" });
     fireEvent.change(screen.getByRole("combobox", { name: "Map" }), { target: { value: "Harbor" } });
     await screen.findByRole("checkbox", { name: "Conquest" });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Change map" })).toBeEnabled());
     expect(screen.queryByLabelText("Reason")).not.toBeInTheDocument();
     fireEvent.change(screen.getByPlaceholderText("CHANGE MAP"), { target: { value: "CHANGE MAP" } });
     fireEvent.click(screen.getByRole("button", { name: "Change map" }));
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Accepted · not verified"));
+    await waitFor(() =>
+      expect(screen.getByRole("status", { name: "Action result" })).toHaveTextContent("Accepted · not verified"),
+    );
     const call = request.mock.calls.find(([path]) => path === "actions")!;
     const body = JSON.parse(String(call[1]?.body));
     expect(body).toMatchObject({ action: "map", map: "Harbor", confirm: "CHANGE MAP" });
@@ -163,6 +214,30 @@ describe("server action review", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("single-line message");
     expect(request).not.toHaveBeenCalled();
   });
+  it("does not send a map change before its modes and layouts have loaded successfully", async () => {
+    let reject!: (error: Error) => void;
+    request.mockImplementation(async (path) => {
+      if (path === "catalog") return { maps: [{ id: "Harbor" }], experiences: [], lightings: [] };
+      return new Promise((_resolve, fail) => {
+        reject = fail;
+      });
+    });
+    render(
+      <AdminContext.Provider value={context()}>
+        <ActionsDialog action="map" onClose={vi.fn()} />
+      </AdminContext.Provider>,
+    );
+    fireEvent.change(await screen.findByRole("combobox", { name: "Map" }), { target: { value: "Harbor" } });
+    fireEvent.change(screen.getByPlaceholderText("CHANGE MAP"), { target: { value: "CHANGE MAP" } });
+    const send = screen.getByRole("button", { name: "Change map" });
+    expect(send).toBeDisabled();
+    fireEvent.submit(send.closest("form")!);
+    reject(new Error("Map options unavailable"));
+    await screen.findByText("Map options unavailable");
+    expect(send).toBeDisabled();
+    fireEvent.submit(send.closest("form")!);
+    expect(request.mock.calls.every(([path]) => path.startsWith("catalog"))).toBe(true);
+  });
   it("blocks map submissions while retained catalog options are refreshing or failed", async () => {
     request.mockResolvedValueOnce({ maps: [{ id: "Harbor" }], experiences: [], lightings: [] });
     const admin = context();
@@ -178,7 +253,7 @@ describe("server action review", () => {
     await waitFor(() => expect(request.mock.calls.some(([path]) => path === "catalog/maps/Harbor")).toBe(true));
     expect(screen.queryByLabelText("Reason")).not.toBeInTheDocument();
     fireEvent.change(screen.getByPlaceholderText("CHANGE MAP"), { target: { value: "CHANGE MAP" } });
-    expect(screen.getByRole("button", { name: "Change map" })).toBeEnabled();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Change map" })).toBeEnabled());
     let reject!: (error: Error) => void;
     request.mockImplementation((path) =>
       path === "catalog"
