@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useGameApi } from "../../api/server-client";
 import type { ActionResult, Player } from "../../api/types";
 import { useGameAdmin as useAdmin } from "../../app/context";
-import { Badge, Modal } from "../../components/ui";
+import { Badge, Modal, Table } from "../../components/ui";
 import { allowed, errorMessage, rejectionState } from "../actions/policy";
 import { FactionOptions, liveFactions, playerFaction } from "./factions";
 
@@ -30,46 +30,35 @@ const labels: Record<ItemState, string> = {
 
 export function TeamResults({ items }: { items: TeamItem[] }) {
   return (
-    <div className="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>PLAYER</th>
-            <th>OUTCOME</th>
-            <th>DETAILS</th>
-          </tr>
-        </thead>
-        <tbody>
-          {items.map((item) => (
-            <tr key={item.id}>
-              <td>
-                <strong>{item.name}</strong>
-                <small>{item.steamId}</small>
-              </td>
-              <td>
-                <Badge
-                  kind={
-                    item.state === "applied"
-                      ? "good"
-                      : item.state === "failed"
-                        ? "bad"
-                        : ["unknown", "pending", "sending"].includes(item.state)
-                          ? "warn"
-                          : "neutral"
-                  }
-                >
-                  {labels[item.state]}
-                </Badge>
-              </td>
-              <td className="audit-detail">
-                {item.message}
-                {!["queued", "skipped"].includes(item.state) && <small>Action {item.id}</small>}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <Table headers={["Player", "Outcome", "Details"]} label="Team move outcomes" scrollable>
+      {items.map((item) => (
+        <tr key={item.id}>
+          <td>
+            <strong>{item.name}</strong>
+            <small>{item.steamId}</small>
+          </td>
+          <td>
+            <Badge
+              kind={
+                item.state === "applied"
+                  ? "good"
+                  : item.state === "failed"
+                    ? "bad"
+                    : ["unknown", "pending", "sending"].includes(item.state)
+                      ? "warn"
+                      : "neutral"
+              }
+            >
+              {labels[item.state]}
+            </Badge>
+          </td>
+          <td className="audit-detail">
+            {item.message}
+            {!["queued", "skipped"].includes(item.state) && <small>Action {item.id}</small>}
+          </td>
+        </tr>
+      ))}
+    </Table>
   );
 }
 
@@ -90,6 +79,7 @@ export function TeamMoveDialog({
   current.current = admin;
   const mounted = useRef(true);
   const submitted = useRef(false);
+  const stopRequested = useRef(false);
   const [faction, setFaction] = useState(initialFaction);
   const [running, setRunning] = useState(false);
   const [done, setDone] = useState(false);
@@ -112,6 +102,7 @@ export function TeamMoveDialog({
   );
   const destination = teams.find((team) => team.name === faction);
   const count = items.filter((item) => item.from !== faction).length;
+  const remainingMoves = items.filter((item) => item.state === "queued" && item.from !== faction).length;
   const ready = allowed("team", admin.me, admin.overview, admin.stale, admin.busy) && Boolean(destination) && count > 0;
 
   useEffect(() => {
@@ -152,6 +143,7 @@ export function TeamMoveDialog({
         const latestTeams = liveFactions(latest.overview);
         const latestPlayer = latest.overview?.players.find((player) => player.steamId === item.steamId);
         if (
+          stopRequested.current ||
           !mounted.current ||
           !allowed("team", latest.me, latest.overview, latest.stale, false) ||
           !latestTeams.some((team) => team.name === faction) ||
@@ -192,7 +184,7 @@ export function TeamMoveDialog({
           item.message = `${errorMessage(failure)} Check this action in Action history before repeating it.`;
         }
         publish();
-        if (item.state === "failed" || item.state === "unknown") {
+        if (stopRequested.current || item.state === "failed" || item.state === "unknown") {
           didStop = true;
           break;
         }
@@ -207,7 +199,9 @@ export function TeamMoveDialog({
         onComplete?.({ label: destination.label, items: batch, stopped: didStop });
         if (didStop)
           setError(
-            "Stopped before sending the remaining requests. Review Action history and refresh the roster before a new review. Attempted players will not be retried automatically.",
+            stopRequested.current
+              ? "Stopped at your request. Sent moves keep their recorded outcomes. Refresh the roster before reviewing the remaining players."
+              : "Stopped before sending the remaining requests. Review Action history and refresh the roster before a new review. Attempted players will not be retried automatically.",
           );
         else void current.current.refresh();
       }
@@ -240,7 +234,11 @@ export function TeamMoveDialog({
           <>
             <div className="team-progress" role="status">
               {items.filter((item) => item.state !== "queued" && item.state !== "sending").length} / {items.length}{" "}
-              processed{running && " · sending one at a time"}
+              processed
+              {running &&
+                (stopped
+                  ? " · stopping remaining moves. Any request already sent will finish."
+                  : " · sending one at a time")}
             </div>
             <TeamResults items={items} />
           </>
@@ -274,9 +272,24 @@ export function TeamMoveDialog({
           </div>
         )}
         <div className="dialog-actions">
-          <button type="button" className="button secondary" onClick={onClose} disabled={running}>
-            {done ? "Close" : "Cancel"}
-          </button>
+          {running && remainingMoves > 0 && (
+            <button
+              type="button"
+              className="button secondary"
+              disabled={stopped}
+              onClick={() => {
+                stopRequested.current = true;
+                setStopped(true);
+              }}
+            >
+              {stopped ? "Stopping…" : "Stop remaining moves"}
+            </button>
+          )}
+          {!running && (
+            <button type="button" className="button secondary" onClick={onClose}>
+              {done ? "Close" : "Cancel"}
+            </button>
+          )}
           {!submitted.current && (
             <button type="submit" className="button primary" disabled={!ready}>
               Move {count} player{count === 1 ? "" : "s"}

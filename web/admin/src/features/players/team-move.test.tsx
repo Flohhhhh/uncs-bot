@@ -16,6 +16,106 @@ function submit() {
 }
 
 describe("reviewed team moves", () => {
+  it("stops unsent moves while allowing the current request to keep its actual outcome", async () => {
+    let finish!: (result: unknown) => void;
+    request.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const admin = context();
+    const finished = vi.fn<(result: TeamMoveResult) => void>();
+    render(
+      <AdminContext.Provider value={admin}>
+        <TeamMoveDialog players={[alice, bob]} initialFaction="Lonestar" onClose={vi.fn()} onComplete={finished} />
+      </AdminContext.Provider>,
+    );
+    submit();
+    fireEvent.click(screen.getByRole("button", { name: "Stop remaining moves" }));
+    expect(screen.getByRole("button", { name: "Stopping…" })).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent("Any request already sent will finish");
+    expect(request).toHaveBeenCalledOnce();
+    expect(request.mock.calls[0][1]?.signal).toBeUndefined();
+    expect(finished).not.toHaveBeenCalled();
+    await act(async () => finish({ state: "accepted", message: "Accepted, not verified" }));
+    expect(finished.mock.calls[0][0]).toMatchObject({
+      stopped: true,
+      items: [{ state: "accepted" }, { state: "queued" }],
+    });
+    expect(screen.getByRole("button", { name: /^Close$/ })).toBeEnabled();
+    expect(screen.getByRole("alert")).toHaveTextContent("Stopped at your request");
+    expect(admin.invalidateOverview).toHaveBeenCalledOnce();
+    expect(admin.setBusy).toHaveBeenLastCalledWith(false);
+    expect(request).toHaveBeenCalledOnce();
+  });
+  it("stops during the gap between requests without sending another move", async () => {
+    vi.useFakeTimers();
+    request.mockResolvedValue({ state: "applied", message: "Confirmed" });
+    const finished = vi.fn<(result: TeamMoveResult) => void>();
+    render(
+      <AdminContext.Provider value={context()}>
+        <TeamMoveDialog players={[alice, bob]} initialFaction="Lonestar" onClose={vi.fn()} onComplete={finished} />
+      </AdminContext.Provider>,
+    );
+    submit();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2199);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Stop remaining moves" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(request).toHaveBeenCalledOnce();
+    expect(finished.mock.calls[0][0]).toMatchObject({
+      stopped: true,
+      items: [{ state: "applied" }, { state: "queued" }],
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("Stopped at your request");
+  });
+  it("keeps an uncertain in-flight outcome when stopping and never offers a resend", async () => {
+    let reject!: (failure: Error) => void;
+    request.mockImplementation(
+      () =>
+        new Promise((_resolve, fail) => {
+          reject = fail;
+        }),
+    );
+    const finished = vi.fn<(result: TeamMoveResult) => void>();
+    render(
+      <AdminContext.Provider value={context()}>
+        <TeamMoveDialog players={[alice, bob]} initialFaction="Lonestar" onClose={vi.fn()} onComplete={finished} />
+      </AdminContext.Provider>,
+    );
+    submit();
+    fireEvent.click(screen.getByRole("button", { name: "Stop remaining moves" }));
+    await act(async () => reject(new Error("Network dropped")));
+    expect(finished.mock.calls[0][0].items.map((item) => item.state)).toEqual(["unknown", "queued"]);
+    expect(screen.getByText("Unconfirmed")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Move \d/ })).not.toBeInTheDocument();
+    expect(request).toHaveBeenCalledOnce();
+  });
+  it("does not offer a stop for a single request that has already been sent", async () => {
+    let finish!: (result: unknown) => void;
+    request.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    render(
+      <AdminContext.Provider value={context()}>
+        <TeamMoveDialog players={[alice]} initialFaction="Lonestar" onClose={vi.fn()} />
+      </AdminContext.Provider>,
+    );
+    submit();
+    expect(screen.queryByRole("button", { name: "Stop remaining moves" })).not.toBeInTheDocument();
+    await act(async () => finish({ state: "applied", message: "Confirmed" }));
+    expect(screen.getByRole("heading", { name: "Team requests complete" })).toBeInTheDocument();
+  });
   it("sends each player with a unique ID, exact confirmation and faction name, spaced sequentially", async () => {
     vi.useFakeTimers();
     request.mockResolvedValue({ state: "applied", message: "Assignment confirmed; respawn may be needed." });
