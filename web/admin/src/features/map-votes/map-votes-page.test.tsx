@@ -463,6 +463,32 @@ it("keeps the ballot builder editable while a background refresh is pending", as
   expect(screen.getByRole("combobox", { name: "Map" })).toHaveValue("Islands");
   expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
 });
+it("starts a fresh draft after every choice is removed and the settings revision moves on", async () => {
+  const { state, rerender } = show();
+  await choose("Europe");
+  fireEvent.click(screen.getByRole("button", { name: "Remove Ozeti · Map defaults" }));
+  expect(screen.queryByRole("button", { name: "Discard draft" })).not.toBeInTheDocument();
+  settings.revision = "r2";
+  rerender(
+    <AdminContext.Provider value={{ ...state, refreshVersion: 1 }}>
+      <MapVotesPage />
+    </AdminContext.Provider>,
+  );
+  await waitFor(() => expect(request.mock.calls.filter(([path]) => path === "settings")).toHaveLength(2));
+  await act(async () => {});
+  expect(screen.queryByText("Server settings changed. Discard this draft and refresh.")).not.toBeInTheDocument();
+  expect(screen.getByRole("combobox", { name: "Map" })).toBeEnabled();
+  expect(screen.getByRole("spinbutton", { name: "Voting duration (minutes)" })).toBeEnabled();
+  await choose("Islands");
+  await choose("Desert");
+  fireEvent.click(screen.getByRole("button", { name: "Review ballot" }));
+  const publish = screen.getByRole("button", { name: "Publish ballot" });
+  await waitFor(() => expect(publish).toBeEnabled());
+  fireEvent.click(publish);
+  await screen.findByText("Voting is open.", { selector: "[role=status]" });
+  const sent = request.mock.calls.find(([, init]) => init?.method === "POST")!;
+  expect(JSON.parse(String(sent[1]?.body))).toMatchObject({ revision: "r2" });
+});
 it("shows saved results and closes an active ballot with a separate recorded request", async () => {
   votes = [ballot];
   show();

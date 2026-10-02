@@ -378,9 +378,12 @@ function EnabledMapVotes({
                         className="button secondary small"
                         disabled={admin.busy}
                         aria-label={`Remove ${selectionLabel(choice)}`}
-                        onClick={() =>
-                          setChoices(choices.filter((entry) => voteChoiceKey(entry) !== voteChoiceKey(choice)))
-                        }
+                        onClick={() => {
+                          const next = choices.filter((entry) => voteChoiceKey(entry) !== voteChoiceKey(choice));
+                          setChoices(next);
+                          // An emptied ballot is a fresh start; the next choice pins the then-current revision.
+                          if (!next.length) setRevision(null);
+                        }}
                       >
                         Remove
                       </button>
