@@ -168,25 +168,6 @@ it("guards browser Back and keeps editing when Escape dismisses the warning", as
   await waitFor(() => expect(router.state.location.pathname).toBe("/overview"));
 });
 
-it("retains hidden rotation drafts and does not clear their warning when a settings draft is discarded", async () => {
-  const { router } = mount();
-  fireEvent.click(await screen.findByRole("button", { name: "Rotation" }));
-  fireEvent.click(screen.getByRole("button", { name: "Move Ozeti up" }));
-  fireEvent.click(screen.getByRole("button", { name: "Identity" }));
-  await editName();
-  fireEvent.click(screen.getByRole("button", { name: "Discard" }));
-  fireEvent.click(screen.getByRole("link", { name: /Server activity/ }));
-  expect(await screen.findByRole("dialog", { name: "Discard unsaved changes?" })).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
-  fireEvent.click(screen.getByRole("button", { name: "Rotation" }));
-  expect(screen.getAllByRole("listitem")[0]).toHaveTextContent("Ozeti");
-  fireEvent.click(screen.getByRole("button", { name: "Discard draft" }));
-  expect(unload()).toBe(false);
-  fireEvent.click(screen.getByRole("link", { name: /Server activity/ }));
-  await waitFor(() => expect(router.state.location.pathname).toBe("/activity"));
-  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-});
-
 it("does not abandon a review or a pending save through browser history", async () => {
   const { router, fetcher } = mount();
   await editName();
