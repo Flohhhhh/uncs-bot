@@ -488,6 +488,52 @@ describe("server configuration boundaries", () => {
     await expect(game.execute(save(changes))).rejects.toThrow();
     expect(request.mock.calls.some(([method]) => method === "PUT")).toBe(false);
   });
+  it.each([
+    "***",
+    "****",
+    "Redacted",
+    "<REDACTED>",
+    "[redacted]",
+    "*** ; host note",
+    "redacted // host note",
+    "****#1",
+  ])("refuses %j, which would read back as a redacted configuration", async (value) => {
+    const f = fixture();
+    const attempts: Record<string, string>[] = [
+      { serverPassword: value },
+      { serverName: value },
+      { serverPassword: value, serverName: "The UNCs Event" },
+    ];
+    for (const changes of attempts)
+      await expect(f.game.execute(save(changes))).rejects.toThrow("is reserved; choose another.");
+    expect(f.request.mock.calls.some(([method]) => method === "PUT")).toBe(false);
+    // Had it been saved, every later settings, rotation and map-next edit would be locked.
+    f.document.text = original.replace("private-join-secret", value);
+    const snapshot = await f.game.configuration();
+    expect(snapshot.fields.every((field) => !field.editable)).toBe(true);
+    expect(snapshot.fields.find((field) => field.id === "serverPassword")?.note).toContain("redacted");
+    expect(snapshot.rotation.editable).toBe(false);
+  });
+  it.each(["**", "***x", " ***", "*** ", "[redacted", "redacted!", "Not redacted"])(
+    "saves the near miss %j and keeps the configuration editable",
+    async (value) => {
+      const f = fixture();
+      await expect(f.game.execute(save({ serverPassword: value }))).resolves.toMatchObject({ state: "pending" });
+      expect(f.saved().text).toContain(`ServerPassword="${value}"`);
+      const snapshot = await f.game.configuration();
+      expect(snapshot.fields.find((field) => field.id === "serverPassword")).toMatchObject({ editable: true });
+      expect(snapshot.rotation.editable).toBe(true);
+    },
+  );
+  it("still shows a host-saved server name that reads as redaction", async () => {
+    const f = fixture();
+    f.document.text = original.replace('ServerName="The UNCs"', 'ServerName="Redacted"');
+    expect((await f.game.configuration()).fields.find((field) => field.id === "serverName")).toMatchObject({
+      value: "Redacted",
+      editable: false,
+      note: "The configuration is redacted. Edit it through the host panel.",
+    });
+  });
   it("refuses stale drafts without automatic rebasing or retries", async () => {
     const { game, request } = fixture();
     await expect(game.execute(save({ scorePeriod: 25 }, "r0"))).rejects.toThrow("changed");

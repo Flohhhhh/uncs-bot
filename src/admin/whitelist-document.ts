@@ -63,6 +63,8 @@ export function inspectConfiguredWhitelist(text: string) {
 export function editWhitelist(document: ConfigDocument, steamId: string, add: boolean) {
   if (!isPublicIndividualSteamId(steamId)) throw new Error("Invalid SteamID64.");
   if (!document.writable) throw new Error("The game reports that its configuration is read-only.");
+  // Whitelist edits write only ClearArray and numeric IDs, and settingValue refuses these sentinels, so no
+  // dashboard write can trip this check. Keep the pattern in step with assertEditable and settingValue.
   if (
     document.redacted ||
     /^\s*[^;#\r\n][^=\r\n]*=\s*"?(?:\*{3,}|<redacted>|\[redacted\]|redacted)"?\s*(?:(?:[;#]|\/\/).*)?$/im.test(
