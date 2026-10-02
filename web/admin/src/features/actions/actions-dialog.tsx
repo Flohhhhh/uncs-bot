@@ -53,6 +53,7 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
   const submitted = useRef(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
+  const [confirmation, setConfirmation] = useState("");
   const [result, setResult] = useState<ActionResult | null>(null);
   const [selection, setSelection] = useState<MapSelection>({ map: "", experiences: [] });
   const [mapReady, setMapReady] = useState(false);
@@ -69,6 +70,9 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
   const requiresConfirmation = confirmedActions.includes(action);
   const requiresReason = ["kick", "ban", "unban", "whitelist-remove"].includes(action);
   const choicesReady = catalogReady && (action !== "map" || mapReady);
+  const confirmationReady = !phrase || confirmation === phrase;
+  const affectsEveryone = !!phrase || action === "lighting";
+  const warnLiveImpact = affectsEveryone || ["kick", "ban", "kill"].includes(action);
   useEffect(() => {
     if (!result && returningToEdits.current) {
       returningToEdits.current = false;
@@ -82,7 +86,7 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (submitted.current || !permitted || !choicesReady) return;
+    if (submitted.current || !permitted || !choicesReady || !confirmationReady) return;
     const values = new FormData(event.currentTarget);
     const reason = requiresReason ? String(values.get("reason") ?? "").trim() : `Staff action: ${title}.`;
     const target = steamId || String(values.get("steamId") ?? "");
@@ -162,7 +166,28 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
   }
 
   return (
-    <Modal serverScoped title={title} description={description} onClose={onClose} busy={sending}>
+    <Modal
+      serverScoped
+      title={title}
+      description={warnLiveImpact ? undefined : description}
+      onClose={onClose}
+      busy={sending}
+    >
+      {!result && warnLiveImpact && (
+        <div
+          className="notice warning"
+          role="note"
+          aria-label={affectsEveryone ? "Live match warning" : "Player action warning"}
+        >
+          {affectsEveryone && (
+            <strong>
+              Affects everyone · {admin.overview?.status.players.current ?? "Unknown number of"} players connected
+            </strong>
+          )}
+          <p>{description}</p>
+          {action === "map" && <p>Use Queue next map to keep the current round running.</p>}
+        </div>
+      )}
       <form ref={form} onSubmit={(event) => void submit(event)}>
         {result && (
           <div
@@ -251,7 +276,14 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
               {phrase && (
                 <label>
                   Type <strong>{phrase}</strong> to confirm
-                  <input name="confirm" required autoComplete="off" placeholder={phrase} />
+                  <input
+                    name="confirm"
+                    required
+                    autoComplete="off"
+                    placeholder={phrase}
+                    value={confirmation}
+                    onChange={(event) => setConfirmation(event.target.value)}
+                  />
                 </label>
               )}
             </fieldset>
@@ -279,6 +311,7 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
                 submitted.current = false;
                 returningToEdits.current = true;
                 setId(crypto.randomUUID());
+                setConfirmation("");
                 setResult(null);
               }}
             >
@@ -288,8 +321,8 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
           {!result && (
             <button
               type="submit"
-              className="button primary"
-              disabled={!permitted || sending || submitted.current || !choicesReady}
+              className={`button ${phrase || action === "kill" || action === "ban" ? "danger" : "primary"}`}
+              disabled={!permitted || sending || submitted.current || !choicesReady || !confirmationReady}
             >
               {sending ? "Sending…" : title}
             </button>
