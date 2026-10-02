@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Table, type TableHeader } from "./ui";
 
 type SortValue = string | number | boolean | null | undefined;
@@ -60,7 +60,13 @@ export function DataTable<T>({
 }
 
 export function CopyValue({ value, label = "SteamID" }: { value: string; label?: string }) {
-  const [status, setStatus] = useState("");
+  // A new object per copy restarts the timer when the same value is copied again.
+  const [status, setStatus] = useState<{ text: string } | null>(null);
+  useEffect(() => {
+    if (status?.text !== "Copied") return;
+    const timer = window.setTimeout(() => setStatus(null), 2_000);
+    return () => window.clearTimeout(timer);
+  }, [status]);
   return (
     <span className="copy-value">
       <span>{value}</span>
@@ -72,16 +78,16 @@ export function CopyValue({ value, label = "SteamID" }: { value: string; label?:
         onClick={async () => {
           try {
             await navigator.clipboard.writeText(value);
-            setStatus("Copied");
+            setStatus({ text: "Copied" });
           } catch {
-            setStatus("Copy failed; select the value to copy it.");
+            setStatus({ text: "Copy failed; select the value to copy it." });
           }
         }}
       >
         ⧉
       </button>
       <span className="copy-feedback" role="status">
-        {status}
+        {status?.text}
       </span>
     </span>
   );

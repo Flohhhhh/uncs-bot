@@ -167,20 +167,13 @@ function TabStrip<T extends string>({
   }
   return (
     <>
-      <div
-        ref={list}
-        role="tablist"
-        aria-label={label}
-        className={`settings-tabs ${className}`.trim()}
-        onKeyDown={move}
-      >
+      <div ref={list} role="tablist" aria-label={label} className={`tabs ${className}`.trim()} onKeyDown={move}>
         {tabs.map((tab, index) => (
           <button
             key={tab.id}
             type="button"
             role="tab"
             id={`${base}-tab-${index}`}
-            className="button secondary"
             aria-selected={tab.id === selected}
             aria-controls={children ? `${base}-panel` : undefined}
             tabIndex={tab.id === entry ? 0 : -1}
@@ -194,7 +187,12 @@ function TabStrip<T extends string>({
         ))}
       </div>
       {children && (
-        <div role="tabpanel" id={`${base}-panel`} aria-labelledby={`${base}-tab-${selectedIndex}`}>
+        <div
+          role="tabpanel"
+          id={`${base}-panel`}
+          className="tab-panel"
+          aria-labelledby={`${base}-tab-${selectedIndex}`}
+        >
           {children(selected)}
         </div>
       )}
@@ -214,10 +212,7 @@ export function Metric({
 }) {
   return (
     <div className="metric">
-      <div className="metric-label">
-        {label}
-        <span>↗</span>
-      </div>
+      <div className="metric-label">{label}</div>
       <div className={`metric-value ${word ? "word" : ""}`}>{value}</div>
       <div className="metric-note">{note}</div>
     </div>
@@ -320,6 +315,7 @@ export function Modal({
   busy = false,
   className = "",
   serverScoped = false,
+  eyebrow = "STAFF REVIEW",
 }: {
   title: string;
   description?: string;
@@ -328,8 +324,11 @@ export function Modal({
   busy?: boolean;
   className?: string;
   serverScoped?: boolean;
+  /** The small label above the title. Pass null on result screens, which are no longer a review. */
+  eyebrow?: ReactNode;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const titleId = useId();
   const { setDialogOpen, server } = useAdmin();
   useEffect(() => {
     setDialogOpen(true);
@@ -344,19 +343,19 @@ export function Modal({
     <dialog
       ref={dialog}
       className={className}
-      aria-labelledby="dialog-title"
+      aria-labelledby={titleId}
       onCancel={(event) => {
         event.preventDefault();
         if (!busy) onClose();
       }}
     >
       <div className="dialog-top">
-        <p className="eyebrow">STAFF REVIEW</p>
+        {eyebrow && <p className="eyebrow">{eyebrow}</p>}
         <button type="button" className="icon-button" aria-label="Close dialog" disabled={busy} onClick={onClose}>
           ×
         </button>
       </div>
-      <h2 id="dialog-title">{title}</h2>
+      <h2 id={titleId}>{title}</h2>
       {serverScoped && server && (
         <p className="server-review-target">
           Game server: <strong>{server.name}</strong> <small>({server.id})</small>
@@ -386,6 +385,7 @@ export function Sheet({
 }) {
   const sheet = useRef<HTMLDialogElement>(null);
   const titleId = useId();
+  const descriptionId = useId();
   useEffect(() => {
     const element = sheet.current;
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -401,6 +401,7 @@ export function Sheet({
       ref={sheet}
       className={`sheet ${className}`.trim()}
       aria-labelledby={titleId}
+      aria-describedby={description ? descriptionId : undefined}
       tabIndex={-1}
       onKeyDown={(event) => {
         // A review opened inside the sheet handles its own Escape.
@@ -415,13 +416,19 @@ export function Sheet({
       }}
     >
       <div className="sheet-top">
-        <h2 id={titleId}>{title}</h2>
+        <div>
+          <h2 id={titleId}>{title}</h2>
+          {description && (
+            <p id={descriptionId} className="muted">
+              {description}
+            </p>
+          )}
+        </div>
         <button type="button" className="icon-button" aria-label="Close panel" onClick={onClose}>
           ×
         </button>
       </div>
-      {description && <p className="muted">{description}</p>}
-      {children}
+      <div className="sheet-body">{children}</div>
     </dialog>
   );
 }

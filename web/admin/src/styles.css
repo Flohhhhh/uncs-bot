@@ -1676,6 +1676,39 @@ dialog .supporter-check input {
   display: grid;
   gap: 22px;
 }
+.tabs {
+  display: flex;
+  gap: var(--space-1);
+  margin-bottom: var(--space-4);
+  overflow-x: auto;
+  scrollbar-width: none;
+  box-shadow: inset 0 -1px 0 var(--line);
+}
+.tabs [role="tab"] {
+  flex-shrink: 0;
+  min-height: 40px;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  font-weight: 650;
+  white-space: nowrap;
+  transition:
+    color 0.15s,
+    border-color 0.15s;
+}
+.tabs [role="tab"]:hover:not(:disabled) {
+  color: var(--cream);
+}
+.tabs [role="tab"][aria-selected="true"] {
+  color: var(--cream);
+  border-bottom-color: var(--accent);
+}
+.tabs [role="tab"]:focus-visible {
+  outline-offset: -2px;
+}
 .intro {
   font-size: 13px;
   line-height: 1.8;
@@ -1735,6 +1768,13 @@ dialog .supporter-check input {
   flex-wrap: wrap;
   gap: 10px;
   margin-block: 10px;
+}
+.action-receipt-outcome {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-2);
 }
 .demo-banner {
   background: #32271e;
@@ -1796,6 +1836,7 @@ dialog::backdrop {
   margin: 0;
 }
 .dialog-top .icon-button {
+  margin-left: auto;
   color: #b3bea7;
 }
 dialog h2 {
@@ -1850,6 +1891,7 @@ dialog textarea {
   color: #b5c59f;
   font: 11px monospace;
 }
+/* A side drawer on wide screens; the header stays in view while the body scrolls. */
 dialog.sheet {
   margin: 0 0 0 auto;
   width: min(440px, 100vw);
@@ -1857,20 +1899,61 @@ dialog.sheet {
   height: 100vh;
   height: 100dvh;
   max-height: none;
+  padding: 0;
   border-width: 0 0 0 3px;
-  border-left-color: var(--orange);
+  border-left-color: var(--accent);
   border-radius: 0;
 }
 .sheet-top {
+  position: sticky;
+  top: 0;
+  z-index: 1;
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
   gap: var(--space-3);
+  padding: var(--space-4) var(--space-5) var(--space-3);
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.sheet-top > div {
+  min-width: 0;
 }
 .sheet-top h2 {
-  margin: 0;
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-2xl);
+  line-height: 1.1;
   text-transform: none;
+  overflow-wrap: anywhere;
 }
+.sheet-top .muted {
+  margin: var(--space-1) 0 0;
+}
+.sheet-top .icon-button {
+  flex-shrink: 0;
+  margin: 0 calc(-1 * var(--space-2)) 0 0;
+}
+.sheet-body {
+  padding: var(--space-4) var(--space-5) var(--space-5);
+}
+@media (prefers-reduced-motion: no-preference) {
+  dialog.sheet[open] {
+    animation: sheet-in-side 0.18s ease-out;
+  }
+}
+@keyframes sheet-in-side {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+}
+@keyframes sheet-in-bottom {
+  from {
+    transform: translateY(24px);
+    opacity: 0;
+  }
+}
+/* A bottom sheet on phones, sized to its content. */
 @media (max-width: 740px) {
   dialog.sheet {
     margin: auto 0 0;
@@ -1879,8 +1962,17 @@ dialog.sheet {
     max-height: 85vh;
     max-height: 85dvh;
     border-width: 3px 0 0;
-    border-top-color: var(--orange);
+    border-top-color: var(--accent);
     border-radius: var(--radius-md) var(--radius-md) 0 0;
+  }
+  dialog.sheet[open] {
+    animation-name: sheet-in-bottom;
+  }
+  .sheet-top {
+    padding-inline: var(--space-4);
+  }
+  .sheet-body {
+    padding: var(--space-3) var(--space-4) var(--space-5);
   }
 }
 .login-screen {

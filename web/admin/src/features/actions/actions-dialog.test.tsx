@@ -167,8 +167,11 @@ describe("server action review", () => {
         <ActionsDialog action="whitelist-add" steamId={alice.steamId} onClose={vi.fn()} />
       </AdminContext.Provider>,
     );
+    expect(screen.getByRole("dialog", { name: "Add whitelist access" })).toHaveTextContent("STAFF REVIEW");
     fireEvent.click(screen.getByRole("button", { name: "Add whitelist access" }));
     await screen.findByRole("status", { name: "Action result" });
+    // The result screen is no longer a review.
+    expect(screen.queryByText("STAFF REVIEW")).not.toBeInTheDocument();
     expect(
       screen.getByRole("status", { name: "Action result" }).textContent!.match(/Check Action history/g),
     ).toHaveLength(1);

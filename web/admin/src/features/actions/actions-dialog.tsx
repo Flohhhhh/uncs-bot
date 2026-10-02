@@ -189,6 +189,7 @@ function ActionForm({
       description={warnLiveImpact ? undefined : description}
       onClose={onClose}
       busy={sending}
+      eyebrow={result ? null : undefined}
     >
       {!result && warnLiveImpact && (
         <div

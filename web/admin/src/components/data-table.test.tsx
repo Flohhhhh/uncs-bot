@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import { compareValues, CopyValue, DataTable } from "./data-table";
@@ -71,6 +71,27 @@ it("copies the exact ID and reports clipboard rejection without claiming success
     await screen.findByText("Copy failed; select the value to copy it.");
     expect(screen.queryByText("Copied")).not.toBeInTheDocument();
   } finally {
+    vi.unstubAllGlobals();
+  }
+});
+it("clears the copied confirmation after two seconds but keeps a failure visible", async () => {
+  vi.useFakeTimers();
+  const writeText = vi.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("denied"));
+  vi.stubGlobal("navigator", { clipboard: { writeText } });
+  try {
+    render(<CopyValue value="76561198000000001" />);
+    const button = screen.getByRole("button", { name: "Copy SteamID 76561198000000001" });
+    await act(async () => fireEvent.click(button));
+    expect(screen.getByRole("status")).toHaveTextContent("Copied");
+    act(() => vi.advanceTimersByTime(1_999));
+    expect(screen.getByRole("status")).toHaveTextContent("Copied");
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.getByRole("status")).toBeEmptyDOMElement();
+    await act(async () => fireEvent.click(button));
+    act(() => vi.advanceTimersByTime(5_000));
+    expect(screen.getByRole("status")).toHaveTextContent("Copy failed; select the value to copy it.");
+  } finally {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   }
 });
