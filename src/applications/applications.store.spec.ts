@@ -62,7 +62,7 @@ describe("atomic application review persistence", () => {
     const where = jest
       .fn()
       .mockReturnValue({ returning: jest.fn().mockResolvedValue([{ id: applicationId, status: "approved" }]) });
-    const reviewWhere = jest.fn().mockResolvedValue(undefined);
+    const reviewWhere = jest.fn().mockReturnValue({ returning: jest.fn().mockResolvedValue([{ id: actionId }]) });
     const update = jest
       .fn()
       .mockReturnValueOnce({ set: jest.fn().mockReturnValue({ where }) })

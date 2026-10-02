@@ -476,17 +476,42 @@ const applicationStore = {
   async list(serverId: string) {
     return [...applications.values()].filter((entry) => entry.serverId === serverId).reverse();
   },
-  async claim(id: string, review: ApplicationReview, kind: "approve" | "decline" | "recheck", staff: Staff) {
+  async get(id: string, serverId: string) {
+    const entry = applications.get(id);
+    return entry?.serverId === serverId ? { ...entry } : undefined;
+  },
+  async finishRecheck(previous: WhitelistApplication, review: ApplicationReview, staff: Staff, result: ActionResult) {
+    const entry = applications.get(previous.id);
+    if (
+      !entry ||
+      entry.serverId !== staff.serverId ||
+      entry.status !== previous.status ||
+      entry.reviewId !== previous.reviewId
+    )
+      throw new ConflictException("Preview application changed during the check");
+    Object.assign(entry, {
+      status: result.state === "applied" ? "approved" : "needs_review",
+      reviewedAt: new Date(),
+      reviewedBy: staff.id,
+      reviewReason: review.reason,
+      reviewId: review.id,
+      reviewKind: "recheck",
+      lastActionState: result.state,
+      lastActionMessage: result.message,
+      updatedAt: new Date(),
+    });
+    return entry;
+  },
+  async claim(id: string, review: ApplicationReview, kind: "approve" | "decline", staff: Staff) {
     const entry = applications.get(id);
     if (entry?.serverId !== staff.serverId) return { claimed: false, application: undefined };
-    if (!entry || entry.status !== (kind === "recheck" ? "needs_review" : "pending"))
-      return { claimed: false, application: entry };
+    if (!entry || entry.status !== "pending") return { claimed: false, application: entry };
     Object.assign(entry, {
       status: kind !== "decline" ? "processing" : "declined",
       reviewedAt: new Date(),
       reviewedBy: staff.id,
       reviewReason: review.reason,
-      actionId: kind === "recheck" ? entry.actionId : review.id,
+      actionId: review.id,
       reviewId: review.id,
       reviewKind: kind,
       lastActionState: kind !== "decline" ? "started" : "applied",

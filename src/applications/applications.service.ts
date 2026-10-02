@@ -20,6 +20,8 @@ import {
   ownApplication,
   reviewSchema,
   type ApplicantIdentity,
+  type ApplicationReview,
+  type WhitelistApplication,
 } from "./applications.types";
 
 @Injectable()
@@ -119,34 +121,11 @@ export class ApplicationsService {
     const request = parsed.data;
     const serverId = this.servers.resolve(staff.serverId);
     const actor = { ...staff, serverId };
+    if (kind === "recheck") return this.recheck(actor, applicationId, request);
     const claim = await this.store.claim(applicationId, request, kind, actor);
     if (!claim.application) throw new NotFoundException("Application not found.");
     if (claim.application.serverId !== serverId) throw new NotFoundException("Application not found on this server.");
-    if (!claim.claimed) {
-      const record = claim.application;
-      const sameKind = record.reviewKind === kind;
-      if (
-        record.reviewId === request.id &&
-        record.reviewedBy === staff.id &&
-        record.reviewReason === request.reason &&
-        sameKind
-      ) {
-        return {
-          application: record,
-          outcome: {
-            id: request.id,
-            state: record.lastActionState === "started" ? "unknown" : (record.lastActionState ?? "unknown"),
-            message:
-              record.lastActionState === "started"
-                ? "This approval was already started. Check the running whitelist and action history before any further change."
-                : (record.lastActionMessage ?? "Check the recorded application status."),
-          },
-        };
-      }
-      throw new ConflictException(
-        "This application is already being reviewed or has a recorded decision. Refresh and check its history.",
-      );
-    }
+    if (!claim.claimed) return this.recordedReview(claim.application, request, kind, staff);
     if (kind === "decline")
       return {
         application: claim.application,
@@ -154,38 +133,23 @@ export class ApplicationsService {
       };
     let outcome: ActionResult;
     try {
-      if (kind === "recheck") {
-        const list = await this.servers.get(serverId).whitelist();
-        const active = list.entries.some((entry) => entry.steamId === claim.application.steamId && entry.active);
-        outcome = active
-          ? { state: "applied", message: "Whitelist access is confirmed in the running game. No game change was sent." }
-          : {
-              state: "pending",
-              message:
-                "Access is not confirmed in the running whitelist. The application still needs review. No game change was sent.",
-            };
-      } else {
-        const result = await this.admin.act(actor, {
-          id: request.id,
-          serverId,
-          action: "whitelist-add",
-          steamId: claim.application.steamId,
-          // The shared RCON audit is visible to more staff roles than private
-          // applications. Keep reviewer notes and contact details out of it.
-          reason: `Website whitelist application ${applicationId} approved.`,
-        });
-        const state = z.enum(["applied", "accepted", "pending", "failed", "unknown"]).safeParse(result.state);
-        outcome = state.success
-          ? { state: state.data, message: result.message }
-          : { state: "unknown", message: "The whitelist result could not be interpreted. Check action history." };
-      }
+      const result = await this.admin.act(actor, {
+        id: request.id,
+        serverId,
+        action: "whitelist-add",
+        steamId: claim.application.steamId,
+        // Private reviewer notes and contact details must stay out of the shared game audit.
+        reason: `Website whitelist application ${applicationId} approved.`,
+      });
+      const state = z.enum(["applied", "accepted", "pending", "failed", "unknown"]).safeParse(result.state);
+      outcome = state.success
+        ? { state: state.data, message: result.message }
+        : { state: "unknown", message: "The whitelist result could not be interpreted. Check action history." };
     } catch {
       outcome = {
         state: "unknown",
         message:
-          kind === "recheck"
-            ? "The running whitelist could not be checked. The application still needs review. No game change was sent."
-            : "Approval could not be confirmed. Check the running whitelist and action history. No automatic retry will be sent.",
+          "Approval could not be confirmed. Check the running whitelist and action history. No automatic retry will be sent.",
       };
     }
     try {
@@ -198,7 +162,78 @@ export class ApplicationsService {
           id: request.id,
           state: "unknown",
           message:
-            "The game request finished, but the application result could not be saved. Check this action ID in history before any further change.",
+            "The game request finished, but the application result could not be saved. Refresh this application and use Recheck live whitelist. No further grant will be sent.",
+        },
+      };
+    }
+  }
+
+  private recordedReview(
+    record: WhitelistApplication,
+    request: ApplicationReview,
+    kind: "approve" | "decline" | "recheck",
+    staff: Staff,
+  ) {
+    const sameKind = record.reviewKind === kind;
+    if (
+      record.reviewId === request.id &&
+      record.reviewedBy === staff.id &&
+      record.reviewReason === request.reason &&
+      sameKind
+    ) {
+      return {
+        application: record,
+        outcome: {
+          id: request.id,
+          state: record.lastActionState === "started" ? "unknown" : (record.lastActionState ?? "unknown"),
+          message:
+            record.lastActionState === "started"
+              ? "This approval was already started. Check the running whitelist and action history before any further change."
+              : (record.lastActionMessage ?? "Check the recorded application status."),
+        },
+      };
+    }
+    throw new ConflictException(
+      "This application is already being reviewed or has a recorded decision. Refresh and check its history.",
+    );
+  }
+
+  private async recheck(staff: Staff, applicationId: string, request: ApplicationReview) {
+    const application = await this.store.get(applicationId, staff.serverId!);
+    if (!application) throw new NotFoundException("Application not found on this server.");
+    if (application.reviewId === request.id) return this.recordedReview(application, request, "recheck", staff);
+    if (!["processing", "needs_review"].includes(application.status))
+      throw new ConflictException("This application does not need a live recheck. Refresh its status.");
+    let outcome: ActionResult;
+    try {
+      const list = await this.servers.get(staff.serverId!).whitelist();
+      const active = list.entries.some((entry) => entry.steamId === application.steamId && entry.active);
+      outcome = active
+        ? { state: "applied", message: "Whitelist access is confirmed in the running game. No game change was sent." }
+        : {
+            state: "pending",
+            message:
+              "Access is not confirmed in the running whitelist. The application still needs review. No game change was sent.",
+          };
+    } catch {
+      outcome = {
+        state: "unknown",
+        message:
+          "The running whitelist could not be checked. The application still needs review. No game change was sent.",
+      };
+    }
+    try {
+      const saved = await this.store.finishRecheck(application, request, staff, outcome);
+      return { application: saved, outcome: { id: request.id, ...outcome } };
+    } catch (error) {
+      if (error instanceof ConflictException) throw error;
+      return {
+        application,
+        outcome: {
+          id: request.id,
+          state: "unknown",
+          message:
+            "The whitelist check could not be saved. Refresh this application before checking again. No game change was sent.",
         },
       };
     }
