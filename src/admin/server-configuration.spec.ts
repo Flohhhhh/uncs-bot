@@ -629,6 +629,30 @@ describe("server configuration boundaries", () => {
     expect(parseRotation(unconfirmed.saved().text)[1].map).toBe("Europe");
     expect(unconfirmed.request.mock.calls.some(([, path]) => path.startsWith("/v1/match"))).toBe(false);
   });
+  it("refuses a choice planned for another next slot, so an automatic queue never appends after the last entry", async () => {
+    const f = fixture();
+    const entries = [kavkazi, europe, europeInfantry];
+    withRotation(f, entries, 2);
+    const queue = (nextSlot: number) =>
+      f.game.execute({
+        id: randomUUID(),
+        reason: "Discord map vote",
+        action: "map-next",
+        revision: "r1",
+        currentIndex: 2,
+        currentMap: "Europe",
+        entry: europe,
+        nextSlot,
+      });
+    // Planned as a swap into entry 1, but this read no longer reports the wrap.
+    const error = await queue(0).catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(RconError);
+    expect((error as RconError).message).toContain("no longer reports the next rotation entry");
+    expect(f.request.mock.calls.some(([method]) => method === "PUT")).toBe(false);
+    f.status.rotation = { nowIndex: 2, nextIndex: 0 } as never;
+    expect(await queue(0)).toMatchObject({ state: "pending" });
+    expect(parseRotation(f.saved().text)).toEqual([europe, kavkazi, europeInfantry]);
+  });
   it("swaps an earlier copy into the next slot without growing the rotation or moving the running entry", async () => {
     const f = fixture();
     const queue = withRotation(f, [kavkazi, europe, europeInfantry], 1);

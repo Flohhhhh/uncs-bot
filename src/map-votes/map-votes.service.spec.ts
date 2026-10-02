@@ -1687,6 +1687,70 @@ describe("automatic ballots that follow the round, not the clock", () => {
       "Ozeti · Normal was already next. The rotation was left unchanged.",
     );
   });
+  /** A ballot opened on the last entry (Islands) after the game confirmed it returns to entry 1. */
+  async function lastRowBallot() {
+    const f = await openBallot();
+    const settings = await f.game.configuration();
+    f.game.configuration.mockResolvedValue({
+      ...settings,
+      rotation: { ...settings.rotation, currentIndex: 2, currentMap: "Islands" },
+    });
+    f.game.catalog.mockResolvedValue({
+      maps: [{ id: "Kavkazi" }, { id: "Europe" }, { id: "Islands" }],
+      experiences: [],
+      lightings: [],
+    });
+    Object.assign(f.record, { currentIndex: 2, currentMap: "Islands" });
+    f.record.choices = [
+      { map: "Kavkazi", experiences: [] },
+      { map: "Europe", experiences: [] },
+    ];
+    Object.assign(f.automation.round!, { map: "Islands", index: 2 });
+    Object.assign(f.automation.rotation!, {
+      currentIndex: 2,
+      nextSlot: 0,
+      nextKey: voteChoiceKey(settings.rotation.entries[0]),
+    });
+    f.status({ map: "Islands", rotation: { nowIndex: 2, nextIndex: 0 } });
+    // Europe, an earlier row, wins: planned as a swap into the first slot.
+    return f;
+  }
+  it("swaps an earlier winner into the first slot after the last entry while the game confirms the wrap", async () => {
+    const f = await lastRowBallot();
+    f.score(95);
+    await f.service.tick();
+    expect(f.store.patchAutomation).toHaveBeenCalledWith(
+      f.record.id,
+      { queue: expect.objectContaining({ kind: "swap" }) },
+      ["closing"],
+    );
+    expect(f.admin.act).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "system:map-vote:primary" }),
+      expect.objectContaining({ action: "map-next", currentIndex: 2, nextSlot: 0 }),
+    );
+    expect(actionSchema.safeParse(f.admin.act.mock.calls[0][1]).success).toBe(true);
+  });
+  it("closes without queueing when the game stops confirming the wrap before the close", async () => {
+    const f = await lastRowBallot();
+    f.score(30);
+    await f.service.tick();
+    later();
+    // A transient read omits nextIndex: Europe would be appended as a duplicate last row.
+    f.status({ factionScores: leadingScores(95), rotation: { nowIndex: 2, nextIndex: null } });
+    await f.service.tick();
+    expect(f.store.claimClose).toHaveBeenCalled();
+    expect(f.admin.act).not.toHaveBeenCalled();
+    expect(f.store.patchAutomation).not.toHaveBeenCalledWith(
+      f.record.id,
+      expect.objectContaining({ queue: expect.anything() }),
+      expect.anything(),
+    );
+    expect(f.store.finish).toHaveBeenCalledWith(
+      f.record.id,
+      "cancelled",
+      "The game no longer confirms it returns to entry 1 after the last entry, so the winner was not queued. The rotation continues.",
+    );
+  });
   it("closes cleanly and keeps voting automatic when the game refuses the winner", async () => {
     const f = await openBallot();
     f.admin.act.mockResolvedValue({ state: "failed", message: "Keep the rotation to 100 entries or fewer." });

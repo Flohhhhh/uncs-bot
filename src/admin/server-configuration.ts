@@ -403,6 +403,10 @@ export async function changeServerConfiguration(
         if (!existing[action.currentIndex] || !sameMap(existing[action.currentIndex].map, status.map))
           throw new RconError("The running map does not match the saved rotation. Reload and review it.");
         const plan = planMapNext(existing, action.currentIndex, status.rotation?.nextIndex, action.entry);
+        if (action.nextSlot !== undefined && plan.nextSlot !== action.nextSlot)
+          throw new RconError(
+            "The game no longer reports the next rotation entry this choice was planned for. Nothing was changed.",
+          );
         // Rewriting an unchanged list would still change the saved array syntax; send nothing.
         if (plan.placement === "already-next")
           return {

@@ -1567,7 +1567,13 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
             overview.status.rotation?.nextIndex,
             entry,
           );
-          if (plan.placement === "already-next") {
+          // The ballot was planned for this next slot and never appends; after the last entry, a fresh
+          // read that no longer confirms the wrap to entry 1 would append a duplicate row instead.
+          if (plan.placement === "append" || plan.nextSlot !== automation.rotation!.nextSlot) {
+            state = "cancelled";
+            message =
+              "The game no longer confirms it returns to entry 1 after the last entry, so the winner was not queued. The rotation continues.";
+          } else if (plan.placement === "already-next") {
             state = "queued";
             message = `${voteChoiceTitle(winner)} was already next. The rotation was left unchanged.`;
           } else {
@@ -1587,6 +1593,7 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
               currentIndex: vote.currentIndex,
               currentMap: vote.currentMap,
               entry,
+              nextSlot: plan.nextSlot,
             }));
           }
         } else
