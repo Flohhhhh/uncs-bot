@@ -108,8 +108,9 @@ it("edits an entry under its own row with labeled icon buttons", async () => {
   expect(edit).toHaveTextContent("✎");
   expect(screen.getByRole("button", { name: "Remove Ozeti" })).toHaveTextContent("✕");
   fireEvent.click(edit);
+  // The map picker loads its catalog options asynchronously, so wait for it before checking the row.
+  await waitFor(() => expect(within(queueRows()[1]).getByRole("combobox", { name: "Map" })).toHaveValue("Europe"));
   const row = queueRows()[1];
-  expect(within(row).getByRole("combobox", { name: "Map" })).toHaveValue("Europe");
   expect(within(row).getByRole("button", { name: "Update entry" })).toBeInTheDocument();
   expect(within(queueRows()[0]).queryByRole("combobox", { name: "Map" })).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Remove Ozeti" })).toBeDisabled();
