@@ -87,4 +87,19 @@ describe("dashboard settings boundary", () => {
   it("uses only explicit IDs without implicitly granting Discord administrators access", () => {
     expect(settings().get()).toMatchObject({ ownerIds: [], adminRoleIds: [], moderatorRoleIds: [], viewerRoleIds: [] });
   });
+  it("reads the staff IDs for Discord staff commands while the dashboard is off", () => {
+    const config = settings({
+      ADMIN_ENABLED: false,
+      ADMIN_OWNER_IDS: " 100000000000000001 ,",
+      ADMIN_ADMIN_ROLE_IDS: "200000000000000001",
+      ADMIN_MODERATOR_ROLE_IDS: "200000000000000002,200000000000000003",
+    });
+    expect(config.staffPolicy()).toEqual({
+      ownerIds: ["100000000000000001"],
+      adminRoleIds: ["200000000000000001"],
+      moderatorRoleIds: ["200000000000000002", "200000000000000003"],
+      viewerRoleIds: [],
+    });
+    expect(() => config.get()).toThrow("not been connected");
+  });
 });
