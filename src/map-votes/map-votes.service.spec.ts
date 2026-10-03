@@ -1272,7 +1272,8 @@ describe("score-based voting controls and reminders", () => {
       f.record.id,
       expect.any(String),
       expect.objectContaining({ name: "Gramps" }),
-      "The score reached 100 or moved backwards. The rotation was left unchanged.",
+      // This branch words a score-based end the same way as any other ended match.
+      "The match ended before voting closed. The rotation continues.",
       expect.any(String),
     );
     expect(f.store.claimClose).not.toHaveBeenCalled();
