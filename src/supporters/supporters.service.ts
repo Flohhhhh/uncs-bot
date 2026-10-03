@@ -18,6 +18,7 @@ import {
   paymentSchema,
   policyDays,
   reviewSchema,
+  signedByPatreon,
   type FounderPolicy,
   type SupporterMutation,
 } from "./supporters.types";
@@ -74,6 +75,10 @@ export class SupportersService {
       this.env.get("PATREON_CAMPAIGN_ID")!,
     );
     return { ok: true, ...(await this.store.ingest(observation)) };
+  }
+  /** Whether a webhook request carries a valid Patreon signature. The body is not parsed or kept. */
+  signedWebhook(raw: unknown, signature: unknown) {
+    return this.webhookConfigured() && signedByPatreon(raw, signature, this.env.get("PATREON_WEBHOOK_SECRET")!);
   }
   async list(staff: Staff, search: unknown = "") {
     this.admin(staff);

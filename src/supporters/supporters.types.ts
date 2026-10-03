@@ -55,6 +55,12 @@ export type PatreonObservation = {
   lastChargeAt: Date | null;
   receivedAt: Date;
 };
+/** Whether the original body carries Patreon's HMAC-MD5 signature for this secret, compared in constant time. */
+export function signedByPatreon(raw: unknown, signature: unknown, secret: string) {
+  if (!Buffer.isBuffer(raw) || typeof signature !== "string" || !/^[a-fA-F0-9]{32}$/.test(signature)) return false;
+  return timingSafeEqual(Buffer.from(signature, "hex"), createHmac("md5", secret).update(raw).digest());
+}
+
 export function parsePatreon(
   raw: unknown,
   signature: unknown,
@@ -64,11 +70,7 @@ export function parsePatreon(
 ): PatreonObservation {
   if (!Buffer.isBuffer(raw) || raw.length === 0 || raw.length > MAX_PATREON_BYTES)
     throw new BadRequestException("A bounded original webhook body is required.");
-  if (typeof signature !== "string" || !/^[a-fA-F0-9]{32}$/.test(signature) || signature.length !== 32)
-    throw new UnauthorizedException("Invalid Patreon signature.");
-  const expected = createHmac("md5", secret).update(raw).digest();
-  if (!timingSafeEqual(Buffer.from(signature, "hex"), expected))
-    throw new UnauthorizedException("Invalid Patreon signature.");
+  if (!signedByPatreon(raw, signature, secret)) throw new UnauthorizedException("Invalid Patreon signature.");
   const event = supportedTriggers.safeParse(trigger);
   if (!event.success) throw new BadRequestException("Unsupported Patreon webhook trigger.");
   let input: unknown;
