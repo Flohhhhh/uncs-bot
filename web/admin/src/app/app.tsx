@@ -11,6 +11,7 @@ import { PlayersPage } from "../features/players/players-page";
 import { ActionsDialog } from "../features/actions/actions-dialog";
 import { ApplicationsPage } from "../features/applications";
 import { SupportersPage } from "../features/supporters";
+import { DiscordRolesPage } from "../features/discord-roles";
 import { SettingsPage, PermissionsPage } from "../features/server/settings-page";
 import { NavigationGuard } from "./navigation-guard";
 import { serverSearch } from "./server-link";
@@ -30,6 +31,7 @@ const pages = {
   bans: { icon: "⊘", label: "Bans", title: "Server bans" },
   announcements: { icon: "↗", label: "Announcements", title: "Announcements" },
   supporters: { icon: "✳", label: "Supporters", title: "Community supporters" },
+  "discord-roles": { icon: "◎", label: "Discord roles", title: "Discord roles" },
   settings: { icon: "⚙", label: "Settings", title: "Server settings" },
   permissions: { icon: "◈", label: "Permissions", title: "Staff permissions" },
 } satisfies Record<string, Page>;
@@ -37,7 +39,7 @@ type PageId = keyof typeof pages;
 /** The first group is the phone tab bar; the others open from More. */
 const navigation: { label: string; pages: PageId[] }[] = [
   { label: "Live", pages: ["overview", "players", "match", "activity"] },
-  { label: "Community", pages: ["whitelist", "applications", "bans", "announcements", "supporters"] },
+  { label: "Community", pages: ["whitelist", "applications", "bans", "announcements", "supporters", "discord-roles"] },
   { label: "Server", pages: ["settings"] },
 ];
 /** Old standalone pages are now views of a hub. The redirect keeps the server and any other parameters. */
@@ -209,7 +211,7 @@ function Dashboard({
   const key = location.pathname.split("/").filter(Boolean)[0] || "overview";
   const page: PageId = Object.hasOwn(pages, key) ? (key as PageId) : "overview";
   const canOpen = (id: PageId) =>
-    id === "supporters"
+    id === "supporters" || id === "discord-roles"
       ? me.role === "admin"
       : ["applications", "settings"].includes(id)
         ? server.role === "admin"
@@ -501,6 +503,7 @@ function Dashboard({
                 <Route path="permissions" element={<PermissionsPage />} />
                 <Route path="applications" element={staffPage(<ApplicationsPage />, true)} />
                 <Route path="supporters" element={staffPage(<SupportersPage />)} />
+                <Route path="discord-roles" element={staffPage(<DiscordRolesPage />)} />
                 <Route
                   path="*"
                   element={<Empty title="Page not found" detail="Choose a section from the staff menu." />}

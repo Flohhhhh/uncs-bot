@@ -60,6 +60,7 @@ export class AdminPageController {
     "whitelist",
     "applications",
     "supporters",
+    "discord-roles",
     "bans",
     "announcements",
     "match",
