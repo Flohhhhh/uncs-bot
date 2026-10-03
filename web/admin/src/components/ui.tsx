@@ -172,16 +172,44 @@ export function Modal({
   serverScoped?: boolean;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const latest = useRef({ busy, onClose });
+  latest.current = { busy, onClose };
   const { setDialogOpen, server } = useAdmin();
   useEffect(() => {
     setDialogOpen(true);
     const element = dialog.current;
+    // Some close requests close the dialog natively whatever the cancel handler does, such as the Android back
+    // gesture. Reopen a busy dialog so its progress and Stop control stay reachable; otherwise let the parent
+    // remove it. The listener goes before this cleanup's own close().
+    const closed = () => {
+      if (!element?.isConnected || element.open) return;
+      if (latest.current.busy) element.showModal();
+      else latest.current.onClose();
+    };
+    element?.addEventListener("close", closed);
     element?.showModal();
     return () => {
+      element?.removeEventListener("close", closed);
       element?.close();
       setDialogOpen(false);
     };
   }, [setDialogOpen]);
+  useEffect(() => {
+    const element = dialog.current;
+    if (!busy || !element) return;
+    // Chrome lets a page cancel only the first Escape after a click; the next one closes the dialog anyway.
+    // While busy, stop the key before it becomes a close request. Focus can be on the page body here, once
+    // the button that started the work is gone, so listen on the document.
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") event.preventDefault();
+    };
+    document.addEventListener("keydown", escape, true);
+    element.setAttribute("closedby", "none");
+    return () => {
+      document.removeEventListener("keydown", escape, true);
+      element.removeAttribute("closedby");
+    };
+  }, [busy]);
   return (
     <dialog
       ref={dialog}

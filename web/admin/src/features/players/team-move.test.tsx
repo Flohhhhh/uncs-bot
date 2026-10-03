@@ -6,6 +6,7 @@ import { AdminContext } from "../../app/context";
 import { TeamMoveDialog, type TeamMoveResult } from "./team-move";
 import { alice, bob, cara, context, overview } from "./test-fixtures";
 import { actionSchema } from "../../../../../src/admin/admin.types";
+import { pressEscape } from "../../test/dialog";
 
 vi.mock("../../api/client", () => ({ api: vi.fn() }));
 const request = vi.mocked(api);
@@ -62,6 +63,32 @@ describe("reviewed team moves", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("Stopped at your request");
     expect(admin.invalidateOverview).toHaveBeenCalledOnce();
     expect(admin.setBusy).toHaveBeenLastCalledWith(false);
+    expect(sent()).toHaveLength(1);
+  });
+  it("keeps a running batch and its Stop button on screen when Escape is pressed twice", async () => {
+    let finish!: (result: unknown) => void;
+    answer(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const onClose = vi.fn();
+    render(
+      <AdminContext.Provider value={context()}>
+        <TeamMoveDialog players={[alice, bob]} initialFaction="Lonestar" onClose={onClose} />
+      </AdminContext.Provider>,
+    );
+    submit();
+    await waitFor(() => expect(sent()).toHaveLength(1));
+    const dialog = screen.getByRole("dialog") as HTMLDialogElement;
+    pressEscape(dialog);
+    pressEscape(dialog, { cancelable: false });
+    expect(dialog.open).toBe(true);
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Stop remaining moves" }));
+    await act(async () => finish({ state: "applied", message: "Confirmed" }));
+    expect(screen.getByRole("heading", { name: "Team move stopped" })).toBeInTheDocument();
     expect(sent()).toHaveLength(1);
   });
   it("stops during the gap between requests without sending another move", async () => {
