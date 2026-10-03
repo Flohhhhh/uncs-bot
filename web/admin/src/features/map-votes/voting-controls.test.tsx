@@ -74,6 +74,41 @@ it("does not save a no-op and does not offer working switches when storage is un
   expect(screen.queryByRole("button", { name: "Save voting controls" })).not.toBeInTheDocument();
   expect(request.mock.calls.some(([, options]) => options?.method === "POST")).toBe(false);
 });
+it("resumes paused automatic voting by saving the unchanged controls", async () => {
+  const pause =
+    "Paused after 3 refused results (Not queued: The current round changed. The rotation continues.). Save the voting controls to resume.";
+  saved = { ...saved, version: 4, ready: true, policy: { ...defaultVotingPolicy, enabled: true, mapChoices: true } };
+  saved.paused = pause;
+  const base = request.getMockImplementation()!;
+  request.mockImplementation(async (path, options) => {
+    // Any save starts a new version, which ends the pause.
+    if (options?.method === "POST") saved.paused = null;
+    return base(path, options);
+  });
+  const { onDirty } = show();
+  expect(await screen.findByRole("alert")).toHaveTextContent(`Automatic voting is paused. ${pause}`);
+  // Nothing was changed, so the ordinary save is not offered; the resume save is.
+  expect(screen.queryByRole("button", { name: "Save voting controls" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Save to resume" }));
+  await screen.findByText("Voting controls saved unchanged. Automatic voting resumes.");
+  const posts = request.mock.calls.filter(([, options]) => options?.method === "POST");
+  expect(posts).toHaveLength(1);
+  expect(JSON.parse(posts[0][1]!.body as string)).toEqual({
+    serverId: "primary",
+    version: 4,
+    policy: { ...defaultVotingPolicy, enabled: true, mapChoices: true },
+  });
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Save to resume" })).not.toBeInTheDocument());
+  expect(screen.queryByText(/Automatic voting is paused/)).not.toBeInTheDocument();
+  expect(onDirty).not.toHaveBeenCalledWith(true);
+});
+it("offers no resume save while voting is off or not paused", async () => {
+  saved.paused = "Paused after 3 refused results (Refused). Save the voting controls to resume.";
+  show();
+  await screen.findByRole("checkbox", { name: "Automatic community voting" });
+  expect(screen.queryByRole("button", { name: "Save to resume" })).not.toBeInTheDocument();
+  expect(screen.queryByText(/Automatic voting is paused/)).not.toBeInTheDocument();
+});
 it("requires a fresh read after an uncertain save before another attempt", async () => {
   show();
   fireEvent.click(await screen.findByRole("checkbox", { name: /Score 85/ }));

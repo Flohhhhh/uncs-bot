@@ -2332,11 +2332,11 @@ describe("ballots that need review", () => {
     const history = [refused(20), refused(60), refused(100)];
     f.store.history.mockResolvedValue(history);
     await f.service.tick();
-    expect((await f.service.list(staff)).automatic).toMatchObject({
-      phase: "paused",
-      message:
-        "Paused after 3 refused results (Not queued: The current round changed. The rotation continues.). Save the voting controls to resume.",
-    });
+    const paused =
+      "Paused after 3 refused results (Not queued: The current round changed. The rotation continues.). Save the voting controls to resume.";
+    expect((await f.service.list(staff)).automatic).toMatchObject({ phase: "paused", message: paused });
+    // The dashboard's controls carry the pause, so staff can save them unchanged to resume.
+    expect((await f.service.controls(staff)).paused).toBe(paused);
     expect(f.alerts.send).toHaveBeenCalledTimes(1);
     expect(f.store.patchAutomation).toHaveBeenCalledWith(
       history[0].id,
@@ -2347,8 +2347,25 @@ describe("ballots that need review", () => {
     await f.service.tick();
     expect(f.alerts.send).toHaveBeenCalledTimes(1);
     f.saved.version = 2;
+    // A save of any kind, even of unchanged controls, ends the pause before the next pass.
+    expect((await f.service.controls(staff)).paused).toBeNull();
     await f.service.tick();
     expect((await f.service.list(staff)).automatic?.phase).not.toBe("paused");
+    expect((await f.service.controls(staff)).paused).toBeNull();
+  });
+  it("asks for a save when the administrator who saved the controls loses access", async () => {
+    const f = automatic();
+    f.auth.role.mockResolvedValue("viewer");
+    await observeForWindow(f);
+    const paused =
+      "The administrator who saved the voting controls no longer has access to this server. Save the voting controls to resume.";
+    expect((await f.service.list(staff)).automatic).toMatchObject({ phase: "paused", message: paused });
+    expect((await f.service.controls(staff)).paused).toBe(paused);
+    expect(f.discord.publish).not.toHaveBeenCalled();
+    // Saved again by an administrator with access: a new version, so the pause is over.
+    f.saved.version = 2;
+    f.auth.role.mockResolvedValue("admin");
+    expect((await f.service.controls(staff)).paused).toBeNull();
   });
   it("keeps voting automatic after 50v50 winners that could not start", async () => {
     const f = automatic();

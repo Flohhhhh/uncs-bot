@@ -33,10 +33,13 @@ export function VotingControlsPanel({ onDirty }: { onDirty: (value: boolean) => 
   }, [draft, onDirty]);
   const policy = draft?.policy ?? data?.policy;
   const changed = !!draft && draft.version !== data?.version;
-  async function save() {
+  // Paused until the controls are saved again: saving them unchanged resumes automatic voting.
+  const paused = data?.policy.enabled && data.paused ? data.paused : null;
+  const resumable = !!paused && !draft;
+  async function save(request = draft) {
     if (
       !data ||
-      !draft ||
+      !request ||
       busy ||
       saving.current ||
       changed ||
@@ -47,7 +50,7 @@ export function VotingControlsPanel({ onDirty }: { onDirty: (value: boolean) => 
       resource.error
     )
       return;
-    if (draft.policy.enabled && !data.policy.enabled && !review) {
+    if (request.policy.enabled && !data.policy.enabled && !review) {
       setReview(true);
       return;
     }
@@ -57,11 +60,13 @@ export function VotingControlsPanel({ onDirty }: { onDirty: (value: boolean) => 
     try {
       await api<VotingControls>("map-votes/controls", {
         method: "POST",
-        body: JSON.stringify({ serverId: data.serverId, ...draft }),
+        body: JSON.stringify({ serverId: data.serverId, ...request }),
       });
       setDraft(null);
       setReview(false);
-      setMessage("Voting controls saved.");
+      setMessage(
+        request === draft ? "Voting controls saved." : "Voting controls saved unchanged. Automatic voting resumes.",
+      );
       setReloadingFrom(data);
       resource.refresh();
     } catch (error) {
@@ -135,9 +140,37 @@ export function VotingControlsPanel({ onDirty }: { onDirty: (value: boolean) => 
           round.
         </p>
       )}
+      {paused && (
+        <div className="notice warning" role="alert">
+          <p>Automatic voting is paused. {paused}</p>
+          {!draft && (
+            <p>
+              Save to resume keeps every switch and setting as it is. Gramps then acts for you as the administrator
+              responsible for automatic voting.
+            </p>
+          )}
+        </div>
+      )}
       {message && <p role="status">{message}</p>}
-      {(draft || uncertain || resource.error) && (
+      {(draft || uncertain || resource.error || resumable) && (
         <div className="dialog-actions">
+          {resumable && (
+            <button
+              className="button primary"
+              disabled={
+                busy ||
+                resource.loading ||
+                resource.refreshing ||
+                reloading ||
+                !data.available ||
+                uncertain ||
+                !!resource.error
+              }
+              onClick={() => void save({ version: data.version, policy: data.policy })}
+            >
+              Save to resume
+            </button>
+          )}
           {draft && (
             <button
               className="button primary"

@@ -135,6 +135,11 @@ export type VotingControls = {
   settings?: VotingSettings;
   limits?: VotingSettingLimits;
   context?: VotingContext | null;
+  /**
+   * Why automatic voting is paused until these controls are saved again (repeated refused results, or the
+   * administrator who saved them lost access). Saving them unchanged resumes it. Null or absent otherwise.
+   */
+  paused?: string | null;
 };
 export type VoteRoundSource = "clock" | "observed" | "baseline";
 export type VoteRoundSnapshot = {

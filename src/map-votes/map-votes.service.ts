@@ -174,6 +174,8 @@ export class MapVotesService implements OnModuleInit, OnApplicationBootstrap, On
   /** Voted 50v50 events that need staff review, by server, and their alert counts. */
   private readonly eventReviews = new Map<string, { id: string; at: string; message: string }>();
   private readonly eventAlerts = new Map<string, { count: number; at: number }>();
+  /** Automatic voting paused until its controls are saved again, with the saved version that paused it. */
+  private readonly savePauses = new Map<string, { version: number; message: string }>();
   constructor(
     private readonly store: MapVotesStore,
     private readonly servers: GameServers,
@@ -299,11 +301,13 @@ export class MapVotesService implements OnModuleInit, OnApplicationBootstrap, On
         } catch {
           valid = false;
         }
+      const policy = saved ? pickPolicy(saved.policy) : defaultVotingPolicy;
+      const pause = this.savePauses.get(serverId);
       controls = {
         serverId,
         version: saved?.version ?? 0,
         // Only the five switches: an older dashboard posts this object back unchanged.
-        policy: saved ? pickPolicy(saved.policy) : defaultVotingPolicy,
+        policy,
         available: true,
         ready: this.options().enabled && connectionMatches,
         message: !connectionMatches
@@ -315,6 +319,8 @@ export class MapVotesService implements OnModuleInit, OnApplicationBootstrap, On
               : "Live voting is disabled in Gramps. You can prepare these settings without opening a ballot.",
         settings,
         limits: votingSettingLimits,
+        // Any save starts a new version, which resumes it; a pause recorded under an older version is over.
+        paused: policy.enabled && pause && pause.version === saved?.version ? pause.message : null,
       };
     } catch {
       return {
@@ -1038,6 +1044,7 @@ export class MapVotesService implements OnModuleInit, OnApplicationBootstrap, On
   }
   private async openAutomatic(recipe: PolicyRow) {
     const serverId = this.servers.resolve(recipe.serverId);
+    this.savePauses.delete(serverId);
     const { policy, settings } = readStoredPolicy(recipe.policy);
     const connection = this.servers.connectionHash(serverId);
     const history = await this.store.history(serverId);
@@ -1076,6 +1083,7 @@ export class MapVotesService implements OnModuleInit, OnApplicationBootstrap, On
     ) {
       const message = `Paused after 3 refused results (${recent[0].message}). Save the voting controls to resume.`;
       this.note(serverId, message, { phase: "paused" });
+      this.savePauses.set(serverId, { version: recipe.version, message });
       if (!recent[0].automation?.alert) {
         await this.alerts.send(serverId, `map-vote-brake:${recent[0].id}`, `${recent[0].serverName}: ${message}`);
         const at = new Date().toISOString();
@@ -1092,10 +1100,10 @@ export class MapVotesService implements OnModuleInit, OnApplicationBootstrap, On
       true,
     );
     if (actor.role !== "admin") {
-      this.note(serverId, "The administrator who saved the voting controls no longer has access to this server.", {
-        ...evaluation.detail,
-        phase: "paused",
-      });
+      const message =
+        "The administrator who saved the voting controls no longer has access to this server. Save the voting controls to resume.";
+      this.note(serverId, message, { ...evaluation.detail, phase: "paused" });
+      this.savePauses.set(serverId, { version: recipe.version, message });
       return;
     }
     if (this.stopped) return;
