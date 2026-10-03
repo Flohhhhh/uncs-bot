@@ -13,6 +13,10 @@ import {
 } from "drizzle-orm/pg-core";
 
 export type SupporterProvider = "patreon" | "paypal";
+/** Who linked a supporter's Discord account: staff, or the Patreon import from the patron's own connection. */
+export type SupporterDiscordSource = "staff" | "patreon";
+/** Who linked a supporter's SteamID: staff, or automatic matching from an approved whitelist application. */
+export type SupporterSteamSource = "staff" | "application";
 // Plain text column: a new source is a TypeScript-only addition unless a check constrains it.
 export type SupporterPaymentSource = "signed_status" | "manual_receipt" | "patreon_api" | "paypal";
 
@@ -31,7 +35,17 @@ export const supporterMembers = pgTable(
     observedAt: timestamp("observed_at", { withTimezone: true }).notNull(),
     reviewState: text("review_state").$type<"pending" | "verified" | "unverified">().notNull().default("pending"),
     discordId: text("discord_id"),
+    // Who made the Discord link. Null when there is no link, and for a link made before sources were recorded until
+    // the startup classification labels it.
+    discordSource: text("discord_source").$type<SupporterDiscordSource>(),
+    // The Discord account Patreon last reported for this membership, linked or not. Patreon rows only.
+    patreonDiscordId: text("patreon_discord_id"),
     steamId: text("steam_id"),
+    // Who made the SteamID link. Null when there is no link, and for a link made before sources were recorded.
+    steamSource: text("steam_source").$type<SupporterSteamSource>(),
+    // The approved whitelist application the SteamID was copied from. No foreign key: this file is re-exported by
+    // schema.ts, so it must not import the application table.
+    steamApplicationId: uuid("steam_application_id"),
     version: integer("version").notNull().default(1),
   },
   (table) => [
@@ -53,6 +67,23 @@ export const supporterMembers = pgTable(
     check(
       "supporter_members_paypal_fields_check",
       sql`${table.provider} <> 'paypal' or (${table.campaignId} is null and ${table.patreonMemberId} is null)`,
+    ),
+    // Every new column is null on existing rows, so each check below holds for them.
+    check(
+      "supporter_members_discord_source_check",
+      sql`${table.discordSource} is null or (${table.discordId} is not null and (${table.discordSource} = 'staff' or (${table.discordSource} = 'patreon' and ${table.provider} = 'patreon')))`,
+    ),
+    check(
+      "supporter_members_steam_source_check",
+      sql`${table.steamSource} is null or (${table.steamId} is not null and (${table.steamSource} = 'staff' or (${table.steamSource} = 'application' and ${table.provider} = 'patreon')))`,
+    ),
+    check(
+      "supporter_members_steam_application_check",
+      sql`(${table.steamApplicationId} is null and ${table.steamSource} is distinct from 'application') or (${table.steamApplicationId} is not null and ${table.steamSource} = 'application')`,
+    ),
+    check(
+      "supporter_members_patreon_discord_check",
+      sql`${table.patreonDiscordId} is null or ${table.provider} = 'patreon'`,
     ),
   ],
 );

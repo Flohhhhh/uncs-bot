@@ -54,7 +54,11 @@ function fixture() {
     observedAt: new Date(),
     reviewState: "verified",
     discordId: staff.id,
+    discordSource: "patreon",
+    patreonDiscordId: staff.id,
     steamId: "76561198000000001",
+    steamSource: "staff",
+    steamApplicationId: null,
     version: 3,
   };
   const payment: Record<string, unknown> & { id: string } = {
@@ -76,12 +80,14 @@ function fixture() {
     manualDuplicate: boolean;
     earlier: boolean;
     otherFounder: boolean;
+    founder: boolean;
     action: Record<string, unknown> | null;
   } = {
     duplicate: false,
     manualDuplicate: false,
     earlier: false,
     otherFounder: false,
+    founder: false,
     action: null,
   };
   const query = jest.fn(async (config: { text: string }, _params: unknown[]) => {
@@ -93,6 +99,8 @@ function fixture() {
       return { rows: state.action ? [row(supporterActions, state.action)] : [] };
     if (config.text.includes('from "supporter_founders" inner join'))
       return { rows: state.otherFounder ? [[randomUUID()]] : [] };
+    if (config.text.startsWith('select "member_id" from "supporter_founders" where'))
+      return { rows: state.founder ? [[id]] : [] };
     if (config.text.startsWith('select "id" from "supporter_payments"'))
       return { rows: state.earlier ? [[randomUUID()]] : [] };
     if (config.text.includes('from "supporter_payments"')) return { rows: [row(supporterPayments, payment)] };
@@ -216,7 +224,7 @@ describe("supporter persistence and founder eligibility", () => {
   });
   it("reports the record's Discord account for a new observation so its roles can be checked", async () => {
     const { store } = fixture();
-    await expect(store.ingest(observation)).resolves.toEqual({ duplicate: false, discordId: staff.id });
+    await expect(store.ingest(observation)).resolves.toEqual({ duplicate: false, memberId: id, discordId: staff.id });
   });
   it("keeps an older charge from replacing newer state", async () => {
     const { store, query } = fixture();
@@ -371,6 +379,123 @@ describe("supporter persistence and founder eligibility", () => {
         policy,
       ),
     ).rejects.toMatchObject({ status: 409, message: "Use the PayPal payment record for PayPal supporters." });
+  });
+  const link = (change: Partial<Extract<SupporterMutation, { kind: "link" }>>): SupporterMutation => ({
+    kind: "link",
+    id: randomUUID(),
+    version: 3,
+    confirm: "member-123",
+    reason: "Linked",
+    ...change,
+  });
+  const memberUpdate = (query: jest.Mock) =>
+    query.mock.calls.find(([config]) => config.text.startsWith('update "supporter_members" set "discord_id"'))!;
+  it("marks only a changed identity as a staff link and keeps where an unchanged one came from", async () => {
+    const { store, query, member } = fixture();
+    // The dashboard used to resend both fields; the Discord ID Patreon filled in must stay a Patreon link.
+    await store.mutate(id, link({ discordId: staff.id, steamId: "76561198000000002" }), staff, "123", policy);
+    const [statement, params] = memberUpdate(query);
+    expect(statement.text).toContain('"discord_source" = $2');
+    expect(statement.text).toContain('"steam_source" = $4');
+    expect(params.slice(0, 5)).toEqual([staff.id, "patreon", "76561198000000002", "staff", null]);
+    const audit = query.mock.calls.find(([config]) => config.text.startsWith('insert into "supporter_actions"'))!;
+    expect(JSON.parse(audit[1].find((value: unknown) => String(value).startsWith("{")) as string)).toMatchObject({
+      previousDiscordSource: "patreon",
+      discordSource: "patreon",
+      previousSteamSource: "staff",
+      steamSource: "staff",
+    });
+    const changed = fixture();
+    await changed.store.mutate(id, link({ discordId: "234567890123456789" }), staff, "123", policy);
+    expect(memberUpdate(changed.query)[1].slice(0, 4)).toEqual([
+      "234567890123456789",
+      "staff",
+      member.steamId,
+      "staff",
+    ]);
+  });
+  it("refuses to move a SteamID copied from an application onto a new Discord account unless staff restate it", async () => {
+    const { store, query, member } = fixture();
+    const applicationId = randomUUID();
+    Object.assign(member, { steamSource: "application", steamApplicationId: applicationId });
+    await expect(
+      store.mutate(id, link({ discordId: "234567890123456789" }), staff, "123", policy),
+    ).rejects.toMatchObject({ status: 409, response: { blockedReason: "steam_from_application" } });
+    // Resending the same SteamID is not a restatement.
+    await expect(
+      store.mutate(
+        id,
+        link({ discordId: "234567890123456789", steamId: member.steamId as string }),
+        staff,
+        "123",
+        policy,
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(query.mock.calls.some(([config]) => config.text.startsWith("update"))).toBe(false);
+    await store.mutate(id, link({ discordId: "234567890123456789", steamConfirmed: true }), staff, "123", policy);
+    expect(memberUpdate(query)[1].slice(0, 5)).toEqual(["234567890123456789", "staff", member.steamId, "staff", null]);
+    // A SteamID-only change, or keeping the same Discord account, needs no restatement.
+    const steamOnly = fixture();
+    Object.assign(steamOnly.member, { steamSource: "application", steamApplicationId: applicationId });
+    await expect(
+      steamOnly.store.mutate(id, link({ discordId: staff.id, steamId: "76561198000000002" }), staff, "123", policy),
+    ).resolves.toMatchObject({ ok: true });
+  });
+  it("refuses to move a founder onto an identity another founder holds, after locking it", async () => {
+    const { store, query, state } = fixture();
+    state.founder = true;
+    state.otherFounder = true;
+    await expect(store.mutate(id, link({ steamId: "76561198000000002" }), staff, "123", policy)).rejects.toMatchObject({
+      status: 409,
+      response: { blockedReason: "already_founder" },
+    });
+    const lock = query.mock.calls.findIndex(([config]) => config.text.includes("pg_advisory_xact_lock"));
+    const check = query.mock.calls.findIndex(([config]) =>
+      config.text.includes('from "supporter_founders" inner join'),
+    );
+    expect(query.mock.calls[lock][1]).toEqual(["founder:steam:76561198000000002"]);
+    expect(lock).toBeLessThan(check);
+    expect(query.mock.calls.at(-1)![0].text).toBe("rollback");
+    // A record that is not a founder takes no founder lock.
+    const plain = fixture();
+    plain.state.otherFounder = true;
+    await expect(
+      plain.store.mutate(id, link({ steamId: "76561198000000002" }), staff, "123", policy),
+    ).resolves.toMatchObject({ ok: true });
+    expect(plain.query.mock.calls.some(([config]) => config.text.includes("pg_advisory_xact_lock"))).toBe(false);
+  });
+  it("names an existing founder record instead of failing on its key", async () => {
+    const { store, query, payment, state } = fixture();
+    state.founder = true;
+    await expect(
+      store.mutate(
+        id,
+        {
+          kind: "founder",
+          id: randomUUID(),
+          version: 3,
+          confirm: "member-123",
+          reason: "Again",
+          paymentId: payment.id,
+        },
+        staff,
+        "123",
+        policy,
+      ),
+    ).rejects.toMatchObject({ status: 409, response: { blockedReason: "already_founder" } });
+    expect(query.mock.calls.some(([config]) => config.text.startsWith('insert into "supporter_founders"'))).toBe(false);
+  });
+  it("reports where each identity came from and how the record is linked", async () => {
+    const { store, query } = fixture();
+    await store.list("123", policy);
+    const [statement] = query.mock.calls[0];
+    expect(statement.text).toContain("'discordSource', m.discord_source");
+    expect(statement.text).toContain("'patreonDiscordId', m.patreon_discord_id");
+    expect(statement.text).toContain("'steamSource', m.steam_source");
+    expect(statement.text).toContain("'steamApplicationId', m.steam_application_id");
+    expect(statement.text).toContain("WHEN m.discord_id IS NULL OR m.steam_id IS NULL THEN 'partial'");
+    expect(statement.text).toContain("WHEN m.discord_source = 'patreon' THEN 'patreon_linked' ELSE 'staff_linked'");
+    expect(statement.text).toContain("'automatic', f.awarded_by LIKE 'system:%'");
   });
   it("links one identity at a time and keeps the other", async () => {
     const { store, query } = fixture();
@@ -565,10 +690,14 @@ describe("PayPal supporter ledger", () => {
     // The transaction lock is the first statement, before any replay or member lookup.
     expect(all[1]).toContain("pg_advisory_xact_lock");
     expect(query.mock.calls[1][1]).toEqual([`paypal:${input.transactionId}`]);
-    const [, memberValues] = query.mock.calls.find(([config]) =>
+    const [memberInsert, memberValues] = query.mock.calls.find(([config]) =>
       config.text.startsWith('insert into "supporter_members"'),
     )!;
     expect(memberValues).toEqual(expect.arrayContaining(["paypal", "PayPal donor", staff.id, "verified"]));
+    // The Discord ID staff entered is a staff link; no SteamID was entered, so it has no source.
+    expect(memberInsert.text).toContain('"discord_source"');
+    expect(memberValues).toContain("staff");
+    expect(memberValues).not.toContain("application");
     const [, paymentValues] = query.mock.calls.find(([config]) =>
       config.text.startsWith('insert into "supporter_payments"'),
     )!;
@@ -584,8 +713,13 @@ describe("PayPal supporter ledger", () => {
     state.existingMember = true;
     await store.recordPaypal({ ...input, steamId: "76561198000000009" }, staff, null, policy);
     expect(texts(query).some((text) => text.startsWith('insert into "supporter_members"'))).toBe(false);
-    const [, update] = query.mock.calls.find(([config]) => config.text.startsWith('update "supporter_members"'))!;
+    const [statement, update] = query.mock.calls.find(([config]) =>
+      config.text.startsWith('update "supporter_members"'),
+    )!;
     expect(update).toEqual(expect.arrayContaining([staff.id, "76561198000000009", member.version + 1]));
+    // Only the SteamID this payment fills in becomes a staff link; the existing Discord link keeps its source.
+    expect(statement.text).toContain('"steam_source" =');
+    expect(statement.text).not.toContain('"discord_source" =');
   });
   it("refuses an identity that conflicts with the matched supporter", async () => {
     const { store, query, state, input, member } = paypalFixture();

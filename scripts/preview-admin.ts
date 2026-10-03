@@ -47,12 +47,13 @@ import { StaffAlerts } from "../src/staff-alerts/staff-alerts.service";
 import { StaffAlertsMonitor } from "../src/staff-alerts/staff-alerts.monitor";
 import { settingsView, staffAlertsOptions } from "../src/staff-alerts/staff-alerts.config";
 import type { StaffAlertsStatus } from "../src/common/staff-alerts";
-import type {
-  FounderPolicy,
-  ManualMemberInput,
-  PaymentView,
-  SupporterMutation,
-  SupporterView,
+import {
+  founderBlockedMessages,
+  type FounderPolicy,
+  type ManualMemberInput,
+  type PaymentView,
+  type SupporterMutation,
+  type SupporterView,
 } from "../src/supporters/supporters.types";
 
 const previewPort = Number(process.env.PREVIEW_PORT || 4317);
@@ -747,14 +748,20 @@ for (const [index, displayName] of ["Demo · Steady Supporter", "Demo · Foundin
     observedAt: new Date().toISOString(),
     reviewState: index === 1 ? "verified" : "pending",
     discordId: index === 2 ? null : `88888888888888888${index + 1}`,
+    discordSource: index === 2 ? null : "staff",
+    patreonDiscordId: null,
     steamId: index === 2 ? null : `7656119800000000${index + 1}`,
+    steamSource: index === 2 ? null : "staff",
+    steamApplicationId: null,
     identityState: index === 2 ? "unlinked" : "staff_linked",
     version: 1,
     latestPayment: payment,
     payments: [payment],
     founderEligiblePayment: null,
-    founder: index === 1 ? { awardedAt: paidAt, paymentId: payment.id, source: payment.source } : null,
+    founder:
+      index === 1 ? { awardedAt: paidAt, paymentId: payment.id, source: payment.source, automatic: false } : null,
     founderBlockedReason: null,
+    founderBlockedMessage: null,
     needsDiscordLink: false,
   });
 }
@@ -783,7 +790,11 @@ const supporterStore = {
       observedAt: new Date().toISOString(),
       reviewState: "unverified",
       discordId: null,
+      discordSource: null,
+      patreonDiscordId: null,
       steamId: null,
+      steamSource: null,
+      steamApplicationId: null,
       identityState: "unlinked",
       version: 1,
       latestPayment: null,
@@ -791,6 +802,7 @@ const supporterStore = {
       founderEligiblePayment: null,
       founder: null,
       founderBlockedReason: "no_payment",
+      founderBlockedMessage: founderBlockedMessages.no_payment,
       needsDiscordLink: false,
     };
     demoSupporters.set(record.id, record);
@@ -864,6 +876,7 @@ const supporterStore = {
         awardedAt: new Date().toISOString(),
         paymentId: input.paymentId,
         source: view.founderEligiblePayment.source,
+        automatic: false,
       };
     }
     if (input.kind === "link") {
@@ -873,9 +886,18 @@ const supporterStore = {
         )
       )
         throw new ConflictException("This preview account is already linked.");
-      record.discordId = input.discordId ?? record.discordId;
-      record.steamId = input.steamId ?? record.steamId;
-      record.identityState = record.discordId && record.steamId ? "staff_linked" : "unlinked";
+      if (input.discordId !== undefined && input.discordId !== record.discordId)
+        Object.assign(record, { discordId: input.discordId, discordSource: "staff" });
+      if (input.steamId !== undefined && input.steamId !== record.steamId)
+        Object.assign(record, { steamId: input.steamId, steamSource: "staff", steamApplicationId: null });
+      record.identityState =
+        record.discordId && record.steamId
+          ? record.discordSource === "patreon"
+            ? "patreon_linked"
+            : "staff_linked"
+          : record.discordId || record.steamId
+            ? "partial"
+            : "unlinked";
     }
     if (input.kind === "payment") {
       const reference = input.reference.toLowerCase();

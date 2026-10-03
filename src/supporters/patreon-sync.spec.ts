@@ -85,6 +85,7 @@ const imported = (overrides: Partial<ApiImportResult> = {}): ApiImportResult => 
   discordLinked: false,
   conflict: null,
   discordId: null,
+  patreonDiscordChanged: false,
   ...overrides,
 });
 function fixture(

@@ -83,7 +83,10 @@ function fixture() {
       observedAt: new Date(),
       reviewState: "verified",
       discordId: null as string | null,
+      discordSource: null as string | null,
+      patreonDiscordId: null as string | null,
       steamId: null as string | null,
+      steamSource: null as string | null,
       version: 4,
     },
     payments: [] as Record<string, unknown>[],
@@ -233,15 +236,19 @@ describe("Patreon API import persistence", () => {
     expect(lookup[0].text).toContain('"id" <>');
     const [update] = calls('update "supporter_members"');
     expect(update[0].text).toContain('"discord_id" =');
+    expect(update[0].text).toContain('"discord_source" =');
+    expect(update[0].text).toContain('"patreon_discord_id" =');
     expect(update[0].text).not.toContain('"steam_id"');
+    expect(update[0].text).not.toContain('"steam_source"');
+    expect(update[0].text).not.toContain('"steam_application_id"');
     expect(update[0].text).not.toContain('"review_state"');
-    expect(update[1]).toEqual(expect.arrayContaining([staff.id, 5]));
+    expect(update[1]).toEqual(expect.arrayContaining([staff.id, "patreon", 5]));
     const [[, audit]] = calls('insert into "supporter_actions"');
     expect(audit).toEqual(
       expect.arrayContaining(["system:patreon-sync", "Patreon sync", "patreon-discord-link", memberId]),
     );
   });
-  it("never overwrites an existing link and reports a Discord ID used by another record", async () => {
+  it("never overwrites an existing link, and records what Patreon reports with one version bump", async () => {
     const differs = fixture();
     differs.state.observed = false;
     differs.state.payments = [payment()];
@@ -249,8 +256,14 @@ describe("Patreon API import persistence", () => {
     expect(await differs.store.importApiMember(campaign, snapshot({ discordId: staff.id }), at)).toMatchObject({
       discordLinked: false,
       conflict: "discord-differs",
+      patreonDiscordChanged: true,
     });
-    expect(differs.calls("update")).toHaveLength(0);
+    const [update, ...others] = differs.calls("update");
+    expect(others).toHaveLength(0);
+    expect(update[0].text).toBe(
+      'update "supporter_members" set "patreon_discord_id" = $1, "version" = $2 where "supporter_members"."id" = $3',
+    );
+    expect(update[1]).toEqual([staff.id, 5, memberId]);
     expect(differs.calls('insert into "supporter_actions"')).toHaveLength(0);
     const same = fixture();
     same.state.observed = false;
@@ -266,8 +279,46 @@ describe("Patreon API import persistence", () => {
     expect(await used.store.importApiMember(campaign, snapshot({ discordId: staff.id }), at)).toMatchObject({
       discordLinked: false,
       conflict: "discord-in-use",
+      patreonDiscordChanged: true,
     });
-    expect(used.calls("update")).toHaveLength(0);
+    const [recorded] = used.calls("update");
+    expect(recorded[0].text).not.toContain('"discord_id" =');
+    expect(recorded[0].text).not.toContain('"discord_source"');
+    expect(recorded[1]).toEqual([staff.id, 5, memberId]);
+  });
+  it("writes nothing when Patreon still reports the account it reported before", async () => {
+    const { store, state, calls } = fixture();
+    state.observed = false;
+    state.payments = [payment()];
+    Object.assign(state.member, { discordId: staff.id, discordSource: "patreon", patreonDiscordId: staff.id });
+    expect(await store.importApiMember(campaign, snapshot({ discordId: staff.id }), at)).toMatchObject({
+      updated: false,
+      patreonDiscordChanged: false,
+    });
+    expect(calls("update")).toHaveLength(0);
+  });
+  it("clears what Patreon reports when the patron disconnects Discord, but keeps the link", async () => {
+    const { store, state, calls } = fixture();
+    state.observed = false;
+    state.payments = [payment()];
+    Object.assign(state.member, { discordId: staff.id, discordSource: "patreon", patreonDiscordId: staff.id });
+    expect(await store.importApiMember(campaign, snapshot({ discordId: null }), at)).toMatchObject({
+      patreonDiscordChanged: true,
+      discordId: staff.id,
+    });
+    const [update] = calls("update");
+    expect(update[0].text).not.toContain('"discord_id" =');
+    expect(update[1]).toEqual([null, 5, memberId]);
+  });
+  it("never clears what Patreon reported when its answer could not be read", async () => {
+    const { store, state, calls } = fixture();
+    state.observed = false;
+    state.payments = [payment()];
+    Object.assign(state.member, { discordId: staff.id, discordSource: "patreon", patreonDiscordId: staff.id });
+    expect(await store.importApiMember(campaign, snapshot({ discordId: null, discordKnown: false }), at)).toMatchObject(
+      { patreonDiscordChanged: false },
+    );
+    expect(calls("update")).toHaveLength(0);
   });
   it("keeps webhook ordering rules: an older API charge does not replace newer webhook state", async () => {
     const { store, state, calls } = fixture();

@@ -2,7 +2,12 @@ import { BadRequestException, UnauthorizedException } from "@nestjs/common";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { isPublicIndividualSteamId } from "../common/steam-id";
-import type { SupporterPaymentSource, SupporterProvider } from "../database/supporters.schema";
+import type {
+  SupporterDiscordSource,
+  SupporterPaymentSource,
+  SupporterProvider,
+  SupporterSteamSource,
+} from "../database/supporters.schema";
 import { PATREON_REVERSED_CHARGE_STATUSES } from "./patreon.client";
 
 export const MAX_PATREON_BYTES = 65_536;
@@ -115,9 +120,15 @@ export const manualMemberSchema = z
   .strict();
 export type ManualMemberInput = z.infer<typeof manualMemberSchema>;
 export const reviewSchema = z.object(base).strict();
-// Either identity may be linked alone. A field that is left out keeps its current value.
+// Either identity may be linked alone. A field that is left out keeps its current value. `steamConfirmed` restates
+// the current SteamID as staff-checked, which a Discord change needs when the SteamID came from an application.
 export const linkSchema = z
-  .object({ ...base, discordId: discordUserId.optional(), steamId: playerSteamId.optional() })
+  .object({
+    ...base,
+    discordId: discordUserId.optional(),
+    steamId: playerSteamId.optional(),
+    steamConfirmed: z.literal(true).optional(),
+  })
   .strict()
   .refine((value) => value.discordId !== undefined || value.steamId !== undefined, "Enter a Discord ID or SteamID64.");
 export const paymentSchema = z
@@ -318,6 +329,11 @@ export type PaymentView = {
   minimumConfirmed: boolean;
   recordedBy: string | null;
 };
+/**
+ * How the two identities are linked: none, one of them, or both. `patreon_linked` means the Discord account came from
+ * the patron's own Patreon connection; the SteamID is still a self-declared or staff-entered claim either way.
+ */
+export type SupporterIdentityState = "unlinked" | "partial" | "patreon_linked" | "staff_linked";
 export type SupporterView = {
   id: string;
   provider: SupporterProvider;
@@ -332,16 +348,27 @@ export type SupporterView = {
   observedAt: string;
   reviewState: "pending" | "verified" | "unverified";
   discordId: string | null;
+  /** Who made the Discord link; null when unlinked, or for an older link that is not classified yet. */
+  discordSource: SupporterDiscordSource | null;
+  /** The Discord account Patreon last reported for this membership, linked or not. Patreon rows only. */
+  patreonDiscordId: string | null;
   steamId: string | null;
-  identityState: "unlinked" | "staff_linked";
+  /** Who made the SteamID link; null when unlinked, or for an older link that is not classified yet. */
+  steamSource: SupporterSteamSource | null;
+  /** The approved whitelist application the SteamID was copied from, when automatic matching copied it. */
+  steamApplicationId: string | null;
+  identityState: SupporterIdentityState;
   version: number;
   latestPayment: PaymentView | null;
   /** Newest first, at most 20. */
   payments: PaymentView[];
   founderEligiblePayment: PaymentView | null;
-  founder: { awardedAt: string; paymentId: string; source: SupporterPaymentSource | null } | null;
+  /** `automatic` is true when automatic supporter matching recorded the promise. */
+  founder: { awardedAt: string; paymentId: string; source: SupporterPaymentSource | null; automatic: boolean } | null;
   /** Why no founder promise can be recorded yet; null for a founder or a member ready to award. */
   founderBlockedReason: FounderBlockedReason | "no_payment" | null;
+  /** The staff-facing text for `founderBlockedReason`. */
+  founderBlockedMessage: string | null;
   /** A founder without a linked Discord account cannot receive the Founder role. */
   needsDiscordLink: boolean;
 };

@@ -19,6 +19,7 @@ import {
   type FounderIdentity,
   identityKeys,
   lockKeys,
+  otherFounder,
   qualifyingSources,
   RECEIPT_COPY_TOLERANCE,
   receiptCopy,
@@ -49,6 +50,8 @@ export type ApiImportResult = {
   conflict: "discord-in-use" | "discord-differs" | null;
   /** The record's Discord account after the import, or null; used only to queue a Discord role check. */
   discordId: string | null;
+  /** Patreon now reports a different Discord account (or none) for this membership than it did before. */
+  patreonDiscordChanged: boolean;
 };
 /** A founder promise for staff review, with the payment that is no longer verified. */
 export type FounderReview = {
@@ -64,7 +67,7 @@ export type FounderReview = {
 type MemberRow = typeof supporterMembers.$inferSelect;
 type PaymentRow = typeof supporterPayments.$inferSelect;
 // Internal columns used to explain founder readiness; removed before a view leaves the store.
-type StoredSupporter = Omit<SupporterView, "founderBlockedReason" | "needsDiscordLink"> & {
+type StoredSupporter = Omit<SupporterView, "founderBlockedReason" | "founderBlockedMessage" | "needsDiscordLink"> & {
   founderCandidate: { payment: PaymentView; earlier: boolean; copyUnverified: boolean } | null;
   otherFounder: boolean;
 };
@@ -123,6 +126,9 @@ export function paymentView(row: PaymentRow): PaymentView {
     recordedBy: row.recordedBy,
   };
 }
+
+const STEAM_FROM_APPLICATION =
+  "This SteamID was copied from the previous Discord account's whitelist application. Enter the SteamID again, or confirm it belongs to the new Discord account, to change the Discord account.";
 
 /** A founder refusal names its rule so staff see why nothing was recorded. */
 function founderConflict(reason: FounderBlockedReason, suffix = "") {
@@ -189,7 +195,7 @@ export class SupportersStore {
   /** Records one signed observation. A new one reports the record's Discord account so its roles can be checked. */
   async ingest(
     observation: PatreonObservation,
-  ): Promise<{ duplicate: true } | { duplicate: false; discordId: string | null }> {
+  ): Promise<{ duplicate: true } | { duplicate: false; memberId: string; discordId: string | null }> {
     return this.db.transaction(async (tx) => {
       await tx
         .insert(supporterMembers)
@@ -251,7 +257,7 @@ export class SupportersStore {
           })
           .onConflictDoNothing();
       }
-      return { duplicate: false as const, discordId: member.discordId };
+      return { duplicate: false as const, memberId: member.id, discordId: member.discordId };
     });
   }
 
@@ -310,6 +316,7 @@ export class SupportersStore {
         discordLinked: false,
         conflict: null,
         discordId: member.discordId,
+        patreonDiscordChanged: false,
       };
       // An unchanged snapshot keeps the member's review state; a changed or corrected one needs review like a webhook.
       const patch: Partial<typeof supporterMembers.$inferInsert> =
@@ -397,6 +404,7 @@ export class SupportersStore {
           if (other) result.conflict = "discord-in-use";
           else {
             patch.discordId = snapshot.discordId;
+            patch.discordSource = "patreon";
             result.discordLinked = true;
             result.discordId = snapshot.discordId;
             actions.push({
@@ -417,7 +425,20 @@ export class SupportersStore {
           }
         }
       }
-      if (observed || stale || result.payments || paymentsChanged || result.discordLinked)
+      // What Patreon reports is kept even when it is not linked, so staff and automatic matching can compare it with
+      // the link. An unreadable answer is not a disconnection and changes nothing.
+      if (snapshot.discordKnown && snapshot.discordId !== member.patreonDiscordId) {
+        patch.patreonDiscordId = snapshot.discordId;
+        result.patreonDiscordChanged = true;
+      }
+      if (
+        observed ||
+        stale ||
+        result.payments ||
+        paymentsChanged ||
+        result.discordLinked ||
+        result.patreonDiscordChanged
+      )
         await tx
           .update(supporterMembers)
           .set({ ...patch, version: member.version + 1 })
@@ -474,7 +495,11 @@ export class SupportersStore {
         'confirmKey', coalesce(m.patreon_member_id, m.id::text), 'displayName', m.display_name,
         'patronStatus', m.patron_status, 'lastChargeStatus', m.last_charge_status, 'lastChargeAt', m.last_charge_at,
         'observedAt', m.observed_at, 'reviewState', m.review_state, 'discordId', m.discord_id, 'steamId', m.steam_id,
-        'identityState', CASE WHEN m.discord_id IS NOT NULL AND m.steam_id IS NOT NULL THEN 'staff_linked' ELSE 'unlinked' END,
+        'discordSource', m.discord_source, 'patreonDiscordId', m.patreon_discord_id, 'steamSource', m.steam_source,
+        'steamApplicationId', m.steam_application_id,
+        'identityState', CASE WHEN m.discord_id IS NULL AND m.steam_id IS NULL THEN 'unlinked'
+          WHEN m.discord_id IS NULL OR m.steam_id IS NULL THEN 'partial'
+          WHEN m.discord_source = 'patreon' THEN 'patreon_linked' ELSE 'staff_linked' END,
         'version', m.version,
         'latestPayment', (SELECT ${payment("p")} FROM supporter_payments p WHERE p.member_id = m.id
           ORDER BY (p.verification_state = 'verified') DESC, (p.source IN ${qualifyingSources}) DESC, p.paid_at DESC,
@@ -501,7 +526,8 @@ export class SupportersStore {
           JOIN supporter_members other_member ON other_member.id = other_founder.member_id
           WHERE other_member.id <> m.id AND ((m.discord_id IS NOT NULL AND other_member.discord_id = m.discord_id)
             OR (m.steam_id IS NOT NULL AND other_member.steam_id = m.steam_id))),
-        'founder', (SELECT json_build_object('awardedAt', f.awarded_at, 'paymentId', f.payment_id, 'source', founder_payment.source)
+        'founder', (SELECT json_build_object('awardedAt', f.awarded_at, 'paymentId', f.payment_id, 'source', founder_payment.source,
+            'automatic', f.awarded_by LIKE 'system:%')
           FROM supporter_founders f LEFT JOIN supporter_payments founder_payment ON founder_payment.id = f.payment_id
           WHERE f.member_id = m.id)
       ) AS supporter FROM supporter_members m
@@ -546,6 +572,7 @@ export class SupportersStore {
       ...supporter,
       payments: supporter.payments ?? [],
       founderBlockedReason,
+      founderBlockedMessage: founderBlockedReason ? founderBlockedMessages[founderBlockedReason] : null,
       needsDiscordLink: Boolean(supporter.founder) && !supporter.discordId,
     };
   }
@@ -585,13 +612,48 @@ export class SupportersStore {
       const now = new Date();
       const details: Record<string, string | number | null> = {};
       if (input.kind === "link") {
-        const discordId = input.discordId ?? member.discordId,
-          steamId = input.steamId ?? member.steamId;
+        // Only a value that changes becomes a staff link; resending the current value keeps where it came from.
+        const discordChanged = input.discordId !== undefined && input.discordId !== member.discordId;
+        const steamChanged = input.steamId !== undefined && input.steamId !== member.steamId;
+        // A SteamID copied from the old Discord account's application must not silently follow a new account.
+        if (discordChanged && member.steamSource === "application" && !steamChanged && input.steamConfirmed !== true)
+          throw new ConflictException({ message: STEAM_FROM_APPLICATION, blockedReason: "steam_from_application" });
+        const steamRestated = !steamChanged && input.steamConfirmed === true && member.steamId !== null;
+        const discordId = discordChanged ? input.discordId! : member.discordId,
+          steamId = steamChanged ? input.steamId! : member.steamId;
+        const discordSource = discordChanged ? "staff" : member.discordSource,
+          steamSource = steamChanged || steamRestated ? "staff" : member.steamSource,
+          steamApplicationId = steamChanged || steamRestated ? null : member.steamApplicationId;
+        if (discordChanged || steamChanged) {
+          // A founder moved onto an identity another founder already holds would make one person a founder twice.
+          const [founder] = await tx
+            .select({ memberId: supporterFounders.memberId })
+            .from(supporterFounders)
+            .where(eq(supporterFounders.memberId, memberId));
+          const added = {
+            id: memberId,
+            discordId: discordChanged ? discordId : null,
+            steamId: steamChanged ? steamId : null,
+          };
+          if (founder) {
+            await lockKeys(tx, identityKeys("founder", added));
+            if (await otherFounder(tx, added)) throw founderConflict("already_founder");
+          }
+        }
         details.previousDiscordId = member.discordId;
         details.previousSteamId = member.steamId;
         details.discordId = discordId;
         details.steamId = steamId;
-        await tx.update(supporterMembers).set({ discordId, steamId }).where(eq(supporterMembers.id, memberId));
+        details.previousDiscordSource = member.discordSource;
+        details.discordSource = discordSource;
+        details.previousSteamSource = member.steamSource;
+        details.steamSource = steamSource;
+        details.previousSteamApplicationId = member.steamApplicationId;
+        if (input.steamConfirmed) details.steamConfirmed = 1;
+        await tx
+          .update(supporterMembers)
+          .set({ discordId, discordSource, steamId, steamSource, steamApplicationId })
+          .where(eq(supporterMembers.id, memberId));
       }
       if (input.kind === "payment") {
         const paymentId = randomUUID();
@@ -623,6 +685,12 @@ export class SupportersStore {
           .from(supporterPayments)
           .where(and(eq(supporterPayments.id, input.paymentId), eq(supporterPayments.memberId, memberId)));
         if (!payment) throw new ConflictException("Choose a payment recorded for this supporter.");
+        // Automatic matching can record this member's promise meanwhile; say so instead of failing on the key.
+        const [existing] = await tx
+          .select({ memberId: supporterFounders.memberId })
+          .from(supporterFounders)
+          .where(eq(supporterFounders.memberId, memberId));
+        if (existing) throw founderConflict("already_founder");
         await lockKeys(tx, identityKeys("founder", member));
         const blocked = await founderCheck(tx, member, payment, policy);
         if (blocked) throw founderConflict(blocked);
@@ -755,7 +823,9 @@ export class SupportersStore {
             patreonMemberId: null,
             displayName: input.displayName,
             discordId: input.discordId ?? null,
+            discordSource: input.discordId ? "staff" : null,
             steamId: input.steamId ?? null,
+            steamSource: input.steamId ? "staff" : null,
             observedAt: now,
             reviewState: "verified",
             version: 1,
@@ -809,7 +879,14 @@ export class SupportersStore {
       if (!created)
         await tx
           .update(supporterMembers)
-          .set({ discordId: identity.discordId, steamId: identity.steamId, version: member.version + 1 })
+          .set({
+            discordId: identity.discordId,
+            steamId: identity.steamId,
+            // Only an identity this payment fills in becomes a staff link; existing links keep their source.
+            ...(member.discordId === null && identity.discordId ? { discordSource: "staff" as const } : {}),
+            ...(member.steamId === null && identity.steamId ? { steamSource: "staff" as const } : {}),
+            version: member.version + 1,
+          })
           .where(eq(supporterMembers.id, member.id));
       await tx.insert(supporterActions).values({
         id: input.id,

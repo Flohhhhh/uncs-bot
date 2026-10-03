@@ -231,9 +231,10 @@ describe("launch storage on isolated PostgreSQL", () => {
       if (file.startsWith("0005_")) {
         // Supporter records written before the provider-neutral ledger must stay valid Patreon records.
         await client.query(
-          `INSERT INTO supporter_members (id, campaign_id, patreon_member_id, display_name, observed_at)
-           VALUES ($1, '999001', 'legacy-member', 'Legacy supporter', $2)`,
-          [legacySupporterId, legacyFirstReceivedAt],
+          `INSERT INTO supporter_members (id, campaign_id, patreon_member_id, display_name, observed_at, discord_id,
+             steam_id)
+           VALUES ($1, '999001', 'legacy-member', 'Legacy supporter', $2, $3, '76561198000000001')`,
+          [legacySupporterId, legacyFirstReceivedAt, staff.id],
         );
         await client.query(
           `INSERT INTO supporter_payments (id, member_id, campaign_id, paid_at, amount_cents, currency, source,
@@ -253,7 +254,8 @@ describe("launch storage on isolated PostgreSQL", () => {
     ).rows;
     migratedSupporterData = (
       await client.query(
-        `SELECT m.provider, m.campaign_id, m.patreon_member_id, p.source, p.minimum_confirmed,
+        `SELECT m.provider, m.campaign_id, m.patreon_member_id, m.discord_source, m.patreon_discord_id,
+        m.steam_source, m.steam_application_id, p.source, p.minimum_confirmed,
         p.recorded_by FROM supporter_members m JOIN supporter_payments p ON p.member_id = m.id WHERE m.id = $1`,
         [legacySupporterId],
       )
@@ -331,11 +333,85 @@ describe("launch storage on isolated PostgreSQL", () => {
         provider: "patreon",
         campaign_id: "999001",
         patreon_member_id: "legacy-member",
+        // Links made before sources were recorded stay unclassified until the startup classification runs.
+        discord_source: null,
+        patreon_discord_id: null,
+        steam_source: null,
+        steam_application_id: null,
         source: "manual_receipt",
         minimum_confirmed: false,
         recorded_by: null,
       },
     ]);
+  });
+
+  it("rejects identity sources that do not match the record's identities or provider", async () => {
+    const insert = (values: {
+      provider?: "patreon" | "paypal";
+      discordId?: string | null;
+      discordSource?: string | null;
+      patreonDiscordId?: string | null;
+      steamId?: string | null;
+      steamSource?: string | null;
+      steamApplicationId?: string | null;
+    }) => {
+      const provider = values.provider ?? "patreon";
+      return client.query(
+        `INSERT INTO supporter_members (id, provider, campaign_id, patreon_member_id, observed_at, discord_id,
+           discord_source, patreon_discord_id, steam_id, steam_source, steam_application_id)
+         VALUES ($1, $2, $3, $4, now(), $5, $6, $7, $8, $9, $10)`,
+        [
+          randomUUID(),
+          provider,
+          provider === "patreon" ? campaign : null,
+          provider === "patreon" ? randomUUID() : null,
+          values.discordId ?? null,
+          values.discordSource ?? null,
+          values.patreonDiscordId ?? null,
+          values.steamId ?? null,
+          values.steamSource ?? null,
+          values.steamApplicationId ?? null,
+        ],
+      );
+    };
+    const discordSource = "supporter_members_discord_source_check",
+      steamSource = "supporter_members_steam_source_check",
+      steamApplication = "supporter_members_steam_application_check",
+      patreonDiscord = "supporter_members_patreon_discord_check";
+    for (const [values, constraint] of [
+      [{ discordSource: "staff" }, discordSource],
+      [{ discordId: staff.id, discordSource: "someone" }, discordSource],
+      [{ provider: "paypal", discordId: staff.id, discordSource: "patreon" }, discordSource],
+      [{ steamSource: "staff" }, steamSource],
+      [
+        {
+          provider: "paypal",
+          steamId: "76561198000000001",
+          steamSource: "application",
+          steamApplicationId: randomUUID(),
+        },
+        steamSource,
+      ],
+      [{ steamId: "76561198000000001", steamSource: "application" }, steamApplication],
+      [{ steamId: "76561198000000001", steamSource: "staff", steamApplicationId: randomUUID() }, steamApplication],
+      [{ provider: "paypal", patreonDiscordId: staff.id }, patreonDiscord],
+    ] as const)
+      await expect(insert(values)).rejects.toMatchObject({ code: "23514", constraint });
+    await insert({
+      discordId: staff.id,
+      discordSource: "patreon",
+      patreonDiscordId: staff.id,
+      steamId: "76561198000000001",
+      steamSource: "application",
+      steamApplicationId: randomUUID(),
+    });
+    await insert({
+      provider: "paypal",
+      discordId: staff.id,
+      discordSource: "staff",
+      steamId: "76561198000000002",
+      steamSource: "staff",
+    });
   });
 
   const ballotInput = () => ({
@@ -1009,8 +1085,11 @@ describe("launch storage on isolated PostgreSQL", () => {
     let [record] = await supporters.list(campaign, policy, undefined, "api-member");
     expect(record).toMatchObject({
       discordId: staff.id,
+      discordSource: "patreon",
+      patreonDiscordId: staff.id,
       steamId: null,
-      identityState: "unlinked",
+      steamSource: null,
+      identityState: "partial",
       reviewState: "pending",
       founderEligiblePayment: {
         source: "patreon_api",
@@ -1033,6 +1112,8 @@ describe("launch storage on isolated PostgreSQL", () => {
         policy,
       )
     ).supporter!;
+    // Resending the Discord ID Patreon filled in keeps it a Patreon link; only the new SteamID is a staff link.
+    expect(record).toMatchObject({ identityState: "patreon_linked", discordSource: "patreon", steamSource: "staff" });
     record = (
       await supporters.mutate(
         record.id,
