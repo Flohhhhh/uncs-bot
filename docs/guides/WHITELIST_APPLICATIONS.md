@@ -23,7 +23,7 @@ The website serves the page; Gramps serves these routes through the same website
 | `POST /apply/auth/logout`                  | Clears the applicant cookie after session, Origin, and CSRF validation.                                          |
 | `GET /apply/api/me`                        | Returns `{userId, displayName, csrf, emailRequired, application}` for the signed-in account only.                |
 | `POST /apply/api/request`                  | Accepts `{steamId, email, relationship, contactConsent: true, rulesAccepted: true}` and returns `{application}`. |
-| `GET /admin/api/applications`              | Admin-only private review list: `{applications}`.                                                                |
+| `GET /admin/api/applications`              | Admin-only private review list: `{enabled, applications}`; `enabled: false` while the feature is off.            |
 | `POST /admin/api/applications/:id/approve` | Reviews a pending application and requests its stored SteamID be added.                                          |
 | `POST /admin/api/applications/:id/decline` | Declines a pending application without contacting the game.                                                      |
 | `POST /admin/api/applications/:id/recheck` | Rechecks a `processing` or `needs_review` application's running whitelist membership without changing the game.  |
@@ -53,7 +53,7 @@ Declining an application never removes an existing whitelist entry. Existing man
 3. Add the exact Discord OAuth redirect `https://theuncsgaming.com/apply/auth/callback`, alongside staff's `https://admin.theuncsgaming.com/admin/auth/callback`. `APPLICATION_ORIGIN` must match the public website origin exactly. Proxy `/apply/*` through that public origin, preserve host-only cookies/Origin, and prevent caching. The website's `/whitelist` route is the return page. Never share staff cookies with the public site.
 4. Leave `WHITELIST_APPLICATION_EMAIL_REQUIRED=true` for the agreed required-email policy. The implementation supports `false` for a deliberate future policy change; any supplied email still requires contact consent.
 5. Configure client rate limits at the trusted website edge. Gramps also bounds requests by socket peer (30 auth or 180 API requests per minute; staff review routes use the dashboard's own limits in [Admin security](ADMIN_SECURITY.md), so applicant traffic cannot use them up) and submissions by authenticated account (5 per hour); these limits are per process and do not trust arbitrary forwarding headers.
-6. Enable `WHITELIST_APPLICATIONS_ENABLED=true` in a development deployment and verify sign-in, own-record isolation, admin-only review, duplicate handling, and controlled game readback before production activation. When disabled, application routes return 503 and ask visitors to check back on the website. There is no Discord application fallback.
+6. Enable `WHITELIST_APPLICATIONS_ENABLED=true` in a development deployment and verify sign-in, own-record isolation, admin-only review, duplicate handling, and controlled game readback before production activation. When disabled, applicant routes and staff review actions return 503 and ask visitors to check back on the website. The staff list instead returns `enabled: false` with no records, without reading the application tables, and the dashboard's Applications page says applications are turned off. There is no Discord application fallback.
 
 ## Applicant session privacy
 

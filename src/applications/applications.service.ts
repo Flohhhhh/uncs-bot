@@ -46,7 +46,6 @@ export class ApplicationsService {
   }
 
   private requireAdmin(staff: Staff) {
-    this.enabled();
     if (staff.role !== "admin") throw new ForbiddenException("Only administrators can review private applications.");
   }
 
@@ -107,13 +106,15 @@ export class ApplicationsService {
 
   async list(staff: Staff) {
     this.requireAdmin(staff);
-    return {
-      serverId: this.servers.resolve(staff.serverId),
-      applications: await this.store.list(this.servers.resolve(staff.serverId)),
-    };
+    const serverId = this.servers.resolve(staff.serverId);
+    // Off is the default, not a failure. The table may not exist until the reviewed schema is
+    // deployed, so report the setting without reading the store.
+    if (!this.env.get("WHITELIST_APPLICATIONS_ENABLED")) return { enabled: false, serverId, applications: [] };
+    return { enabled: true, serverId, applications: await this.store.list(serverId) };
   }
 
   async review(staff: Staff, applicationId: string, kind: "approve" | "decline" | "recheck", input: unknown) {
+    this.enabled();
     this.requireAdmin(staff);
     const parsed = reviewSchema.safeParse(input);
     if (!z.uuid().safeParse(applicationId).success || !parsed.success)
