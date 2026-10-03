@@ -74,7 +74,6 @@ export class ApplicationsService implements OnModuleInit, OnModuleDestroy {
   }
 
   private requireAdmin(staff: Staff) {
-    this.enabled();
     if (staff.role !== "admin") throw new ForbiddenException("Only administrators can review private applications.");
   }
 
@@ -149,6 +148,9 @@ export class ApplicationsService implements OnModuleInit, OnModuleDestroy {
   async list(staff: Staff) {
     this.requireAdmin(staff);
     const serverId = this.servers.resolve(staff.serverId);
+    // Off is the default, not a failure. The table may not exist until the reviewed schema is
+    // deployed, so report the setting without reading the store.
+    if (!this.env.get("WHITELIST_APPLICATIONS_ENABLED")) return { enabled: false, serverId, applications: [] };
     const applications = await this.store.list(serverId);
     let live: Map<string, "active" | "saved"> | null = null;
     if (applications.some((application) => unresolved.includes(application.status)))
@@ -160,6 +162,7 @@ export class ApplicationsService implements OnModuleInit, OnModuleDestroy {
         live = null;
       }
     return {
+      enabled: true,
       serverId,
       applications: applications.map((application) => ({
         ...application,
@@ -173,6 +176,7 @@ export class ApplicationsService implements OnModuleInit, OnModuleDestroy {
   }
 
   async review(staff: Staff, applicationId: string, kind: ReviewKind, input: unknown) {
+    this.enabled();
     this.requireAdmin(staff);
     const parsed = reviewSchema.safeParse(input);
     if (!z.uuid().safeParse(applicationId).success || !parsed.success)

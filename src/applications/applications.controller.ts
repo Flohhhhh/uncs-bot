@@ -30,7 +30,7 @@ export class ApplicationsExceptionFilter implements ExceptionFilter {
     const response = host.switchToHttp().getResponse<Response>();
     const request = host.switchToHttp().getRequest<Request>();
     const status = error instanceof HttpException ? error.getStatus() : 503;
-    if (request.method === "GET" && /^\/apply\/auth\/(login|callback)\/?$/.test(request.path)) {
+    if (request.method === "GET" && /^\/apply\/auth\/(login|callback)\/?$/i.test(request.path)) {
       // Return to the application with a fixed public code, never an OAuth code,
       // state value, upstream error body or caller-supplied redirect.
       const code = status === 401 ? "sign_in" : status === 403 ? "discord_access" : "unavailable";
@@ -39,7 +39,7 @@ export class ApplicationsExceptionFilter implements ExceptionFilter {
       // selection locally; a callback may use only the verified signed target.
       const target = gameServerId.safeParse(
         response.locals.applicantServer ??
-          (/^\/apply\/auth\/login\/?$/.test(request.path) ? request.query.server : undefined),
+          (/^\/apply\/auth\/login\/?$/i.test(request.path) ? request.query.server : undefined),
       );
       if (target.success) query.set("server", target.data);
       response.setHeader("Cache-Control", "no-store");
@@ -113,26 +113,32 @@ export class ApplicantApiController {
 
 @Controller(["admin/api/applications", "admin/api/servers/:serverId/applications"])
 @UseFilters(ApplicationsExceptionFilter)
-@UseGuards(ApplicationsEnabledGuard, AdminGuard, AdminServerGuard)
+@UseGuards(AdminGuard, AdminServerGuard)
 export class StaffApplicationsController {
   constructor(private readonly service: ApplicationsService) {}
+  // Only the review actions need the feature switched on. The list answers { enabled: false }
+  // so the dashboard can say applications are off instead of showing a load failure.
   @Get()
   list(@Req() req: StaffRequest) {
     return this.service.list(req.staff);
   }
   @Post(":id/approve")
+  @UseGuards(ApplicationsEnabledGuard)
   approve(@Req() req: StaffRequest, @Param("id") id: string, @Body() body: unknown) {
     return this.service.review(req.staff, id, "approve", body);
   }
   @Post(":id/decline")
+  @UseGuards(ApplicationsEnabledGuard)
   decline(@Req() req: StaffRequest, @Param("id") id: string, @Body() body: unknown) {
     return this.service.review(req.staff, id, "decline", body);
   }
   @Post(":id/recheck")
+  @UseGuards(ApplicationsEnabledGuard)
   recheck(@Req() req: StaffRequest, @Param("id") id: string, @Body() body: unknown) {
     return this.service.review(req.staff, id, "recheck", body);
   }
   @Post(":id/revoke")
+  @UseGuards(ApplicationsEnabledGuard)
   revoke(@Req() req: StaffRequest, @Param("id") id: string, @Body() body: unknown) {
     return this.service.review(req.staff, id, "revoke", body);
   }

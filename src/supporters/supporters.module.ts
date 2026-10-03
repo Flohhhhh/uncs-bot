@@ -1,4 +1,4 @@
-import { type MiddlewareConsumer, Module, type NestModule } from "@nestjs/common";
+import { type MiddlewareConsumer, Module, type NestModule, type RawBodyRequest } from "@nestjs/common";
 import type { NextFunction, Request, Response } from "express";
 import { AdminModule } from "../admin/admin.module";
 import { DiscordRolesModule } from "../discord-roles/discord-roles.module";
@@ -19,10 +19,16 @@ import { SupportersStore } from "./supporters.store";
   exports: [SupportersService, SupportersStore, PatreonSyncService],
 })
 export class SupportersModule implements NestModule {
+  constructor(private readonly service: SupportersService) {}
+
   configure(consumer: MiddlewareConsumer) {
+    // Webhooks carrying a valid Patreon signature count in their own bucket, so unsigned traffic
+    // behind one proxy can neither use up Patreon's allowance nor fill the address map and lock
+    // the webhooks out.
     const traffic = new Map<string, { until: number; count: number }>();
+    const signed = new Map<string, { until: number; count: number }>();
     consumer
-      .apply((req: Request, res: Response, next: NextFunction) => {
+      .apply((req: RawBodyRequest<Request>, res: Response, next: NextFunction) => {
         res.set({
           "Cache-Control": "no-store",
           "CDN-Cache-Control": "no-store",
@@ -34,14 +40,17 @@ export class SupportersModule implements NestModule {
           "Cross-Origin-Resource-Policy": "same-origin",
           "Strict-Transport-Security": "max-age=31536000",
         });
-        const now = Date.now();
-        for (const [key, value] of traffic) if (value.until <= now) traffic.delete(key);
         const webhook = /^\/supporters\/webhooks(?:\/|$)/i.test(req.originalUrl);
-        const key = `${webhook ? "webhook" : "staff"}:${req.socket.remoteAddress ?? "unknown"}`;
-        let counter = traffic.get(key);
-        if (!counter && traffic.size < 5000) {
+        const patreon = webhook && this.service.signedWebhook(req.rawBody, req.headers["x-patreon-signature"]);
+        const counters = patreon ? signed : traffic;
+        const now = Date.now();
+        for (const [key, value] of counters) if (value.until <= now) counters.delete(key);
+        const key = patreon ? "patreon" : `${webhook ? "webhook" : "staff"}:${req.socket.remoteAddress ?? "unknown"}`;
+        let counter = counters.get(key);
+        // The signed bucket holds one entry, so it needs no size cap.
+        if (!counter && (patreon || counters.size < 5000)) {
           counter = { until: now + 60_000, count: 0 };
-          traffic.set(key, counter);
+          counters.set(key, counter);
         }
         if (!counter || ++counter.count > 180) {
           res.set("Retry-After", "60").status(429).json({ message: "Too many supporter requests. Try again shortly." });

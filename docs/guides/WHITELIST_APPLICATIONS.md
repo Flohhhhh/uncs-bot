@@ -16,18 +16,18 @@ The database keeps the submitted values, consent version and time, rules acknowl
 
 The website serves the page; Gramps serves these routes through the same website origin:
 
-| Route                                      | Behavior                                                                                                         |
-| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
-| `GET /apply/auth/login`                    | Starts Discord sign-in with only the `identify` scope.                                                           |
-| `GET /apply/auth/callback`                 | Completes sign-in and redirects to `/whitelist`.                                                                 |
-| `POST /apply/auth/logout`                  | Clears the applicant cookie after session, Origin, and CSRF validation.                                          |
-| `GET /apply/api/me`                        | Returns `{userId, displayName, csrf, emailRequired, application}` for the signed-in account only.                |
-| `POST /apply/api/request`                  | Accepts `{steamId, email, relationship, contactConsent: true, rulesAccepted: true}` and returns `{application}`. |
-| `GET /admin/api/applications`              | Admin-only private review list: `{applications}`. Unresolved rows include `whitelistState`.                      |
-| `POST /admin/api/applications/:id/approve` | Reviews a pending application and requests its stored SteamID be added.                                          |
-| `POST /admin/api/applications/:id/decline` | Declines a pending application without contacting the game.                                                      |
-| `POST /admin/api/applications/:id/recheck` | Rechecks a `processing` or `needs_review` application's running whitelist membership without changing the game.  |
-| `POST /admin/api/applications/:id/revoke`  | Removes an approved application's SteamID from the whitelist and marks it `revoked`.                             |
+| Route                                      | Behavior                                                                                                                                        |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /apply/auth/login`                    | Starts Discord sign-in with only the `identify` scope.                                                                                          |
+| `GET /apply/auth/callback`                 | Completes sign-in and redirects to `/whitelist`.                                                                                                |
+| `POST /apply/auth/logout`                  | Clears the applicant cookie after session, Origin, and CSRF validation.                                                                         |
+| `GET /apply/api/me`                        | Returns `{userId, displayName, csrf, emailRequired, application}` for the signed-in account only.                                               |
+| `POST /apply/api/request`                  | Accepts `{steamId, email, relationship, contactConsent: true, rulesAccepted: true}` and returns `{application}`.                                |
+| `GET /admin/api/applications`              | Admin-only private review list: `{enabled, applications}`; `enabled: false` while the feature is off. Unresolved rows include `whitelistState`. |
+| `POST /admin/api/applications/:id/approve` | Reviews a pending application and requests its stored SteamID be added.                                                                         |
+| `POST /admin/api/applications/:id/decline` | Declines a pending application without contacting the game.                                                                                     |
+| `POST /admin/api/applications/:id/recheck` | Rechecks a `processing` or `needs_review` application's running whitelist membership without changing the game.                                 |
+| `POST /admin/api/applications/:id/revoke`  | Removes an approved application's SteamID from the whitelist and marks it `revoked`.                                                            |
 
 Staff decisions accept `{id: <new review UUID>, reason: <3–200 characters>}` and return `{application, outcome: {id, state, message}}`. Approval also accepts `existingAccessConfirmed: true` (see below). The URL ID identifies the application; the body ID identifies that review attempt. The private list includes email and review notes; moderator/viewer roles cannot read it. It returns at most 100 records: unresolved requests first, oldest first, followed by recent resolved records. Counts describe this returned batch, not the entire database. Refresh after processing a batch to advance the queue.
 
@@ -84,8 +84,8 @@ Reinstating a revoked application is not available yet. A declined or revoked ap
 2. Configure `APPLICATION_ORIGIN=https://theuncsgaming.com` and the shared Discord identity credentials: `ADMIN_DISCORD_CLIENT_ID`, `ADMIN_DISCORD_CLIENT_SECRET`, `ADMIN_SESSION_SECRET`, `ADMIN_GUILD_ID`, and `DISCORD_BOT_TOKEN`. These values remain server-side. Applicant login and submission do not require `ADMIN_ENABLED`, `ADMIN_ORIGIN`, or RCON credentials. Staff review still requires staff access, and granting game access requires the game connection.
 3. Add the exact Discord OAuth redirect `https://theuncsgaming.com/apply/auth/callback`, alongside staff's `https://admin.theuncsgaming.com/admin/auth/callback`. `APPLICATION_ORIGIN` must match the public website origin exactly. Proxy `/apply/*` through that public origin, preserve host-only cookies/Origin, and prevent caching. The website's `/whitelist` route is the return page. Never share staff cookies with the public site.
 4. Leave `WHITELIST_APPLICATION_EMAIL_REQUIRED=true` for the agreed required-email policy. The implementation supports `false` for a deliberate future policy change; any supplied email still requires contact consent. Leave `WHITELIST_APPLICATION_EXISTING_CONFIRMATION_REQUIRED=false` until the dashboard sends the existing-member confirmation (see [Existing whitelist members](#existing-whitelist-members)).
-5. Configure client rate limits at the trusted website edge. Gramps also bounds requests by socket peer (30 auth or 180 API requests per minute) and submissions by authenticated account (5 per hour); these limits are per process and do not trust arbitrary forwarding headers.
-6. Enable `WHITELIST_APPLICATIONS_ENABLED=true` in a development deployment and verify sign-in, own-record isolation, admin-only review, duplicate handling, and controlled game readback before production activation. When disabled, application routes return 503 and ask visitors to check back on the website. There is no Discord application fallback.
+5. Configure client rate limits at the trusted website edge. Gramps also bounds requests by socket peer (30 auth or 180 API requests per minute; staff review routes use the dashboard's own limits in [Admin security](ADMIN_SECURITY.md), so applicant traffic cannot use them up) and submissions by authenticated account (5 per hour); these limits are per process and do not trust arbitrary forwarding headers.
+6. Enable `WHITELIST_APPLICATIONS_ENABLED=true` in a development deployment and verify sign-in, own-record isolation, admin-only review, duplicate handling, and controlled game readback before production activation. When disabled, applicant routes and staff review actions return 503 and ask visitors to check back on the website. The staff list instead returns `enabled: false` with no records, without reading the application tables, and the dashboard's Applications page says applications are turned off. There is no Discord application fallback.
 
 ## Applicant session privacy
 

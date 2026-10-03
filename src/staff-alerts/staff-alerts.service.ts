@@ -13,6 +13,7 @@ import { EnvService } from "../env/env.service";
 import {
   alertCategory,
   reviewDecisions,
+  SAFE_LINK,
   type FeedContextView,
   type NetworkBanView,
   type StaffAlertCategory,
@@ -43,8 +44,6 @@ const REQUIRED_PERMISSIONS = [
   PermissionFlagsBits.EmbedLinks,
   PermissionFlagsBits.ReadMessageHistory,
 ];
-/** An https link shown as an autolink (<url>): no spaces, angle brackets or backticks to break out. */
-const SAFE_LINK = /^https:\/\/[^\s<>`]{1,500}$/;
 const NO_MENTIONS = { parse: [], users: [], roles: [], repliedUser: false };
 
 export type StaffAlertInput = {

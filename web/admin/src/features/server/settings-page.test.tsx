@@ -72,6 +72,12 @@ const show = (role: "viewer" | "moderator" | "admin" = "admin", path = "/setting
     </AdminContext.Provider>,
   );
 };
+it("announces a failed settings read without announcing the read while it loads", async () => {
+  request.mockRejectedValue(new Error("Server settings could not be read."));
+  show();
+  expect(screen.getByText("Loading server settings…").closest("[role=alert]")).toBeNull();
+  expect(await screen.findByRole("alert")).toHaveTextContent("Server settings could not be read.");
+});
 it("reviews changed values and records the save without extra typing", async () => {
   show();
   const name = await screen.findByRole("textbox", { name: /Server name/ });

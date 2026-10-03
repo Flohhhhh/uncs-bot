@@ -1,9 +1,20 @@
-import { ForbiddenException, UnauthorizedException, type INestApplication } from "@nestjs/common";
+import {
+  ForbiddenException,
+  Module,
+  type ExecutionContext,
+  UnauthorizedException,
+  type INestApplication,
+  type MiddlewareConsumer,
+  type NestModule,
+} from "@nestjs/common";
+import { HttpAdapterHost } from "@nestjs/core";
 import { Test } from "@nestjs/testing";
+import type { Request, Response } from "express";
 import request from "supertest";
 import { Subject } from "rxjs";
 import { AdminApiController, AdminGameController, AdminExceptionFilter } from "../admin/admin.controller";
-import { AdminAuth, AdminGuard, AdminServerGuard } from "../admin/admin.auth";
+import { AdminAuth, AdminGuard, AdminServerGuard, type StaffRequest } from "../admin/admin.auth";
+import { AdminModule } from "../admin/admin.module";
 import { AdminService } from "../admin/admin.service";
 import { GameServers } from "../admin/game-servers";
 import { fixtureServers } from "../admin/game-server-fixture";
@@ -18,6 +29,7 @@ import {
   ApplicationsExceptionFilter,
   StaffApplicationsController,
 } from "./applications.controller";
+import { ApplicationsModule } from "./applications.module";
 import { ApplicationsService } from "./applications.service";
 import { ApplicationsStore } from "./applications.store";
 import { DiscordRolesService } from "../discord-roles/discord-roles.service";
@@ -145,10 +157,21 @@ describe("application HTTP routing and privacy", () => {
     expect(response.text).not.toMatch(/private|evil|primary/);
   });
 
+  it("returns mixed-case sign-in paths to the website like lowercase ones", async () => {
+    applicantAuth.callback.mockRejectedValueOnce(new UnauthorizedException("Expired OAuth state"));
+    const callback = await request(app.getHttpServer()).get("/Apply/Auth/Callback?code=private-code").expect(303);
+    expect(callback.headers.location).toBe("/whitelist?auth=sign_in");
+    expect(callback.text).not.toMatch(/private|Expired/);
+    enabled = false;
+    const login = await request(app.getHttpServer()).get("/APPLY/AUTH/LOGIN?server=event").expect(303);
+    expect(login.headers.location).toBe("/whitelist?auth=unavailable&server=event");
+  });
+
   it("routes the administrator applications list separately from existing resources", async () => {
     const response = await request(app.getHttpServer()).get("/admin/api/applications").expect(200);
     // The unreadable test whitelist leaves the live state unknown instead of failing the list.
     expect(response.body).toEqual({
+      enabled: true,
       serverId: "primary",
       applications: [{ ...privateRow, whitelistState: "unknown" }],
     });
@@ -220,8 +243,110 @@ describe("application HTTP routing and privacy", () => {
     const response = await request(app.getHttpServer()).get("/apply/api/me").expect(503);
     expect(response.body.message).toContain("this website");
     expect(response.body.message).not.toContain("discord.gg");
-    await request(app.getHttpServer()).get("/admin/api/applications").expect(503);
     expect(store.own).not.toHaveBeenCalled();
+  });
+  it("tells an administrator that applications are off without reading or reviewing records", async () => {
+    enabled = false;
+    const list = await request(app.getHttpServer()).get("/admin/api/servers/primary/applications").expect(200);
+    expect(list.body).toEqual({ enabled: false, serverId: "primary", applications: [] });
+    for (const decision of ["approve", "decline", "recheck", "revoke"]) {
+      const review = await request(app.getHttpServer())
+        .post(`/admin/api/servers/primary/applications/${privateRow.id}/${decision}`)
+        .send({ id: privateRow.id, reason: "Reviewed" })
+        .expect(503);
+      expect(review.body.message).toContain("not open yet");
+    }
+    staff.role = "moderator";
+    await request(app.getHttpServer()).get("/admin/api/servers/primary/applications").expect(403);
     expect(store.list).not.toHaveBeenCalled();
+    expect(store.claim).not.toHaveBeenCalled();
+    expect(store.claimRevoke).not.toHaveBeenCalled();
+  });
+});
+
+describe("staff application review traffic limit", () => {
+  let app: INestApplication;
+  const service = { list: jest.fn(async () => []), review: jest.fn(async () => ({ ok: true })), me: jest.fn() };
+  @Module({
+    controllers: [ApplicantApiController, StaffApplicationsController],
+    providers: [ApplicationsExceptionFilter, { provide: ApplicationsService, useValue: service }],
+  })
+  class ReviewAndApply implements NestModule {
+    configure(consumer: MiddlewareConsumer) {
+      new AdminModule(new HttpAdapterHost()).configure(consumer);
+      new ApplicationsModule().configure(consumer);
+    }
+  }
+  beforeAll(async () => {
+    const module = await Test.createTestingModule({ imports: [ReviewAndApply] })
+      .overrideGuard(ApplicationsEnabledGuard)
+      .useValue({ canActivate: () => true })
+      .overrideGuard(ApplicantGuard)
+      .useValue({
+        canActivate: () => {
+          throw new UnauthorizedException("Sign in with Discord to continue.");
+        },
+      })
+      .overrideGuard(AdminGuard)
+      .useValue({
+        canActivate: (context: ExecutionContext) => {
+          const req = context.switchToHttp().getRequest<StaffRequest>();
+          req.staff = { id: "234567890123456789", name: "Reviewer", role: "admin", csrf: "csrf" };
+          return true;
+        },
+      })
+      .overrideGuard(AdminServerGuard)
+      .useValue({ canActivate: () => true })
+      .compile();
+    app = module.createNestApplication({ logger: false });
+    await app.listen(0);
+  });
+  afterAll(async () => app.close());
+
+  it("keeps anonymous applicant traffic from one proxy address out of staff review", async () => {
+    const server = app.getHttpServer();
+    for (let count = 0; count < 180; count++) await request(server).get("/apply/api/me").expect(401);
+    await request(server).get("/apply/api/me").expect(429);
+    await request(server).get("/admin/api/servers/primary/applications").expect(200);
+    await request(server).post("/admin/api/applications/x/approve").send({}).expect(201);
+    expect(service.review).toHaveBeenCalledTimes(1);
+  });
+
+  it("still counts staff review routes in the dashboard's own /admin limit", async () => {
+    const server = app.getHttpServer();
+    // The previous test's two staff requests already count.
+    for (let count = 2; count < 600; count++) await request(server).get("/admin/api/applications").expect(200);
+    const refused = await request(server).get("/admin/api/applications").expect(429);
+    expect(refused.body.message).toBe("Too many dashboard requests. Try again in a minute.");
+  });
+});
+
+describe("applicant sign-in traffic limit", () => {
+  let app: INestApplication;
+  const signIn = jest.fn((_req: Request, res: Response) => res.status(204).end());
+  @Module({
+    controllers: [ApplicantAuthController],
+    providers: [ApplicationsExceptionFilter, { provide: ApplicantAuth, useValue: { login: signIn, callback: signIn } }],
+  })
+  class SignInOnly implements NestModule {
+    configure(consumer: MiddlewareConsumer) {
+      new ApplicationsModule().configure(consumer);
+    }
+  }
+  beforeAll(async () => {
+    const module = await Test.createTestingModule({ imports: [SignInOnly] })
+      .overrideGuard(ApplicationsEnabledGuard)
+      .useValue({ canActivate: () => true })
+      .compile();
+    app = module.createNestApplication({ logger: false });
+    await app.init();
+  });
+  afterAll(async () => app.close());
+
+  it("counts mixed-case sign-in paths against the sign-in limit, not the larger API limit", async () => {
+    for (let count = 0; count < 30; count++) await request(app.getHttpServer()).get("/apply/auth/login").expect(204);
+    await request(app.getHttpServer()).get("/APPLY/AUTH/LOGIN").expect(429);
+    await request(app.getHttpServer()).get("/Apply/Auth/Callback?code=junk").expect(429);
+    expect(signIn).toHaveBeenCalledTimes(30);
   });
 });
