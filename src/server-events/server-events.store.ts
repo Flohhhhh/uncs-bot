@@ -1,10 +1,18 @@
 import { ConflictException, Inject, Injectable } from "@nestjs/common";
 import { and, desc, eq, ne } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { DATABASE, type Database } from "../database/database.types";
 import { serverEvents, serverEventOperations } from "../database/schema";
 import type { Staff } from "../admin/admin.types";
-import type { EventOperation, EventProgress, EventRecord, EventState, EventStop } from "./server-events.types";
+import {
+  systemStops,
+  type EventOperation,
+  type EventProgress,
+  type EventRecord,
+  type EventState,
+  type EventStop,
+} from "./server-events.types";
 type EventRow = typeof serverEvents.$inferSelect;
 type Update = { state: EventState; progress: EventProgress; message: string; restoreRevision?: string | null };
 
@@ -86,7 +94,9 @@ export class ServerEventsStore {
       if (!event || event.version !== version || event.state === "complete") return null;
       const restore = op.kind === "restore_lock";
       if (event.operationId && !(manual && event.state === "needs_review" && restore)) return null;
-      if ((event.stop || event.state === "needs_review") && !restore) return null;
+      // After a stop, only restoring the lock and the end-of-event notice may start.
+      if (event.state === "needs_review" && !restore) return null;
+      if (event.stop && !restore && op.kind !== "ended") return null;
       await tx
         .insert(serverEventOperations)
         .values({ id: op.id, eventId, actorId: staff.id, actorName: staff.name, operation: op });
@@ -97,7 +107,7 @@ export class ServerEventsStore {
           progress,
           version: event.version + 1,
           updatedAt: new Date(),
-          state: restore ? "stopping" : event.state,
+          state: restore || event.stop ? "stopping" : event.state,
         })
         .where(eq(serverEvents.id, eventId))
         .returning();
@@ -146,6 +156,55 @@ export class ServerEventsStore {
         .where(eq(serverEvents.id, id));
     });
     return (await this.get(id))!;
+  }
+  /**
+   * Stops an event without staff review: settles an interrupted operation as unknown (it is never
+   * replayed), records a system stop if none exists, and leaves the restore path to put the team lock
+   * back. Refused for completed events and for events already waiting for staff review.
+   */
+  async halt(id: string, reason: string, opId?: string) {
+    const halted = await this.db.transaction(async (tx) => {
+      const [event] = await tx.select().from(serverEvents).where(eq(serverEvents.id, id)).for("update");
+      if (!event || event.state === "complete" || event.state === "needs_review") return false;
+      if (opId) {
+        if (event.operationId !== opId) return false;
+        await tx
+          .update(serverEventOperations)
+          .set({
+            state: "unknown",
+            message: "Interrupted before its result was recorded. It is not replayed.",
+            completedAt: new Date(),
+          })
+          .where(and(eq(serverEventOperations.id, opId), eq(serverEventOperations.state, "started")));
+      } else if (event.operationId) return false;
+      const now = new Date();
+      await tx
+        .update(serverEvents)
+        .set({
+          stop: event.stop ?? { id: randomUUID(), ...systemStops.halted, reason, at: now.toISOString() },
+          state: "stopping",
+          operationId: null,
+          ...(opId ? { lastActionId: opId } : {}),
+          message: `${reason} The team lock is being restored.`,
+          version: event.version + 1,
+          updatedAt: now,
+        })
+        .where(eq(serverEvents.id, id));
+      return true;
+    });
+    return halted ? this.get(id) : null;
+  }
+  /** Completes a stopped event whose team lock already reads its original value. No game write is needed. */
+  async completeRestored(id: string, version: number, message: string) {
+    await this.db.transaction(async (tx) => {
+      const [event] = await tx.select().from(serverEvents).where(eq(serverEvents.id, id)).for("update");
+      if (!event || event.version !== version || event.operationId || !event.stop || event.state !== "stopping") return;
+      await tx
+        .update(serverEvents)
+        .set({ state: "complete", message, version: event.version + 1, updatedAt: new Date() })
+        .where(eq(serverEvents.id, id));
+    });
+    return this.get(id);
   }
   async completeUnchanged(id: string, version: number) {
     await this.db.transaction(async (tx) => {

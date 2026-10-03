@@ -1,11 +1,18 @@
 import { ConflictException, Inject, Injectable } from "@nestjs/common";
 import { and, desc, eq, inArray, lte, sql } from "drizzle-orm";
-import { isDeepStrictEqual } from "node:util";
 import { DATABASE, type Database } from "../database/database.types";
 import { mapVoteBallots, mapVotes, mapVotePolicies } from "../database/schema";
-import { votingMilestones, type VoteReminder, type VotingPolicy } from "../common/voting-policy";
-import { ballotWinner, type MapVoteRecord } from "./map-votes.types";
+import {
+  automationSettings,
+  closeReached,
+  type StoredVotingPolicy,
+  type VoteAutomation,
+  type VoteReminder,
+} from "../common/voting-policy";
+import { ballotWinner, type MapVoteRecord, type MapVoteState } from "./map-votes.types";
 import type { Staff } from "../admin/admin.types";
+
+type FinishState = "queued" | "no_votes" | "tied" | "cancelled" | "needs_review";
 
 @Injectable()
 export class MapVotesStore {
@@ -18,12 +25,23 @@ export class MapVotesStore {
   policies() {
     return this.db.select().from(mapVotePolicies);
   }
-  async savePolicy(serverId: string, version: number, policy: VotingPolicy, staff: Staff, connectionHash: string) {
+  /**
+   * Saves under the per-server lock and optimistic version. A callback receives the stored document so a
+   * partial save (such as the original five switches) merges with settings it does not carry.
+   */
+  async savePolicy(
+    serverId: string,
+    version: number,
+    next: StoredVotingPolicy | ((previous: StoredVotingPolicy | null) => StoredVotingPolicy),
+    staff: Staff,
+    connectionHash: string,
+  ) {
     return this.db.transaction(async (tx) => {
       await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${"map-vote:" + serverId}))`);
       const [previous] = await tx.select().from(mapVotePolicies).where(eq(mapVotePolicies.serverId, serverId));
       if ((previous?.version ?? 0) !== version)
         throw new ConflictException("Voting controls changed. Refresh before saving.");
+      const policy = typeof next === "function" ? next(previous?.policy ?? null) : next;
       const values = {
         serverId,
         policy,
@@ -61,17 +79,72 @@ export class MapVotesStore {
       .from(mapVotes)
       .where(and(eq(mapVotes.state, "open"), sql`${mapVotes.automation} is not null`));
   }
-  async observeScore(id: string, score: number) {
+  /** Records a higher leading score and, when `step` is known, the largest increase between close samples. */
+  async observeScore(id: string, score: number, step: number | null = null) {
     return this.db.transaction(async (tx) => {
       const [vote] = await tx.select().from(mapVotes).where(eq(mapVotes.id, id)).for("update");
       if (!vote || vote.state !== "open" || !vote.automation || score < vote.automation.highestScore) return false;
       if (score === vote.automation.highestScore) return true;
+      const maxStep = Math.max(vote.automation.maxStep ?? 0, step ?? 0);
       await tx
         .update(mapVotes)
-        .set({ automation: { ...vote.automation, highestScore: score } })
+        .set({
+          automation: {
+            ...vote.automation,
+            highestScore: score,
+            ...(vote.automation.settings ? { maxStep, lastScoreAt: new Date().toISOString() } : {}),
+          },
+        })
         .where(eq(mapVotes.id, id));
       return true;
     });
+  }
+  /** Merges stored automation details while the ballot is still in one of `states`. Never changes `updatedAt`. */
+  async patchAutomation(id: string, patch: Partial<VoteAutomation>, states: MapVoteState[] = ["open", "closing"]) {
+    return this.db.transaction(async (tx) => {
+      const [vote] = await tx.select().from(mapVotes).where(eq(mapVotes.id, id)).for("update");
+      if (!vote?.automation || !states.includes(vote.state)) return null;
+      const [updated] = await tx
+        .update(mapVotes)
+        .set({ automation: { ...vote.automation, ...patch } })
+        .where(eq(mapVotes.id, id))
+        .returning();
+      return updated ?? null;
+    });
+  }
+  /** Moves an automatic ballot out of review only; a staff close that happened first wins. */
+  async resolveReview(
+    id: string,
+    to: "queued" | "cancelled",
+    message: string,
+    patch: Partial<VoteAutomation>,
+    messageId?: string,
+  ) {
+    return this.db.transaction(async (tx) => {
+      const [vote] = await tx.select().from(mapVotes).where(eq(mapVotes.id, id)).for("update");
+      if (!vote?.automation || vote.state !== "needs_review") return null;
+      const [updated] = await tx
+        .update(mapVotes)
+        .set({
+          state: to,
+          message,
+          updatedAt: new Date(),
+          automation: { ...vote.automation, ...patch },
+          ...(messageId && !vote.messageId ? { messageId } : {}),
+        })
+        .where(eq(mapVotes.id, id))
+        .returning();
+      return updated ?? null;
+    });
+  }
+  /** Automatic ballots awaiting review on every server, oldest first. */
+  needsReview() {
+    return this.db
+      .select()
+      .from(mapVotes)
+      .where(and(eq(mapVotes.state, "needs_review"), sql`${mapVotes.automation} is not null`))
+      .orderBy(mapVotes.updatedAt)
+      .limit(20);
   }
   async claimReminder(id: string, stage: VoteReminder, receiptId: string) {
     return this.db.transaction(async (tx) => {
@@ -166,7 +239,7 @@ export class MapVotesStore {
           !policy?.policy.enabled ||
           policy.actorId !== input.actorId ||
           policy.connectionHash !== input.connectionHash ||
-          !isDeepStrictEqual(policy.policy, input.automation.policy)
+          policy.version !== input.automation.policyVersion
         )
           throw new ConflictException("Voting controls changed before the ballot opened.");
       }
@@ -222,7 +295,10 @@ export class MapVotesStore {
           target: [mapVoteBallots.voteId, mapVoteBallots.discordUserId],
           set: { choice, updatedAt: new Date() },
         });
-      return vote.choices[choice];
+      return {
+        selection: vote.choices[choice],
+        closeAtScore: vote.automation ? automationSettings(vote.automation).closeAtScore : null,
+      };
     });
   }
   due(now: Date) {
@@ -238,7 +314,7 @@ export class MapVotesStore {
       if (!vote || vote.state !== "open" || (!scoreReached && vote.closesAt.getTime() > Date.now())) return null;
       if (scoreReached) {
         const [policy] = await tx.select().from(mapVotePolicies).where(eq(mapVotePolicies.serverId, vote.serverId));
-        if (!vote.automation || vote.automation.highestScore < votingMilestones.close || !policy?.policy.enabled)
+        if (!vote.automation || !closeReached(vote.automation, vote.automation.highestScore) || !policy?.policy.enabled)
           return null;
       }
       const totals = await tx
@@ -252,7 +328,11 @@ export class MapVotesStore {
         .set({
           state: "closing",
           counts,
-          winner: ballotWinner(counts),
+          winner: ballotWinner(
+            counts,
+            vote.automation ? automationSettings(vote.automation).tieRule : "keep_rotation",
+            vote.choices.findIndex((choice) => choice.event === "50v50"),
+          ),
           updatedAt: new Date(),
           message: "Voting closed; checking the next map.",
         })
@@ -261,7 +341,23 @@ export class MapVotesStore {
       return claimed;
     });
   }
-  async finish(id: string, state: "queued" | "no_votes" | "tied" | "cancelled" | "needs_review", message: string) {
+  async finish(id: string, state: FinishState, message: string, patch?: Partial<VoteAutomation>) {
+    if (patch)
+      return this.db.transaction(async (tx) => {
+        const [vote] = await tx.select().from(mapVotes).where(eq(mapVotes.id, id)).for("update");
+        if (!vote || !["publishing", "closing"].includes(vote.state)) return null;
+        const [finished] = await tx
+          .update(mapVotes)
+          .set({
+            state,
+            message,
+            updatedAt: new Date(),
+            ...(vote.automation ? { automation: { ...vote.automation, ...patch } } : {}),
+          })
+          .where(eq(mapVotes.id, id))
+          .returning();
+        return finished ?? null;
+      });
     const [vote] = await this.db
       .update(mapVotes)
       .set({ state, message, updatedAt: new Date() })

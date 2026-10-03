@@ -88,36 +88,67 @@ it("defaults to no forced respawns and requires two different teams", async () =
   await selectTeams();
   expect(screen.getByRole("button", { name: "Review event" })).toBeEnabled();
   expect(
-    within(screen.getByRole("combobox", { name: "Team 2" })).queryByRole("option", { name: "Valkyra" }),
+    within(screen.getByRole("combobox", { name: "Team 2" })).queryByRole("option", { name: "Red · Valkyra" }),
   ).not.toBeInTheDocument();
 });
-it("explains missing round timing before review and keeps the draft when timing is checked again", async () => {
-  matchSeconds = undefined;
+it("labels event teams by their current colors", async () => {
+  events = [{ ...event, state: "complete" }];
   show();
+  const first = await screen.findByRole("combobox", { name: "Team 1" });
+  await waitFor(() => expect(first).toBeEnabled());
+  expect(
+    within(first)
+      .getAllByRole("option")
+      .map((option) => option.textContent),
+  ).toEqual(["Choose team…", "Red · Valkyra", "Blue · Lonestar", "Green · Manticore"]);
+  expect(screen.getByRole("table", { name: "Optional events" })).toHaveTextContent("Red · Valkyra vs Blue · Lonestar");
   await selectTeams();
-  await screen.findByText(/Round timing is unavailable/);
-  expect(screen.getByRole("button", { name: "Review event" })).toBeDisabled();
-  expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
-  matchSeconds = 125;
-  fireEvent.click(screen.getByRole("button", { name: "Check round timing" }));
-  await waitFor(() => expect(screen.getByRole("button", { name: "Review event" })).toBeEnabled());
-  expect(screen.getByRole("combobox", { name: "Team 1" })).toHaveValue("Valkyra");
-  expect(screen.getByRole("combobox", { name: "Team 2" })).toHaveValue("Lonestar");
-});
-it("rechecks round timing when opening a start review and blocks a missing clock without a POST", async () => {
-  show();
-  await selectTeams();
-  matchSeconds = undefined;
   fireEvent.click(screen.getByRole("button", { name: "Review event" }));
-  await screen.findByText(/Round timing is unavailable/);
-  const submit = screen.getByRole("button", { name: "Arm event" });
-  expect(submit).toBeDisabled();
-  fireEvent.submit(submit.closest("form")!);
-  expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
-  matchSeconds = 125;
-  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Check round timing" }));
+  expect(screen.getByRole("dialog")).toHaveTextContent("Red · Valkyra vs Blue · Lonestar");
+});
+it("lets staff review and arm an event without a match clock, explaining that the server checks the round", async () => {
+  matchSeconds = undefined;
+  show();
+  await selectTeams();
+  const note = /The game is not reporting a match clock\. 50v50 does not need one/;
+  expect(await screen.findByText(note)).toBeInTheDocument();
+  // Information only: nothing is shown as a warning or alert.
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.queryByText(/Round timing is unavailable/)).not.toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Review event" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "Review event" }));
+  const dialog = within(screen.getByRole("dialog"));
+  expect(await dialog.findByText(note)).toBeInTheDocument();
+  const submit = dialog.getByRole("button", { name: "Arm event" });
   await waitFor(() => expect(submit).toBeEnabled());
-  expect(within(screen.getByRole("dialog")).queryByRole("textbox")).not.toBeInTheDocument();
+  fireEvent.click(submit);
+  await screen.findByText("Event request recorded");
+  const posts = request.mock.calls.filter(([, init]) => init?.method === "POST");
+  expect(posts).toHaveLength(1);
+  expect(JSON.parse(posts[0][1]!.body as string)).toMatchObject({
+    teams: ["Valkyra", "Lonestar"],
+    confirm: "START 50V50",
+  });
+});
+it("says nothing about the clock when the game reports one", async () => {
+  show();
+  await selectTeams();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Review event" })).toBeEnabled());
+  expect(screen.queryByText(/match clock/)).not.toBeInTheDocument();
+});
+it("reports its draft to a page that shares it instead of clearing the page's warning", async () => {
+  const report = vi.fn();
+  const state = context();
+  render(
+    <AdminContext.Provider value={state}>
+      <EventsPage onUnsavedChange={report} />
+    </AdminContext.Provider>,
+  );
+  await selectTeams();
+  expect(report).toHaveBeenLastCalledWith(true);
+  fireEvent.click(screen.getByRole("button", { name: "Discard draft" }));
+  expect(report).toHaveBeenLastCalledWith(false);
+  expect(state.setUnsavedChanges).not.toHaveBeenCalled();
 });
 it("reviews a frozen start request without typing and waits for the separate confirmation button", async () => {
   const { state } = show();
@@ -150,31 +181,31 @@ it("reviews a frozen start request without typing and waits for the separate con
     confirm: "START 50V50",
   });
 });
-it("blocks submission while the review timing read is pending or failed and permits a read-only retry", async () => {
+it("blocks submission while the review's game status read is pending or failed and permits a read-only retry", async () => {
   show();
   await selectTeams();
   const fallback = request.getMockImplementation()!;
-  let rejectTiming!: (error: Error) => void;
+  let rejectStatus!: (error: Error) => void;
   request.mockImplementation((path, init) =>
     path === "overview"
       ? new Promise((_, reject) => {
-          rejectTiming = reject;
+          rejectStatus = reject;
         })
       : fallback(path, init),
   );
   fireEvent.click(screen.getByRole("button", { name: "Review event" }));
   const dialog = within(screen.getByRole("dialog"));
   const submit = dialog.getByRole("button", { name: "Arm event" });
-  expect(dialog.getByText("Checking round timing…")).toBeInTheDocument();
+  expect(dialog.getByText("Checking the current round…")).toBeInTheDocument();
   expect(submit).toBeDisabled();
   fireEvent.submit(submit.closest("form")!);
-  rejectTiming(new Error("Game status could not be read"));
+  rejectStatus(new Error("Game status could not be read"));
   await dialog.findByText("Game status could not be read");
   expect(submit).toBeDisabled();
   fireEvent.submit(submit.closest("form")!);
   expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
   request.mockImplementation(fallback);
-  fireEvent.click(dialog.getByRole("button", { name: "Check round timing" }));
+  fireEvent.click(dialog.getByRole("button", { name: "Check the round again" }));
   await waitFor(() => expect(submit).toBeEnabled());
   expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
   fireEvent.click(dialog.getByRole("button", { name: "Back" }));
@@ -461,7 +492,7 @@ it("keeps the draft editable while a background refresh is pending", async () =>
   expect(duration).toBeEnabled();
   expect(screen.getByRole("combobox", { name: "Team 1" })).toBeEnabled();
   expect(screen.getByRole("checkbox", { name: /Force a respawn/ })).toBeEnabled();
-  expect(screen.queryByText("Checking round timing…")).not.toBeInTheDocument();
+  expect(screen.queryByText("Checking the current round…")).not.toBeInTheDocument();
   await act(async () => release());
   expect(duration).toHaveValue(90);
   expect(screen.getByRole("button", { name: "Review event" })).toBeEnabled();

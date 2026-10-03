@@ -173,7 +173,7 @@ describe("admin HTTP boundaries", () => {
     }
   });
   it("supports dashboard deep links without swallowing API, auth, or missing-file errors", async () => {
-    for (const path of ["players", "applications", "supporters", "combat", "match", "votes"]) {
+    for (const path of ["players", "applications", "supporters", "discord-roles", "combat", "match", "votes"]) {
       const page = await request(app.getHttpServer()).get(`/admin/${path}`).expect(200);
       expect(page.text).toContain('<div id="root"></div>');
       expect(page.headers["content-security-policy"]).toContain("script-src 'self'");

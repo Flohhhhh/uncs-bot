@@ -5,7 +5,7 @@ import { useGameApi } from "../../api/server-client";
 import type { ActionResult, Overview, Player } from "../../api/types";
 import { validateOverview } from "../../api/validation";
 import { useGameAdmin as useAdmin } from "../../app/context";
-import { Badge, Modal, Table } from "../../components/ui";
+import { Badge, Modal, OutcomeBadge, Table } from "../../components/ui";
 import { allowed, errorMessage, rejectionState } from "../actions/policy";
 import { ActionReceipt } from "../actions/action-receipt";
 import { FactionOptions, liveFactions, playerFaction } from "./factions";
@@ -21,18 +21,24 @@ export type TeamItem = {
   message: string;
 };
 export type TeamMoveResult = { label: string; items: TeamItem[]; stopped: boolean };
-const labels: Record<ItemState, string> = {
+const localLabels = {
   queued: "Not sent",
   sending: "Sending…",
-  applied: "Assignment confirmed",
-  accepted: "Accepted · not verified",
-  pending: "Pending",
-  failed: "Failed",
-  unknown: "Unconfirmed",
   skipped: "Already on team",
   unmatched: "Skipped · roster changed",
   refused: "Skipped · roster changed",
-};
+} as const;
+
+const isLocal = (state: ItemState): state is keyof typeof localLabels => Object.hasOwn(localLabels, state);
+/** A server-refused move ("refused") reads as the dialog's own roster skip but keeps the server's receipt. */
+const hasReceipt = (state: ItemState) => !isLocal(state) || state === "refused";
+function ItemOutcome({ state }: { state: ItemState }) {
+  return isLocal(state) ? (
+    <Badge kind={state === "queued" || state === "skipped" ? "neutral" : "warn"}>{localLabels[state]}</Badge>
+  ) : (
+    <OutcomeBadge state={state} />
+  );
+}
 /** No move reached the game for this player: the batch stopped first, or their roster entry changed. */
 export function notSent(item: TeamItem) {
   return item.state === "queued" || item.state === "unmatched" || item.state === "refused";
@@ -58,27 +64,40 @@ export function TeamResults({ items }: { items: TeamItem[] }) {
             <small>{item.steamId}</small>
           </td>
           <td>
-            <Badge
-              kind={
-                item.state === "applied"
-                  ? "good"
-                  : item.state === "failed"
-                    ? "bad"
-                    : ["unknown", "pending", "sending", "unmatched", "refused"].includes(item.state)
-                      ? "warn"
-                      : "neutral"
-              }
-            >
-              {labels[item.state]}
-            </Badge>
+            <ItemOutcome state={item.state} />
           </td>
           <td className="audit-detail">
             {item.message}
-            {!["queued", "skipped", "unmatched", "sending"].includes(item.state) && <ActionReceipt id={item.id} />}
+            {hasReceipt(item.state) && <ActionReceipt id={item.id} />}
           </td>
         </tr>
       ))}
     </Table>
+  );
+}
+
+/**
+ * A single player's move reads as one line instead of a one-row table. While the dialog runs, a move that
+ * is still queued is waiting on the live roster read, so the line says so rather than "Not sent".
+ */
+function TeamResultLine({ item, running, stopping }: { item: TeamItem; running: boolean; stopping: boolean }) {
+  const checking = running && item.state === "queued";
+  return (
+    <div className="team-result-line" role="status" aria-label="Team move outcome">
+      <p>
+        {checking ? (
+          <>
+            <Badge kind="neutral">Checking roster…</Badge>{" "}
+            {stopping ? "Stopping before the request is sent." : "Reading the live roster before sending the move."}
+          </>
+        ) : (
+          <>
+            <ItemOutcome state={item.state} /> {item.message}
+          </>
+        )}
+      </p>
+      {hasReceipt(item.state) && <ActionReceipt id={item.id} />}
+    </div>
   );
 }
 
@@ -294,15 +313,20 @@ export function TeamMoveDialog({
             : `Move ${items.length === 1 ? items[0].name : `${items.length} players`}`
       }
       description={
-        done || running
-          ? `${destination?.label ?? faction}. Each player has their own recorded outcome. ${items.filter(notSent).length} not sent.`
-          : "Review the named players and destination. This changes team assignment without sending a forced kill; players may need to respawn."
+        (done || running) && items.length === 1
+          ? `${items[0].name} to ${destination?.label ?? faction}.`
+          : done || running
+            ? `${destination?.label ?? faction}. Each player has their own recorded outcome. ${items.filter(notSent).length} not sent.`
+            : "Review the named players and destination. This changes team assignment without sending a forced kill; players may need to respawn."
       }
       onClose={onClose}
       busy={running}
+      eyebrow={done ? null : undefined}
     >
       <form onSubmit={(event) => void submit(event)}>
-        {submitted.current ? (
+        {submitted.current && items.length === 1 ? (
+          <TeamResultLine item={items[0]} running={running} stopping={stopped} />
+        ) : submitted.current ? (
           <>
             <div className="team-progress" role="status">
               {items.filter((item) => item.state !== "queued" && item.state !== "sending").length} / {items.length}{" "}

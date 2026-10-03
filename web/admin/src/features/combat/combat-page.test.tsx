@@ -14,6 +14,8 @@ const context: AdminContextValue = {
   me: { id: "12345678901234567", name: "Staff", role: "viewer", csrf: "fixture" },
   overview: null,
   stale: false,
+  checking: false,
+  watchRoster: vi.fn(),
   busy: false,
   dialogOpen: false,
   refreshVersion: 0,
@@ -97,8 +99,12 @@ function page(value: AdminContextValue = context) {
     </AdminContext.Provider>
   );
 }
+/** One entry in the stat strip, such as "Recorded kills 100". */
+function stat(label: string) {
+  return screen.getByText(label, { selector: ".combat-stats dt" }).closest("div");
+}
 function recordedKills() {
-  return screen.getByText("RECORDED KILLS", { selector: ".metric-label" }).closest(".metric");
+  return stat("Recorded kills");
 }
 
 beforeEach(() => {
@@ -123,7 +129,7 @@ describe("CombatPage", () => {
     );
     render(page());
     await screen.findByText(enabled ? "Waiting for the first combat events" : "Combat tracking is off");
-    expect(screen.queryByText("RECORDED KILLS", { selector: ".metric-label" })).not.toBeInTheDocument();
+    expect(document.querySelector(".combat-stats")).not.toBeInTheDocument();
     expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
   });
@@ -136,17 +142,25 @@ describe("CombatPage", () => {
     await act(async () => response.resolve(server()));
     expect(await screen.findByRole("table", { name: "Server leaderboard" })).toBeTruthy();
     expect(recordedKills()?.textContent).toContain("100");
+    expect(stat("Headshot kills")?.textContent).toContain("50% of kills");
     expect(
       screen.getByText("Filters apply to these recent events. Stats cover the full recorded period."),
     ).toBeTruthy();
-    expect(screen.getByText("Recorded statistics are for human review, not a cheating verdict.")).toBeTruthy();
+    expect(screen.getByText("Combat feed:").parentElement).toHaveTextContent("Combat feed: Receiving");
+    // The coverage notes sit behind one disclosure instead of a permanent panel.
+    const about = screen.getByText("About these numbers").closest("details")!;
+    expect(about).not.toHaveAttribute("open");
+    fireEvent.click(screen.getByText("About these numbers"));
+    expect(about).toHaveAttribute("open");
+    expect(within(about).getByText("Recorded statistics are for human review, not a cheating verdict.")).toBeVisible();
+    expect(within(about).getByText(server().coverageNote)).toBeVisible();
   });
 
   it("keeps recorded history visible after tracking is turned off", async () => {
     request.mockResolvedValue(server({ enabled: false, connected: false, feedStatus: "waiting" }));
     render(page());
     expect(await screen.findByRole("table", { name: "Server leaderboard" })).toBeInTheDocument();
-    expect(screen.getByText("TRACKING OFF")).toBeInTheDocument();
+    expect(screen.getByText("Tracking off")).toBeInTheDocument();
     expect(recordedKills()?.textContent).toContain("100");
     expect(screen.queryByText("No statistics are available yet.")).not.toBeInTheDocument();
   });
@@ -191,10 +205,10 @@ describe("CombatPage", () => {
     );
     render(page());
     await screen.findByRole("table", { name: "Server leaderboard" });
-    fireEvent.click(screen.getByRole("button", { name: "Last 24 hours" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Last 24 hours" }));
     expect(screen.getByText("Loading combat history…")).toBeTruthy();
     expect(screen.queryByRole("table", { name: "Server leaderboard" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Last 30 days" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Last 30 days" }));
     await act(async () =>
       day.resolve(server({ period: "day", leaderboard: [{ ...server().leaderboard[0], name: "Day-only player" }] })),
     );
@@ -207,7 +221,7 @@ describe("CombatPage", () => {
     );
     expect(await screen.findByRole("button", { name: "Month-only player" })).toBeTruthy();
     expect(screen.queryByText("Day-only player")).toBeNull();
-    expect(screen.getByRole("button", { name: "Last 30 days" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Last 30 days" })).toHaveAttribute("aria-selected", "true");
   });
 
   it("opens a player's history with no old roster and returns to the server leaderboard", async () => {
@@ -223,7 +237,7 @@ describe("CombatPage", () => {
     await act(async () => response.resolve(playerData));
     expect(await screen.findByRole("heading", { name: "Alice" })).toBeTruthy();
     expect(screen.getByText("No recorded deaths in this period")).toBeTruthy();
-    expect(screen.getByText("K / D", { selector: ".metric-label" }).closest(".metric")?.textContent).toContain("—");
+    expect(stat("K / D")?.textContent).toContain("—");
     expect(request).toHaveBeenCalledWith(
       `combat/players/${aliceId}?period=week`,
       expect.objectContaining({ signal: expect.anything() }),
@@ -252,21 +266,21 @@ describe("CombatPage", () => {
   it("keeps failed-refresh history stale through a pending retry until recovery is confirmed", async () => {
     request.mockResolvedValueOnce(server()).mockRejectedValueOnce(new Error("Unavailable"));
     const view = render(page());
-    await screen.findByText("FEED RECEIVING");
+    await screen.findByText("Receiving");
     view.rerender(page({ ...context, refreshVersion: 1 }));
     expect(await screen.findByRole("alert")).toBeTruthy();
-    expect(screen.getByText("FEED STATUS UNAVAILABLE")).toBeTruthy();
-    expect(screen.queryByText("FEED RECEIVING")).toBeNull();
+    expect(screen.getByText("Status unavailable")).toBeTruthy();
+    expect(screen.queryByText("Receiving")).toBeNull();
     expect(screen.getByRole("table", { name: "Server leaderboard" })).toBeTruthy();
     const retry = deferred<CombatResponse>();
     request.mockImplementationOnce(() => retry.promise as never);
     view.rerender(page({ ...context, refreshVersion: 2 }));
     await waitFor(() => expect(request).toHaveBeenCalledTimes(3));
     expect(screen.getByRole("alert")).toHaveTextContent("Showing the last received snapshot");
-    expect(screen.queryByText("FEED RECEIVING")).toBeNull();
+    expect(screen.queryByText("Receiving")).toBeNull();
     expect(screen.getByRole("button", { name: "Retry combat history" })).toBeDisabled();
     await act(async () => retry.resolve(server({ feedStatus: "quiet" })));
-    expect(await screen.findByText("NO RECENT BATCH")).toBeInTheDocument();
+    expect(await screen.findByText("No recent batch")).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(request.mock.calls.every(([, options]) => !options?.method)).toBe(true);
   });
@@ -277,7 +291,7 @@ describe("CombatPage", () => {
       server({ feedStatus: "quiet", events: [], leaderboard: [{ ...server().leaderboard[0], name }] }),
     );
     render(page());
-    expect(await screen.findByText("NO RECENT BATCH")).toBeTruthy();
+    expect(await screen.findByText("No recent batch")).toBeTruthy();
     expect(screen.getByText(/A quiet feed does not mean the server is offline/)).toBeTruthy();
     expect(screen.getByRole("button", { name })).toBeTruthy();
     expect(document.querySelector("img")).toBeNull();
@@ -369,10 +383,21 @@ describe("CombatPage", () => {
     request.mockResolvedValue(server());
     render(page({ ...context, busy: true }));
     await screen.findByRole("table", { name: "Server leaderboard" });
-    const period = screen.getByRole("button", { name: "Last 24 hours" }) as HTMLButtonElement;
+    const period = screen.getByRole("tab", { name: "Last 24 hours" }) as HTMLButtonElement;
     expect(period.disabled).toBe(true);
     fireEvent.click(period);
     await waitFor(() => expect(request).toHaveBeenCalledTimes(1));
     expect((screen.getAllByRole("button", { name: "Alice" })[0] as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("shows weapons without the item prefix and still filters by the reported cause", async () => {
+    request.mockResolvedValue(server({ events: [event({ cause: "Id.Item.AK74M" }), event({ eventId: "two" })] }));
+    render(page());
+    const events = await screen.findByRole("table", { name: "Combat events" });
+    expect(within(events).getByText("AK74M")).toHaveAttribute("title", "Id.Item.AK74M");
+    const cause = screen.getByLabelText("Weapon / cause");
+    expect(within(cause).getByRole("option", { name: "AK74M" })).toHaveValue("Id.Item.AK74M");
+    fireEvent.change(cause, { target: { value: "Id.Item.AK74M" } });
+    expect(within(screen.getByRole("table", { name: "Combat events" })).getAllByRole("row")).toHaveLength(2);
   });
 });

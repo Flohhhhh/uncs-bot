@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import { WardogsClient } from "./wardogs.client";
 import { AdminSettings } from "./admin.settings";
 import { actionSchema, type ConfigDocument } from "./admin.types";
-import { auditAction, parseRotation } from "./server-configuration";
-import { SESSION, ROTATION } from "../common/server-settings";
+import { auditAction, formatRotation, parseRotation, planMapNext } from "./server-configuration";
+import { SESSION, ROTATION, type MapSelection } from "../common/server-settings";
 import { AdminService } from "./admin.service";
 import { AdminStore } from "./admin.store";
 import { fixtureServers } from "./game-server-fixture";
@@ -699,22 +699,120 @@ describe("server configuration boundaries", () => {
     );
     expect(f.request.mock.calls.some(([, path]) => path.startsWith("/v1/match"))).toBe(false);
   });
-  it("keeps the running rotation index fixed when the chosen map already appeared earlier", async () => {
+  const kavkazi = { map: "Kavkazi", experiences: ["KOTH"], lighting: "DayClear" };
+  const europe = { map: "Europe", experiences: ["KOTH"], lighting: "DayClear" };
+  const europeInfantry = { map: "Europe", experiences: ["KOTH", "KOTH_InfantryOnly"], lighting: "DayClear" };
+  const kavkaziInfantry = { map: "Kavkazi", experiences: ["KOTH", "KOTH_InfantryOnly"], lighting: "DayClear" };
+  function withRotation(f: ReturnType<typeof fixture>, entries: MapSelection[], running: number) {
+    // "." keeps duplicate rows; "+" would add each distinct entry only once.
+    const rows = entries.map((entry) => `.RotationEntries=${formatRotation(entry)}`).join("\r\n");
+    f.document.text = original.replace(
+      /\+RotationEntries=\(Map="Kavkazi"[^\r]*\r\n\+RotationEntries=\(Map="Europe"[^\r]*/,
+      rows,
+    );
+    f.status.map = entries[running].map;
+    f.status.rotation = { nowIndex: running } as never;
+    return (entry: MapSelection) =>
+      f.game.execute({
+        id: randomUUID(),
+        reason: "Next round choice",
+        action: "map-next",
+        revision: "r1",
+        currentIndex: running,
+        currentMap: entries[running].map,
+        entry,
+      });
+  }
+  it("returns to the first entry after the last one only when the game reports it", async () => {
+    // Europe runs last and Kavkazi wins. With nextIndex 0 the game already plays Kavkazi next.
+    const wrap = fixture();
+    const queueWrap = withRotation(wrap, [kavkazi, europe], 1);
+    wrap.status.rotation = { nowIndex: 1, nextIndex: 0 } as never;
+    expect(await queueWrap(kavkazi)).toMatchObject({ state: "applied", changed: false });
+    expect(wrap.request.mock.calls.some(([method]) => method === "PUT")).toBe(false);
+    // Without that confirmation, the old append is kept: the rotation grows by one entry.
+    const unconfirmed = fixture();
+    await withRotation(unconfirmed, [kavkazi, europe], 1)(kavkazi);
+    expect(parseRotation(unconfirmed.saved().text).map((entry) => entry.map)).toEqual(["Kavkazi", "Europe", "Kavkazi"]);
+    expect(parseRotation(unconfirmed.saved().text)[1].map).toBe("Europe");
+    expect(unconfirmed.request.mock.calls.some(([, path]) => path.startsWith("/v1/match"))).toBe(false);
+  });
+  it("refuses a choice planned for another next slot, so an automatic queue never appends after the last entry", async () => {
     const f = fixture();
-    f.status.map = "Europe";
-    f.status.rotation.nowIndex = 1;
-    await f.game.execute({
-      id: randomUUID(),
-      reason: "Next round choice",
-      action: "map-next",
-      revision: "r1",
-      currentIndex: 1,
-      currentMap: "Europe",
-      entry: { map: "Kavkazi", experiences: ["KOTH"], lighting: "DayClear" },
+    const entries = [kavkazi, europe, europeInfantry];
+    withRotation(f, entries, 2);
+    const queue = (nextSlot: number) =>
+      f.game.execute({
+        id: randomUUID(),
+        reason: "Discord map vote",
+        action: "map-next",
+        revision: "r1",
+        currentIndex: 2,
+        currentMap: "Europe",
+        entry: europe,
+        nextSlot,
+      });
+    // Planned as a swap into entry 1, but this read no longer reports the wrap.
+    const error = await queue(0).catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(RconError);
+    expect((error as RconError).message).toContain("no longer reports the next rotation entry");
+    expect(f.request.mock.calls.some(([method]) => method === "PUT")).toBe(false);
+    f.status.rotation = { nowIndex: 2, nextIndex: 0 } as never;
+    expect(await queue(0)).toMatchObject({ state: "pending" });
+    expect(parseRotation(f.saved().text)).toEqual([europe, kavkazi, europeInfantry]);
+  });
+  it("swaps an earlier copy into the next slot without growing the rotation or moving the running entry", async () => {
+    const f = fixture();
+    const queue = withRotation(f, [kavkazi, europe, europeInfantry], 1);
+    expect(await queue(kavkazi)).toMatchObject({ state: "pending" });
+    const saved = parseRotation(f.saved().text);
+    expect(saved).toEqual([europeInfantry, europe, kavkazi]);
+    expect(saved[1].map).toBe(f.status.map);
+    expect(f.request.mock.calls.filter(([method]) => method === "PUT")).toHaveLength(1);
+  });
+  it("still moves a later copy up and inserts a new entry after the running one", async () => {
+    const moved = fixture();
+    await withRotation(moved, [kavkazi, europe, europeInfantry, kavkaziInfantry], 0)(kavkaziInfantry);
+    expect(parseRotation(moved.saved().text)).toEqual([kavkazi, kavkaziInfantry, europe, europeInfantry]);
+    const inserted = fixture();
+    await withRotation(inserted, [kavkazi, europe, europeInfantry], 0)(kavkaziInfantry);
+    expect(parseRotation(inserted.saved().text)).toEqual([kavkazi, kavkaziInfantry, europe, europeInfantry]);
+  });
+  it("refuses a 101st entry cleanly, before any write", async () => {
+    const f = fixture();
+    const queue = withRotation(
+      f,
+      Array.from({ length: 100 }, (_, index) => (index % 2 ? europe : kavkazi)),
+      0,
+    );
+    const error = await queue(kavkaziInfantry).catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(RconError);
+    expect((error as RconError).message).toContain("100 entries or fewer");
+    expect((error as RconError).unknownResult).toBeFalsy();
+    expect(f.request.mock.calls.some(([method]) => method === "PUT")).toBe(false);
+  });
+  describe("next-round placement", () => {
+    const a = { map: "Kavkazi", experiences: ["KOTH"] },
+      b = { map: "Europe", experiences: ["KOTH"] },
+      c = { map: "NorthAmerica", experiences: ["KOTH"] },
+      d = { map: "Europe", experiences: ["KOTH_Hardcore"] };
+    it.each([
+      ["already next", [a, b, c], 0, null, b, "already-next", [a, b, c], 1],
+      ["later copy", [a, b, c], 0, null, c, "move", [a, c, b], 1],
+      ["earlier copy", [a, b, c], 1, null, a, "swap", [c, b, a], 2],
+      ["new entry", [a, b, c], 1, null, d, "insert", [a, b, d, c], 2],
+      ["wrap confirmed, first already next", [a, b, c], 2, 0, a, "already-next", [a, b, c], 0],
+      ["wrap confirmed, earlier copy", [a, b, c], 2, 0, b, "swap", [b, a, c], 0],
+      ["wrap confirmed, new entry", [a, b, c], 2, 0, d, "append", [a, b, c, d], 3],
+      ["wrap unconfirmed", [a, b, c], 2, null, a, "append", [a, b, c, a], 3],
+      ["single entry replays", [a], 0, 0, a, "already-next", [a], 0],
+      ["running entry itself", [a, b, c], 1, null, b, "insert", [a, b, b, c], 2],
+    ] as const)("%s", (_, entries, current, next, entry, placement, expected, slot) => {
+      const plan = planMapNext([...entries], current, next, entry);
+      expect(plan).toMatchObject({ placement, slot });
+      expect(plan.entries).toEqual(expected);
+      expect(plan.entries[current]).toBe(entries[current]);
     });
-    expect(parseRotation(f.saved().text).map((entry) => entry.map)).toEqual(["Kavkazi", "Europe", "Kavkazi"]);
-    expect(parseRotation(f.saved().text)[f.status.rotation.nowIndex].map).toBe(f.status.map);
-    expect(f.request.mock.calls.some(([, path]) => path.startsWith("/v1/match"))).toBe(false);
   });
   it.each(["round", "random", "disabled", "unknown-mode"])("refuses unsafe next-map selection: %s", async (kind) => {
     const f = fixture();

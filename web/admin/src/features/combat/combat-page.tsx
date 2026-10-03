@@ -2,8 +2,9 @@ import { useState } from "react";
 import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 import { useResource } from "../../api/use-resource";
 import { useAdmin } from "../../app/context";
-import { Badge, Card, Empty, Metric, Search, date } from "../../components/ui";
+import { Badge, Card, Empty, Search, Tabs, date } from "../../components/ui";
 import { CopyValue, DataTable } from "../../components/data-table";
+import { When, weaponLabel } from "../server/activity-entries";
 import type {
   CombatEvent,
   CombatEventKind,
@@ -21,6 +22,8 @@ const ratio = (player: CombatPlayer | null | undefined) =>
   typeof player?.kd === "number" && Number.isFinite(player.kd) ? player.kd.toFixed(2) : "—";
 const headshotShare = (player: CombatPlayer) =>
   player.kills > 0 ? `${Math.round((player.headshotKills / player.kills) * 100)}%` : "—";
+const shareOfKills = (part: number, kills: number) =>
+  kills > 0 && Number.isFinite(part) ? `${Math.round((part / kills) * 100)}% of kills` : undefined;
 const plural = (value: number, one: string, many: string) => `${count(value)} ${value === 1 ? one : many}`;
 
 // Why deliveries that reached Gramps were refused or partly skipped, since it last started. A
@@ -80,6 +83,23 @@ function PlayerLink({
   );
 }
 
+/** An inline row of recorded totals. */
+function StatStrip({ label, items }: { label: string; items: { label: string; value: string; note?: string }[] }) {
+  return (
+    <dl className="combat-stats" aria-label={label}>
+      {items.map((item) => (
+        <div key={item.label}>
+          <dt>{item.label}</dt>
+          <dd>
+            {item.value}
+            {item.note && <small>{item.note}</small>}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
 function EventsTable({
   events,
   disabled,
@@ -104,7 +124,7 @@ function EventsTable({
       renderRow={(event) => (
         <tr key={`${event.serverInstanceId}:${event.eventId}`}>
           <td className="combat-time">
-            {date(event.receivedAt)}
+            <When at={event.receivedAt} />
             {event.mapName && <small>{event.mapName}</small>}
           </td>
           <td>
@@ -123,7 +143,9 @@ function EventsTable({
             </strong>
             <small>{event.victimSteamId && <CopyValue value={event.victimSteamId} />}</small>
           </td>
-          <td className="combat-cause">{event.cause || "Not reported"}</td>
+          <td className="combat-cause" title={event.cause ?? undefined}>
+            {weaponLabel(event.cause) || "Not reported"}
+          </td>
           <td>
             {typeof event.distanceMeters === "number" && Number.isFinite(event.distanceMeters)
               ? `${event.distanceMeters.toLocaleString(undefined, { maximumFractionDigits: 1 })} m`
@@ -169,23 +191,38 @@ function CombatView({
   // Keep the selected window/identity paired with its response even if a shared
   // resource hook briefly retains the previous result while changing its key.
   const data = result?.period === period && (playerId ? result.steamId === playerId : !result.steamId) ? result : null;
+  const player = data?.player;
+  const heading = playerId && (
+    <div className="combat-player-heading">
+      <div>
+        <h2>{player?.name || "Player history"}</h2>
+        <CopyValue value={playerId} />
+      </div>
+      <button type="button" className="button secondary small" disabled={disabled} onClick={() => onSelect("")}>
+        ← Server leaderboard
+      </button>
+    </div>
+  );
   if (!data) {
     return (
       <div aria-live="polite">
+        {heading}
         <Empty
           title={error ? "Combat history could not be loaded" : "Loading combat history…"}
           detail={error ? "Try again. No empty history has been assumed." : undefined}
+          action={
+            error && (
+              <button
+                type="button"
+                className="button secondary small"
+                disabled={disabled || loading || refreshing}
+                onClick={() => void refresh()}
+              >
+                Retry combat history
+              </button>
+            )
+          }
         />
-        {error && (
-          <button
-            type="button"
-            className="button secondary small"
-            disabled={disabled || loading || refreshing}
-            onClick={() => void refresh()}
-          >
-            Retry combat history
-          </button>
-        )}
       </div>
     );
   }
@@ -193,7 +230,7 @@ function CombatView({
   const events = data.events;
   const search = query.trim().toLowerCase();
   const matches = (values: (string | null)[]) => values.some((value) => (value ?? "").toLowerCase().includes(search));
-  const players = leaderboard.filter((player) => matches([player.name, player.steamId]));
+  const players = leaderboard.filter((entry) => matches([entry.name, entry.steamId]));
   const causes = [
     ...new Set(events.map((event) => event.cause).filter((value): value is string => Boolean(value))),
   ].sort();
@@ -203,16 +240,20 @@ function CombatView({
       (eventKind !== "headshot" || event.headshot) &&
       (!cause || event.cause === cause),
   );
-  const player = data.player;
-  const feedLabel = !data.enabled
-    ? "TRACKING OFF"
-    : data.feedStatus === "receiving"
-      ? "FEED RECEIVING"
-      : data.feedStatus === "quiet"
-        ? "NO RECENT BATCH"
-        : "WAITING FOR FEED";
+  // Feed status is unknown while the latest read failed; never show the old state as current.
+  const feed = error
+    ? "Status unavailable"
+    : !data.enabled
+      ? "Tracking off"
+      : data.feedStatus === "receiving"
+        ? "Receiving"
+        : data.feedStatus === "quiet"
+          ? "No recent batch"
+          : "Waiting for the first batch";
+  const tone = error ? "attention" : data.enabled && data.feedStatus === "receiving" ? "good" : "quiet";
   return (
     <div aria-busy={loading || refreshing}>
+      {heading}
       {error && (
         <div className="notice error" role="alert">
           Combat history could not be refreshed. Showing the last received snapshot; feed status is unavailable.{" "}
@@ -226,30 +267,29 @@ function CombatView({
           </button>
         </div>
       )}
-      <div className="combat-coverage">
-        <div>
-          <Badge kind={error ? "warn" : data.enabled && data.feedStatus === "receiving" ? "good" : "neutral"}>
-            {error ? "FEED STATUS UNAVAILABLE" : feedLabel}
-          </Badge>
-          <p>
-            {data.coverageNote || "Only recorded combat events are included in this view."}
-            {data.feedStatus === "quiet" && " A quiet feed does not mean the server is offline."}
-          </p>
-          <p className="combat-window">
-            Rolling window starts {date(data.windowStartedAt)}. Periods use event receipt times.
-          </p>
-          <p>Recorded statistics are for human review, not a cheating verdict.</p>
-        </div>
-        <dl>
-          <div>
-            <dt>Tracking started</dt>
-            <dd>{date(data.trackingStartedAt)}</dd>
+      <div className="status-row">
+        <p className={`status-line ${tone}`}>
+          <span>
+            Combat feed: <strong>{feed}</strong>
+          </span>
+          {!error && data.feedStatus === "quiet" && <span>A quiet feed does not mean the server is offline.</span>}
+          <span>Last batch {data.lastReceivedAt ? <When at={data.lastReceivedAt} /> : "not received yet"}</span>
+          {data.trackingStartedAt && (
+            <span>Tracking since {new Date(data.trackingStartedAt).toLocaleDateString()}</span>
+          )}
+        </p>
+        <details className="status-about">
+          <summary>About these numbers</summary>
+          <div className="status-about-panel">
+            <p>{data.coverageNote || "Only recorded combat events are included in this view."}</p>
+            <p>The rolling window starts {date(data.windowStartedAt)}. Periods use the time each event was received.</p>
+            <p>
+              Kills exclude suicides. Headshot share is a share of recorded kills, not shooting accuracy. K/D shows —
+              when no deaths were recorded.
+            </p>
+            <p>Recorded statistics are for human review, not a cheating verdict.</p>
           </div>
-          <div>
-            <dt>Last batch received</dt>
-            <dd>{date(data.lastReceivedAt)}</dd>
-          </div>
-        </dl>
+        </details>
       </div>
       {!playerId && "rejectedCount" in data && <FeedDeliveries feed={data} />}
       {!data.connected && !data.trackingStartedAt && !data.totals.events ? (
@@ -260,52 +300,43 @@ function CombatView({
       ) : (
         <>
           {playerId ? (
-            <>
-              <div className="combat-player-heading">
-                <div>
-                  <p className="eyebrow">PLAYER HISTORY / {periods[period].toUpperCase()}</p>
-                  <h2>{player?.name || "Player history"}</h2>
-                  <p className="muted">{playerId}</p>
-                </div>
-                <Badge>RECORDED EVENTS</Badge>
-              </div>
-              <div className="metrics">
-                <Metric label="KILLS" value={count(player?.kills)} note="Recorded kills in this period" />
-                <Metric label="DEATHS" value={count(player?.deaths)} note="Recorded deaths in this period" />
-                <Metric
-                  label="K / D"
-                  value={ratio(player)}
-                  note={player?.deaths === 0 ? "No recorded deaths in this period" : "Per recorded death"}
-                />
-                <Metric
-                  label="HEADSHOT KILLS"
-                  value={count(player?.headshotKills)}
-                  note={player ? `${headshotShare(player)} of recorded kills` : "Share of kills, not shooting accuracy"}
-                />
-              </div>
-            </>
+            <StatStrip
+              label={`Recorded totals, ${periods[period].toLowerCase()}`}
+              items={[
+                { label: "Kills", value: count(player?.kills) },
+                { label: "Deaths", value: count(player?.deaths) },
+                {
+                  label: "K / D",
+                  value: ratio(player),
+                  note: player?.deaths === 0 ? "No recorded deaths in this period" : undefined,
+                },
+                {
+                  label: "Headshot kills",
+                  value: count(player?.headshotKills),
+                  note: player ? shareOfKills(player.headshotKills, player.kills) : undefined,
+                },
+              ]}
+            />
           ) : (
-            <div className="metrics">
-              <Metric label="RECORDED KILLS" value={count(data.totals.kills)} note="Player kills, excluding suicides" />
-              <Metric label="RECORDED DEATHS" value={count(data.totals.deaths)} note="Deaths in the captured feed" />
-              <Metric
-                label="PLAYERS RECORDED"
-                value={count(data.totals.players)}
-                note="Distinct players in this period"
-              />
-              <Metric
-                label="HEADSHOT KILLS"
-                value={count(data.totals.headshotKills)}
-                note="Recorded headshot kill events"
-              />
-            </div>
+            <StatStrip
+              label={`Recorded totals, ${periods[period].toLowerCase()}`}
+              items={[
+                { label: "Recorded kills", value: count(data.totals.kills) },
+                { label: "Recorded deaths", value: count(data.totals.deaths) },
+                { label: "Players recorded", value: count(data.totals.players) },
+                {
+                  label: "Headshot kills",
+                  value: count(data.totals.headshotKills),
+                  note: shareOfKills(data.totals.headshotKills, data.totals.kills),
+                },
+              ]}
+            />
           )}
           <Search value={query} onChange={onQuery} placeholder="Search player, SteamID, or weapon" />
           {!playerId && (
             <Card
               title="Server leaderboard"
               subtitle={`${periods[period]} · up to 100 players · select a player to view their history`}
-              badge={<Badge>RECORDED KILLS</Badge>}
               className="combat-leaderboard"
             >
               {players.length ? (
@@ -350,14 +381,11 @@ function CombatView({
                   }
                 />
               )}
-              <p className="combat-stat-note">
-                Headshot percentage is a share of recorded kills. K/D is shown as — when no deaths were recorded.
-              </p>
             </Card>
           )}
           <Card
             title={playerId ? "Player combat events" : "Recent combat events"}
-            subtitle={`${filtered.length} shown from the latest ${events.length} events (up to 100) · timestamps show receipt time`}
+            subtitle={`${filtered.length} shown of the latest ${events.length} (up to 100) · times are when each event was received`}
           >
             <div className="combat-filters">
               <label>
@@ -375,10 +403,12 @@ function CombatView({
                 Weapon / cause
                 <select value={cause} disabled={disabled} onChange={(event) => onCause(event.target.value)}>
                   <option value="">All reported causes</option>
-                  {cause && !causes.includes(cause) && <option value={cause}>{cause} (not in recent events)</option>}
+                  {cause && !causes.includes(cause) && (
+                    <option value={cause}>{weaponLabel(cause)} (not in recent events)</option>
+                  )}
                   {causes.map((value) => (
                     <option key={value} value={value}>
-                      {value}
+                      {weaponLabel(value)}
                     </option>
                   ))}
                 </select>
@@ -387,7 +417,7 @@ function CombatView({
               {(query || cause || eventKind !== "all") && (
                 <button
                   type="button"
-                  className="button secondary"
+                  className="button secondary small"
                   onClick={() => {
                     onQuery("");
                     onCause("");
@@ -417,62 +447,58 @@ function CombatView({
   );
 }
 
-export function CombatPage() {
+/**
+ * Combat history. Pass `playerId` and `onPlayerChange` to keep the chosen player outside the page,
+ * such as in the Activity hub's URL; otherwise the page holds it.
+ */
+export function CombatPage({
+  playerId: chosenPlayer,
+  onPlayerChange,
+}: { playerId?: string; onPlayerChange?: (id: string) => void } = {}) {
   const { me, busy, dialogOpen } = useAdmin();
   const [period, setPeriod] = useState<CombatPeriod>("week");
-  const [playerId, setPlayerId] = useState("");
+  const [ownPlayer, setOwnPlayer] = useState("");
+  const playerId = chosenPlayer ?? ownPlayer;
   const [query, setQuery] = useState("");
   const [cause, setCause] = useState("");
   const [eventKind, setEventKind] = useState<CombatEventKind>("all");
   const disabled = busy || dialogOpen;
   const selectPlayer = (id: string) => {
     if (disabled || (id && !validSteamId(id))) return;
-    setPlayerId(id);
+    (onPlayerChange ?? setOwnPlayer)(id);
     setQuery("");
     setCause("");
     setEventKind("all");
   };
   if (!me) return null;
   return (
-    <>
-      <div className="combat-toolbar">
-        <div className="period-switch" role="group" aria-label="Combat history period">
-          {(Object.keys(periods) as CombatPeriod[]).map((value) => (
-            <button
-              type="button"
-              key={value}
-              className={value === period ? "active" : ""}
-              aria-pressed={value === period}
-              disabled={disabled}
-              onClick={() => {
-                setPeriod(value);
-                setQuery("");
-                setCause("");
-              }}
-            >
-              {periods[value]}
-            </button>
-          ))}
-        </div>
-        {playerId && (
-          <button type="button" className="button secondary small" disabled={disabled} onClick={() => selectPlayer("")}>
-            ← Server leaderboard
-          </button>
-        )}
-      </div>
-      <CombatView
-        key={`${period}:${playerId}`}
-        period={period}
-        playerId={playerId}
-        query={query}
-        onQuery={setQuery}
-        cause={cause}
-        onCause={setCause}
-        eventKind={eventKind}
-        onEventKind={setEventKind}
-        onSelect={selectPlayer}
-        disabled={disabled}
-      />
-    </>
+    <Tabs
+      label="Combat history period"
+      className="combat-periods"
+      tabs={(Object.keys(periods) as CombatPeriod[]).map((id) => ({ id, label: periods[id], disabled }))}
+      value={period}
+      onChange={(value) => {
+        if (disabled) return;
+        setPeriod(value);
+        setQuery("");
+        setCause("");
+      }}
+    >
+      {(selected) => (
+        <CombatView
+          key={`${selected}:${playerId}`}
+          period={selected}
+          playerId={playerId}
+          query={query}
+          onQuery={setQuery}
+          cause={cause}
+          onCause={setCause}
+          eventKind={eventKind}
+          onEventKind={setEventKind}
+          onSelect={selectPlayer}
+          disabled={disabled}
+        />
+      )}
+    </Tabs>
   );
 }

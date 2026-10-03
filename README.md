@@ -94,3 +94,4 @@ npm run typecheck       # Run TypeScript checks
 - [REST API guide](docs/guides/REST_API.md) — enabling the optional HTTP API.
 - [Staff dashboard](docs/guides/ADMIN_DASHBOARD.md) — Wardogs administration, local preview, staff permissions, and deployment prerequisites.
 - [Website whitelist applications](docs/guides/WHITELIST_APPLICATIONS.md) — applicant sign-in, private contact information, staff review, and activation requirements.
+- [Seeding pings](docs/guides/SEEDING.md) — the opt-in Seeder role, `/seeding` commands, and staff-sent seeding pings.

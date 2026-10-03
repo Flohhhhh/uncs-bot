@@ -1,25 +1,35 @@
+import { useEffect, useRef } from "react";
 import type { RotationCheck } from "../../../../../src/common/server-settings";
 import { useResource } from "../../api/use-resource";
 
+/** Checks the saved rotation against the server catalog. Shows nothing unless an entry needs attention or the check failed. */
 export function SavedRotationCheck({ revision }: { revision: string }) {
   const { data, loading, refreshing, error, refresh } = useResource<RotationCheck>("settings/rotation-check");
+  // A re-check keeps the previous answer on screen, so waiting for it covers a background read too.
   const checking = loading || refreshing;
+  const outdated = !error && !!data && data.revision !== revision;
+  // A newer saved rotation is checked again once; a check that still answers for another revision is reported.
+  const checked = useRef(revision);
+  const recheck = outdated && checked.current !== revision;
+  useEffect(() => {
+    if (recheck) {
+      checked.current = revision;
+      refresh();
+    }
+  }, [recheck, revision, refresh]);
   const current = !error && data?.revision === revision ? data : null;
+  if (!error && (outdated ? checking || recheck : !current?.issues.length)) return null;
   const groups = new Map<string, number[]>();
   for (const issue of current?.issues ?? [])
     groups.set(issue.message, [...(groups.get(issue.message) ?? []), issue.index + 1]);
   return (
-    <div className={`notice ${current?.issues.length || error ? "warning" : "info"}`} aria-busy={checking}>
+    <div className="notice warning rotation-check" aria-busy={checking}>
       <p role="status">
-        {checking
-          ? "Checking saved rotation against the server catalog…"
-          : error
-            ? "The saved rotation could not be checked."
-            : !current
-              ? "Settings changed. Refresh settings and check the rotation again."
-              : current.issues.length
-                ? `${current.issues.length} of ${current.total} saved entries need attention.`
-                : `All ${current.total} saved entries match the current catalog.`}
+        {error
+          ? "The saved rotation could not be checked."
+          : !current
+            ? "The saved rotation changed after it was checked."
+            : `${current.issues.length} of ${current.total} saved entries need attention.`}
       </p>
       {!!groups.size && (
         <details>
@@ -33,7 +43,6 @@ export function SavedRotationCheck({ revision }: { revision: string }) {
           </ul>
         </details>
       )}
-      <small>Checks saved values only. A catalog match does not prove every combination works in a match.</small>
       <button className="button secondary small" type="button" disabled={checking} onClick={refresh}>
         Check saved rotation
       </button>

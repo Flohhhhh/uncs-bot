@@ -16,7 +16,7 @@ export class MapVotesComponent {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     let message: string;
     try {
-      const selection = await this.votes.cast(
+      const { selection, closeAtScore } = await this.votes.cast(
         id,
         choice,
         interaction.user.id,
@@ -26,7 +26,9 @@ export class MapVotesComponent {
         interaction.inCachedGuild() && !interaction.member.pending && !interaction.user.bot,
       );
       // Same number and title as the button, so a voter can see which choice was recorded.
-      message = `Your vote is now choice ${Number(choice) + 1}: ${voteChoiceTitle(selection).slice(0, 150)}. You can choose again until the ballot closes.`;
+      message = `Your vote is now choice ${Number(choice) + 1}: ${voteChoiceTitle(selection).slice(0, 150)}. You can choose again until ${
+        closeAtScore === null ? "the ballot closes" : `it closes at ${closeAtScore} points`
+      }.`;
     } catch (error) {
       message =
         error instanceof HttpException
