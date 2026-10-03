@@ -325,10 +325,11 @@ it("does not save a cancelled or reversed edit", async () => {
   fireEvent.click(await screen.findByRole("button", { name: "Edit Bakurani" }));
   expect(screen.getByRole("tab", { name: "Next round" })).toBeDisabled();
   fireEvent.click(await screen.findByRole("button", { name: "Cancel entry edit" }));
-  expect(screen.getByRole("tab", { name: "Next round" })).toBeEnabled();
+  // The hub re-enables its tabs once the cancelled edit's unsaved flag clears, which can land a render later.
+  await waitFor(() => expect(screen.getByRole("tab", { name: "Next round" })).toBeEnabled());
   expect(screen.queryByRole("button", { name: "Review rotation" })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Move Ozeti up" }));
-  expect(screen.getByRole("button", { name: "Review rotation" })).toBeEnabled();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Review rotation" })).toBeEnabled());
   fireEvent.click(screen.getByRole("button", { name: "Move Ozeti down" }));
   expect(screen.queryByRole("button", { name: "Review rotation" })).not.toBeInTheDocument();
   await waitFor(() => expect(state.setUnsavedChanges).toHaveBeenLastCalledWith(false));
