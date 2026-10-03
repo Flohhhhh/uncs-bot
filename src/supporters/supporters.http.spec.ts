@@ -1,6 +1,7 @@
 import { Global, Logger, Module, type INestApplication, type MiddlewareConsumer } from "@nestjs/common";
 import { APP_FILTER } from "@nestjs/core";
 import { Test } from "@nestjs/testing";
+import { ConflictException, ServiceUnavailableException } from "@nestjs/common";
 import type { NextFunction, Request, Response } from "express";
 import { createHmac, randomUUID } from "node:crypto";
 import request from "supertest";
@@ -11,7 +12,12 @@ import { WardogsClient } from "../admin/wardogs.client";
 import { hash } from "../admin/admin.auth";
 import { SupportersModule } from "./supporters.module";
 import { SupportersStore } from "./supporters.store";
+import { supporterFixture } from "./supporter-fixtures";
+import { DiscordRolesDiscord } from "../discord-roles/discord-roles.discord";
+import { DiscordRolesStore } from "../discord-roles/discord-roles.store";
 import { PatreonSyncService } from "./patreon-sync.service";
+import { SupporterMatchService } from "./supporter-match.service";
+import { SupporterMatchStore } from "./supporter-match.store";
 import { AppExceptionFilter } from "../common/filters/app-exception.filter";
 
 const secret = "separate-patreon-webhook-secret";
@@ -29,10 +35,18 @@ class TestEnvModule {}
 describe("private supporters HTTP boundary", () => {
   let app: INestApplication;
   const sessionToken = "c".repeat(64);
-  const store = { ingest: jest.fn(), list: jest.fn(), mutate: jest.fn(), register: jest.fn() };
+  const store = {
+    ingest: jest.fn(),
+    list: jest.fn(),
+    mutate: jest.fn(),
+    register: jest.fn(),
+    recordPaypal: jest.fn(),
+    get: jest.fn(),
+  };
   const adminStore = { session: jest.fn() };
   const game = { execute: jest.fn() };
   const sync = { configured: jest.fn(), status: jest.fn(), staffSync: jest.fn() };
+  const match = { member: jest.fn(), status: jest.fn(), sweep: jest.fn(), applicationChanged: jest.fn() };
   const config = {
     origin: "https://theuncs.example",
     clientId: "123",
@@ -52,7 +66,10 @@ describe("private supporters HTTP boundary", () => {
     store.list.mockResolvedValue([]);
     store.mutate.mockResolvedValue({ ok: true, replayed: false });
     store.register.mockResolvedValue({ ok: true, replayed: false });
+    store.recordPaypal.mockResolvedValue({ ok: true, replayed: false });
     sync.configured.mockReturnValue(true);
+    match.member.mockResolvedValue(null);
+    match.status.mockReturnValue({ steamFill: false, founderAuto: false, configured: true, running: false });
     sync.status.mockReturnValue({ configured: true, running: false, members: 2, lastError: null });
     sync.staffSync.mockResolvedValue({ joined: false, sync: { configured: true, running: false, members: 2 } });
     adminStore.session.mockImplementation(async (key) =>
@@ -70,13 +87,31 @@ describe("private supporters HTTP boundary", () => {
       .overrideProvider(SupportersStore)
       .useValue(store)
       .overrideProvider(AdminSettings)
-      .useValue({ get: () => config })
+      .useValue({
+        get: () => config,
+        servers: () => [
+          { id: "primary", name: "The UNCs", version: "a".repeat(64) },
+          { id: "partner", name: "Partner server", version: "b".repeat(64) },
+        ],
+        explicitServers: () => true,
+        // The partner server has its own staff; this administrator's roles are not among them.
+        serverRoles: (id: string) =>
+          id === "partner" ? { admin: ["partner-staff"], moderator: [], viewer: [] } : undefined,
+      })
       .overrideProvider(AdminStore)
       .useValue(adminStore)
       .overrideProvider(WardogsClient)
       .useValue(game)
+      .overrideProvider(DiscordRolesStore)
+      .useValue({})
+      .overrideProvider(DiscordRolesDiscord)
+      .useValue({ ready: () => false })
       .overrideProvider(PatreonSyncService)
       .useValue(sync)
+      .overrideProvider(SupporterMatchStore)
+      .useValue({})
+      .overrideProvider(SupporterMatchService)
+      .useValue(match)
       .compile();
     app = module.createNestApplication({ rawBody: true });
     await app.init();
@@ -97,6 +132,78 @@ describe("private supporters HTTP boundary", () => {
     expect(result.headers["cache-control"]).toBe("no-store");
     expect(result.headers["cdn-cache-control"]).toBe("no-store");
     expect(result.headers["vercel-cdn-cache-control"]).toBe("no-store");
+  });
+  it("leaves out whitelist application details from a server the administrator cannot open", async () => {
+    const offered = (serverId: string) =>
+      supporterFixture({
+        discordId: "123456789012345678",
+        discordSource: "patreon",
+        patreonDiscordId: "123456789012345678",
+        identityState: "partial",
+        match: {
+          ...supporterFixture().match,
+          steam: {
+            reason: null,
+            steamId: `7656119800000009${serverId === "partner" ? 8 : 7}`,
+            applicationId: randomUUID(),
+            serverId,
+          },
+        },
+      });
+    store.list.mockResolvedValue([offered("partner"), offered("primary")]);
+    const result = await request(app.getHttpServer())
+      .get("/admin/api/supporters")
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .expect(200);
+    const [partner, primary] = result.body.supporters;
+    expect(partner.match.steam).toEqual({ reason: null, steamId: null, applicationId: null, serverId: null });
+    expect(JSON.stringify(partner)).not.toMatch(/76561198000000098|partner/);
+    expect(primary.match.steam).toMatchObject({ steamId: "76561198000000097", serverId: "primary" });
+  });
+  it("returns each record's next steps and the automatic matching status to administrators", async () => {
+    store.list.mockResolvedValue([supporterFixture()]);
+    match.status.mockReturnValue({ steamFill: true, founderAuto: false, configured: true, running: false });
+    const result = await request(app.getHttpServer())
+      .get("/admin/api/supporters")
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .expect(200);
+    expect(result.headers["cache-control"]).toBe("no-store");
+    expect(result.body.automation).toEqual({ steamFill: true, founderAuto: false, configured: true, running: false });
+    expect(result.body.supporters[0]).toMatchObject({
+      identityState: "unlinked",
+      match: { steam: null },
+      nextSteps: [
+        { code: "connect_discord_in_patreon", area: "discord" },
+        { code: "founder_no_payment", area: "payment" },
+      ],
+    });
+  });
+  it("returns the record as read again after a staff link fills the SteamID", async () => {
+    store.mutate.mockResolvedValueOnce({ ok: true, replayed: false, supporter: supporterFixture({ version: 2 }) });
+    store.get.mockResolvedValueOnce(supporterFixture({ version: 3, steamSource: "application" }));
+    match.member.mockResolvedValueOnce({ steamFilled: true, founderRecorded: false, blocked: [] });
+    const result = await request(app.getHttpServer())
+      .post(`/admin/api/supporters/${randomUUID()}/link`)
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .set("Origin", config.origin)
+      .set("X-CSRF-Token", "csrf")
+      .send({ id: randomUUID(), version: 1, discordId: "123456789012345678", reason: "Checked", confirm: "member-1" })
+      .expect(201);
+    expect(result.body).toMatchObject({
+      automatic: { steamFilled: true, founderRecorded: false },
+      supporter: { version: 3, steamSource: "application" },
+    });
+  });
+  it("offers no HTTP trigger for automatic matching", async () => {
+    await request(app.getHttpServer())
+      .post("/admin/api/supporters/match")
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .set("Origin", config.origin)
+      .set("X-CSRF-Token", "csrf")
+      .send({})
+      .expect(404);
+    expect(match.sweep).not.toHaveBeenCalled();
+    expect(match.member).not.toHaveBeenCalled();
   });
   it.each(["viewer", "moderator"])("rejects private ledger reads for %s", async (role) => {
     jest.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ roles: [role] })));
@@ -266,7 +373,7 @@ describe("private supporters HTTP boundary", () => {
       .query({ search: "old%_member" })
       .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
       .expect(200);
-    expect(store.list).toHaveBeenCalledWith("123", expect.any(Object), undefined, "old%_member");
+    expect(store.list).toHaveBeenCalledWith("123", expect.any(Object), undefined, "old%_member", undefined);
     expect(result.body).toMatchObject({ search: "old%_member", limit: 100 });
   });
   it("returns the additive Patreon sync status with the private list", async () => {
@@ -378,5 +485,81 @@ describe("private supporters HTTP boundary", () => {
     expect(store.mutate).not.toHaveBeenCalled();
     expect(store.ingest).not.toHaveBeenCalled();
     expect(game.execute).not.toHaveBeenCalled();
+  });
+  it("requires admin, same-origin CSRF and the payment check for PayPal entries, and explains founder refusals", async () => {
+    const endpoint = "/admin/api/supporters/paypal";
+    const body = {
+      id: randomUUID(),
+      displayName: "PayPal donor",
+      discordId: "123456789012345678",
+      paidAt: "2026-10-01T12:00:00-04:00",
+      amountCents: 500,
+      currency: "USD",
+      transactionId: "8AB12345CD678901E",
+      completedPaymentVerified: true,
+      firstSuccessfulPaymentVerified: true,
+      awardFounder: true,
+      reason: "Checked the completed PayPal payment",
+    };
+    await request(app.getHttpServer()).post(endpoint).send(body).expect(401);
+    await request(app.getHttpServer())
+      .post(endpoint)
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .set("Origin", "https://other.example")
+      .set("X-CSRF-Token", "csrf")
+      .send(body)
+      .expect(403);
+    jest.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ roles: ["moderator"] })));
+    await request(app.getHttpServer())
+      .post(endpoint)
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .set("Origin", config.origin)
+      .set("X-CSRF-Token", "csrf")
+      .send(body)
+      .expect(403);
+    expect(store.recordPaypal).not.toHaveBeenCalled();
+    jest.mocked(fetch).mockImplementation(async () => new Response(JSON.stringify({ roles: ["staff"] })));
+    const send = (payload: object) =>
+      request(app.getHttpServer())
+        .post(endpoint)
+        .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+        .set("Origin", config.origin)
+        .set("X-CSRF-Token", "csrf")
+        .send(payload);
+    await send({ ...body, completedPaymentVerified: false }).expect(400);
+    await send(body).expect(201);
+    expect(store.recordPaypal).toHaveBeenCalledWith(
+      expect.objectContaining({ transactionId: body.transactionId }),
+      expect.objectContaining({ role: "admin" }),
+      "123",
+      expect.any(Object),
+    );
+    store.recordPaypal.mockRejectedValueOnce(
+      new ConflictException({
+        message: "This payment was not made inside the founder window. Nothing was recorded.",
+        blockedReason: "outside_window",
+      }),
+    );
+    const refused = await send({ ...body, id: randomUUID() }).expect(409);
+    expect(refused.body).toEqual({
+      message: "This payment was not made inside the founder window. Nothing was recorded.",
+      blockedReason: "outside_window",
+    });
+    store.recordPaypal.mockRejectedValueOnce(new ServiceUnavailableException("Unavailable"));
+    expect((await send({ ...body, id: randomUUID() }).expect(503)).body).toEqual({ message: "Unavailable" });
+    expect(game.execute).not.toHaveBeenCalled();
+  });
+  it("filters the ledger by provider", async () => {
+    await request(app.getHttpServer())
+      .get("/admin/api/supporters")
+      .query({ provider: "paypal" })
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .expect(200);
+    expect(store.list).toHaveBeenCalledWith("123", expect.any(Object), undefined, "", "paypal");
+    await request(app.getHttpServer())
+      .get("/admin/api/supporters")
+      .query({ provider: "venmo" })
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .expect(400);
   });
 });

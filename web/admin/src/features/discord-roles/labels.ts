@@ -96,7 +96,10 @@ export function reconcileError(error: unknown, dryRun: boolean) {
     case 409:
       return message || "A role check is already running. Try again when it finishes.";
     case 429:
-      return "Gramps allows one role check every 30 seconds, previews included. Wait a moment, then try again.";
+      // Previews and real runs are spaced separately on the server: a preview never holds up a real run.
+      return dryRun
+        ? "Gramps allows one preview every 5 seconds. Wait a moment, then preview again."
+        : "Gramps allows one role check every 30 seconds. Previews don’t count toward this wait. Wait a moment, then try again.";
     case 503:
       if (!message) return "Discord roles are unavailable right now. No role change was sent.";
       return /no role change/i.test(message) ? message : `${message} No role change was sent.`;

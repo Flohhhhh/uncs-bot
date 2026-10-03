@@ -50,6 +50,10 @@ import { TelemetryStore } from "../src/telemetry/telemetry.store";
 import type { CombatStats } from "../src/telemetry/telemetry.types";
 import { SupportersModule } from "../src/supporters/supporters.module";
 import { SupportersStore } from "../src/supporters/supporters.store";
+import { SupporterMatchService } from "../src/supporters/supporter-match.service";
+import { SupporterMatchStore } from "../src/supporters/supporter-match.store";
+import { DiscordRolesDiscord } from "../src/discord-roles/discord-roles.discord";
+import { DiscordRolesStore } from "../src/discord-roles/discord-roles.store";
 import { PatreonSyncService, type PatreonSyncStatus } from "../src/supporters/patreon-sync.service";
 import { MapVotesModule } from "../src/map-votes/map-votes.module";
 import { MapVotesStore } from "../src/map-votes/map-votes.store";
@@ -68,12 +72,14 @@ import { StaffAlerts } from "../src/staff-alerts/staff-alerts.service";
 import { StaffAlertsMonitor } from "../src/staff-alerts/staff-alerts.monitor";
 import { settingsView, staffAlertsOptions } from "../src/staff-alerts/staff-alerts.config";
 import type { StaffAlertsStatus } from "../src/common/staff-alerts";
-import type {
-  FounderPolicy,
-  ManualMemberInput,
-  PaymentView,
-  SupporterMutation,
-  SupporterView,
+import { automaticBlockedMessages } from "../src/supporters/supporter-match.rules";
+import {
+  founderBlockedMessages,
+  type FounderPolicy,
+  type ManualMemberInput,
+  type PaymentView,
+  type SupporterMutation,
+  type SupporterView,
 } from "../src/supporters/supporters.types";
 
 const previewPort = Number(process.env.PREVIEW_PORT || 4317);
@@ -536,6 +542,9 @@ const applicationStore = {
       reviewKind: null,
       lastActionState: null,
       lastActionMessage: null,
+      accessIntent: "grant",
+      whitelistGrant: null,
+      revokedAt: null,
       ...input,
     } as WhitelistApplication;
     applications.set(entry.id, entry);
@@ -560,8 +569,10 @@ const applicationStore = {
       entry.reviewId !== previous.reviewId
     )
       throw new ConflictException("Preview application changed during the check");
+    const revoke = entry.accessIntent === "revoke";
     Object.assign(entry, {
-      status: result.state === "applied" ? "approved" : "needs_review",
+      status: result.state === "applied" ? (revoke ? "revoked" : "approved") : "needs_review",
+      ...(revoke && result.state === "applied" ? { revokedAt: new Date() } : {}),
       reviewedAt: new Date(),
       reviewedBy: staff.id,
       reviewReason: review.reason,
@@ -591,17 +602,75 @@ const applicationStore = {
     });
     return { claimed: true, application: entry };
   },
-  async finishApproval(id: string, actionId: string, result: ActionResult) {
+  async finishApproval(
+    id: string,
+    actionId: string,
+    result: ActionResult,
+    grant: "granted" | "existing" | null = null,
+  ) {
     const entry = applications.get(id);
     if (!entry || entry.status !== "processing" || entry.reviewId !== actionId)
       throw new Error("Preview application changed");
     Object.assign(entry, {
       status: result.state === "applied" ? "approved" : "needs_review",
+      ...(result.state === "applied" && grant ? { whitelistGrant: grant } : {}),
       lastActionState: result.state,
       lastActionMessage: result.message,
       updatedAt: new Date(),
     });
     return entry;
+  },
+  async claimRevoke(id: string, review: ApplicationReview, staff: Staff) {
+    const entry = applications.get(id);
+    if (!entry || entry.serverId !== staff.serverId) return { claimed: false, application: undefined };
+    if (!(entry.status === "approved" || (entry.status === "needs_review" && entry.accessIntent === "revoke")))
+      return { claimed: false, application: entry };
+    Object.assign(entry, {
+      status: "revoking",
+      accessIntent: "revoke",
+      reviewedAt: new Date(),
+      reviewedBy: staff.id,
+      reviewReason: review.reason,
+      reviewId: review.id,
+      reviewKind: "revoke",
+      lastActionState: "started",
+      lastActionMessage: "Revocation started.",
+      updatedAt: new Date(),
+    });
+    return { claimed: true, application: entry };
+  },
+  async finishRevoke(id: string, actionId: string, result: ActionResult) {
+    const entry = applications.get(id);
+    if (!entry || entry.status !== "revoking" || entry.reviewId !== actionId)
+      throw new Error("Preview application changed");
+    const removed = result.state === "applied" || result.state === "pending";
+    Object.assign(entry, {
+      status: removed ? "revoked" : result.state === "failed" ? "approved" : "needs_review",
+      ...(removed ? { revokedAt: new Date() } : {}),
+      ...(result.state === "failed" ? { accessIntent: "grant" } : {}),
+      lastActionState: result.state,
+      lastActionMessage: result.message,
+      updatedAt: new Date(),
+    });
+    return entry;
+  },
+  async recordExternalRevoke(removal: { serverId: string; steamId: string; actorId: string; state: string }) {
+    const revoked = [...applications.values()].filter(
+      (entry) =>
+        entry.serverId === removal.serverId && entry.steamId === removal.steamId && entry.status === "approved",
+    );
+    for (const entry of revoked)
+      Object.assign(entry, {
+        status: "revoked",
+        accessIntent: "revoke",
+        revokedAt: new Date(),
+        reviewedBy: removal.actorId,
+        reviewKind: "revoke",
+        lastActionState: removal.state,
+        lastActionMessage: "Removed on the Whitelist page.",
+        updatedAt: new Date(),
+      });
+    return revoked;
   },
 };
 const applicantAuth = {
@@ -717,6 +786,31 @@ const telemetryStore = {
 };
 // Fictional supporter evidence stays in memory. No Patreon credentials or calls.
 const demoSupporters = new Map<string, SupporterView>();
+/** No whitelist applications exist in the preview, so automatic matching never has anything to copy. */
+function previewMatch(record: Pick<SupporterView, "discordId" | "discordSource" | "steamId">, founder: boolean) {
+  const automaticBlockedReason = founder
+    ? null
+    : !record.discordId
+      ? ("no_discord" as const)
+      : record.discordSource !== "patreon"
+        ? ("discord_not_from_patreon" as const)
+        : ("no_patreon_payment" as const);
+  return {
+    match: {
+      steam: record.discordId
+        ? { reason: "no_application" as const, steamId: null, applicationId: null, serverId: null }
+        : null,
+      sourceApplication: null,
+      sourceApplicationRevoked: false,
+      patreonDiscordElsewhere: false,
+      discordReportedForOtherPatron: false,
+      linkedSteamShared: false,
+    },
+    automaticPayment: null,
+    automaticBlockedReason,
+    automaticBlockedMessage: automaticBlockedReason ? automaticBlockedMessages[automaticBlockedReason] : null,
+  };
+}
 const demoSupporterActions = new Map<string, string>();
 const demoPaymentReferences = new Set<string>();
 for (const [index, displayName] of ["Demo · Steady Supporter", "Demo · Founding Crew", "Demo · New Backer"].entries()) {
@@ -731,11 +825,15 @@ for (const [index, displayName] of ["Demo · Steady Supporter", "Demo · Foundin
     reference: `DEMO-RECEIPT-${index + 1}`,
     verificationState: index === 2 ? "unverified" : "verified",
     firstSuccessfulPaymentVerified: index !== 2,
+    minimumConfirmed: false,
+    recordedBy: index === 2 ? null : "999999999999999991",
   };
   demoPaymentReferences.add(payment.reference.toLowerCase());
   demoSupporters.set(id, {
     id,
+    provider: "patreon",
     patreonMemberId: `preview-member-${index + 1}`,
+    confirmKey: `preview-member-${index + 1}`,
     displayName,
     patronStatus: index === 1 ? "former_patron" : "active_patron",
     lastChargeStatus: "Paid",
@@ -743,12 +841,29 @@ for (const [index, displayName] of ["Demo · Steady Supporter", "Demo · Foundin
     observedAt: new Date().toISOString(),
     reviewState: index === 1 ? "verified" : "pending",
     discordId: index === 2 ? null : `88888888888888888${index + 1}`,
+    discordSource: index === 2 ? null : "staff",
+    patreonDiscordId: null,
     steamId: index === 2 ? null : `7656119800000000${index + 1}`,
+    steamSource: index === 2 ? null : "staff",
+    steamApplicationId: null,
     identityState: index === 2 ? "unlinked" : "staff_linked",
     version: 1,
     latestPayment: payment,
+    payments: [payment],
     founderEligiblePayment: null,
-    founder: index === 1 ? { awardedAt: paidAt, paymentId: payment.id } : null,
+    founder:
+      index === 1 ? { awardedAt: paidAt, paymentId: payment.id, source: payment.source, automatic: false } : null,
+    founderBlockedReason: null,
+    founderBlockedMessage: null,
+    needsDiscordLink: false,
+    ...previewMatch(
+      {
+        discordId: index === 2 ? null : `88888888888888888${index + 1}`,
+        discordSource: index === 2 ? null : "staff",
+        steamId: index === 2 ? null : `7656119800000000${index + 1}`,
+      },
+      index === 1,
+    ),
   });
 }
 const supporterStore = {
@@ -766,7 +881,9 @@ const supporterStore = {
     if (existing) throw new ConflictException("This preview membership is already recorded. Search its membership ID.");
     const record: SupporterView = {
       id: randomUUID(),
+      provider: "patreon",
       patreonMemberId: input.patreonMemberId,
+      confirmKey: input.patreonMemberId,
       displayName: input.displayName,
       patronStatus: null,
       lastChargeStatus: null,
@@ -774,19 +891,31 @@ const supporterStore = {
       observedAt: new Date().toISOString(),
       reviewState: "unverified",
       discordId: null,
+      discordSource: null,
+      patreonDiscordId: null,
       steamId: null,
+      steamSource: null,
+      steamApplicationId: null,
       identityState: "unlinked",
       version: 1,
       latestPayment: null,
+      payments: [],
       founderEligiblePayment: null,
       founder: null,
+      founderBlockedReason: "no_payment",
+      founderBlockedMessage: founderBlockedMessages.no_payment,
+      needsDiscordLink: false,
+      ...previewMatch({ discordId: null, discordSource: null, steamId: null }, false),
     };
     demoSupporters.set(record.id, record);
     demoSupporterActions.set(input.id, fingerprint);
     const [supporter] = await this.list(campaignId, policy, record.id);
     return { ok: true, replayed: false, supporter };
   },
-  async list(_campaignId: string, _policy: FounderPolicy, memberId?: string, search = "") {
+  async recordPaypal() {
+    throw new ConflictException("Recording PayPal supporters is unavailable in the simulated preview.");
+  },
+  async list(_campaignId: string | null, _policy: FounderPolicy, memberId?: string, search = "") {
     const needle = search.toLocaleLowerCase();
     return structuredClone(
       [...demoSupporters.values()]
@@ -816,7 +945,13 @@ const supporterStore = {
         }),
     );
   },
-  async mutate(memberId: string, input: SupporterMutation, staff: Staff, campaignId: string, policy: FounderPolicy) {
+  async mutate(
+    memberId: string,
+    input: SupporterMutation,
+    staff: Staff,
+    campaignId: string | null,
+    policy: FounderPolicy,
+  ) {
     const record = demoSupporters.get(memberId);
     if (!record) throw new ConflictException("Preview supporter not found.");
     const fingerprint = JSON.stringify({ memberId, input, staff: staff.id });
@@ -825,7 +960,7 @@ const supporterStore = {
       if (previous !== fingerprint) throw new ConflictException("Preview review ID was already used.");
       return { ok: true, replayed: true, supporter: structuredClone(record) };
     }
-    if (record.version !== input.version || record.patreonMemberId !== input.confirm)
+    if (record.version !== input.version || record.confirmKey !== input.confirm)
       throw new ConflictException("Preview record changed. Refresh before reviewing.");
     if (input.kind === "founder") {
       const [view] = await this.list(campaignId, policy, memberId);
@@ -839,7 +974,13 @@ const supporterStore = {
         throw new ConflictException(
           "This preview record needs a matched identity and qualifying checked first payment.",
         );
-      record.founder = { awardedAt: new Date().toISOString(), paymentId: input.paymentId };
+      record.founder = {
+        awardedAt: new Date().toISOString(),
+        paymentId: input.paymentId,
+        source: view.founderEligiblePayment.source,
+        automatic: false,
+      };
+      Object.assign(record, previewMatch(record, true));
     }
     if (input.kind === "link") {
       if (
@@ -848,9 +989,19 @@ const supporterStore = {
         )
       )
         throw new ConflictException("This preview account is already linked.");
-      record.discordId = input.discordId;
-      record.steamId = input.steamId;
-      record.identityState = "staff_linked";
+      if (input.discordId !== undefined && input.discordId !== record.discordId)
+        Object.assign(record, { discordId: input.discordId, discordSource: "staff" });
+      if (input.steamId !== undefined && input.steamId !== record.steamId)
+        Object.assign(record, { steamId: input.steamId, steamSource: "staff", steamApplicationId: null });
+      record.identityState =
+        record.discordId && record.steamId
+          ? record.discordSource === "patreon"
+            ? "patreon_linked"
+            : "staff_linked"
+          : record.discordId || record.steamId
+            ? "partial"
+            : "unlinked";
+      Object.assign(record, previewMatch(record, Boolean(record.founder)));
     }
     if (input.kind === "payment") {
       const reference = input.reference.toLowerCase();
@@ -866,7 +1017,10 @@ const supporterStore = {
         source: "manual_receipt",
         verificationState: "verified",
         firstSuccessfulPaymentVerified: input.firstSuccessfulPaymentVerified,
+        minimumConfirmed: false,
+        recordedBy: staff.id,
       };
+      record.payments = [record.latestPayment, ...record.payments];
     }
     if (input.kind === "review") record.reviewState = "verified";
     record.version++;
@@ -899,18 +1053,20 @@ const previewSyncStatus = (): PatreonSyncStatus => ({
   intervalMinutes: 30,
   nextAttemptAt: new Date(previewSyncedAt + 30 * 60_000).toISOString(),
   conflictDetails: [
-    { supporterId: previewBacker.id, patreonMemberId: previewBacker.patreonMemberId, reason: "discord-in-use" },
+    // The demo supporters are Patreon records, so the member ID equals the confirm key.
+    { supporterId: previewBacker.id, patreonMemberId: previewBacker.confirmKey, reason: "discord-in-use" },
   ],
   founderReviews: previewFounder.founder
     ? [
         {
           supporterId: previewFounder.id,
-          patreonMemberId: previewFounder.patreonMemberId,
+          patreonMemberId: previewFounder.confirmKey,
           paymentId: previewFounder.founder.paymentId,
           paymentSource: "manual_receipt",
           reference: "DEMO-RECEIPT-2",
           unverifiedPaymentId: previewUnverifiedPaymentId,
           unverifiedReference: "DEMO-PLEDGE-EVENT-2",
+          reviewReason: "unverified" as const,
         },
       ]
     : [],
@@ -1572,7 +1728,9 @@ const previewRoleNotes: PreviewPlanEntry[] = [
 ];
 let previewRolesApplied = false;
 let previewRolesRunning = false;
+// Like draft #117, real runs and previews are spaced separately: 30 seconds between runs, 5 between previews.
 let previewRolesLastRequestAt = 0;
+let previewRolesLastPreviewAt = 0;
 const previewRoleResults = new Map<string, { fingerprint: string; summary: Record<string, unknown> }>();
 const previewLedgerRow = (
   discordUserId: string,
@@ -1747,7 +1905,7 @@ const previewReconcileSchema = z
   })
   .strict();
 
-/** Simulated roles API with draft #117's switch, 30-second spacing, running and repeated-ID rules. */
+/** Simulated roles API with draft #117's switch, run and preview spacing, running and repeated-ID rules. */
 @Controller("admin/api/discord-roles")
 @UseFilters(AdminExceptionFilter)
 @UseGuards(AdminGuard)
@@ -1778,9 +1936,15 @@ class PreviewDiscordRolesController {
       throw new ServiceUnavailableException("Discord roles are switched off (DISCORD_ROLES_ENABLED=false).");
     if (previewRolesRunning)
       throw new ConflictException("A role check is already running. Try again when it finishes.");
-    if (Date.now() - previewRolesLastRequestAt < 30_000)
-      throw new HttpException("Wait 30 seconds between role checks.", 429);
-    previewRolesLastRequestAt = Date.now();
+    if (input.dryRun) {
+      if (Date.now() - previewRolesLastPreviewAt < 5_000)
+        throw new HttpException("Wait 5 seconds between previews.", 429);
+      previewRolesLastPreviewAt = Date.now();
+    } else {
+      if (Date.now() - previewRolesLastRequestAt < 30_000)
+        throw new HttpException("Wait 30 seconds between role checks.", 429);
+      previewRolesLastRequestAt = Date.now();
+    }
     const startedAt = new Date().toISOString();
     const only = (entries: PreviewPlanEntry[]) =>
       input.discordUserId ? entries.filter((entry) => entry.discordUserId === input.discordUserId) : entries;
@@ -1943,12 +2107,45 @@ async function main() {
     .useValue(telemetryStore)
     .overrideProvider(SupportersStore)
     .useValue(supporterStore)
+    // No database: automatic supporter matching stays off and reports nothing.
+    .overrideProvider(SupporterMatchStore)
+    .useValue({})
+    .overrideProvider(SupporterMatchService)
+    .useValue({
+      status: () => ({
+        steamFill: false,
+        founderAuto: false,
+        holdHours: 72,
+        configured: false,
+        running: false,
+        lastRunAt: null,
+        lastTrigger: null,
+        lastError: null,
+        checked: 0,
+        steamFilled: 0,
+        foundersRecorded: 0,
+        blocked: {},
+        capped: false,
+      }),
+      sweep: async () => undefined,
+      member: async () => null,
+      applicationChanged: async () => undefined,
+    })
     .overrideProvider(PatreonSyncService)
     .useValue(patreonSync)
     .overrideProvider(MapVotesStore)
     .useValue(voteStore)
     .overrideProvider(ServerEventsStore)
     .useValue(eventStore)
+    // No Discord client or database: the roles page reports Discord as not connected.
+    .overrideProvider(DiscordRolesDiscord)
+    .useValue({ ready: () => false })
+    .overrideProvider(DiscordRolesStore)
+    .useValue({
+      summary: async () => ({ memberEligible: 0, founders: 1, foundersWithoutDiscord: 0 }),
+      foundersWithoutDiscord: async () => [],
+      recent: async () => [],
+    })
     .overrideProvider(MapVotesDiscord)
     .useValue({
       check: async () => ({ name: "simulated-voting" }),

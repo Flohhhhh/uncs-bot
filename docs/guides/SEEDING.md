@@ -76,6 +76,7 @@ Gramps refuses to add or remove the configured role, and won't post the panel, w
 
 - `@everyone`, or a managed role (a bot or integration role);
 - one of the staff roles in `ADMIN_ADMIN_ROLE_IDS`, `ADMIN_MODERATOR_ROLE_IDS` or `ADMIN_VIEWER_ROLE_IDS`;
+- one of Gramps' [automatic Discord roles](DISCORD_ROLES.md) in `DISCORD_MEMBER_ROLE_ID`, `DISCORD_FOUNDER_ROLE_ID` or `DISCORD_SUPPORTER_ROLE_ID`, which people earn and must never be able to give themselves;
 - a role with any of: Administrator, Manage Server, Manage Roles, Manage Channels, Manage Webhooks, Manage Messages, Manage Threads, Manage Nicknames, Manage Events, Manage Expressions, Kick Members, Ban Members, Timeout Members, Mute Members, Deafen Members, Move Members, Mention @everyone, @here and All Roles, or View Audit Log;
 - a role that gets any of those through a channel or category permission override. Gramps reads the overrides from its channel cache, which Discord fills when Gramps connects. An override that only allows things like View Channel or Send Messages is fine.
 

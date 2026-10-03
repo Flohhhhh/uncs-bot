@@ -1,6 +1,8 @@
 import { Injectable, Logger, type OnApplicationBootstrap, type OnModuleDestroy } from "@nestjs/common";
+import { DiscordRolesService } from "../discord-roles/discord-roles.service";
 import { EnvService } from "../env/env.service";
 import { PatreonApiError, PatreonClient } from "./patreon.client";
+import { SupporterMatchService } from "./supporter-match.service";
 import { SupportersStore, type FounderReview } from "./supporters.store";
 
 export const PATREON_SYNC_STARTUP_DELAY_MS = 15_000;
@@ -108,7 +110,22 @@ export class PatreonSyncService implements OnApplicationBootstrap, OnModuleDestr
     private readonly client: PatreonClient,
     private readonly store: SupportersStore,
     private readonly env: EnvService,
+    private readonly roles: DiscordRolesService,
+    private readonly match: SupporterMatchService,
   ) {}
+
+  /**
+   * A Discord account the sync linked can make a founder eligible for the Founder role, and a changed status or
+   * payment can start or end support for the Supporter role, so the role service checks that account like a staff
+   * change. Fire-and-forget: a role problem never fails the import.
+   */
+  private notifyRoles(discordId: string | null) {
+    try {
+      this.roles.supporterChanged(discordId);
+    } catch {
+      /* The role service logs its own problems. */
+    }
+  }
 
   private otherSecrets() {
     return [this.env.get("PATREON_WEBHOOK_SECRET"), ...deploymentSecrets(this.env)];
@@ -214,6 +231,12 @@ export class PatreonSyncService implements OnApplicationBootstrap, OnModuleDestr
         counts.payments += result.payments;
         counts.revokedPayments += result.revoked;
         if (result.discordLinked) counts.discordLinks++;
+        // An unchanged record queues nothing; the six-hour role safety pass covers time-based expiry.
+        if (
+          result.discordId &&
+          (result.created || result.updated || result.payments || result.revoked || result.discordLinked)
+        )
+          this.notifyRoles(result.discordId);
         if (result.conflict) {
           counts.conflicts++;
           if (counts.conflictDetails.length < MAX_DETAILS)
@@ -226,6 +249,9 @@ export class PatreonSyncService implements OnApplicationBootstrap, OnModuleDestr
       }
       // A shutdown mid-sync keeps what was imported but does not report a completed sync.
       if (this.stopped) return;
+      // Automatic supporter matching (off by default) sees this sync's Discord links and payments. It never rejects
+      // and keeps its own status, so it cannot fail the sync.
+      await this.match.sweep("sync");
       counts.founderReviews = await this.store.founderReviews(campaignId);
       this.counts = counts;
       this.lastSuccessAt = Date.now();

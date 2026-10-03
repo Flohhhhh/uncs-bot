@@ -389,10 +389,17 @@ export class SeedingService {
    */
   private unsafe(guild: Guild, role: Role) {
     const staff = this.admin.staffPolicy();
+    // Gramps' automatic UNC, Founder and Supporter roles are earned, so a button must never hand them out.
+    const automatic = [
+      this.env.get("DISCORD_MEMBER_ROLE_ID"),
+      this.env.get("DISCORD_FOUNDER_ROLE_ID"),
+      this.env.get("DISCORD_SUPPORTER_ROLE_ID"),
+    ];
     return (
       role.id === guild.id ||
       role.managed ||
       [...staff.adminRoleIds, ...staff.moderatorRoleIds, ...staff.viewerRoleIds].includes(role.id) ||
+      automatic.includes(role.id) ||
       role.permissions.any(ELEVATED_PERMISSIONS) ||
       guild.channels.cache.some(
         (channel) =>

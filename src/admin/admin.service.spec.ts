@@ -87,6 +87,59 @@ describe("staff action safeguards", () => {
     expect(game.execute).toHaveBeenCalledTimes(1);
   });
 });
+describe("whitelist removal notifications", () => {
+  const removal = () => ({
+    id: randomUUID(),
+    action: "whitelist-remove",
+    steamId: "76561198123456789",
+    confirm: "76561198123456789",
+    reason: "Removed on the Whitelist page",
+  });
+  it.each(["applied", "pending"] as const)("announces a %s removal after its receipt is saved", async (state) => {
+    const { service, game, store } = fixture();
+    game.execute.mockResolvedValue({ state, message: "Removed" });
+    const events: unknown[] = [];
+    let savedBeforeEvent = 0;
+    service.whitelistRemovals.subscribe((event) => {
+      savedBeforeEvent = store.finish.mock.calls.length;
+      events.push(event);
+    });
+    const action = removal();
+    await service.act(staff, action);
+    expect(events).toEqual([
+      {
+        serverId: "primary",
+        steamId: action.steamId,
+        actionId: action.id,
+        actorId: staff.id,
+        actorName: staff.name,
+        state,
+      },
+    ]);
+    expect(savedBeforeEvent).toBe(1);
+  });
+  it("announces nothing for a refused, uncertain or unsaved removal, or for a grant", async () => {
+    const { service, game, store } = fixture();
+    const events: unknown[] = [];
+    service.whitelistRemovals.subscribe((event) => events.push(event));
+    // Separate staff members avoid the one-second courtesy limit between actions.
+    const actor = (index: number) => ({ ...staff, id: `12345678901234567${index}` });
+    game.execute.mockResolvedValueOnce({ state: "failed", message: "Refused" });
+    await service.act(actor(1), removal());
+    game.execute.mockRejectedValueOnce(new RconError("Lost response", true));
+    await service.act(actor(2), removal());
+    store.finish.mockRejectedValueOnce(new Error("DB offline"));
+    await service.act(actor(3), removal());
+    game.execute.mockResolvedValueOnce({ state: "applied", message: "Added" });
+    await service.act(actor(4), {
+      id: randomUUID(),
+      action: "whitelist-add",
+      steamId: "76561198123456789",
+      reason: "Member",
+    });
+    expect(events).toEqual([]);
+  });
+});
 
 describe("a person queuing the entry that is already next", () => {
   const queue = () => ({
