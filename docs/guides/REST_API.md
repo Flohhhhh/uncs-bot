@@ -29,15 +29,15 @@ After you've deployed your bot with Railway as suggested in the main README, you
 
 ## 2. Startup order and the health check
 
-The HTTP port opens before the bot signs in to Discord: after the database check and route setup, but without waiting for Discord's gateway. The dashboard, the game kill-feed ingest (`/api/ingest/...`), the public community API and the Patreon webhooks therefore answer even while Discord is slow, down or rate-limiting the sign-in.
+The HTTP port opens before the bot signs in to Discord: after the database check and route setup, but without waiting for Discord's gateway. The dashboard, the game kill-feed ingest (`/api/ingest/...`), the public community API and the Patreon webhooks therefore answer while the sign-in is still pending, for example while Discord's gateway is slow or is holding the sign-in back with a rate limit.
 
 Everything that needs Discord still waits for it:
 
 - `/health` answers `503 {"status":"starting"}` until Discord is signed in and the background workers have started, then `200 {"status":"ok"}` for the rest of the process's life. That is the moment the bot used to start answering HTTP at all.
-- The background workers (community messages, staff alerts, map votes, events, the weekly board and the Patreon sync) start only after the sign-in, in the same order as before.
+- The background workers (community messages, staff alerts, map votes, events, the weekly board and the Patreon sync) start only after the sign-in, in the same order as before. Until then, starting an optional event answers that Gramps is still starting, so no event waits for a worker that is not running yet.
 - Slash commands and buttons arrive through Discord's gateway, so none run before the sign-in. Dashboard actions that post to Discord or check a Discord channel, such as starting a ballot or posting the weekly board, answer that Discord is not ready.
 - Staff dashboard and applicant sign-in check roles and membership through Discord's API with the bot token, not through the gateway, and deny access whenever Discord cannot confirm them.
 
-If the sign-in fails outright, for example with a rejected token or a missing privileged intent, the bot logs `Failed to bootstrap the application` and exits with code 1 so Railway restarts it, as before.
+If the sign-in fails outright, the bot logs `Failed to bootstrap the application` and exits with code 1 so Railway restarts it, as before. That covers a rejected token or a missing privileged intent, and also most Discord outages: discord.js gives up when Discord's gateway lookup keeps failing or the first gateway connection errors. HTTP is then unavailable from the exit until a restarted process opens the port again, so an outage like that still interrupts the routes above.
 
-On Railway, set the service's **Healthcheck Path** (Settings → Deploy) to `/health`. Railway then switches traffic to a new deployment only once its Discord sign-in has completed, and keeps the running deployment if the new one never signs in. This repository has no `railway.json`, so the setting lives in the Railway dashboard.
+On Railway, set the service's **Healthcheck Path** (Settings → Deploy) to `/health`. Railway then switches traffic to a new deployment only once its Discord sign-in has completed, and keeps the running deployment if the new one does not sign in within the healthcheck timeout. This repository has no `railway.json`, so the setting lives in the Railway dashboard.

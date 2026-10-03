@@ -22,11 +22,12 @@ export class StartupState {
  * Opens the HTTP port before the Discord sign-in.
  *
  * Necord signs in from NecordModule.onApplicationBootstrap, and Nest awaits every bootstrap hook inside
- * app.init(). app.listen() binds the port only after that, so a slow, rate-limited or failing Discord gateway kept
- * the dashboard, the kill-feed ingest, the community API and the Patreon webhooks offline. Nest runs global
- * modules' hooks first, in import order, and BotModule imports StartupModule ahead of NecordModule. The port
- * therefore opens after every onModuleInit (database check, error handlers) and route registration, but before
- * the sign-in. The sign-in, and every feature module's bootstrap hook after it, keep their order.
+ * app.init(). app.listen() binds the port only after that, so a slow or rate-limited Discord sign-in kept the
+ * dashboard, the kill-feed ingest, the community API and the Patreon webhooks offline. (A sign-in that fails
+ * outright still ends the process; see startApplication.) Nest runs global modules' hooks first, in import order,
+ * and BotModule imports StartupModule ahead of NecordModule. The port therefore opens after every onModuleInit
+ * (database check, error handlers) and route registration, but before the sign-in. The sign-in, and every feature
+ * module's bootstrap hook after it, keep their order.
  */
 @Injectable()
 export class OpenHttpBeforeDiscord implements OnApplicationBootstrap {
