@@ -6,7 +6,7 @@ import { DataTable, CopyValue } from "../../components/data-table";
 import { allowed } from "../actions/policy";
 import { PlayerActions } from "./player-actions";
 import { FactionChip, FactionOptions, liveFactions, playerFaction } from "./factions";
-import { TeamMoveDialog, TeamResults, type TeamMoveResult } from "./team-move";
+import { notSent, TeamMoveDialog, TeamResults, type TeamMoveResult } from "./team-move";
 import { EmptyRoster } from "./empty-roster";
 
 export function PlayersPage() {
@@ -57,7 +57,8 @@ export function PlayersPage() {
   }
   function completed(result: TeamMoveResult) {
     setLastMove(result);
-    const attempted = new Set(result.items.filter((item) => item.state !== "queued").map((item) => item.steamId));
+    // Players skipped for a roster change were never sent a move either, so they stay selected for a new review.
+    const attempted = new Set(result.items.filter((item) => !notSent(item)).map((item) => item.steamId));
     setSelected((previous) => new Set([...previous].filter((id) => !attempted.has(id))));
     setDestinations((previous) => Object.fromEntries(Object.entries(previous).filter(([id]) => !attempted.has(id))));
   }

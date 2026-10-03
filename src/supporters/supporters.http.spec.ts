@@ -1,4 +1,5 @@
-import { Global, Module, type INestApplication, type MiddlewareConsumer } from "@nestjs/common";
+import { Global, Logger, Module, type INestApplication, type MiddlewareConsumer } from "@nestjs/common";
+import { APP_FILTER } from "@nestjs/core";
 import { Test } from "@nestjs/testing";
 import type { NextFunction, Request, Response } from "express";
 import { createHmac, randomUUID } from "node:crypto";
@@ -11,6 +12,7 @@ import { hash } from "../admin/admin.auth";
 import { SupportersModule } from "./supporters.module";
 import { SupportersStore } from "./supporters.store";
 import { PatreonSyncService } from "./patreon-sync.service";
+import { AppExceptionFilter } from "../common/filters/app-exception.filter";
 
 const secret = "separate-patreon-webhook-secret";
 const values: Record<string, unknown> = {
@@ -59,7 +61,12 @@ describe("private supporters HTTP boundary", () => {
         : undefined,
     );
     jest.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ roles: ["staff"] })));
-    const module = await Test.createTestingModule({ imports: [TestEnvModule, SupportersModule] })
+    jest.spyOn(Logger.prototype, "error").mockImplementation();
+    // Production registers this filter globally, so status assertions here go through it.
+    const module = await Test.createTestingModule({
+      imports: [TestEnvModule, SupportersModule],
+      providers: [{ provide: APP_FILTER, useClass: AppExceptionFilter }],
+    })
       .overrideProvider(SupportersStore)
       .useValue(store)
       .overrideProvider(AdminSettings)

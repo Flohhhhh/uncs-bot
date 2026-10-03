@@ -71,11 +71,16 @@ export function CommunityMessages() {
               <strong>
                 {!data.discordStatus.enabled
                   ? "Off"
-                  : data.discordStatus.configured
-                    ? "Enabled"
-                    : "Needs channel and message"}
+                  : !data.discordStatus.configured
+                    ? "Needs channel and message"
+                    : data.discordStatus.problem
+                      ? "Not updating"
+                      : "Enabled"}
               </strong>
             </div>
+            {data.discordStatus.enabled && data.discordStatus.configured && data.discordStatus.problem && (
+              <p className="notice warning">{data.discordStatus.problem}</p>
+            )}
             <details className="message-observations">
               <summary>Activity &amp; setup</summary>
               <dl>

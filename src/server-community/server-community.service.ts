@@ -22,6 +22,15 @@ const MAX_SENDS_PER_TICK = 1;
 const MESSAGE_TTL_MS = 60_000;
 /** After a failed whitelist read, joiners get the standard welcome without another read for this long. */
 export const WHITELIST_RETRY_MS = 60_000;
+/** Why a configured status card is not being edited. Fixed text: it names settings, never IDs. */
+const CARD_PROBLEMS = {
+  guild: "Discord status card is not being updated. Set ADMIN_GUILD_ID to the server that holds its channel.",
+  channel:
+    "Discord status card is not being updated. Its configured channel is not a text channel in the ADMIN_GUILD_ID server.",
+  author:
+    "Discord status card is not being updated. Its configured message was not posted by Gramps, and Gramps edits only its own messages.",
+  failed: "Discord status card could not be updated. Check the configured existing message and channel permissions.",
+} as const;
 type QueuedMessage = { action: AdminAction; readyAt: number; expiresAt: number; followUps: string[] };
 type StatusCardTarget = { channelId: string; messageId: string } | null | undefined;
 
@@ -105,6 +114,7 @@ export class ServerCommunityService implements OnApplicationBootstrap, OnModuleD
           this.env.get("SERVER_COMMUNITY_ENABLED") === true &&
           this.env.get("SERVER_COMMUNITY_DISCORD_STATUS_ENABLED") === true,
         configured: !!options.channelId && !!options.messageId,
+        problem: worker?.statusCardProblem() ?? null,
       },
     };
   }
@@ -146,6 +156,8 @@ export class ServerCommunityWorker implements OnApplicationBootstrap, OnModuleDe
   private cardInFlight?: Promise<void>;
   private cardSavedAt = 0;
   private cardKey = "";
+  private cardProblem: string | null = null;
+  private readonly cardWarnings = new Set<string>();
   private lastMessageAcknowledgedAt: string | null = null;
   private whitelistLoadedAt: string | null = null;
   private whitelistFailedAt: string | null = null;
@@ -171,6 +183,11 @@ export class ServerCommunityWorker implements OnApplicationBootstrap, OnModuleDe
       lastMessageAcknowledgedAt: this.lastMessageAcknowledgedAt,
       lastStatusCardUpdatedAt: this.cardSavedAt ? new Date(this.cardSavedAt).toISOString() : null,
     };
+  }
+
+  /** Why the latest status-card attempt made no edit; null before the first attempt and after an edit. */
+  statusCardProblem() {
+    return this.cardProblem;
   }
 
   /** When the whitelist used to pick welcome pools was last read, and when a read last failed. */
@@ -393,19 +410,29 @@ export class ServerCommunityWorker implements OnApplicationBootstrap, OnModuleDe
     this.cardAttemptAt = now;
     try {
       const guildId = this.env.get("ADMIN_GUILD_ID");
-      if (!guildId) return;
+      if (!guildId) return this.refuseCard(CARD_PROBLEMS.guild);
       const channel = await this.discord.channels.fetch(options.channelId!);
-      if (!channel || !("guildId" in channel) || channel.guildId !== guildId || !("messages" in channel)) return;
+      if (!channel || !("guildId" in channel) || channel.guildId !== guildId || !("messages" in channel))
+        return this.refuseCard(CARD_PROBLEMS.channel);
       const message = await channel.messages.fetch(options.messageId!);
-      if (message.author.id !== this.discord.user!.id || this.stopped) return;
+      if (this.stopped) return;
+      if (message.author.id !== this.discord.user!.id) return this.refuseCard(CARD_PROBLEMS.author);
       // Edit only the explicitly configured, bot-owned message. Never create one.
       await message.edit(payload);
       this.cardKey = key;
       this.cardSavedAt = now;
+      this.cardProblem = null;
     } catch {
-      this.logger.warn(
-        "Discord status card could not be updated. Check the configured existing message and channel permissions.",
-      );
+      this.cardProblem = CARD_PROBLEMS.failed;
+      this.logger.warn(CARD_PROBLEMS.failed);
     }
+  }
+
+  /** A setup problem repeats every minute until fixed, so each cause is logged once per worker. */
+  private refuseCard(problem: string) {
+    this.cardProblem = problem;
+    if (this.cardWarnings.has(problem)) return;
+    this.cardWarnings.add(problem);
+    this.logger.warn(problem);
   }
 }
