@@ -814,7 +814,7 @@ function AdminSupporters() {
                 </td>
                 <td>
                   <button
-                    className="button secondary small"
+                    className="button secondary small supporter-review"
                     disabled={busy || resource.loading || resource.refreshing}
                     onClick={() => setSelected(record)}
                   >

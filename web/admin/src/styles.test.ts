@@ -150,3 +150,12 @@ describe("Discord roles ledger", () => {
     expect(declared('[data-mobile="cards"] td:has(.roles-ledger-message)', "grid-column", 1024)).toBeUndefined();
   });
 });
+
+describe("Supporters table", () => {
+  it("fits a 1280px desktop: narrow wrapping columns and a wrapping review button", () => {
+    // At 180px minimums with a one-line button the table needed 1129px and cut off Review supporter at 1366px.
+    expect(declared("td small.supporter-wrap", "min-width", 1280)).toBe("120px");
+    expect(declared(".supporter-review", "white-space", 1280)).toBe("normal");
+    expect(declared(".supporter-review", "max-width", 1280)).toBe("6.5rem");
+  });
+});

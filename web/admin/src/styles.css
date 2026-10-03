@@ -1352,7 +1352,7 @@ td strong {
 }
 /* Step text and match summaries run long; they wrap so the table stays usable on a phone. */
 td small.supporter-wrap {
-  min-width: 180px;
+  min-width: 120px;
   max-width: 320px;
   line-height: 1.6;
   white-space: normal;
@@ -1366,6 +1366,11 @@ td small.supporter-wrap {
   [data-mobile="cards"] td:has(.supporter-still-needed) {
     grid-column: 1 / -1;
   }
+}
+/* The six-column table must fit a 1280px desktop, so the row's button wraps instead of widening the table. */
+.supporter-review {
+  max-width: 6.5rem;
+  white-space: normal;
 }
 .supporter-offer {
   display: flex;
