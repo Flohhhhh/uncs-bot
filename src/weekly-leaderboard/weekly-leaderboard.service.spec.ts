@@ -430,6 +430,41 @@ describe("weekly board worker", () => {
     expect(service.status(admin).lastRun).toMatchObject({ outcome: "failed", reason: "send refused" });
   });
 
+  it("lets an administrator post a week Discord refused once the cause is fixed", async () => {
+    const { service, channel } = fixture();
+    channel.send.mockRejectedValueOnce(
+      new DiscordAPIError(
+        { code: 200000, message: "Message was blocked by AutoMod" },
+        200000,
+        400,
+        "POST",
+        `/channels/${CHANNEL}/messages`,
+        {},
+      ),
+    );
+    await service.tick();
+    expect(service.status(admin).lastRun).toMatchObject({ outcome: "failed", reason: "send refused" });
+    jest.advanceTimersByTime(CHECK_INTERVAL_MS);
+    await service.tick();
+    expect(channel.send).toHaveBeenCalledTimes(1);
+
+    const preview = await service.preview(admin, "last");
+    expect(preview.postable).toBe(true);
+    await expect(
+      service.post(admin, { weekKey: "2026-W40", previewHash: preview.previewHash, confirm: true }),
+    ).resolves.toMatchObject({ outcome: "posted", weekKey: "2026-W40" });
+    expect(channel.send).toHaveBeenCalledTimes(2);
+    expect(channel.send.mock.calls[1][0]).toMatchObject({ nonce: channel.send.mock.calls[0][0].nonce });
+
+    // Posted now, so neither the schedule nor a second request sends it again.
+    jest.advanceTimersByTime(CHECK_INTERVAL_MS);
+    await service.tick();
+    await expect(
+      service.post(admin, { weekKey: "2026-W40", previewHash: preview.previewHash, confirm: true }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(channel.send).toHaveBeenCalledTimes(2);
+  });
+
   it("claims the week before sending, so overlapping scheduled and staff posts send once", async () => {
     const { service, channel } = fixture();
     const preview = await service.preview(admin, "last");

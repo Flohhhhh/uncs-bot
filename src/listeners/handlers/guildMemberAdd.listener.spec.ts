@@ -4,6 +4,7 @@ import { APP_FILTER, ExternalContextCreator } from "@nestjs/core";
 import { Test } from "@nestjs/testing";
 import { DiscordAPIError, TextChannel } from "discord.js";
 import { NecordParamsFactory } from "necord";
+import { createHash } from "node:crypto";
 import { AppExceptionFilter } from "../../common/filters/app-exception.filter";
 import { WelcomeService } from "../../welcome/welcome.service";
 import { GuildMemberAddListener } from "./guildMemberAdd.listener";
@@ -15,7 +16,7 @@ function discordError(code: number, status: number) {
 }
 
 /** Runs a member join the way Necord does, with the app's global exception filter. */
-async function join(sendError?: Error) {
+async function join(sendError?: Error, joinedTimestamp = 1_790_000_000_000) {
   const warnLog = jest.spyOn(Logger.prototype, "warn").mockImplementation(() => undefined);
   const errorLog = jest.spyOn(Logger.prototype, "error").mockImplementation(() => undefined);
   const channel = Object.assign(Object.create(TextChannel.prototype), {
@@ -23,7 +24,12 @@ async function join(sendError?: Error) {
     messages: {},
     send: jest.fn(() => (sendError ? Promise.reject(sendError) : Promise.resolve())),
   });
-  const member = { id: "member-1", guild: { id: "guild-1", systemChannel: channel }, toString: () => "<@member-1>" };
+  const member = {
+    id: "member-1",
+    joinedTimestamp,
+    guild: { id: "guild-1", systemChannel: channel },
+    toString: () => "<@member-1>",
+  };
   const welcomeService = {
     getSettings: jest.fn().mockResolvedValue({ enabled: true, message: "Welcome {user}" }),
     createEmbed: jest.fn().mockReturnValue({}),
@@ -76,6 +82,23 @@ describe("GuildMemberAddListener", () => {
     const { warnLog, errorLog } = await join(discordError(0, 500));
     expect(warnLog).not.toHaveBeenCalled();
     expect(errorLog).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends each join's welcome with one deterministic nonce Discord enforces, so a resend returns the first", async () => {
+    const first = await join();
+    const again = await join();
+    const rejoin = await join(undefined, 1_790_000_060_000);
+    const sentWith = (send: jest.Mock) => (send.mock.calls[0] as [{ nonce: string; enforceNonce: boolean }])[0];
+
+    expect(sentWith(first.send)).toEqual(
+      expect.objectContaining({
+        nonce: createHash("sha256").update("guild-welcome:guild-1:member-1:1790000000000").digest("hex").slice(0, 25),
+        enforceNonce: true,
+      }),
+    );
+    expect(sentWith(first.send).nonce).toHaveLength(25);
+    expect(sentWith(again.send).nonce).toBe(sentWith(first.send).nonce);
+    expect(sentWith(rejoin.send).nonce).not.toBe(sentWith(first.send).nonce);
   });
 
   it("sends the welcome without warnings when Discord accepts it", async () => {

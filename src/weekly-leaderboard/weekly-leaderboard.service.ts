@@ -93,8 +93,13 @@ const discordFailures: Record<string, string> = {
 @Injectable()
 export class WeeklyLeaderboardService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(WeeklyLeaderboardService.name);
-  /** `${serverId}:${weekKey}` claims and settled skips. Claimed before any send; never released. */
+  /**
+   * `${serverId}:${weekKey}` claims and settled skips. Claimed before any send; released only when Discord
+   * definitely refused the post, which moves the week to `refused`.
+   */
   private readonly decided = new Set<string>();
+  /** Weeks Discord refused: nothing was posted. The schedule never retries them; an administrator may post. */
+  private readonly refused = new Set<string>();
   private readonly lastRuns = new Map<string, WeeklyRun>();
   private readonly logged = new Set<string>();
   private timer?: ReturnType<typeof setTimeout>;
@@ -164,7 +169,7 @@ export class WeeklyLeaderboardService implements OnApplicationBootstrap, OnModul
     const slot = latestSlot(now, options.schedule);
     const window = weekEndingAt(slot, options.schedule);
     const key = `${server.id}:${window.weekKey}`;
-    if (this.decided.has(key)) return;
+    if (this.decided.has(key) || this.refused.has(key)) return;
     if (!options.enabled) {
       this.decided.add(key);
       this.record(server.id, window, "schedule", "skipped", "disabled");
@@ -263,10 +268,17 @@ export class WeeklyLeaderboardService implements OnApplicationBootstrap, OnModul
       if (failure.settled) this.decided.add(key);
       return this.record(server.id, window, trigger, "skipped", failure.reason, totals, undefined, staff);
     }
-    if (this.decided.has(key) || this.stopped || !message) return null;
+    if (this.decided.has(key) || (trigger === "schedule" && this.refused.has(key)) || this.stopped || !message)
+      return null;
     // Claimed synchronously before the send, so overlapping checks in this process send at most once.
+    this.refused.delete(key);
     this.decided.add(key);
     const result = await this.discord.send(channel, message, weeklyNonce(server.id, window.weekKey));
+    if (result.outcome === "failed") {
+      // A definite refusal posted nothing, so an administrator can post once the cause is fixed.
+      this.decided.delete(key);
+      this.refused.add(key);
+    }
     if (result.outcome === "posted")
       return this.record(server.id, window, trigger, "posted", "posted", totals, result.messageId, staff);
     return this.record(

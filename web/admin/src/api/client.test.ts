@@ -60,6 +60,18 @@ describe("staff API boundary", () => {
       await expect(api(path)).rejects.toMatchObject({ message: "Invalid API path.", status: 400 });
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
+  it("reads map IDs the server accepts but refuses an encoded traversal", async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ experiences: [], zones: null })));
+    vi.stubGlobal("fetch", fetcher);
+    const maps = { Kavkazi_Night: "Kavkazi_Night", "Map.Name": "Map.Name", "Folder/Map": "Folder%2FMap" };
+    for (const [map, sent] of Object.entries(maps)) {
+      await expect(api(`catalog/maps/${encodeURIComponent(map)}`)).resolves.toEqual({ experiences: [], zones: null });
+      expect(fetcher).toHaveBeenLastCalledWith(`/admin/api/catalog/maps/${sent}`, expect.any(Object));
+    }
+    for (const path of ["catalog/maps/%2e%2e/x", "catalog/maps/%2E./x", "catalog/maps/.%2e/x"])
+      await expect(api(path)).rejects.toMatchObject({ message: "Invalid API path.", status: 400 });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
   it.each([401, 403])("invalidates immediately on %s without waiting for an error body", async (status) => {
     const body = vi.fn(() => new Promise(() => {}));
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status, json: body }));

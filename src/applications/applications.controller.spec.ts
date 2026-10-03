@@ -7,6 +7,7 @@ import {
   type MiddlewareConsumer,
   type NestModule,
 } from "@nestjs/common";
+import { HttpAdapterHost } from "@nestjs/core";
 import { Test } from "@nestjs/testing";
 import type { Request, Response } from "express";
 import request from "supertest";
@@ -160,7 +161,7 @@ describe("application HTTP routing and privacy", () => {
 
   it("routes the administrator applications list separately from existing resources", async () => {
     const response = await request(app.getHttpServer()).get("/admin/api/applications").expect(200);
-    expect(response.body).toEqual({ serverId: "primary", applications: [privateRow] });
+    expect(response.body).toEqual({ enabled: true, serverId: "primary", applications: [privateRow] });
     expect(admin.read).not.toHaveBeenCalled();
     expect(store.list).toHaveBeenCalledTimes(1);
   });
@@ -209,9 +210,23 @@ describe("application HTTP routing and privacy", () => {
     const response = await request(app.getHttpServer()).get("/apply/api/me").expect(503);
     expect(response.body.message).toContain("this website");
     expect(response.body.message).not.toContain("discord.gg");
-    await request(app.getHttpServer()).get("/admin/api/applications").expect(503);
     expect(store.own).not.toHaveBeenCalled();
+  });
+  it("tells an administrator that applications are off without reading or reviewing records", async () => {
+    enabled = false;
+    const list = await request(app.getHttpServer()).get("/admin/api/servers/primary/applications").expect(200);
+    expect(list.body).toEqual({ enabled: false, serverId: "primary", applications: [] });
+    for (const decision of ["approve", "decline", "recheck"]) {
+      const review = await request(app.getHttpServer())
+        .post(`/admin/api/servers/primary/applications/${privateRow.id}/${decision}`)
+        .send({ id: privateRow.id, reason: "Reviewed" })
+        .expect(503);
+      expect(review.body.message).toContain("not open yet");
+    }
+    staff.role = "moderator";
+    await request(app.getHttpServer()).get("/admin/api/servers/primary/applications").expect(403);
     expect(store.list).not.toHaveBeenCalled();
+    expect(store.claim).not.toHaveBeenCalled();
   });
 });
 
@@ -224,7 +239,7 @@ describe("staff application review traffic limit", () => {
   })
   class ReviewAndApply implements NestModule {
     configure(consumer: MiddlewareConsumer) {
-      new AdminModule().configure(consumer);
+      new AdminModule(new HttpAdapterHost()).configure(consumer);
       new ApplicationsModule().configure(consumer);
     }
   }

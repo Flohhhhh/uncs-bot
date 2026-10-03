@@ -113,22 +113,27 @@ export class ApplicantApiController {
 
 @Controller(["admin/api/applications", "admin/api/servers/:serverId/applications"])
 @UseFilters(ApplicationsExceptionFilter)
-@UseGuards(ApplicationsEnabledGuard, AdminGuard, AdminServerGuard)
+@UseGuards(AdminGuard, AdminServerGuard)
 export class StaffApplicationsController {
   constructor(private readonly service: ApplicationsService) {}
+  // Only the review actions need the feature switched on. The list answers { enabled: false }
+  // so the dashboard can say applications are off instead of showing a load failure.
   @Get()
   list(@Req() req: StaffRequest) {
     return this.service.list(req.staff);
   }
   @Post(":id/approve")
+  @UseGuards(ApplicationsEnabledGuard)
   approve(@Req() req: StaffRequest, @Param("id") id: string, @Body() body: unknown) {
     return this.service.review(req.staff, id, "approve", body);
   }
   @Post(":id/decline")
+  @UseGuards(ApplicationsEnabledGuard)
   decline(@Req() req: StaffRequest, @Param("id") id: string, @Body() body: unknown) {
     return this.service.review(req.staff, id, "decline", body);
   }
   @Post(":id/recheck")
+  @UseGuards(ApplicationsEnabledGuard)
   recheck(@Req() req: StaffRequest, @Param("id") id: string, @Body() body: unknown) {
     return this.service.review(req.staff, id, "recheck", body);
   }
