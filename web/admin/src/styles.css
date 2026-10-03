@@ -274,11 +274,12 @@ textarea:focus-visible {
   font-size: var(--text-md);
   line-height: 1.4;
 }
+/* Hover leaves an over-long or otherwise invalid field's danger border in place. */
 :where(
     input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="color"]),
     select,
     textarea
-  ):hover:not(:disabled) {
+  ):hover:not(:disabled, [aria-invalid="true"]) {
   border-color: var(--line-hover);
 }
 :where(input, select, textarea):disabled {
