@@ -8,7 +8,7 @@ import { useGameApi } from "../../api/server-client";
 import type { ActionName, ActionResult, Catalog } from "../../api/types";
 import { useResource } from "../../api/use-resource";
 import { useGameAdmin as useAdmin } from "../../app/context";
-import { Modal, OutcomeBadge, ReasonField } from "../../components/ui";
+import { CountedTextarea, Modal, OutcomeBadge, ReasonField } from "../../components/ui";
 import { nextRoundLine, nextRoundSummary } from "../server/next-round";
 import { ActionReceipt } from "./action-receipt";
 import { TeamMoveDialog } from "../players/team-move";
@@ -318,17 +318,18 @@ function ActionForm({
                   </label>
                 ))}
               {(action === "message" || action === "broadcast") && (
-                <label>
-                  In-game message <span className="muted">(up to 200 characters)</span>
-                  <textarea
-                    name="message"
-                    maxLength={200}
-                    required
-                    rows={4}
-                    placeholder="Write your message…"
-                    defaultValue={initialMessage}
-                  />
-                </label>
+                <CountedTextarea
+                  label={
+                    <>
+                      In-game message <span className="muted">(up to 200 characters)</span>
+                    </>
+                  }
+                  name="message"
+                  required
+                  rows={4}
+                  placeholder="Write your message…"
+                  defaultValue={initialMessage}
+                />
               )}
               {needsCatalog && !catalogReady && (
                 <p role="status">

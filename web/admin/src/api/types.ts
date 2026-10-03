@@ -6,6 +6,8 @@ export type ActionResult = {
   id?: string;
   state: "applied" | "accepted" | "pending" | "failed" | "unknown";
   message: string;
+  /** False when a team move's precondition refused it before anything was sent to the game. */
+  changed?: boolean;
 };
 export type Player = {
   name: string;

@@ -8,6 +8,7 @@ import {
   type CSSProperties,
   type KeyboardEvent,
   type ReactNode,
+  type TextareaHTMLAttributes,
 } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useAdmin, useGameAdmin } from "../app/context";
@@ -294,20 +295,50 @@ export function Search({
     </div>
   );
 }
+export function CountedTextarea({
+  label,
+  limit = 200,
+  defaultValue = "",
+  ...textarea
+}: { label: ReactNode; limit?: number; defaultValue?: string } & Omit<
+  TextareaHTMLAttributes<HTMLTextAreaElement>,
+  "defaultValue" | "maxLength" | "value"
+>) {
+  // No maxLength: browsers silently cut pasted text to fit it. Count instead, and let the form's own
+  // length check refuse an over-long value with a visible error.
+  const id = useId();
+  const [length, setLength] = useState(() => defaultValue.trim().length);
+  const over = length > limit;
+  return (
+    <>
+      <label>
+        {label}
+        <textarea
+          {...textarea}
+          defaultValue={defaultValue}
+          aria-describedby={id}
+          aria-invalid={over || undefined}
+          onChange={(event) => setLength(event.target.value.trim().length)}
+        />
+      </label>
+      <small id={id} className={`character-count${over ? " over" : ""}`}>
+        {length}/{limit}
+        {over && ` · ${length - limit} over the limit`}
+      </small>
+    </>
+  );
+}
 export function ReasonField({ defaultValue = "" }: { defaultValue?: string }) {
   return (
-    <label>
-      Reason
-      <textarea
-        name="reason"
-        required
-        minLength={3}
-        maxLength={200}
-        rows={2}
-        defaultValue={defaultValue}
-        placeholder="A clear reason for the staff record"
-      />
-    </label>
+    <CountedTextarea
+      label="Reason"
+      name="reason"
+      required
+      minLength={3}
+      rows={2}
+      defaultValue={defaultValue}
+      placeholder="A clear reason for the staff record"
+    />
   );
 }
 export function Modal({

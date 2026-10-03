@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../../api/client";
 import { AdminContext, type AdminContextValue } from "../../app/context";
 import { PlayersPage } from "./players-page";
-import { alice, bob, context } from "./test-fixtures";
+import { alice, bob, context, overview } from "./test-fixtures";
 
 vi.mock("../../api/client", () => ({ api: vi.fn() }));
 const request = vi.mocked(api);
@@ -245,8 +245,11 @@ describe("live player controls", () => {
 });
 
 describe("team move results on the roster", () => {
-  async function moveBob(state: string) {
-    request.mockResolvedValue({ state, message: "Recorded outcome" } as never);
+  async function moveBob(state: string, changed?: boolean) {
+    // The dialog reads the live roster before each move; every other request is the team action.
+    request.mockImplementation(async (path) =>
+      path === "overview" ? overview() : { state, changed, message: "Recorded outcome" },
+    );
     const admin = context();
     show(admin);
     fireEvent.click(screen.getByLabelText("Select Bob"));
@@ -264,6 +267,11 @@ describe("team move results on the roster", () => {
     expect(screen.getByText("Team move to Blue · Lonestar: 1 accepted, not verified.")).toBeInTheDocument();
     expect(screen.queryByText(/Last team move/)).not.toBeInTheDocument();
     expect(screen.getByLabelText("Select Bob")).not.toBeChecked();
+  });
+  it("counts a player the server skipped because the roster changed in the status line", async () => {
+    await moveBob("failed", false);
+    expect(screen.getByText("Team move to Blue · Lonestar: 1 skipped, roster changed.")).toBeInTheDocument();
+    expect(screen.queryByText(/Last team move/)).not.toBeInTheDocument();
   });
   it("keeps the full results when a move fails", async () => {
     await moveBob("failed");
