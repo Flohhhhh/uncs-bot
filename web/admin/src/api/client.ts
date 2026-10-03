@@ -23,8 +23,10 @@ export function configureSession(token: string, onAuthFailure?: (message: string
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   // Callers can only reach this same-origin API. Never retry a mutation.
   // Only the route can traverse; ".." in a query value, such as a searched name, is ordinary text.
+  // Map IDs may hold "_", "." or an encoded "/", so the route allows them, but never "%2e": browsers
+  // turn an encoded ".." segment back into a real one.
   const route = path.split("?", 1)[0];
-  if (!/^[a-z][a-z0-9/-]*(?:\?[^#]*)?$/i.test(path) || route.includes(".."))
+  if (!/^[a-z][a-z0-9/._~%-]*(?:\?[^#]*)?$/i.test(path) || route.includes("..") || /%2e/i.test(route))
     throw new ApiError("Invalid API path.", 400);
   if (options.signal?.aborted) throw options.signal.reason;
   const mutation = !["GET", "HEAD"].includes((options.method ?? "GET").toUpperCase());
