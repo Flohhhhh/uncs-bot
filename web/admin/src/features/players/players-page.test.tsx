@@ -118,6 +118,43 @@ describe("live player controls", () => {
     fireEvent.change(screen.getByRole("searchbox"), { target: { value: "" } });
     expect(screen.getByLabelText("Select Bob")).toBeChecked();
   });
+  it("shows a filtered team that left the match so All can clear it", () => {
+    const view = show();
+    fireEvent.click(teamChip(/Lonestar/));
+    expect(screen.getByRole("heading", { name: "1 player shown" })).toBeInTheDocument();
+    const next = context();
+    next.overview!.status.factionScores = next.overview!.status.factionScores.filter(
+      (team) => team.name !== "Lonestar",
+    );
+    view.rerender(tree(next));
+    expect(teamChip(/^Lonestar \(not in this match\) 0$/)).toHaveAttribute("aria-pressed", "true");
+    expect(teamChip(/^All 3$/)).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("heading", { name: "0 players shown" })).toBeInTheDocument();
+    fireEvent.click(teamChip(/^All 3$/));
+    expect(
+      within(screen.getByRole("group", { name: "Filter players by team" })).queryByRole("button", {
+        name: /not in this match/,
+      }),
+    ).not.toBeInTheDocument();
+    expect(teamChip(/^All 3$/)).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("heading", { name: "3 players shown" })).toBeInTheDocument();
+  });
+  it("keeps the Unassigned filter visible after its players have joined a team", () => {
+    const admin = context();
+    admin.overview!.players[2] = { ...admin.overview!.players[2], faction: "" };
+    const view = show(admin);
+    fireEvent.click(teamChip(/^Unassigned 1$/));
+    expect(screen.getByRole("heading", { name: "1 player shown" })).toBeInTheDocument();
+    view.rerender(tree(context()));
+    expect(teamChip(/^Unassigned 0$/)).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(teamChip(/^All 3$/));
+    expect(
+      within(screen.getByRole("group", { name: "Filter players by team" })).queryByRole("button", {
+        name: /Unassigned/,
+      }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "3 players shown" })).toBeInTheDocument();
+  });
   it("limits the UNC shortcut to player names while keeping hidden selections visible", () => {
     const admin = context();
     admin.overview!.status.factionScores[0].name = "UNC faction";

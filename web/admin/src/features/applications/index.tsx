@@ -355,12 +355,22 @@ function AdminApplications() {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<ApplicationFilter>("");
   const [selected, setSelected] = useState<WhitelistApplication | null>(null);
+  const off = resource.data?.enabled === false;
   const records = resource.data?.applications;
-  if (!records)
+  // A failed read while the feature looked off cannot confirm it is still off, so report the failure.
+  if (!records || (resource.error && off))
     return (
       <Empty
         title={resource.error ? "Applications could not be loaded" : "Loading applications…"}
-        detail={resource.error ? "Use Refresh to try again." : undefined}
+        detail={resource.error || undefined}
+        alert={!!resource.error}
+      />
+    );
+  if (off)
+    return (
+      <Empty
+        title="Website applications are turned off"
+        detail="Set WHITELIST_APPLICATIONS_ENABLED=true in the bot configuration after the applications database migration is deployed."
       />
     );
   const needle = query.trim().toLocaleLowerCase();

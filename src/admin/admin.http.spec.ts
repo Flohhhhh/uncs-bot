@@ -4,6 +4,7 @@ import { ExpressAdapter } from "@nestjs/platform-express";
 import type { INestApplication } from "@nestjs/common";
 import request from "supertest";
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import { AdminModule } from "./admin.module";
 import { AdminSettings } from "./admin.settings";
 import { AdminStore } from "./admin.store";
@@ -150,6 +151,26 @@ describe("admin HTTP boundaries", () => {
     await request(app.getHttpServer()).get("/admin/assets/constructor").expect(404);
     const traversal = await request(app.getHttpServer()).get("/admin/assets/..%2F..%2Fadmin.settings.ts").expect(403);
     expect(traversal.text).not.toContain("clientSecret");
+    expect(traversal.body).toEqual({ message: "Forbidden." });
+  });
+  it("answers a missing or unreadable asset without the server's filesystem path", async () => {
+    for (const path of ["missing.js", "package.json", "uncs-mascot.png/missing", `${"a".repeat(300)}.js`]) {
+      const response = await request(app.getHttpServer()).get(`/admin/assets/${path}`).expect(404);
+      expect(response.body).toEqual({ message: "Not found." });
+      expect(response.text).not.toMatch(/ENOENT|ENOTDIR|ENAMETOOLONG|dist|public/);
+      expect(response.headers["content-security-policy"]).toContain("default-src 'none'");
+    }
+    const hidden = await request(app.getHttpServer()).get("/admin/assets/.env").expect(403);
+    expect(hidden.body).toEqual({ message: "Forbidden." });
+  });
+  it("answers a dashboard page without the server's filesystem path when the build is missing", async () => {
+    jest.spyOn(process, "cwd").mockReturnValue(join(process.cwd(), "missing-build"));
+    for (const path of ["/admin", "/admin/overview", "/admin/players"]) {
+      const response = await request(app.getHttpServer()).get(path).expect(503);
+      expect(response.body).toEqual({ message: "The dashboard is unavailable." });
+      expect(response.text).not.toMatch(/ENOENT|missing-build|dist|public|index\.html/);
+      expect(response.headers["content-security-policy"]).toContain("default-src 'none'");
+    }
   });
   it("supports dashboard deep links without swallowing API, auth, or missing-file errors", async () => {
     for (const path of ["players", "applications", "supporters", "combat", "match", "votes"]) {

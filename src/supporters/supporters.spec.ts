@@ -236,12 +236,24 @@ describe("supporter reviews", () => {
       { WARDOGS_RCON_PASSWORD: secret },
       { WARDOGS_FEED_TOKEN: secret },
       { ADMIN_SESSION_SECRET: secret },
+      { WARDOGS_SERVERS: [{ id: "event", password: "other-password", feedToken: secret }] },
+      { DISCORD_BOT_TOKEN: secret },
+      { ADMIN_DISCORD_CLIENT_SECRET: secret },
+      { DATABASE_URL: secret },
     ]) {
       const { service, store } = fixture(overrides);
       const { raw, signature } = signed();
       await expect(service.webhook(raw, signature, "members:update")).rejects.toMatchObject({ status: 503 });
       expect(store.ingest).not.toHaveBeenCalled();
     }
+  });
+  it("refuses a webhook secret that is the creator token, as the setup guide promises", async () => {
+    const { service, store } = fixture({ PATREON_CREATOR_ACCESS_TOKEN: secret });
+    const { raw, signature } = signed();
+    await expect(service.list(admin)).resolves.toMatchObject({ webhookConfigured: false });
+    await expect(service.webhook(raw, signature, "members:update")).rejects.toMatchObject({ status: 503 });
+    expect(service.signedWebhook(raw, signature)).toBe(false);
+    expect(store.ingest).not.toHaveBeenCalled();
   });
   it.each(["viewer", "moderator"] as const)("denies %s private records and all mutations", async (role) => {
     const { service, store } = fixture();

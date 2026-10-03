@@ -7,6 +7,7 @@ import {
   Get,
   HttpException,
   Injectable,
+  Logger,
   Param,
   Post,
   Req,
@@ -38,6 +39,7 @@ export class AdminExceptionFilter implements ExceptionFilter {
 @Controller("admin")
 @UseFilters(AdminExceptionFilter)
 export class AdminPageController {
+  private readonly logger = new Logger(AdminPageController.name);
   constructor(private readonly auth: AdminAuth) {}
   @Get([
     "",
@@ -58,7 +60,20 @@ export class AdminPageController {
     "events",
   ])
   page(@Res() res: Response) {
-    res.sendFile(join(process.cwd(), "dist", "src", "admin", "public", "index.html"));
+    // Without a callback a missing dashboard build goes to Express's error chain as an fs error, and that
+    // chain writes its message, the server's path, to the browser. These pages need no session.
+    res.sendFile(
+      join(process.cwd(), "dist", "src", "admin", "public", "index.html"),
+      (error?: Error & { code?: string }) => {
+        if (!error || error.code === "ECONNABORTED") return;
+        if (res.headersSent) {
+          res.destroy();
+          return;
+        }
+        this.logger.error(`The dashboard page could not be sent: ${error.message}`);
+        res.status(503).json({ message: "The dashboard is unavailable." });
+      },
+    );
   }
   @Get("auth/login")
   login(@Res() res: Response) {

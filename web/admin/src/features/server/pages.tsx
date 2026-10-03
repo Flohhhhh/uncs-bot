@@ -271,7 +271,13 @@ export function WhitelistPage() {
   const [filter, setFilter] = useState("");
   const [managed, setManaged] = useState<SheetPlayer | null>(null);
   if (!data)
-    return <Empty title={error ? "Whitelist could not be loaded" : "Loading whitelist…"} detail={error || ""} />;
+    return (
+      <Empty
+        title={error ? "Whitelist could not be loaded" : "Loading whitelist…"}
+        detail={error || ""}
+        alert={!!error}
+      />
+    );
   // Names only for players in the latest roster; offline entries stay SteamIDs.
   const online = new Map((overview?.players ?? []).map((player) => [player.steamId, player]));
   const search = query.trim().toLowerCase();
@@ -388,7 +394,8 @@ export function BansPage() {
   const { data, error } = useResource<Ban[]>("bans");
   const [query, setQuery] = useState("");
   const [picking, setPicking] = useState(false);
-  if (!data) return <Empty title={error ? "Bans could not be loaded" : "Loading bans…"} detail={error} />;
+  if (!data)
+    return <Empty title={error ? "Bans could not be loaded" : "Loading bans…"} detail={error} alert={!!error} />;
   const invalidCount = data.filter((ban) => !isPublicIndividualSteamId(ban.steamId)).length;
   const rows = data.filter((ban) =>
     [ban.steamId, ban.reason, ban.bannedBy].some((value) => value?.toLowerCase().includes(query.trim().toLowerCase())),

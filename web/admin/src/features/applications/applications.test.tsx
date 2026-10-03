@@ -68,6 +68,28 @@ beforeEach(() => {
   request.mockReset();
 });
 
+it("announces a failed application read without announcing the read while it loads", async () => {
+  request.mockRejectedValue(new Error("The dashboard could not be reached."));
+  render(page());
+  expect(screen.getByText("Loading applications…").closest("[role=alert]")).toBeNull();
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("Applications could not be loaded");
+  expect(alert).toHaveTextContent("The dashboard could not be reached.");
+});
+
+it("says applications are turned off instead of reporting a load failure", async () => {
+  request.mockResolvedValue({ enabled: false, serverId: "primary", applications: [] });
+  const view = render(page());
+  expect(await screen.findByText("Website applications are turned off")).toBeInTheDocument();
+  expect(screen.getByText(/WHITELIST_APPLICATIONS_ENABLED=true/)).toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.queryByText("No applications yet")).not.toBeInTheDocument();
+  request.mockRejectedValue(new Error("The dashboard request timed out. Try refreshing this page."));
+  view.rerender(page({ ...context, refreshVersion: 1 }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("The dashboard request timed out.");
+  expect(screen.queryByText("Website applications are turned off")).not.toBeInTheDocument();
+});
+
 it("waits for a refreshed list before freezing an application for review", async () => {
   const refreshed = deferred<ApplicationsResponse>();
   request.mockResolvedValueOnce({ applications: [record] }).mockReturnValueOnce(refreshed.promise);
@@ -78,7 +100,7 @@ it("waits for a refreshed list before freezing an application for review", async
   expect(open).toBeDisabled();
   fireEvent.click(open);
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-  await act(async () => refreshed.resolve({ applications: [{ ...record, status: "processing" }] }));
+  await act(async () => refreshed.resolve({ enabled: true, applications: [{ ...record, status: "processing" }] }));
   fireEvent.click(screen.getByRole("button", { name: "View request" }));
   expect(within(screen.getByRole("dialog")).getByText("Awaiting confirmation")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Review approval" })).not.toBeInTheDocument();

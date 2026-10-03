@@ -120,7 +120,12 @@ export function PlayersPage() {
               players.filter((player) => playerFaction(player, teams)?.name === team.name).length,
             ),
           )}
-          {unassigned > 0 && chip("unassigned", "Unassigned", unassigned)}
+          {/* A filtered team that has left the match stays visible, so the filter is never hidden and All clears it. */}
+          {teamFilter &&
+            teamFilter !== "unassigned" &&
+            !teams.some((team) => team.name === teamFilter) &&
+            chip(teamFilter, `${teamFilter} (not in this match)`, 0)}
+          {(unassigned > 0 || teamFilter === "unassigned") && chip("unassigned", "Unassigned", unassigned)}
           <button
             type="button"
             className="filter-chip"

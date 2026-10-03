@@ -29,6 +29,8 @@ export interface WhitelistApplication {
 }
 
 export interface ApplicationsResponse {
+  /** False while WHITELIST_APPLICATIONS_ENABLED is off; the list is then empty and was not read. */
+  enabled: boolean;
   applications: WhitelistApplication[];
 }
 

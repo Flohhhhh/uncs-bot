@@ -35,9 +35,21 @@ export function OutcomeBadge({ state }: { state: OutcomeState }) {
     </Badge>
   );
 }
-export function Empty({ title, detail, action }: { title: string; detail?: ReactNode; action?: ReactNode }) {
+export function Empty({
+  title,
+  detail,
+  action,
+  alert = false,
+}: {
+  title: string;
+  detail?: ReactNode;
+  action?: ReactNode;
+  alert?: boolean;
+}) {
+  // Only a failed read is announced, so routine loading and refreshes stay quiet. The key mounts the
+  // alert as a new element, which screen readers announce more reliably than a role added in place.
   return (
-    <div className="empty">
+    <div className="empty" role={alert ? "alert" : undefined} key={alert ? "alert" : "empty"}>
       <strong>{title}</strong>
       {detail && <p>{detail}</p>}
       {action && <div className="empty-action">{action}</div>}

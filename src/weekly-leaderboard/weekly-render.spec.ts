@@ -7,6 +7,7 @@ import {
   causeLabel,
   discordName,
   hasWeeklyMarker,
+  kdLabel,
   mapName,
   renderWeeklyBoard,
   shoutOuts,
@@ -244,6 +245,16 @@ describe("weekly board renderer", () => {
     expect(lines).not.toContain("**This week's shout-outs**");
     expect(labels({ bestKd: { steamId: FIXTURE_IDS[0], name: "Iron Hip", kills: 31, deaths: 0 } })).toEqual([
       "Still got it: Iron Hip, 31 kills, no deaths",
+    ]);
+  });
+
+  it("rounds K/D half-up like the store's round(numeric, 2), not through floating point", () => {
+    expect(kdLabel(41, 40)).toBe("1.03");
+    expect(kdLabel(23, 40)).toBe("0.58");
+    expect(kdLabel(58, 17)).toBe("3.41");
+    expect(kdLabel(12, 0)).toBe("—");
+    expect(labels({ bestKd: { steamId: FIXTURE_IDS[0], name: "Iron Hip", kills: 41, deaths: 40 } })).toEqual([
+      "Still got it: Iron Hip, K/D 1.03 over 41 kills",
     ]);
   });
 

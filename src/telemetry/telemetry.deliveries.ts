@@ -1,6 +1,6 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { GameServers } from "../admin/game-servers";
-import { feedCredentials } from "./telemetry.credentials";
+import { feedCredentials, feedServer } from "./telemetry.credentials";
 
 export type FeedRejection = { at: string; status: number; reason: string };
 /** accepted: valid killed events (repeats included); skipped: other types plus invalid entries. */
@@ -72,17 +72,19 @@ export class TelemetryDeliveries {
    * Authorization header carries the targeted server's feed token. Returns false for other routes.
    */
   rejectedRequest(url: string, status: number, reason: string, authorization: unknown) {
-    const route = INGEST_ROUTE.exec(url);
-    if (!route) return false;
-    let id: string | undefined;
-    try {
-      id = route[1] === undefined ? undefined : decodeURIComponent(route[1]);
-    } catch {
-      id = UNCONFIGURED;
-    }
-    const serverId = this.configured(id);
+    const serverId = this.target(url, authorization);
+    if (serverId === undefined) return false;
     this.record(serverId, status, reason, serverId !== null && this.carriesToken(serverId, authorization));
     return true;
+  }
+
+  /**
+   * The configured server an ingest request targets when its Authorization header carries that
+   * server's feed token, or null. The comparison is constant-time and nothing is kept.
+   */
+  tokenServer(url: string, authorization: unknown): string | null {
+    const serverId = this.target(url, authorization);
+    return serverId && this.carriesToken(serverId, authorization) ? serverId : null;
   }
 
   status(serverId: string): FeedDeliveryStatus {
@@ -129,9 +131,25 @@ export class TelemetryDeliveries {
     }
   }
 
-  private configured(id: string | undefined) {
+  /**
+   * The configured server an ingest route targets: null when it targets none, undefined for other
+   * routes. With WARDOGS_SERVERS set, the unscoped route targets the server whose feed token it carries.
+   */
+  private target(url: string, authorization: unknown) {
+    const route = INGEST_ROUTE.exec(url);
+    if (!route) return undefined;
+    let id: string | undefined;
     try {
-      return this.servers.resolve(id);
+      id = route[1] === undefined ? undefined : decodeURIComponent(route[1]);
+    } catch {
+      id = UNCONFIGURED;
+    }
+    return this.configured(id, authorization);
+  }
+
+  private configured(id: string | undefined, authorization?: unknown) {
+    try {
+      return feedServer(this.servers, id, authorization);
     } catch {
       return null;
     }
