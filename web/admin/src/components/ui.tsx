@@ -1,4 +1,12 @@
-import { useEffect, useId, useRef, useState, type ReactNode, type TextareaHTMLAttributes } from "react";
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+  type TextareaHTMLAttributes,
+} from "react";
 import { useAdmin } from "../app/context";
 export function Badge({ children, kind = "neutral" }: { children: ReactNode; kind?: string }) {
   return <span className={`pill ${kind}`}>{children}</span>;
@@ -154,6 +162,10 @@ export function ReasonField({ defaultValue = "" }: { defaultValue?: string }) {
     />
   );
 }
+function focusPageHeading() {
+  const heading = document.querySelector<HTMLElement>("#main-content h1[tabindex]");
+  (heading ?? document.getElementById("main-content"))?.focus();
+}
 export function Modal({
   title,
   description,
@@ -175,9 +187,10 @@ export function Modal({
   const latest = useRef({ busy, onClose });
   latest.current = { busy, onClose };
   const { setDialogOpen, server } = useAdmin();
-  useEffect(() => {
+  useLayoutEffect(() => {
     setDialogOpen(true);
     const element = dialog.current;
+    const opener = document.activeElement;
     // Some close requests close the dialog natively whatever the cancel handler does, such as the Android back
     // gesture. Reopen a busy dialog so its progress and Stop control stay reachable; otherwise let the parent
     // remove it. The listener goes before this cleanup's own close().
@@ -190,8 +203,12 @@ export function Modal({
     element?.showModal();
     return () => {
       element?.removeEventListener("close", closed);
+      // A layout cleanup runs before React removes the dialog, so close() still returns focus to the control
+      // that opened it. When that control is gone or disabled by now (a removed row, a deselected bulk move),
+      // focus the page heading rather than leave keyboard users at the end of the page.
       element?.close();
       setDialogOpen(false);
+      if (document.activeElement !== opener) focusPageHeading();
     };
   }, [setDialogOpen]);
   useEffect(() => {
