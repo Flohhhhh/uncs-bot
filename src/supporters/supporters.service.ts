@@ -13,7 +13,7 @@ import { deploymentSecrets, PatreonSyncService } from "./patreon-sync.service";
 import { SupporterMatchService } from "./supporter-match.service";
 import { SupportersStore } from "./supporters.store";
 import { founderPolicy, patreonCampaign } from "./founder-policy";
-import { supporterNextSteps, type NextStepContext } from "./supporter-match.rules";
+import { AUTO_FOUNDER_HOLD_HOURS_DEFAULT, supporterNextSteps, type NextStepContext } from "./supporter-match.rules";
 import {
   founderSchema,
   linkSchema,
@@ -74,6 +74,7 @@ export class SupportersService {
       steamFill: this.env.get("SUPPORTER_AUTO_STEAM_FILL_ENABLED") === true,
       founderAuto: this.env.get("SUPPORTER_AUTO_FOUNDER_ENABLED") === true,
       importConfigured: this.patreonSync.configured(),
+      holdHours: this.policy().automaticHoldHours ?? AUTO_FOUNDER_HOLD_HOURS_DEFAULT,
     };
   }
   /** Adds the steps still needed to a record before it leaves the service. */

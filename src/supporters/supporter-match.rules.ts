@@ -235,7 +235,8 @@ export function automaticFounderBlocker(
   return null;
 }
 
-export type NextStepArea = "discord" | "steam" | "payment" | "founder";
+/** `info` is not a task: it says why no founder promise is possible on this record. */
+export type NextStepArea = "discord" | "steam" | "payment" | "founder" | "info";
 export type NextStep = { code: string; area: NextStepArea; message: string };
 /** What the Supporters page needs to explain one record. */
 export type NextStepRecord = MatchMember & {
@@ -243,6 +244,8 @@ export type NextStepRecord = MatchMember & {
   founderBlockedReason: FounderBlockedReason | "no_payment" | null;
   founderEligiblePayment: PaymentView | null;
   latestPayment: PaymentView | null;
+  /** The payment automatic matching would record a founder promise on. */
+  automaticPayment: PaymentView | null;
   needsDiscordLink: boolean;
   match: {
     steam: SteamMatch | null;
@@ -253,7 +256,13 @@ export type NextStepRecord = MatchMember & {
   };
   automaticBlockedReason: AutomaticFounderBlockedReason | null;
 };
-export type NextStepContext = { steamFill: boolean; founderAuto: boolean; importConfigured: boolean };
+export type NextStepContext = {
+  steamFill: boolean;
+  founderAuto: boolean;
+  importConfigured: boolean;
+  /** Hours an imported first payment must stand before an automatic founder promise. */
+  holdHours: number;
+};
 
 const PAYMENT_REASONS = new Set<string>([
   "no_payment",
@@ -280,10 +289,15 @@ const steamStepCodes: Record<SteamMatchBlock, string> = {
 function steamStep(steam: SteamMatch, record: NextStepRecord, context: NextStepContext): NextStep {
   const id = steam.steamId ? ` (${steam.steamId})` : "";
   const server = steam.serverId ? ` on server ${steam.serverId}` : "";
+  // Only a Patreon record with the fill switched on is ever filled in; anything else waits for staff.
+  const fills = record.provider === "patreon" && context.steamFill;
   const messages: Record<SteamMatchBlock, string> = {
-    no_application:
-      "No whitelist application from this Discord account. The SteamID fills in once one is approved, or staff can link it.",
-    application_pending: `The whitelist application${server} is waiting for review. The SteamID fills in once it is approved.`,
+    no_application: fills
+      ? "No whitelist application from this Discord account. The SteamID fills in once one is approved with a whitelist grant, or staff can link it."
+      : "No whitelist application from this Discord account. Staff can link the SteamID once one is approved, or after confirming it with the supporter.",
+    application_pending: fills
+      ? `The whitelist application${server} is waiting for review. The SteamID fills in once it is approved with a whitelist grant; otherwise staff link it.`
+      : `The whitelist application${server} is waiting for review. Staff can link the SteamID once it is approved.`,
     application_in_progress: `A whitelist application${server} is being reviewed or revoked. Finish that review first.`,
     no_approved_application: "No approved whitelist application from this Discord account. Staff can link the SteamID.",
     application_not_confirmed: `The approved application's SteamID${id} was approved without a recorded grant or confirmed existing entry. Check it belongs to this person, then link it.`,
@@ -338,6 +352,12 @@ export function supporterNextSteps(record: NextStepRecord, context: NextStepCont
         "The Patreon import is off. Link the Discord account after confirming who the patron is.",
       );
   } else if (record.provider === "patreon") {
+    // Patreon's answer is only refreshed while the import runs, so a missing one says nothing without it.
+    if (record.discordSource === "patreon" && !record.patreonDiscordId && context.importConfigured)
+      discord(
+        "discord_not_reported",
+        "Patreon no longer reports this Discord account for the patron, who may have disconnected it. The link was kept; check it.",
+      );
     if (record.patreonDiscordId && record.patreonDiscordId !== record.discordId)
       discord(
         "discord_differs",
@@ -387,11 +407,14 @@ export function supporterNextSteps(record: NextStepRecord, context: NextStepCont
   const reason = record.founderBlockedReason;
   if (reason) {
     const payment = record.founderEligiblePayment ?? record.latestPayment;
-    const message =
-      reason === "below_minimum" && payment?.currency && payment.currency !== "USD"
-        ? `This ${payment.currency} payment has not been confirmed to be worth at least US$5. An imported Patreon payment in another currency cannot be confirmed here, so it needs a staff decision.`
-        : founderBlockedMessages[reason];
-    steps.push({ code: `founder_${reason}`, area: PAYMENT_REASONS.has(reason) ? "payment" : "founder", message });
+    const otherCurrency = reason === "below_minimum" && payment?.currency && payment.currency !== "USD";
+    const message = otherCurrency
+      ? `This ${payment.currency} payment has not been confirmed to be worth at least US$5. An imported Patreon payment in another currency cannot be confirmed here, so it needs a staff decision.`
+      : founderBlockedMessages[reason];
+    // Outside the window, below the minimum in US dollars, or a founder elsewhere: nothing staff can do here.
+    const area =
+      FOUNDER_IMPOSSIBLE.has(reason) && !otherCurrency ? "info" : PAYMENT_REASONS.has(reason) ? "payment" : "founder";
+    steps.push({ code: `founder_${reason}`, area, message });
     return steps;
   }
   const automatic = record.automaticBlockedReason;
@@ -410,14 +433,17 @@ export function supporterNextSteps(record: NextStepRecord, context: NextStepCont
               "Ready for staff to record. Automatic recording is off; with it on, Gramps would record this one itself.",
           },
     );
-  else if (record.provider === "patreon" && automatic === "payment_too_recent" && context.founderAuto)
+  else if (record.provider === "patreon" && automatic === "payment_too_recent" && context.founderAuto) {
+    const paidAt = record.automaticPayment ? Date.parse(record.automaticPayment.paidAt) : NaN;
+    const until = Number.isFinite(paidAt)
+      ? `, until ${new Date(paidAt + context.holdHours * 3_600_000).toISOString().slice(0, 16).replace("T", " ")} UTC`
+      : "";
     steps.push({
       code: "founder_automatic_waiting",
       area: "founder",
-      message:
-        "Ready for staff to record. Gramps records it itself once the first payment is past the refund waiting period.",
+      message: `Gramps records it after the refund waiting period (${context.holdHours} hours from the payment${until}). Recording it sooner skips that wait.`,
     });
-  else
+  } else
     steps.push({
       code: "founder_ready_staff",
       area: "founder",

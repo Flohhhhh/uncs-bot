@@ -252,8 +252,8 @@ describe("the automatic founder rule", () => {
   });
 });
 
-const on: NextStepContext = { steamFill: true, founderAuto: true, importConfigured: true };
-const off: NextStepContext = { steamFill: false, founderAuto: false, importConfigured: true };
+const on: NextStepContext = { steamFill: true, founderAuto: true, importConfigured: true, holdHours: 72 };
+const off: NextStepContext = { steamFill: false, founderAuto: false, importConfigured: true, holdHours: 72 };
 const codes = (record: SupporterView, context = on) => supporterNextSteps(record, context).map((step) => step.code);
 const ready = (overrides: Partial<SupporterView> = {}) =>
   supporterFixture({
@@ -315,6 +315,24 @@ describe("next steps on the Supporters page", () => {
       "discord_reported_for_other_patron",
     );
   });
+  it("flags a Discord account from Patreon that Patreon no longer reports, also for a founder", () => {
+    const disconnected = ready({ patreonDiscordId: null });
+    const [step] = supporterNextSteps(disconnected, on);
+    expect(step).toMatchObject({ code: "discord_not_reported", area: "discord" });
+    expect(step.message).toContain("no longer reports this Discord account");
+    expect(
+      codes(
+        ready({
+          patreonDiscordId: null,
+          founder: { awardedAt: "2026-10-02T00:00:00Z", paymentId: "p", source: "patreon_api", automatic: true },
+        }),
+      ),
+    ).toEqual(["discord_not_reported"]);
+    // Only for an account Patreon supplied, and only while the import keeps Patreon's answer current.
+    expect(codes(ready({ patreonDiscordId: null, discordSource: "staff" }))).not.toContain("discord_not_reported");
+    expect(codes(disconnected, { ...on, importConfigured: false })).not.toContain("discord_not_reported");
+    expect(codes(ready())).not.toContain("discord_not_reported");
+  });
   it.each([
     ["no_application", "no_whitelist_application"],
     ["application_pending", "application_pending"],
@@ -336,9 +354,29 @@ describe("next steps on the Supporters page", () => {
     expect(codes(ready(missing), off)).toContain("steam_available");
     expect(codes(ready({ ...missing, provider: "paypal" }))).toContain("steam_available");
   });
+  it.each(["no_application", "application_pending"] as const)(
+    "promises a SteamID fill for %s only for Patreon with the fill on",
+    (reason) => {
+      const steam = { steamId: null, steamSource: null, match: { ...ready().match, steam: steamMatch(reason) } };
+      const message = (record: SupporterView, context: NextStepContext) =>
+        supporterNextSteps(record, context).find((step) => step.area === "steam")!.message;
+      expect(message(ready(steam), on)).toContain("fills in once");
+      for (const [record, context] of [
+        [ready(steam), off],
+        [ready(steam), { ...on, steamFill: false }],
+        [ready({ ...steam, provider: "paypal" }), on],
+      ] as const) {
+        expect(message(record, context)).not.toContain("fills in");
+        expect(message(record, context)).toContain("Staff can link the SteamID");
+      }
+    },
+  );
   it("hides SteamID steps once no founder promise is possible, but keeps them for a founder without one", () => {
     for (const founderBlockedReason of ["outside_window", "below_minimum", "already_founder"] as const)
-      expect(codes(ready({ steamId: null, founderBlockedReason }))).toEqual([`founder_${founderBlockedReason}`]);
+      expect(supporterNextSteps(ready({ steamId: null, founderBlockedReason }), on)).toEqual([
+        // Not a task: why no founder promise is possible on this record.
+        expect.objectContaining({ code: `founder_${founderBlockedReason}`, area: "info" }),
+      ]);
     expect(
       codes(
         ready({
@@ -376,6 +414,17 @@ describe("next steps on the Supporters page", () => {
     expect(codes(ready(), off)).toEqual(["founder_ready_automatic_off"]);
     expect(codes(ready({ automaticBlockedReason: "discord_not_from_patreon" }))).toEqual(["founder_ready_staff"]);
     expect(codes(ready({ automaticBlockedReason: "payment_too_recent" }))).toEqual(["founder_automatic_waiting"]);
+    const [waiting] = supporterNextSteps(
+      ready({ automaticBlockedReason: "payment_too_recent", automaticPayment: paymentFixture() }),
+      { ...on, holdHours: 48 },
+    );
+    expect(waiting.message).toBe(
+      "Gramps records it after the refund waiting period (48 hours from the payment, until 2026-10-03 12:00 UTC). Recording it sooner skips that wait.",
+    );
+    expect(
+      supporterNextSteps(ready({ automaticBlockedReason: "payment_too_recent", automaticPayment: null }), on)[0]
+        .message,
+    ).toContain("(72 hours from the payment)");
     expect(codes(ready({ automaticBlockedReason: "payment_too_recent" }), off)).toEqual(["founder_ready_staff"]);
     const paypal = supporterNextSteps(ready({ provider: "paypal", automaticBlockedReason: "not_patreon" }), on);
     expect(paypal.map((step) => step.code)).toEqual(["founder_ready_staff"]);
@@ -385,6 +434,9 @@ describe("next steps on the Supporters page", () => {
     const steps = supporterNextSteps(ready({ founderBlockedReason: "not_first_payment" }), on);
     expect(steps.at(-1)).toMatchObject({ code: "founder_not_first_payment", area: "payment" });
     expect(supporterNextSteps(ready({ founderBlockedReason: "outside_window" }), on).at(-1)).toMatchObject({
+      area: "info",
+    });
+    expect(supporterNextSteps(ready({ founderBlockedReason: "window_not_configured" }), on).at(-1)).toMatchObject({
       area: "founder",
     });
     const euro = supporterNextSteps(
@@ -396,6 +448,8 @@ describe("next steps on the Supporters page", () => {
       on,
     );
     expect(euro.at(-1)!.message).toContain("EUR payment");
+    // Another currency needs a staff decision, so it stays a founder task rather than a note.
+    expect(euro.at(-1)!.area).toBe("founder");
   });
   it("asks for a Discord account for a founder without one", () => {
     expect(
