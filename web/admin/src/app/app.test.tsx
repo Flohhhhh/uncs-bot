@@ -48,6 +48,23 @@ describe("React staff shell", () => {
     expect(fetcher.mock.calls.some(([url]) => url.includes("/applications"))).toBe(false);
     expect(screen.getByRole("button", { name: /Send an announcement/ })).toBeDisabled();
   });
+  it("hides Discord roles from a moderator and never reads its status", async () => {
+    const fetcher = mount("/discord-roles", "moderator");
+    await waitFor(() => expect(router.state.location.pathname).toBe("/overview"));
+    expect(screen.queryByRole("link", { name: /Discord roles/ })).not.toBeInTheDocument();
+    expect(fetcher.mock.calls.some(([url]) => url.includes("discord-roles"))).toBe(false);
+  });
+  it("opens Discord roles from the Community group for an administrator", async () => {
+    const fetcher = mount("/discord-roles");
+    expect(await screen.findByRole("heading", { level: 1, name: "Discord roles" })).toBeInTheDocument();
+    const community = within(screen.getByRole("list", { name: "Community" }));
+    const labels = community.getAllByRole("link").map((link) => link.querySelector(".nav-text")?.textContent);
+    expect(labels).toContain("Supporters");
+    expect(labels.indexOf("Discord roles")).toBe(labels.indexOf("Supporters") + 1);
+    await waitFor(() => expect(fetcher.mock.calls.some(([url]) => url === "/admin/api/discord-roles")).toBe(true));
+    // Opening the page only reads its status.
+    expect(fetcher.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+  });
   it("shows Discord sign-in instead of staff data when session checking fails", async () => {
     vi.stubGlobal(
       "fetch",
