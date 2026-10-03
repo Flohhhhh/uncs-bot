@@ -66,6 +66,10 @@ Without that confirmation, what happens depends on `WHITELIST_APPLICATION_EXISTI
 
 If the SteamID is not active, approval uses the normal grant and records `whitelistGrant: "granted"` when it applies. If the whitelist cannot be read, approval also uses the normal grant but records `whitelistGrant: null`: Gramps cannot tell whether the SteamID was already live, and a build that edits the saved configuration reports an existing entry as applied. A recheck that confirms access also leaves `whitelistGrant` unset, because the recheck does not know what the whitelist held before the approval. With [automatic Discord roles](DISCORD_ROLES.md) switched on, an approved `unc_member` application receives the UNC role either way, so ownership is only checked by staff when the confirmation is required.
 
+## Approvals and supporter matching
+
+With `SUPPORTER_AUTO_STEAM_FILL_ENABLED` on, an approval that recorded `whitelistGrant` `granted` or `existing` can fill the SteamID of the campaign's Patreon supporter record for the same Discord account, when that record has none (see [Automatic matching](PATREON_SUPPORTERS.md#the-steamid-fill)). An approval with no recorded grant never fills one; staff see its SteamID on the Supporters page to check. Matching runs after the review is saved and never delays or changes the review response. A later revocation keeps a copied SteamID and flags it for staff. The copied SteamID is still the applicant's claim; Steam ownership is not verified.
+
 ## Revoking access
 
 `POST …/applications/:id/revoke` with `{id, reason}` (administrators only) claims an `approved` application, or a `needs_review` one whose earlier revocation was uncertain, as `revoking` and saves its review record before contacting the game. It then sends the audited `whitelist-remove` action with a fixed reason, "Website whitelist application <id> revoked."

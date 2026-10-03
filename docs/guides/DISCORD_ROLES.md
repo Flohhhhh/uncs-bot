@@ -3,7 +3,7 @@
 Gramps can keep three community roles in step with its own records:
 
 - **UNC**: added when a website whitelist application with relationship `unc_member` reaches `approved`. That covers a real whitelist grant and a staff-confirmed registration of an entry that was already whitelisted. `friend_regular` and `new_player` applications never receive it automatically.
-- **Founder**: added for every founder record (Patreon or PayPal) whose supporter has a linked Discord account, whether staff linked it, it was entered on the PayPal record, or the Patreon import filled it in from the patron's connected Discord account. It is never removed automatically.
+- **Founder**: added for every founder record (Patreon or PayPal), recorded by staff or [automatically](PATREON_SUPPORTERS.md#automatic-founder-promises), whose supporter has a linked Discord account, whether staff linked it, it was entered on the PayPal record, or the Patreon import filled it in from the patron's connected Discord account. It is never removed automatically.
 - **Supporter**: added for people with a linked Discord account who support The UNCs right now, and removed when that support ends. This is how people who support after the founder window closes are recognised. See [The Supporter role](#the-supporter-role). It is optional: with `DISCORD_SUPPORTER_ROLE_ID` unset it is skipped entirely.
 
 The feature is **off by default** (`DISCORD_ROLES_ENABLED=false`). While it is off, the status page and the dry-run preview still work, so the setup can be checked before anything changes in Discord.
@@ -91,7 +91,7 @@ The dashboard redesign owns the page itself. The intended panel shows each check
 ## When roles are checked
 
 - **Startup:** with the feature on, Gramps waits for Discord to connect and then checks everyone with a reason to hold or lose a role. This is also the **backfill**: the first start after enabling adds the UNC role for every existing approved UNC application, the Founder role for every founder with a linked Discord account and, when configured, the Supporter role for everyone who supports right now.
-- **Events:** an approval, recheck or revocation, a founder award, a Discord link on a supporter (by staff or filled in by the Patreon import), a staff receipt, a new PayPal record, a Patreon import that changed a linked supporter's record, a new signed Patreon webhook for a linked supporter, or someone joining the server queues a check for that person (batched for two seconds).
+- **Events:** an approval, recheck or revocation, a founder award (by staff, or recorded automatically), a Discord link on a supporter (by staff or filled in by the Patreon import), a staff receipt, a new PayPal record, a Patreon import that changed a linked supporter's record, a new signed Patreon webhook for a linked supporter, or someone joining the server queues a check for that person (batched for two seconds).
 - **Safety pass:** a full check every six hours. It also covers anyone an event check missed, Supporter roles whose 7- or 31-day window ran out, and a Supporter role left on an account after staff moved a supporter record's Discord link to another account.
 - **Staff:** the reconcile endpoint above.
 
@@ -111,14 +111,14 @@ Gramps logs a warning only for blocked or failed passes, with fixed text: databa
 
 ## Recording PayPal supporters and founders
 
-Record each PayPal donor with **Record PayPal supporter** (`POST /admin/api/supporters/paypal`, see [Supporter records](PATREON_SUPPORTERS.md#recording-paypal-supporters)). Include their Discord user ID so the Founder and Supporter roles can be added; a founder without one appears under **Needs attention** as `founder_without_discord` until staff link the account. Patreon founders are awarded after the Patreon import has recorded their payment history.
+Record each PayPal donor with **Record PayPal supporter** (`POST /admin/api/supporters/paypal`, see [Supporter records](PATREON_SUPPORTERS.md#recording-paypal-supporters)). Include their Discord user ID so the Founder and Supporter roles can be added; a founder without one appears under **Needs attention** as `founder_without_discord` until staff link the account. Patreon founders are awarded by staff after the Patreon import has recorded their payment history, or recorded automatically when `SUPPORTER_AUTO_FOUNDER_ENABLED` is on (see [Automatic matching](PATREON_SUPPORTERS.md#automatic-matching)).
 
 ## Rollout
 
 1. A human contributor generates and reviews one migration for the combined schema changes (this branch and the Patreon import), then deploys. Railway's pre-deploy step runs `db:migrate`.
 2. Set the founder window and the role IDs in Railway (`DISCORD_SUPPORTER_ROLE_ID` is optional), leaving `DISCORD_ROLES_ENABLED=false`.
 3. Fix the bot's permission and role position until the status endpoint reports `ready: true`.
-4. Record the PayPal donors with `awardFounder`, and award the Patreon founder after the import.
+4. Record the PayPal donors with `awardFounder`, and award the Patreon founders after the import, using the Supporters page's "Would be recorded automatically" preview. Turn on `SUPPORTER_AUTO_FOUNDER_ENABLED` only once staff can void a founder promise; until then award by hand.
 5. Review a dry run, then set `DISCORD_ROLES_ENABLED=true` and restart. The startup pass performs the backfill.
 
 ## Not included
