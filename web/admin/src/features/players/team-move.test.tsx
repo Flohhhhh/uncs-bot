@@ -419,4 +419,24 @@ describe("reviewed team moves", () => {
     expect(sent()).toHaveLength(2);
     expect(finished.mock.calls[0][0].items.map((item) => item.state)).toEqual(["accepted", "skipped", "accepted"]);
   });
+  it("spaces moves to use at most half of the game's advertised request allowance", async () => {
+    vi.useFakeTimers();
+    // Seven game requests a move within 60 of the game's 120 a minute: one move every 7 seconds.
+    live.capabilities.limits = { maxRequestsPerMinutePerIp: 120 };
+    answer(() => ({ state: "applied", message: "Confirmed" }));
+    const finished = vi.fn<(result: TeamMoveResult) => void>();
+    render(
+      <AdminContext.Provider value={context()}>
+        <TeamMoveDialog players={[alice, bob]} initialFaction="Lonestar" onClose={vi.fn()} onComplete={finished} />
+      </AdminContext.Provider>,
+    );
+    submit();
+    await flush();
+    expect(sent()).toHaveLength(1);
+    await flush(6999);
+    expect(sent()).toHaveLength(1);
+    await flush(1);
+    expect(sent()).toHaveLength(2);
+    expect(finished.mock.calls[0][0].stopped).toBe(false);
+  });
 });

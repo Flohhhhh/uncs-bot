@@ -33,6 +33,16 @@ const labels: Record<ItemState, string> = {
   unmatched: "Skipped · roster changed",
 };
 
+/**
+ * The pause before the next move, at least 2.2 s. A move costs about seven game requests (the roster read
+ * before it, then the server's own reads around the change), so a batch keeps to half of the game's
+ * advertised allowance and leaves the rest for the staff-alerts and community workers that share it.
+ */
+function moveSpacing(live: Overview) {
+  const allowance = live.capabilities.limits?.maxRequestsPerMinutePerIp;
+  return Math.max(2200, allowance ? Math.ceil((60_000 * 7) / (allowance / 2)) : 0);
+}
+
 export function TeamResults({ items }: { items: TeamItem[] }) {
   return (
     <Table headers={["Player", "Outcome", "Details"]} label="Team move outcomes" scrollable>
@@ -140,6 +150,7 @@ export function TeamMoveDialog({
     let didSend = false;
     let didStop = false;
     let stopReason = "";
+    let spacing = moveSpacing(admin.overview!);
     // Hiding the page invalidates the review, as it does for the dashboard's own snapshot.
     let hidden = document.hidden;
     const hiddenReason = "The dashboard was hidden during the moves.";
@@ -152,7 +163,7 @@ export function TeamMoveDialog({
     };
     try {
       for (const item of batch) {
-        if (didSend && item.from !== faction) await new Promise((resolve) => setTimeout(resolve, 2200));
+        if (didSend && item.from !== faction) await new Promise((resolve) => setTimeout(resolve, spacing));
         if (stopRequested.current || !mounted.current || hidden) {
           if (hidden) stopReason = hiddenReason;
           didStop = true;
@@ -174,6 +185,7 @@ export function TeamMoveDialog({
           didStop = true;
           break;
         }
+        spacing = moveSpacing(live);
         const liveTeams = liveFactions(live);
         const liveRound = roundStamp(live.status, Date.parse(live.observedAt));
         if (
