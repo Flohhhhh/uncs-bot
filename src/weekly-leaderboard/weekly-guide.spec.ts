@@ -37,3 +37,14 @@ it("has the board previewed while it is still off, and warns about the catch-up 
   expect(CATCH_UP_HOURS).toBe(6);
   expect(steps).toContain("six-hour catch-up window");
 });
+
+it("has the board previewed for the week that will post next", () => {
+  const steps = from("## Before turning it on");
+  // Before the first slot `last` is a week before anything can post, and outside the catch-up window the next
+  // post is the week in progress, so `last` is right only inside the window.
+  const current = steps.indexOf("preview?week=current");
+  expect(current).toBeGreaterThan(steps.indexOf("leave `WEEKLY_LEADERBOARD_ENABLED=false`"));
+  expect(current).toBeLessThan(steps.indexOf("`WEEKLY_LEADERBOARD_ENABLED=true`"));
+  expect(steps).toContain("Before the first slot, or when turning it on outside the catch-up window");
+  expect(steps).toContain("Run `preview?week=last` only when turning it on inside the window");
+});
