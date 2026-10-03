@@ -5,6 +5,7 @@ import { gameServerConnections, gameServerJoinId } from "../common/game-server";
 import { DST_HOURS, SLOT_TIME, WEEKDAYS } from "../weekly-leaderboard/weekly-schedule";
 import { isPublicIndividualSteamId } from "../common/steam-id";
 import { parseClockList, parseWindows, validTimeZone } from "../staff-alerts/local-time";
+import { SAFE_LINK } from "../common/staff-alerts";
 
 const discordId = z.string().regex(/^\d{17,20}$/, "Use a Discord numeric ID.");
 const communityMessage = z
@@ -56,17 +57,24 @@ const knownGoodEntry = z.union([
     })
     .strict(),
 ]);
+/** Kept in its normalised form, which must pass the rule the alert applies or the alert would drop the link. */
 const evidenceUrl = z
   .string()
+  .trim()
   .max(500)
-  .refine((value) => {
+  .transform((value, context) => {
     try {
       const url = new URL(value);
-      return url.protocol === "https:" && !url.username && !url.password;
+      if (url.protocol === "https:" && !url.username && !url.password && SAFE_LINK.test(url.href)) return url.href;
     } catch {
-      return false;
+      /* reported below */
     }
-  }, "Use an https:// evidence link without credentials.");
+    context.addIssue({
+      code: "custom",
+      message: "Use an https:// evidence link without credentials, spaces, <, > or backticks.",
+    });
+    return z.NEVER;
+  });
 const watchlistEntry = z
   .object({
     steamId: personalSteamId,

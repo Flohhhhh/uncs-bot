@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { SAFE_LINK } from "../common/staff-alerts";
 import { Env } from "../env/env";
 import type { EnvService } from "../env/env.service";
 import { settingsView, staffAlertsOptions } from "./staff-alerts.config";
@@ -160,6 +161,31 @@ describe("staff alert settings", () => {
       [{ ...entry, autoBan: true }],
     ])
       expect(parse({ STAFF_ALERTS_WATCHLIST: JSON.stringify(bad) }).success).toBe(false);
+  });
+
+  it.each([
+    ["surrounding spaces", " https://discord.com/channels/1/2/3 ", "https://discord.com/channels/1/2/3"],
+    ["an upper-case scheme", "HTTPS://discord.com/channels/1/2/3", "https://discord.com/channels/1/2/3"],
+    ["no slashes after the scheme", "https:discord.com/channels/1/2/3", "https://discord.com/channels/1/2/3"],
+    ["a space in the path", "https://example.com/my clip", "https://example.com/my%20clip"],
+  ])("keeps an evidence link with %s in the form the alert shows", (_case, evidenceUrl, stored) => {
+    const parsed = parse({
+      STAFF_ALERTS_WATCHLIST: JSON.stringify([{ steamId: owner, reason: "Aimbot", evidenceUrl }]),
+    });
+    expect(parsed.data?.STAFF_ALERTS_WATCHLIST).toEqual([{ steamId: owner, reason: "Aimbot", evidenceUrl: stored }]);
+    expect(SAFE_LINK.test(stored)).toBe(true);
+  });
+
+  it("refuses an evidence link the alert would drop, with a clear message", () => {
+    const parsed = parse({
+      STAFF_ALERTS_WATCHLIST: JSON.stringify([
+        { steamId: owner, reason: "Aimbot", evidenceUrl: "https://example.com/clip?t=`1`" },
+      ]),
+    });
+    expect(parsed.success).toBe(false);
+    expect(z.prettifyError(parsed.error!)).toContain(
+      "Use an https:// evidence link without credentials, spaces, <, > or backticks.",
+    );
   });
 
   it("shows counts of the known-good list and watch list, never their contents", () => {
