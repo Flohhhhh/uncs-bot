@@ -29,7 +29,7 @@ import {
 import { initialRoundState, observeRound } from "./round-state";
 import { initialSeedingState, observeSeeding, seedingView, type SeedingAlert } from "./seeding-state";
 import { settingsView, staffAlertsOptions, type StaffAlertsOptions } from "./staff-alerts.config";
-import { cleanText, StaffAlerts, type StaffAlertInput } from "./staff-alerts.service";
+import { cleanText, playerLabel, StaffAlerts, type StaffAlertInput } from "./staff-alerts.service";
 
 export const ACTIVE_DELAY_MS = 10_000;
 export const IDLE_DELAY_MS = 15_000;
@@ -58,7 +58,7 @@ export function failureKind(error: unknown): RconErrorKind {
 const one = (value: number) => (Number.isInteger(value) ? String(value) : value.toFixed(1));
 /** Review wording only: counters are prompts for a person, never proof and never an action. */
 export function performanceText(candidate: PerformanceCandidate, timeZone: string, notes: string[] = []) {
-  const name = cleanText(candidate.name, 64) || "Unknown";
+  const name = playerLabel(candidate.name);
   const map = mapLabel(candidate.map);
   const lines: string[] = [];
   const windowLine =
@@ -107,7 +107,7 @@ export function watchlistText(entry: NetworkBanEntry, name: string, presentAtSta
       ? "Community count not recorded"
       : `Banned in ${entry.communities} ${entry.communities === 1 ? "community" : "communities"}${entry.recordedAt ? ` (as recorded ${entry.recordedAt})` : ""}`;
   const lines = [
-    `${cleanText(name, 64) || "Unknown"} ${presentAtStart ? "was online when Gramps started" : "joined"}.`,
+    `${playerLabel(name)} ${presentAtStart ? "was online when Gramps started" : "joined"}.`,
     `${communities}. Reason: ${entry.reasons.map((reason) => cleanText(reason, 200)).join("; ") || "not recorded"}.`,
   ];
   if (entry.addedBy) lines.push(`Added to the watch list by ${cleanText(entry.addedBy, 64)}.`);

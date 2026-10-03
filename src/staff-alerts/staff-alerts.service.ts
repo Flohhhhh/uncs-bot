@@ -79,14 +79,27 @@ type StoredAlert = StaffAlertView & {
 };
 type ChannelCheck = { state: StaffAlertsChannelState; channel: TextChannel | null };
 
-/** Game-controlled or staff text: no control characters, collapsed spaces, capped. */
+/** Bidi controls and zero-width characters. Keeps U+200D and tag characters, which emoji sequences use. */
+const INVISIBLE = /[\u061c\u180e\u200b\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g;
+/** Nothing visible: spaces, format characters and the fillers Unicode counts as letters or symbols. */
+const BLANK = /^[\p{Z}\p{Cf}\u115f\u1160\u3164\uffa0\u2800]*$/u;
+
+/** Game-controlled or staff text: no control, bidi or zero-width characters, collapsed spaces, capped. */
 export function cleanText(value: string, max: number) {
-  const text = [...value]
-    .map((character) => (character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127 ? " " : character))
+  const text = [...value.replace(INVISIBLE, "")]
+    .map((character) => {
+      const code = character.charCodeAt(0);
+      return code < 32 || (code >= 127 && code <= 159) ? " " : character;
+    })
     .join("")
     .replace(/\s+/g, " ")
     .trim();
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+/** A player name for staff text, or "Unknown" when nothing visible is left. */
+export function playerLabel(name: string) {
+  const text = cleanText(name, 64);
+  return BLANK.test(text) ? "Unknown" : text;
 }
 /**
  * Text for an embed: cleaned, Markdown escaped and unable to form a mention. Also escapes what
@@ -200,9 +213,7 @@ export class StaffAlerts {
       key: input.key,
       title: cleanText(input.title, 80),
       lines: input.lines.map((line) => cleanText(line, 600)),
-      player: input.player
-        ? { steamId: input.player.steamId, name: cleanText(input.player.name, 64) || "Unknown" }
-        : null,
+      player: input.player ? { steamId: input.player.steamId, name: playerLabel(input.player.name) } : null,
       facts: { ...(input.facts ?? {}) },
       fields: (input.fields ?? []).slice(0, 4),
       links: (input.links ?? []).filter((link) => SAFE_LINK.test(link)).slice(0, 3),
