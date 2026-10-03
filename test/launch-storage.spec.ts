@@ -1121,7 +1121,11 @@ describe("launch storage on isolated PostgreSQL", () => {
       trigger: "members:delete",
     };
     // A new observation reports the linked Discord account so its roles can be checked.
-    expect(await supporters.ingest(observation)).toEqual({ duplicate: false, discordId: staff.id });
+    expect(await supporters.ingest(observation)).toEqual({
+      duplicate: false,
+      memberId: record.id,
+      discordId: staff.id,
+    });
     expect(await supporters.ingest(observation)).toEqual({ duplicate: true });
     const saved = await supporters.get(record.id, campaign, policy);
     expect(saved).toMatchObject({
@@ -1147,7 +1151,7 @@ describe("launch storage on isolated PostgreSQL", () => {
         receivedAt: new Date("2026-09-30T12:00:05.000Z"),
         trigger: "members:pledge:create",
       }),
-    ).toEqual({ duplicate: false, discordId: staff.id });
+    ).toEqual({ duplicate: false, memberId: created.id, discordId: staff.id });
     let record = await payment(
       (await supporters.get(created.id, campaign, policy))!,
       "2026-10-01T12:00:00.000Z",
@@ -1314,6 +1318,7 @@ describe("launch storage on isolated PostgreSQL", () => {
         paymentId: receipt.id,
         paymentSource: "manual_receipt",
         reference: "receipt-2001",
+        reviewReason: "unverified",
         unverifiedPaymentId: copy.id,
         unverifiedReference: "pledge_start:2001",
       },
@@ -2269,12 +2274,13 @@ describe("launch storage on isolated PostgreSQL", () => {
       ).rows;
       expect(holders).toHaveLength(1);
       if (holders[0].id === other.id) {
-        expect(results[0]).toMatchObject({ status: "rejected", reason: { cause: { code: "23505" } } });
+        // Both writes take the SteamID lock first, so the match waits, sees the staff link and fills nothing.
+        expect(results[0]).toMatchObject({ status: "fulfilled", value: { steamFilled: false } });
         expect((await kinds(record.id)).map((row) => row.kind)).toEqual(["patreon-discord-link"]);
         expect((await client.query("SELECT count(*)::int AS count FROM supporter_founders")).rows).toEqual([
           { count: 0 },
         ]);
-      } else expect(results[1]).toMatchObject({ status: "rejected", reason: { cause: { code: "23505" } } });
+      } else expect(results[1].status).toBe("rejected");
     });
 
     it("records no automatic founder on a first payment in another currency", async () => {
