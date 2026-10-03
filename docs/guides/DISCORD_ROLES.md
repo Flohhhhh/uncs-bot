@@ -48,7 +48,7 @@ Nothing is ever approved automatically. Staff can confirm that a Discord member 
 ## Discord setup
 
 1. The **UNC**, **Founder** and **Supporter** roles must be ordinary roles: not `@everyone`, not managed by an integration, and without moderation or administrator permissions (Administrator, Manage Server, Manage Roles, Manage Channels, Ban, Kick, Timeout, Manage Messages, Manage Webhooks, Mention Everyone). Gramps refuses any role that has one of these.
-2. None of them may be one of the dashboard staff roles in `ADMIN_ADMIN_ROLE_IDS`, `ADMIN_MODERATOR_ROLE_IDS` or `ADMIN_VIEWER_ROLE_IDS`, because assigning it would grant dashboard access. Each must also be a different role.
+2. None of them may be one of the dashboard staff roles in `ADMIN_ADMIN_ROLE_IDS`, `ADMIN_MODERATOR_ROLE_IDS` or `ADMIN_VIEWER_ROLE_IDS`, because assigning it would grant dashboard access, or the opt-in Seeder role in `SEEDING_ROLE_ID`, which members add to themselves (see [Seeding](SEEDING.md#safety-checks)). Each must also be a different role.
 3. The bot's role needs the **Manage Roles** permission and must sit **above** every configured role in Server Settings → Roles. Discord only lets a bot assign roles below its own highest role.
 4. The Server Members Intent is already required by the bot (`src/bot/bot.module.ts`) and must stay enabled in the Discord developer portal.
 5. To show UNC members, Founders or Supporters as their own groups in the member list, turn on **Display role members separately from online members** for each role and keep those roles above any other displayed role their members also hold (for example "Wardogs"). A member who holds several is listed under the highest. Role icons are optional and need Server Boost level 2.
@@ -75,13 +75,13 @@ A role that is not configured is simply skipped. Founder awards also need the fo
 - `roles.member`, `roles.founder` and `roles.supporter`: `{id, name, exists, position, managed, privileged, staffRole, assignable, problem, candidates?}`, where `problem` is a plain-English fix;
 - `ready`: every configured role passes its checks;
 - `lastPass` (trigger, times, `added`, `removed`, `noted`, `confirmed`, `failed`, `blocked`, `deferred`, `attention`), `lastFullPass` (the same for the last check of everyone: startup, the safety pass or an untargeted staff run), `running`, `queued`, `fullPassQueued` and `nextRetryAt`. An event check that found nothing to do does not replace `lastPass`;
-- `summary: {memberEligible, founders, foundersWithoutDiscord, supporterEligible}`, where `supporterEligible` counts people with a linked Discord account who support right now and is `null` while `DISCORD_SUPPORTER_ROLE_ID` is unset;
+- `summary: {memberEligible, founders, foundersWithoutDiscord, supporterEligible}`, where `memberEligible` counts people (Discord accounts) with an approved UNC member application, not applications, and `supporterEligible` counts people with a linked Discord account who support right now and is `null` while `DISCORD_SUPPORTER_ROLE_ID` is unset;
 - `attention`: founders without a linked Discord account, people who are not in the server (except someone whose only reason is the Supporter role: joining the server queues a check that adds it), roles removed in Discord, and failed changes. Items stay listed across checks until that person (and role) is checked again, so a later check of someone else never hides them;
 - `recent`: the latest 25 role ledger rows.
 
 `POST /admin/api/discord-roles/reconcile` (administrators only, same-origin CSRF) takes `{id, reason, discordUserId?, dryRun?}`:
 
-- `dryRun: true` returns a plan of at most 100 `{discordUserId, roleKind, op, why}` entries and changes nothing. It is allowed while the feature is off.
+- `dryRun: true` returns a plan of `{discordUserId, roleKind, op, why}` entries and changes nothing. It stops taking new people at 100 entries, and plans each person's roles together, so a plan can hold up to 102. A role that fails its setup checks is left out (counted in `blocked`), and so is anyone Discord would not return (counted in `failed`); the page says so instead of reporting that nothing would change. It is allowed while the feature is off.
 - A real run needs `DISCORD_ROLES_ENABLED=true`; otherwise it returns 503 "Discord roles are switched off (DISCORD_ROLES_ENABLED=false)".
 - It returns 409 while another pass is running, and 409 for a preview while another preview is still reading Discord.
 - Real runs and previews are spaced separately. A real run within 30 seconds of the last real run returns 429 "Wait 30 seconds between role checks.", and a preview within 5 seconds of the last preview returns 429 "Wait 5 seconds between previews." A preview never counts toward the 30-second wait, so staff can preview and then run straight away, and a real run never holds up the next preview.

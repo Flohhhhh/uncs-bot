@@ -242,7 +242,8 @@ export function SetupChecks({ data }: { data: DiscordRolesStatus }) {
 export function SummaryCounts({ data }: { data: DiscordRolesStatus }) {
   const { summary } = data;
   const counts: [string, number | null, string][] = [
-    ["UNC eligible", summary.memberEligible, "Approved UNC member applications"],
+    // The server counts people (Discord accounts), not applications.
+    ["UNC eligible", summary.memberEligible, "People with an approved UNC member application"],
     ["Founders", summary.founders, "Founder records"],
     ["Founders without Discord", summary.foundersWithoutDiscord, "Can’t get the Founder role yet"],
     [

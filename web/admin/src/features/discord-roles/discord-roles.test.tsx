@@ -176,6 +176,13 @@ it("shows the counts, the last checks, the attention list and the latest 25 ledg
   expect(counts.getByText("UNC eligible").nextElementSibling).toHaveTextContent("42");
   expect(counts.getByText("Founders without Discord").nextElementSibling).toHaveTextContent("2");
   expect(counts.getByText("Supporters now").nextElementSibling).toHaveTextContent("5");
+  // Each detail names what the server counts: people (not applications), and supporters with Discord linked.
+  expect(counts.getByText("UNC eligible").nextElementSibling).toHaveTextContent(
+    "People with an approved UNC member application",
+  );
+  expect(counts.getByText("Supporters now").nextElementSibling).toHaveTextContent(
+    "Support right now, with Discord linked",
+  );
   const last = within(screen.getByRole("region", { name: "Last check" }));
   expect(last.getByText("After a change", { exact: false })).toBeInTheDocument();
   expect(last.getByText("Added").nextElementSibling).toHaveTextContent("1");
@@ -287,6 +294,25 @@ describe("preview", () => {
     });
     await screen.findByRole("region", { name: "Preview of role changes" });
     expect(posts()).toHaveLength(1);
+  });
+
+  it("does not say nothing would change when a role was skipped or members could not be read", async () => {
+    serve(rolesStatus(), () => dryRun([], { blocked: 1, failed: 2 }));
+    render(page());
+    await preview();
+    const shown = within(screen.getByRole("region", { name: "Preview of role changes" }));
+    expect(shown.getByText("1 role fails its setup checks, so this preview leaves it out.")).toBeInTheDocument();
+    expect(shown.getByText("Gramps could not read 2 people from Discord.").closest("p")).toHaveTextContent(
+      "This preview leaves out their roles.",
+    );
+    expect(shown.getByText("No changes found")).toBeInTheDocument();
+    expect(shown.queryByText("Nothing would change")).not.toBeInTheDocument();
+    expect(shown.queryByText(/Everyone already has the roles/)).not.toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Preview ready: 0 roles to add and 0 roles to remove. Some roles or people could not be checked.",
+      ),
+    ).toHaveAttribute("role", "status");
   });
 
   it("says when nothing would change and when the preview could not finish", async () => {
