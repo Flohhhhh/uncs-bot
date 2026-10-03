@@ -1,5 +1,5 @@
 {
-  "id": "6d34f8c3-34df-46a1-808e-bdd4749be7c6",
+  "id": "1f60fe6e-1371-4e71-9743-c9c19b872d68",
   "prevId": "583d2438-e384-41ce-8000-ee4301d23347",
   "version": "7",
   "dialect": "postgresql",
@@ -1693,9 +1693,33 @@
           "primaryKey": false,
           "notNull": false
         },
+        "discord_source": {
+          "name": "discord_source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "patreon_discord_id": {
+          "name": "patreon_discord_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "steam_id": {
           "name": "steam_id",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "steam_source": {
+          "name": "steam_source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "steam_application_id": {
+          "name": "steam_application_id",
+          "type": "uuid",
           "primaryKey": false,
           "notNull": false
         },
@@ -1820,6 +1844,22 @@
         "supporter_members_paypal_fields_check": {
           "name": "supporter_members_paypal_fields_check",
           "value": "\"supporter_members\".\"provider\" <> 'paypal' or (\"supporter_members\".\"campaign_id\" is null and \"supporter_members\".\"patreon_member_id\" is null)"
+        },
+        "supporter_members_discord_source_check": {
+          "name": "supporter_members_discord_source_check",
+          "value": "\"supporter_members\".\"discord_source\" is null or (\"supporter_members\".\"discord_id\" is not null and (\"supporter_members\".\"discord_source\" = 'staff' or (\"supporter_members\".\"discord_source\" = 'patreon' and \"supporter_members\".\"provider\" = 'patreon')))"
+        },
+        "supporter_members_steam_source_check": {
+          "name": "supporter_members_steam_source_check",
+          "value": "\"supporter_members\".\"steam_source\" is null or (\"supporter_members\".\"steam_id\" is not null and (\"supporter_members\".\"steam_source\" = 'staff' or (\"supporter_members\".\"steam_source\" = 'application' and \"supporter_members\".\"provider\" = 'patreon')))"
+        },
+        "supporter_members_steam_application_check": {
+          "name": "supporter_members_steam_application_check",
+          "value": "(\"supporter_members\".\"steam_application_id\" is null and \"supporter_members\".\"steam_source\" is distinct from 'application') or (\"supporter_members\".\"steam_application_id\" is not null and \"supporter_members\".\"steam_source\" = 'application')"
+        },
+        "supporter_members_patreon_discord_check": {
+          "name": "supporter_members_patreon_discord_check",
+          "value": "\"supporter_members\".\"patreon_discord_id\" is null or \"supporter_members\".\"provider\" = 'patreon'"
         }
       },
       "isRLSEnabled": false
