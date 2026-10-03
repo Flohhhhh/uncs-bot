@@ -112,7 +112,7 @@ Remaining risks:
 - Two long-running instances could each post outside Discord's nonce window.
 - Changing a server's `id` during a week defeats the marker match for that week. Renaming its display name does not.
 - Deleting the bot's post by hand and restarting Gramps inside the window posts it again.
-- After a `failed` or `unknown` send, that process never tries the week again, including post-now. After a restart the channel scan decides: within the window the worker posts only if no earlier post is found; after it, an administrator can post-now.
+- The schedule never retries a `failed` or `unknown` send in that process. After `failed` nothing was posted, so an administrator can post-now in the same process once the cause is fixed; no restart is needed. After `unknown`, post-now is refused until a restart. Then the channel scan decides: within the window the worker posts only if no earlier post is found; after it, an administrator can post-now.
 
 ## Staff routes
 
