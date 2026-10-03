@@ -62,6 +62,8 @@ export const paymentJson = (alias: string) =>
  *   whether another record with the same Discord account or SteamID has an earlier payment of any kind.
  * - whether Patreon reports this record's Discord account for another patron, and whether the account Patreon reports
  *   for this record is linked to another record.
+ * - whether another Discord account has an application for the linked SteamID that was not declined or revoked. Only
+ *   that yes or no is read: never the other account, its server or its status.
  */
 export function matchFactsSql(campaignId: string | null) {
   return sql`json_build_object(
@@ -92,7 +94,10 @@ export function matchFactsSql(campaignId: string | null) {
       AND reporter.patreon_discord_id = m.discord_id),
     'patreonDiscordElsewhere', m.patreon_discord_id IS NOT NULL AND m.patreon_discord_id IS DISTINCT FROM m.discord_id
       AND EXISTS (SELECT 1 FROM supporter_members linked WHERE linked.id <> m.id AND linked.provider = 'patreon'
-        AND linked.campaign_id = m.campaign_id AND linked.discord_id = m.patreon_discord_id))`;
+        AND linked.campaign_id = m.campaign_id AND linked.discord_id = m.patreon_discord_id),
+    'linkedSteamShared', m.discord_id IS NOT NULL AND m.steam_id IS NOT NULL
+      AND EXISTS (SELECT 1 FROM whitelist_applications shared WHERE shared.steam_id = m.steam_id
+        AND shared.discord_user_id <> m.discord_id AND shared.status NOT IN ('declined', 'revoked')))`;
 }
 
 /** Founder awards for one person serialize on each identity before the cross-record check. */

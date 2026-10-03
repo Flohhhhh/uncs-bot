@@ -64,6 +64,7 @@ function fixture() {
       automatic: { payment: paymentFixture(), earlier: false, earlierOtherRecord: false },
       discordReportedForOtherPatron: false,
       patreonDiscordElsewhere: false,
+      linkedSteamShared: false,
     } as MatchFacts,
   };
   const query = jest.fn(async (config: { text: string }, params: unknown[]) => {
@@ -285,6 +286,19 @@ describe("automatic founder promise", () => {
       {},
       "charge_reversed",
     ],
+    [
+      "a refund of the qualifying charge dated with it",
+      { lastChargeStatus: "Refunded", lastChargeAt: new Date(paymentFixture().paidAt) },
+      {},
+      "charge_reversed",
+    ],
+    [
+      "a staff SteamID that differs from the approved application",
+      {},
+      { applications: [applicationFixture({ steamId: "76561198000000002" })] },
+      "steam_differs_from_application",
+    ],
+    ["a staff SteamID another Discord account applied with", {}, { linkedSteamShared: true }, "steam_shared"],
     [
       "a revoked source application",
       { steamSource: "application", steamApplicationId: applicationFixture().id },

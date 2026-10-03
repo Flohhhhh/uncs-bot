@@ -58,6 +58,7 @@ export class SupporterMatchStore {
       automatic: facts?.automatic ?? null,
       discordReportedForOtherPatron: Boolean(facts?.discordReportedForOtherPatron),
       patreonDiscordElsewhere: Boolean(facts?.patreonDiscordElsewhere),
+      linkedSteamShared: Boolean(facts?.linkedSteamShared),
     } satisfies MatchFacts;
   }
 

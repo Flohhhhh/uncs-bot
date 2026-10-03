@@ -109,6 +109,7 @@ const facts = (overrides: Partial<MatchFacts> = {}): MatchFacts => ({
   automatic: { payment: paymentFixture(), earlier: false, earlierOtherRecord: false },
   discordReportedForOtherPatron: false,
   patreonDiscordElsewhere: false,
+  linkedSteamShared: false,
   ...overrides,
 });
 const later = { now: Date.parse("2026-10-05T12:00:00.000Z"), holdHours: 72 };
@@ -149,14 +150,52 @@ describe("the automatic founder rule", () => {
   ] as const)("refuses %s", (_name, member, factChange, reason) => {
     expect(automaticFounderBlocker({ ...patreonDiscord, ...member }, facts(factChange), later)).toBe(reason);
   });
-  it("ignores a refund of a charge before the qualifying payment", () => {
+  it.each([
+    ["dated with the payment", paymentFixture().paidAt],
+    ["dated a few seconds before the payment", "2026-10-01T11:59:55.000Z"],
+    ["dated before the payment", "2026-09-01T00:00:00Z"],
+  ])("refuses a reversed latest charge %s, which can be the qualifying charge itself", (_name, lastChargeAt) => {
+    for (const lastChargeStatus of ["Refunded", "Fraud"])
+      expect(automaticFounderBlocker({ ...patreonDiscord, lastChargeStatus, lastChargeAt }, facts(), later)).toBe(
+        "charge_reversed",
+      );
     expect(
-      automaticFounderBlocker(
-        { ...patreonDiscord, lastChargeStatus: "Refunded", lastChargeAt: "2026-09-01T00:00:00Z" },
-        facts(),
-        later,
-      ),
+      automaticFounderBlocker({ ...patreonDiscord, lastChargeStatus: "Paid", lastChargeAt }, facts(), later),
     ).toBeNull();
+  });
+  describe("a SteamID staff linked", () => {
+    it("is refused when this Discord account's approved application names another SteamID", () => {
+      const differs = facts({ applications: [application({ steamId: otherSteam })] });
+      expect(automaticFounderBlocker(patreonDiscord, differs, later)).toBe("steam_differs_from_application");
+      expect(automaticFounderBlocker({ ...patreonDiscord, steamSource: null }, differs, later)).toBe(
+        "steam_differs_from_application",
+      );
+      // An application that only offers this same SteamID, or none, is no alert.
+      expect(automaticFounderBlocker(patreonDiscord, facts(), later)).toBeNull();
+      expect(automaticFounderBlocker(patreonDiscord, facts({ applications: [] }), later)).toBeNull();
+    });
+    it.each([
+      ["pending", { status: "pending" as const }],
+      ["under review", { status: "needs_review" as const }],
+    ])("is not doubted for a %s application with another SteamID", (_name, change) => {
+      expect(
+        automaticFounderBlocker(
+          patreonDiscord,
+          facts({ applications: [application({ steamId: otherSteam, ...change })] }),
+          later,
+        ),
+      ).toBeNull();
+    });
+    it("is refused while another Discord account has applied with it", () => {
+      expect(automaticFounderBlocker(patreonDiscord, facts({ linkedSteamShared: true }), later)).toBe("steam_shared");
+      expect(
+        automaticFounderBlocker(
+          { ...patreonDiscord, steamSource: "application", steamApplicationId: application().id },
+          facts({ linkedSteamShared: true }),
+          later,
+        ),
+      ).toBe("steam_shared");
+    });
   });
   it("waits the configured hours after the payment", () => {
     const paidAt = Date.parse(paymentFixture().paidAt);
@@ -233,6 +272,7 @@ const ready = (overrides: Partial<SupporterView> = {}) =>
       sourceApplicationRevoked: false,
       patreonDiscordElsewhere: false,
       discordReportedForOtherPatron: false,
+      linkedSteamShared: false,
     },
     ...overrides,
   });
@@ -317,6 +357,19 @@ describe("next steps on the Supporters page", () => {
     expect(
       codes(ready({ steamId: otherSteam, match: { ...ready().match, steam: steamMatch("application_pending") } })),
     ).not.toContain("steam_differs_from_application");
+  });
+  it("flags a linked SteamID another Discord account applied with, also for a founder", () => {
+    const shared = { match: { ...ready().match, linkedSteamShared: true } };
+    expect(codes(ready(shared))).toContain("linked_steam_shared");
+    expect(
+      codes(
+        ready({
+          ...shared,
+          founder: { awardedAt: "2026-10-02T00:00:00Z", paymentId: "p", source: "patreon_api", automatic: false },
+        }),
+      ),
+    ).toEqual(["linked_steam_shared"]);
+    expect(codes(ready())).not.toContain("linked_steam_shared");
   });
   it("tells automatic recording, recording with automation off and staff recording apart", () => {
     expect(codes(ready())).toEqual(["founder_ready_automatic"]);

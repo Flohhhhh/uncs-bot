@@ -72,6 +72,7 @@ export function supporterFixture(overrides: Partial<SupporterView> = {}): Suppor
       sourceApplicationRevoked: false,
       patreonDiscordElsewhere: false,
       discordReportedForOtherPatron: false,
+      linkedSteamShared: false,
     },
     automaticPayment: null,
     automaticBlockedReason: "no_discord",

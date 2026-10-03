@@ -1913,6 +1913,31 @@ describe("launch storage on isolated PostgreSQL", () => {
       });
     });
 
+    it("records no automatic founder on a staff SteamID another Discord account applied with", async () => {
+      const record = await importPatron();
+      await supporters.mutate(
+        record.id,
+        { ...review(record), kind: "link", steamId: patronSteam },
+        staff,
+        campaign,
+        policy,
+      );
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        steamSource: "staff",
+        match: { linkedSteamShared: false },
+        automaticBlockedReason: null,
+      });
+      await application("567890123456789016", patronSteam);
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        match: { linkedSteamShared: true },
+        automaticBlockedReason: "steam_shared",
+      });
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        founderRecorded: false,
+        blocked: ["steam_shared"],
+      });
+    });
+
     it("shows a Discord account Patreon reports for one record while another links it", async () => {
       const linked = await register("linked-by-staff");
       await supporters.mutate(

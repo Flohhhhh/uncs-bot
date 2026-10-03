@@ -64,6 +64,8 @@ export type MatchFacts = {
   discordReportedForOtherPatron: boolean;
   /** Patreon reports a different Discord account for this record, and another record of the campaign links it. */
   patreonDiscordElsewhere: boolean;
+  /** Another Discord account has an application for the record's linked SteamID that was not declined or revoked. */
+  linkedSteamShared: boolean;
 };
 export type MatchMember = {
   provider: SupporterProvider;
@@ -125,6 +127,26 @@ export function sourceApplicationRevoked(member: Pick<MatchMember, "steamId" | "
   );
 }
 
+/** Steam matches whose SteamID comes from an application that is not approved yet. */
+const UNAPPROVED_STEAM = new Set<string>(["application_pending", "application_in_progress"]);
+/**
+ * A SteamID that staff linked (or that was linked before sources were recorded) differs from the one this Discord
+ * account's approved application names. A pending application, or one under review, is no reason to doubt it. The
+ * Supporters page shows this alert and automatic founder recording refuses on it, from this one test.
+ */
+export function steamDiffersFromApplication(
+  member: Pick<MatchMember, "steamId" | "steamSource">,
+  steam: SteamMatch | null,
+) {
+  return Boolean(
+    member.steamId &&
+    member.steamSource !== "application" &&
+    steam?.steamId &&
+    !UNAPPROVED_STEAM.has(steam.reason ?? "") &&
+    steam.steamId !== member.steamId,
+  );
+}
+
 export type AutomaticFounderBlockedReason =
   | "not_patreon"
   | "no_discord"
@@ -175,9 +197,10 @@ export const automaticBlockedMessages: Record<AutomaticFounderBlockedReason, str
  * Why automatic matching will not record a founder promise for this Patreon record, apart from the staff founder rule
  * (founderCheck, or founderBlocker on the same facts), which runs after this. It is stricter than staff awards: the
  * Discord account must come from the patron's Patreon connection and still be the one Patreon reports, a valid SteamID
- * must be linked (and, when it was copied from an application, still pass the SteamID rule), and the payment must be a
- * verified first Patreon API payment that was not reversed, has passed the waiting period, and has no earlier payment
- * on another record for the same person.
+ * must be linked with no SteamID alert (one copied from an application must still pass the SteamID rule; one staff
+ * entered must not differ from the approved application's), no other Discord account may have applied with it, and the
+ * payment must be a verified first Patreon API payment whose latest charge was not reversed, that has passed the
+ * waiting period, and that has no earlier payment on another record for the same person.
  */
 export function automaticFounderBlocker(
   member: MatchMember,
@@ -192,16 +215,20 @@ export function automaticFounderBlocker(
   if (!isPublicIndividualSteamId(member.steamId)) return "no_steam";
   if (member.steamSource === "application") {
     if (sourceApplicationRevoked(member, facts)) return "source_application_revoked";
+    // An approved application still names this SteamID, so the SteamID rule decides; with no refusal, every approved
+    // application names this same SteamID.
     const steam = applicationSteamMatch(facts.applications);
     if (steam.reason) return steam.reason;
-    if (steam.steamId !== member.steamId) return "steam_differs_from_application";
-  }
+  } else if (steamDiffersFromApplication(member, applicationSteamMatch(facts.applications)))
+    return "steam_differs_from_application";
+  if (facts.linkedSteamShared) return "steam_shared";
   const automatic = facts.automatic;
   if (!automatic) return "no_patreon_payment";
-  const paidAt = Date.parse(automatic.payment.paidAt);
-  const chargedAt = member.lastChargeAt === null ? NaN : new Date(member.lastChargeAt).getTime();
-  if (member.lastChargeStatus && PATREON_REVERSED_CHARGE_STATUSES.has(member.lastChargeStatus) && !(chargedAt < paidAt))
+  // Any reversed latest charge stops automation. The latest charge can only look older than the first payment when
+  // Patreon dates that same charge a few seconds apart, which makes it a refund of the qualifying charge itself.
+  if (member.lastChargeStatus && PATREON_REVERSED_CHARGE_STATUSES.has(member.lastChargeStatus))
     return "charge_reversed";
+  const paidAt = Date.parse(automatic.payment.paidAt);
   const now = typeof context.now === "number" ? context.now : context.now.getTime();
   if (!(paidAt <= now - context.holdHours * 3_600_000)) return "payment_too_recent";
   if (automatic.earlierOtherRecord) return "earlier_payment_other_record";
@@ -222,6 +249,7 @@ export type NextStepRecord = MatchMember & {
     sourceApplicationRevoked: boolean;
     patreonDiscordElsewhere: boolean;
     discordReportedForOtherPatron: boolean;
+    linkedSteamShared: boolean;
   };
   automaticBlockedReason: AutomaticFounderBlockedReason | null;
 };
@@ -234,8 +262,6 @@ const PAYMENT_REASONS = new Set<string>([
   "not_verified",
   "source_not_qualifying",
 ]);
-/** Steam matches whose SteamID comes from an application that is not approved yet. */
-const UNAPPROVED_STEAM = new Set<string>(["application_pending", "application_in_progress"]);
 /** Founder reasons after which no founder promise is possible, so a missing SteamID no longer matters for one. */
 const FOUNDER_IMPOSSIBLE = new Set<string>(["outside_window", "below_minimum", "already_founder"]);
 const steamStepCodes: Record<SteamMatchBlock, string> = {
@@ -333,16 +359,17 @@ export function supporterNextSteps(record: NextStepRecord, context: NextStepCont
         message:
           "The whitelist application this SteamID was copied from is no longer approved. The SteamID was kept; check it.",
       });
-    else if (
-      record.steamSource !== "application" &&
-      record.match.steam?.steamId &&
-      !UNAPPROVED_STEAM.has(record.match.steam.reason ?? "") &&
-      record.match.steam.steamId !== record.steamId
-    )
+    else if (steamDiffersFromApplication(record, record.match.steam))
       steps.push({
         code: "steam_differs_from_application",
         area: "steam",
-        message: `The linked SteamID differs from the one on this Discord account's approved application (${record.match.steam.steamId}). Check which is right.`,
+        message: `The linked SteamID differs from the one on this Discord account's approved application (${record.match.steam?.steamId}). Check which is right.`,
+      });
+    if (record.match.linkedSteamShared)
+      steps.push({
+        code: "linked_steam_shared",
+        area: "steam",
+        message: "Another Discord account has applied with the linked SteamID. Check who it belongs to.",
       });
   } else if (record.match.steam && (record.founder || founderPossible))
     // A founder without a SteamID still needs one for the whitelist promise.

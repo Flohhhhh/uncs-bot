@@ -739,6 +739,7 @@ function previewMatch(record: Pick<SupporterView, "discordId" | "discordSource" 
       sourceApplicationRevoked: false,
       patreonDiscordElsewhere: false,
       discordReportedForOtherPatron: false,
+      linkedSteamShared: false,
     },
     automaticPayment: null,
     automaticBlockedReason,

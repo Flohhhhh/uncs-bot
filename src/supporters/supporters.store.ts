@@ -584,6 +584,7 @@ export class SupportersStore {
       automatic: matchFacts?.automatic ?? null,
       discordReportedForOtherPatron: Boolean(matchFacts?.discordReportedForOtherPatron),
       patreonDiscordElsewhere: Boolean(matchFacts?.patreonDiscordElsewhere),
+      linkedSteamShared: Boolean(matchFacts?.linkedSteamShared),
     };
     let founderBlockedReason: SupporterView["founderBlockedReason"] = null;
     if (!supporter.founder) {
@@ -627,6 +628,7 @@ export class SupportersStore {
         sourceApplicationRevoked: sourceApplicationRevoked(supporter, facts),
         patreonDiscordElsewhere: facts.patreonDiscordElsewhere,
         discordReportedForOtherPatron: facts.discordReportedForOtherPatron,
+        linkedSteamShared: facts.linkedSteamShared,
       },
       automaticPayment: facts.automatic?.payment ?? null,
       automaticBlockedReason,

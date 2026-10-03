@@ -384,6 +384,8 @@ export type SupporterView = {
     sourceApplicationRevoked: boolean;
     patreonDiscordElsewhere: boolean;
     discordReportedForOtherPatron: boolean;
+    /** Another Discord account has applied with the linked SteamID (an application not declined or revoked). */
+    linkedSteamShared: boolean;
   };
   /** The payment automatic matching would record a founder promise on: the earliest verified first Patreon API payment. */
   automaticPayment: PaymentView | null;

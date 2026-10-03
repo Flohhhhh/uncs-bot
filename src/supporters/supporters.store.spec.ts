@@ -512,6 +512,12 @@ describe("supporter persistence and founder eligibility", () => {
     expect(statement.text).toContain("p.source = 'patreon_api' AND p.verification_state = 'verified'");
     expect(statement.text).toContain("other_payment.paid_at < p.paid_at");
     expect(statement.text).toContain("reporter.patreon_discord_id = m.discord_id");
+    // Only whether another Discord account applied with the linked SteamID, never which one.
+    expect(statement.text).toContain("'linkedSteamShared', m.discord_id IS NOT NULL AND m.steam_id IS NOT NULL");
+    expect(statement.text).toContain("WHERE shared.steam_id = m.steam_id");
+    expect(statement.text).toContain(
+      "AND shared.discord_user_id <> m.discord_id AND shared.status NOT IN ('declined', 'revoked')",
+    );
     expect(values.filter((value: unknown) => value === "123").length).toBeGreaterThanOrEqual(2);
     expect(statement.text).not.toMatch(/email|contact_consent|review_reason|reviewed_by|discord_display_name/);
   });
@@ -591,6 +597,11 @@ describe("supporter persistence and founder eligibility", () => {
       automaticBlockedReason: "earlier_payment",
     });
     expect(await read(stored({ otherFounder: true }))).toMatchObject({ automaticBlockedReason: "already_founder" });
+    expect(await read(stored({}, { linkedSteamShared: true }))).toMatchObject({
+      automaticBlockedReason: "steam_shared",
+      match: { linkedSteamShared: true },
+    });
+    expect((await read(stored())).match.linkedSteamShared).toBe(false);
     expect(await read(stored({ discordSource: "staff" }))).toMatchObject({
       automaticBlockedReason: "discord_not_from_patreon",
       automaticBlockedMessage: expect.stringContaining("entered by staff"),
