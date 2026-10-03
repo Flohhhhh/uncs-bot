@@ -34,7 +34,7 @@ export function VotingControlsPanel({ onDirty }: { onDirty: (value: boolean) => 
   const policy = draft?.policy ?? data?.policy;
   const changed = !!draft && draft.version !== data?.version;
   // Paused until the controls are saved again: saving them unchanged resumes automatic voting.
-  const paused = data?.policy.enabled && data.paused ? data.paused : null;
+  const paused = data?.policy?.enabled && data.paused ? data.paused : null;
   const resumable = !!paused && !draft;
   async function save(request = draft) {
     if (
