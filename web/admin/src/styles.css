@@ -1227,6 +1227,24 @@ td strong {
 .supporter-next h3 {
   margin-bottom: 8px;
 }
+.supporter-steps {
+  padding: 14px 0 6px;
+}
+.supporter-steps h3,
+.supporter-steps h4 {
+  margin-bottom: 6px;
+}
+.supporter-steps ul {
+  margin: 0 0 12px;
+  padding-left: 18px;
+  line-height: 1.7;
+}
+.supporter-automation .pill {
+  vertical-align: middle;
+}
+.warning-text {
+  color: #e9d397;
+}
 .supporter-form-grid {
   display: grid;
   grid-template-columns: 1.2fr 1fr;

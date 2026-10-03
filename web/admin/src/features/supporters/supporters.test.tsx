@@ -3,7 +3,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { api } from "../../api/client";
 import { AdminContext, type AdminContextValue } from "../../app/context";
 import { SupportersPage } from "./index";
-import { founderReady, reviewInput } from "./policy";
+import { applicationSteamId, founderReady, reviewInput } from "./policy";
 import type { FounderPolicy, PaymentEvidence, Supporter, SupporterReviewResponse, SupportersResponse } from "./types";
 
 vi.mock("../../api/client", () => ({ api: vi.fn() }));
@@ -41,7 +41,9 @@ const payment: PaymentEvidence = {
 };
 const supporter: Supporter = {
   id: "01234567-89ab-4cde-8fab-0123456789ab",
+  provider: "patreon",
   patreonMemberId: "patreon-member-1",
+  confirmKey: "patreon-member-1",
   displayName: "<img src=x onerror=alert(1)>",
   patronStatus: "active_patron",
   lastChargeStatus: "Paid",
@@ -49,7 +51,11 @@ const supporter: Supporter = {
   observedAt: "2026-10-30T15:00:00Z",
   reviewState: "pending",
   discordId: "23456789012345678",
+  discordSource: "staff",
+  patreonDiscordId: null,
   steamId: "76561198000000001",
+  steamSource: "staff",
+  steamApplicationId: null,
   identityState: "staff_linked",
   version: 7,
   latestPayment: {
@@ -61,7 +67,27 @@ const supporter: Supporter = {
   },
   founderEligiblePayment: payment,
   founder: null,
+  founderBlockedReason: null,
+  founderBlockedMessage: null,
+  needsDiscordLink: false,
+  match: {
+    steam: null,
+    sourceApplication: null,
+    sourceApplicationRevoked: false,
+    patreonDiscordElsewhere: false,
+    discordReportedForOtherPatron: false,
+  },
+  automaticBlockedReason: "discord_not_from_patreon",
+  automaticBlockedMessage: "The Discord account was entered by staff.",
+  nextSteps: [
+    {
+      code: "founder_ready_staff",
+      area: "founder",
+      message: "Ready for staff to record. Not automatic: the Discord account was entered by staff.",
+    },
+  ],
 };
+const automaticSteam = { reason: null, steamId: "76561198000000009", applicationId: "app-1", serverId: "primary" };
 function data(record = supporter): SupportersResponse {
   return {
     enabled: true,
@@ -264,49 +290,31 @@ it("requires admin access and renders provider data as text, with no access-gran
   expect(document.querySelector("img")).toBeNull();
   const dialog = screen.getByRole("dialog");
   expect(within(dialog).getByText(supporter.displayName!)).toBeInTheDocument();
-  expect(within(dialog).getByText("Matched by staff; not verified through Discord sign-in.")).toBeInTheDocument();
-  expect(within(dialog).getByText("Staff-entered; Steam ownership is not verified by this page.")).toBeInTheDocument();
+  expect(within(dialog).getByText("Entered by staff; not verified through Discord sign-in.")).toBeInTheDocument();
+  expect(
+    within(dialog).getByText("Entered by staff; Steam ownership is not verified by this page."),
+  ).toBeInTheDocument();
   expect(
     screen.getByText(/No whitelist, priority tier, or Discord role is granted from this page/),
   ).toBeInTheDocument();
 });
 
-it("founder eligibility requires first checked payment, linked identities, amount/currency and the exact date window", () => {
-  expect(founderReady(supporter, policy)).toBe(true);
-  const invalidPayments: Partial<PaymentEvidence>[] = [
-    { source: "signed_status" },
-    { verificationState: "unverified" },
-    { firstSuccessfulPaymentVerified: false },
-    { currency: "CAD" },
-    { amountCents: null },
-    { amountCents: 499 },
-    { paidAt: "2026-09-30T03:59:59.999Z" },
-    { paidAt: policy.endsAt! },
-    { paidAt: "not-a-date" },
-  ];
-  for (const invalid of invalidPayments)
-    expect(founderReady({ ...supporter, founderEligiblePayment: { ...payment, ...invalid } }, policy)).toBe(false);
-  for (const invalid of [
-    { identityState: "unlinked" as const },
-    { discordId: null },
-    { steamId: null },
-    { steamId: "76561190000000001" },
-    { founderEligiblePayment: null },
-    { founder: { awardedAt: policy.startsAt!, paymentId: payment.id } },
-  ])
-    expect(founderReady({ ...supporter, ...invalid }, policy)).toBe(false);
-  expect(founderReady(supporter, { ...policy, configured: false })).toBe(false);
-  expect(
-    founderReady({ ...supporter, founderEligiblePayment: { ...payment, paidAt: "2026-10-15T03:59:59.999Z" } }, policy),
-  ).toBe(true);
+it("follows the server's founder verdict instead of judging eligibility in the browser", () => {
+  expect(founderReady(supporter)).toBe(true);
+  expect(founderReady({ ...supporter, founderBlockedReason: "earlier_payment" })).toBe(false);
+  expect(founderReady({ ...supporter, founderEligiblePayment: null })).toBe(false);
+  expect(founderReady({ ...supporter, founder: { awardedAt: policy.startsAt!, paymentId: payment.id } })).toBe(false);
+  // The server accepts one linked identity, so a Discord-only record or a PayPal record can be ready.
+  expect(founderReady({ ...supporter, steamId: null, identityState: "partial" })).toBe(true);
+  expect(founderReady({ ...supporter, provider: "paypal", patreonMemberId: null, confirmKey: supporter.id })).toBe(
+    true,
+  );
 });
 
 it("records a founder promise against a verified first payment from the Patreon import", async () => {
   const imported: PaymentEvidence = { ...payment, source: "patreon_api", reference: "patreon-event-1" };
   const record = { ...supporter, founderEligiblePayment: imported };
-  expect(founderReady(record, policy)).toBe(true);
-  for (const invalid of [{ verificationState: "unverified" as const }, { firstSuccessfulPaymentVerified: false }])
-    expect(founderReady({ ...record, founderEligiblePayment: { ...imported, ...invalid } }, policy)).toBe(false);
+  expect(founderReady(record)).toBe(true);
   request.mockImplementation(async (_path, options) =>
     options?.method === "POST"
       ? {
@@ -337,19 +345,29 @@ it("checks linked Steam account structure rather than a decimal prefix", () => {
   input.set("discordId", "123456789012345678");
   for (const steamId of ["76561197960265729", "76561202255233023"]) {
     input.set("steamId", steamId);
-    expect(reviewInput(supporter, "link", "review-id", input, policy)).toMatchObject({ steamId });
+    expect(reviewInput(supporter, "link", "review-id", input)).toMatchObject({ steamId });
   }
   for (const steamId of ["76561190000000001", "76561197960265728", "76561202255233024"]) {
     input.set("steamId", steamId);
-    expect(() => reviewInput(supporter, "link", "review-id", input, policy)).toThrow("SteamID64");
+    expect(() => reviewInput(supporter, "link", "review-id", input)).toThrow("SteamID64");
   }
 });
 
-it("active membership and signed payment status do not unlock founder recognition", async () => {
-  request.mockResolvedValue(data({ ...supporter, founderEligiblePayment: { ...payment, source: "signed_status" } }));
+it("keeps the founder action off while the server names a blocking rule, and says which", async () => {
+  const message = "Only a checked Patreon receipt, a Patreon API payment or a PayPal payment can qualify.";
+  request.mockResolvedValue(
+    data({
+      ...supporter,
+      founderEligiblePayment: null,
+      founderBlockedReason: "source_not_qualifying",
+      founderBlockedMessage: message,
+    }),
+  );
   render(page());
   fireEvent.click(await screen.findByRole("button", { name: "Review supporter" }));
-  expect(screen.getByRole("button", { name: "Record founder promise" })).toBeDisabled();
+  const founder = screen.getByRole("button", { name: "Record founder promise" });
+  expect(founder).toBeDisabled();
+  expect(founder).toHaveAttribute("title", message);
   expect(postCalls()).toHaveLength(0);
 });
 
@@ -429,7 +447,7 @@ it("payment entry defaults first-payment attestation off and requires a complete
   expect(body.paidAt).toBe(new Date("2020-10-01T12:30").toISOString());
 });
 
-it("matches accounts with the reviewed member revision and explicit IDs", async () => {
+it("matches accounts with the reviewed member revision, sending only the identity that changed", async () => {
   request.mockImplementation(async (_path, options) =>
     options?.method === "POST" ? { ok: true, replayed: false, supporter: { ...supporter, version: 8 } } : data(),
   );
@@ -439,14 +457,21 @@ it("matches accounts with the reviewed member revision and explicit IDs", async 
   fireEvent.change(screen.getByLabelText("Reason"), {
     target: { value: "Matched the member to the supplied accounts." },
   });
-  fireEvent.click(screen.getByRole("button", { name: "Save reviewed record" }));
+  const form = screen.getByRole("button", { name: "Save reviewed record" }).closest("form")!;
+  fireEvent.submit(form);
+  // Resending unchanged values would turn a Patreon or application link into a staff link.
+  expect(screen.getByRole("alert")).toHaveTextContent("Unchanged values are kept");
+  expect(postCalls()).toHaveLength(0);
+  fireEvent.change(screen.getByLabelText("SteamID64"), { target: { value: "76561198000000002" } });
+  fireEvent.submit(form);
   await screen.findByRole("heading", { name: "Supporter record saved" });
   expect(postCalls()[0][0]).toBe(`supporters/${supporter.id}/link`);
-  expect(JSON.parse(String(postCalls()[0][1]?.body))).toMatchObject({
+  expect(JSON.parse(String(postCalls()[0][1]?.body))).toEqual({
+    id: expect.any(String),
     version: 7,
-    confirm: supporter.patreonMemberId,
-    discordId: supporter.discordId,
-    steamId: supporter.steamId,
+    confirm: supporter.confirmKey,
+    reason: "Matched the member to the supplied accounts.",
+    steamId: "76561198000000002",
   });
 });
 
@@ -476,7 +501,209 @@ it("unmounting during a save cannot repopulate private supporter data or start a
   view.rerender(page({ ...context, me: { ...context.me, role: "moderator" } }));
   await act(async () => response.resolve({ ok: true, replayed: false, supporter: { ...supporter, version: 8 } }));
   expect(screen.getByText("Administrator access required")).toBeInTheDocument();
-  expect(screen.queryByText(supporter.patreonMemberId)).not.toBeInTheDocument();
+  expect(screen.queryByText(supporter.patreonMemberId!)).not.toBeInTheDocument();
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   expect(request.mock.calls).toHaveLength(calls);
+});
+
+it("shows where each identity came from and how the founder promise was recorded", async () => {
+  request.mockResolvedValue(
+    data({
+      ...supporter,
+      discordSource: "patreon",
+      patreonDiscordId: "34567890123456789",
+      steamSource: "application",
+      steamApplicationId: "app-1",
+      identityState: "patreon_linked",
+      match: {
+        ...supporter.match,
+        sourceApplication: { id: "app-1", serverId: "primary", status: "revoked" },
+        sourceApplicationRevoked: true,
+      },
+      founder: { awardedAt: policy.startsAt!, paymentId: payment.id, source: "patreon_api", automatic: true },
+      nextSteps: [],
+    }),
+  );
+  render(page());
+  const row = (await screen.findByText(supporter.displayName!)).closest("tr")!;
+  expect(within(row).getByText("Discord from Patreon")).toBeInTheDocument();
+  expect(within(row).getByText("Discord: Patreon · SteamID: application")).toBeInTheDocument();
+  expect(within(row).getByText("Recorded automatically")).toBeInTheDocument();
+  fireEvent.click(within(row).getByRole("button", { name: "Review supporter" }));
+  const dialog = screen.getByRole("dialog");
+  expect(
+    within(dialog).getByText(
+      "From Patreon (the patron connected it). Patreon now reports a different account: 34567890123456789.",
+    ),
+  ).toBeInTheDocument();
+  expect(
+    within(dialog).getByText(
+      "Copied from the approved whitelist application on server primary. Steam ownership is not verified.",
+    ),
+  ).toBeInTheDocument();
+  expect(within(dialog).getByText(/application it was copied from is no longer approved/)).toBeInTheDocument();
+  expect(within(dialog).getByText("Recorded automatically by Gramps.")).toBeInTheDocument();
+});
+
+it("shows the first step still needed with a count in the table and every step in the record", async () => {
+  const steps = [
+    { code: "no_whitelist_application", area: "steam" as const, message: "No whitelist application yet." },
+    { code: "founder_not_first_payment", area: "payment" as const, message: "First payment not confirmed." },
+  ];
+  request.mockResolvedValue(data({ ...supporter, steamId: null, identityState: "partial", nextSteps: steps }));
+  render(page());
+  const row = (await screen.findByText(supporter.displayName!)).closest("tr")!;
+  expect(within(row).getByText("No whitelist application yet. (+1 more)")).toBeInTheDocument();
+  expect(within(row).getByText("Partly matched")).toBeInTheDocument();
+  fireEvent.click(within(row).getByRole("button", { name: "Review supporter" }));
+  const dialog = screen.getByRole("dialog");
+  expect(within(dialog).getByRole("heading", { name: "Still needed" })).toBeInTheDocument();
+  expect(within(dialog).getByRole("heading", { name: "Payment needs checking" })).toBeInTheDocument();
+  expect(within(dialog).getByText("No whitelist application yet.")).toBeInTheDocument();
+  expect(within(dialog).getByText("First payment not confirmed.")).toBeInTheDocument();
+});
+
+it("lets staff review a PayPal record, confirming with its record ID, even while Patreon is off", async () => {
+  const paypal: Supporter = {
+    ...supporter,
+    provider: "paypal",
+    patreonMemberId: null,
+    confirmKey: supporter.id,
+    displayName: "PayPal donor",
+    steamId: null,
+    steamSource: null,
+    identityState: "partial",
+    founderEligiblePayment: { ...payment, source: "paypal", reference: "8AB12345CD678901E" },
+    automaticBlockedReason: "not_patreon",
+  };
+  request.mockImplementation(async (_path, options) =>
+    options?.method === "POST"
+      ? {
+          ok: true,
+          replayed: false,
+          supporter: { ...paypal, version: 8, founder: { awardedAt: policy.startsAt!, paymentId: payment.id } },
+        }
+      : { ...data(paypal), configured: false },
+  );
+  render(page());
+  fireEvent.click(await screen.findByRole("button", { name: "Review supporter" }));
+  expect(screen.queryByRole("button", { name: "Record checked payment" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Record founder promise" }));
+  expect(screen.getByText("Payment supporting this founder promise").parentElement).toHaveTextContent(
+    "PayPal payment checked by staff",
+  );
+  fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "Checked the PayPal payment." } });
+  fireEvent.click(screen.getByRole("button", { name: "Save reviewed record" }));
+  await screen.findByRole("heading", { name: "Supporter record saved" });
+  expect(JSON.parse(String(postCalls()[0][1]?.body))).toMatchObject({ confirm: supporter.id, paymentId: payment.id });
+});
+
+it("fills in the SteamID an approved application offers only when none is linked, and says to check it", async () => {
+  const offered = {
+    ...supporter,
+    steamId: null,
+    steamSource: null,
+    identityState: "partial" as const,
+    match: { ...supporter.match, steam: automaticSteam },
+  };
+  request.mockImplementation(async (_path, options) =>
+    options?.method === "POST"
+      ? {
+          ok: true,
+          replayed: false,
+          supporter: { ...offered, version: 8, steamId: automaticSteam.steamId, steamSource: "staff" },
+        }
+      : data(offered),
+  );
+  render(page());
+  fireEvent.click(await screen.findByRole("button", { name: "Review supporter" }));
+  fireEvent.click(screen.getByRole("button", { name: "Review account match" }));
+  expect(screen.getByLabelText("SteamID64")).toHaveValue(automaticSteam.steamId);
+  expect(screen.getByText(/Check it belongs to this supporter before saving/)).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "Checked the applicant's SteamID." } });
+  fireEvent.click(screen.getByRole("button", { name: "Save reviewed record" }));
+  await screen.findByRole("heading", { name: "Supporter record saved" });
+  expect(JSON.parse(String(postCalls()[0][1]?.body))).toMatchObject({ steamId: automaticSteam.steamId });
+  expect(JSON.parse(String(postCalls()[0][1]?.body))).not.toHaveProperty("discordId");
+  // A linked SteamID is never replaced by the application's.
+  const linked = { ...offered, steamId: "76561198000000001", steamSource: "staff" as const };
+  expect(applicationSteamId(linked)).toBeNull();
+});
+
+function form(values: Record<string, string>) {
+  const input = new FormData();
+  input.set("reason", "Checked both accounts with the supporter");
+  for (const [key, value] of Object.entries(values)) input.set(key, value);
+  return input;
+}
+
+it("asks staff to restate a SteamID copied from an application before changing the Discord account", () => {
+  const copied: Supporter = {
+    ...supporter,
+    discordSource: "patreon",
+    steamSource: "application",
+    steamApplicationId: "app-1",
+  };
+  const newDiscord = "34567890123456789";
+  expect(() => reviewInput(copied, "link", "id", form({ discordId: newDiscord, steamId: copied.steamId! }))).toThrow(
+    "copied from the old Discord account",
+  );
+  expect(
+    reviewInput(copied, "link", "id", form({ discordId: newDiscord, steamId: copied.steamId!, steamConfirmed: "on" })),
+  ).toMatchObject({ discordId: newDiscord, steamConfirmed: true, confirm: copied.confirmKey });
+  expect(
+    reviewInput(copied, "link", "id", form({ discordId: newDiscord, steamId: "76561198000000002" })),
+  ).toMatchObject({ discordId: newDiscord, steamId: "76561198000000002" });
+  expect(
+    reviewInput(copied, "link", "id", form({ discordId: copied.discordId!, steamId: "76561198000000002" })),
+  ).toEqual(expect.not.objectContaining({ discordId: expect.anything() }));
+  expect(() => reviewInput(copied, "link", "id", form({}))).toThrow("Enter a Discord user ID or a SteamID64.");
+  expect(() => reviewInput(copied, "link", "id", form({ discordId: "display name" }))).toThrow("not a display name");
+});
+
+it("filters accounts to match, records ready for staff, automatic previews and automatic founders", async () => {
+  const records: Supporter[] = [
+    {
+      ...supporter,
+      id: "a",
+      displayName: "Partly matched patron",
+      steamId: null,
+      identityState: "partial",
+      nextSteps: [],
+    },
+    {
+      ...supporter,
+      id: "b",
+      displayName: "Automatic founder",
+      identityState: "patreon_linked",
+      founder: { awardedAt: policy.startsAt!, paymentId: payment.id, automatic: true },
+      nextSteps: [],
+    },
+    {
+      ...supporter,
+      id: "c",
+      displayName: "Would be automatic",
+      identityState: "patreon_linked",
+      nextSteps: [{ code: "founder_ready_automatic_off", area: "founder", message: "Ready for staff to record." }],
+    },
+  ];
+  request.mockResolvedValue({ ...data(), supporters: records, automation: { steamFill: false, founderAuto: false } });
+  render(page());
+  await screen.findByText("Partly matched patron");
+  expect(screen.getByText(/Automatic founder recording is off/)).toBeInTheDocument();
+  expect(screen.getByText("SteamID fill off")).toBeInTheDocument();
+  const filter = screen.getByRole("combobox", { name: "Filter supporter records" });
+  const shown = () => screen.getAllByRole("button", { name: "Review supporter" }).length;
+  fireEvent.change(filter, { target: { value: "unlinked" } });
+  expect(screen.getByText("Partly matched patron")).toBeInTheDocument();
+  expect(shown()).toBe(1);
+  fireEvent.change(filter, { target: { value: "automatic" } });
+  expect(screen.getByText("Automatic founder")).toBeInTheDocument();
+  expect(shown()).toBe(1);
+  fireEvent.change(filter, { target: { value: "preview" } });
+  expect(screen.getByText("Would be automatic")).toBeInTheDocument();
+  expect(shown()).toBe(1);
+  fireEvent.change(filter, { target: { value: "staff" } });
+  expect(screen.getByText("Would be automatic")).toBeInTheDocument();
+  expect(shown()).toBe(1);
 });

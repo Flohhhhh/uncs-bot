@@ -1,4 +1,4 @@
-import type { FounderPolicy, PaymentEvidence, Supporter, SupporterDecision, SupporterReviewInput } from "./types";
+import type { NextStep, PaymentEvidence, Supporter, SupporterDecision, SupporterReviewInput } from "./types";
 import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 
 export function paymentDescription(payment: PaymentEvidence | null) {
@@ -15,28 +15,88 @@ export function paymentDescription(payment: PaymentEvidence | null) {
       ? `receipt checked by staff · ${history}`
       : payment.source === "patreon_api"
         ? `${payment.verificationState === "verified" ? "checked by the Patreon import" : "Patreon import no longer reports this charge as paid"} · ${history}`
-        : "provider status only";
+        : payment.source === "paypal"
+          ? `PayPal payment checked by staff · ${history}`
+          : "provider status only";
   return `${amount} · ${evidence}`;
 }
 
-export function founderReady(record: Supporter, policy: FounderPolicy) {
-  const payment = record.founderEligiblePayment;
-  const paidAt = Date.parse(payment?.paidAt ?? "");
-  return Boolean(
-    policy.configured &&
-    record.identityState === "staff_linked" &&
-    record.discordId &&
-    isPublicIndividualSteamId(record.steamId) &&
-    (payment?.source === "manual_receipt" || payment?.source === "patreon_api") &&
-    payment.verificationState === "verified" &&
-    payment.firstSuccessfulPaymentVerified === true &&
-    payment.currency === policy.currency &&
-    payment.amountCents !== null &&
-    payment.amountCents >= policy.amountCents &&
-    paidAt >= Date.parse(policy.startsAt ?? "") &&
-    paidAt < Date.parse(policy.endsAt ?? "") &&
-    !record.founder,
+/** The server decides founder eligibility; the dashboard only follows its verdict. */
+export function founderReady(record: Supporter) {
+  return !record.founder && record.founderBlockedReason === null && Boolean(record.founderEligiblePayment);
+}
+
+/** How the Discord account was linked, in staff-facing words. */
+export function discordDescription(record: Supporter) {
+  const reported = record.patreonDiscordId;
+  if (!record.discordId)
+    return reported
+      ? `Patreon reports Discord account ${reported}, which another supporter record links.`
+      : "Record the account after confirming the member’s identity.";
+  const patreon =
+    record.provider !== "patreon" || !reported
+      ? ""
+      : reported === record.discordId
+        ? " Patreon reports the same account."
+        : ` Patreon now reports a different account: ${reported}.`;
+  if (record.discordSource === "patreon") return `From Patreon (the patron connected it).${patreon}`;
+  if (record.discordSource === "staff") return `Entered by staff; not verified through Discord sign-in.${patreon}`;
+  return `Linked before match sources were recorded.${patreon}`;
+}
+
+/** How the SteamID was linked, in staff-facing words. Steam ownership is never verified here. */
+export function steamDescription(record: Supporter) {
+  if (!record.steamId) return "Not linked yet.";
+  if (record.steamSource === "application") {
+    const server = record.match.sourceApplication?.serverId;
+    return `Copied from the approved whitelist application${server ? ` on server ${server}` : ""}. Steam ownership is not verified.`;
+  }
+  if (record.steamSource === "staff") return "Entered by staff; Steam ownership is not verified by this page.";
+  return "Linked before match sources were recorded; Steam ownership is not verified.";
+}
+
+export const identityLabels: Record<Supporter["identityState"], string> = {
+  patreon_linked: "Discord from Patreon",
+  staff_linked: "Staff-linked",
+  partial: "Partly matched",
+  unlinked: "Not linked",
+};
+const sourceLabel = (value: string | null, source: string | null) =>
+  !value ? "not linked" : source === "patreon" ? "Patreon" : source === "application" ? "application" : "staff";
+/** One line for the table: where each identity came from. */
+export function matchSummary(record: Supporter) {
+  return `Discord: ${sourceLabel(record.discordId, record.discordSource)} · SteamID: ${sourceLabel(record.steamId, record.steamSource)}`;
+}
+
+/** The SteamID an approved application offers, for staff to check when the record has none. */
+export function applicationSteamId(record: Supporter) {
+  return !record.steamId && record.match.steam?.steamId && record.match.steam.reason !== "application_pending"
+    ? record.match.steam.steamId
+    : null;
+}
+
+const READY_FOR_STAFF = new Set([
+  "founder_ready_staff",
+  "founder_ready_automatic_off",
+  "founder_automatic_waiting",
+  "application_not_confirmed",
+  "steam_available",
+]);
+export const readyForStaff = (record: Supporter) => record.nextSteps.some((step) => READY_FOR_STAFF.has(step.code));
+/** Founder promises automation would record: now, or with automatic recording switched on. */
+export const automaticPreview = (record: Supporter) =>
+  record.nextSteps.some(
+    (step) => step.code === "founder_ready_automatic" || step.code === "founder_ready_automatic_off",
   );
+export const accountsToMatch = (record: Supporter) =>
+  record.identityState === "unlinked" || record.identityState === "partial";
+
+/** Steps grouped for the record dialog; payment problems share one heading. */
+export function stepGroups(steps: NextStep[]) {
+  return {
+    payment: steps.filter((step) => step.area === "payment"),
+    other: steps.filter((step) => step.area !== "payment"),
+  };
 }
 
 export function reviewInput(
@@ -44,7 +104,6 @@ export function reviewInput(
   decision: SupporterDecision,
   id: string,
   values: FormData,
-  policy: FounderPolicy,
 ): SupporterReviewInput {
   const reason = String(values.get("reason") ?? "").trim();
   if (
@@ -53,13 +112,31 @@ export function reviewInput(
     [...reason].some((character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)
   )
     throw new Error("Enter a single-line review reason between 3 and 200 characters.");
-  const base = { id, version: record.version, confirm: record.patreonMemberId, reason };
+  const base = { id, version: record.version, confirm: record.confirmKey, reason };
   if (decision === "link") {
     const discordId = String(values.get("discordId") ?? "").trim();
     const steamId = String(values.get("steamId") ?? "").trim();
-    if (!/^\d{17,20}$/.test(discordId) || !isPublicIndividualSteamId(steamId))
-      throw new Error("Enter the Discord user ID and the player’s 17-digit SteamID64.");
-    return { ...base, discordId, steamId };
+    if (!discordId && !steamId) throw new Error("Enter a Discord user ID or a SteamID64.");
+    if (discordId && !/^\d{17,20}$/.test(discordId))
+      throw new Error("Enter the Discord user ID (17 to 20 digits), not a display name.");
+    if (steamId && !isPublicIndividualSteamId(steamId)) throw new Error("Enter the player’s 17-digit SteamID64.");
+    // Only a value that changes is sent, so an unchanged identity keeps where it came from.
+    const discordChanged = Boolean(discordId) && discordId !== record.discordId;
+    const steamChanged = Boolean(steamId) && steamId !== record.steamId;
+    const steamConfirmed =
+      discordChanged && !steamChanged && record.steamSource === "application" && values.get("steamConfirmed") === "on";
+    if (discordChanged && !steamChanged && record.steamSource === "application" && !steamConfirmed)
+      throw new Error(
+        "This SteamID was copied from the old Discord account’s application. Confirm it belongs to the new account, or enter the right SteamID64.",
+      );
+    if (!discordChanged && !steamChanged)
+      throw new Error("Change the Discord user ID or the SteamID64 before saving. Unchanged values are kept.");
+    return {
+      ...base,
+      ...(discordChanged ? { discordId } : {}),
+      ...(steamChanged ? { steamId } : {}),
+      ...(steamConfirmed ? { steamConfirmed: true as const } : {}),
+    };
   }
   if (decision === "payment") {
     const paidAt = new Date(String(values.get("paidAt") ?? ""));
@@ -90,10 +167,8 @@ export function reviewInput(
     };
   }
   if (decision === "founder") {
-    if (!founderReady(record, policy) || !record.founderEligiblePayment)
-      throw new Error(
-        "A configured launch window, matched accounts and a qualifying checked first payment are required.",
-      );
+    if (!founderReady(record) || !record.founderEligiblePayment)
+      throw new Error(record.founderBlockedMessage ?? "This supporter cannot be recorded as a founder yet.");
     return { ...base, paymentId: record.founderEligiblePayment.id };
   }
   return base;

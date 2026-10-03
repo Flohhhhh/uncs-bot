@@ -1,18 +1,38 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { api } from "../../api/client";
 import { useResource } from "../../api/use-resource";
 import { useAdmin } from "../../app/context";
 import { Badge, Card, Empty, Modal, ReasonField, date } from "../../components/ui";
 import { CopyValue, DataTable } from "../../components/data-table";
-import { founderReady, paymentDescription, reviewInput } from "./policy";
+import {
+  accountsToMatch,
+  applicationSteamId,
+  automaticPreview,
+  discordDescription,
+  founderReady,
+  identityLabels,
+  matchSummary,
+  paymentDescription,
+  readyForStaff,
+  reviewInput,
+  steamDescription,
+  stepGroups,
+} from "./policy";
 import { ManualMember } from "./manual-member";
-import type { FounderPolicy, Supporter, SupporterDecision, SupporterReviewResponse, SupportersResponse } from "./types";
+import type {
+  AutomationStatus,
+  FounderPolicy,
+  Supporter,
+  SupporterDecision,
+  SupporterReviewResponse,
+  SupportersResponse,
+} from "./types";
 
 const decisions = {
   link: {
     title: "Match supporter accounts",
     description:
-      "Confirm which Discord and Steam accounts belong with this Patreon member. This saves a staff-reviewed match; it does not authenticate either account.",
+      "Link the Discord account and SteamID64 that belong to this supporter. Only a value you change is saved, as a staff link; it does not authenticate either account.",
   },
   payment: {
     title: "Record a checked payment",
@@ -31,16 +51,49 @@ const decisions = {
   },
 };
 
+const recordName = (record: Supporter) =>
+  record.displayName || (record.provider === "paypal" ? "PayPal supporter" : "Patreon member");
+const recordReference = (record: Supporter) =>
+  record.provider === "paypal" ? "PayPal supporter" : `Member ${record.patreonMemberId}`;
+
 function SupporterBadge({ record }: { record: Supporter }) {
   const labels: Record<string, string> = {
     active_patron: "Active membership",
     declined_patron: "Payment issue",
     former_patron: "Former member",
   };
+  if (record.provider === "paypal") return <Badge>PayPal</Badge>;
   return (
     <Badge kind={record.patronStatus === "declined_patron" ? "warn" : "neutral"}>
       {(record.patronStatus && labels[record.patronStatus]) || record.patronStatus || "Status not supplied"}
     </Badge>
+  );
+}
+
+function NextSteps({ record }: { record: Supporter }) {
+  const { payment, other } = stepGroups(record.nextSteps);
+  if (!record.nextSteps.length) return null;
+  return (
+    <div className="supporter-steps">
+      <h3>Still needed</h3>
+      {other.length > 0 && (
+        <ul>
+          {other.map((step) => (
+            <li key={step.code}>{step.message}</li>
+          ))}
+        </ul>
+      )}
+      {payment.length > 0 && (
+        <>
+          <h4>Payment needs checking</h4>
+          <ul>
+            {payment.map((step) => (
+              <li key={step.code}>{step.message}</li>
+            ))}
+          </ul>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -50,9 +103,11 @@ function SupporterDetails({ record }: { record: Supporter }) {
     <>
       <div className="application-identity">
         <div>
-          <span className="eyebrow">PATREON MEMBER RECORD</span>
-          <strong>{record.displayName || "Patreon member"}</strong>
-          <small>{record.patreonMemberId}</small>
+          <span className="eyebrow">
+            {record.provider === "paypal" ? "PAYPAL SUPPORTER RECORD" : "PATREON MEMBER RECORD"}
+          </span>
+          <strong>{recordName(record)}</strong>
+          <small>{record.provider === "paypal" ? "Recorded by staff from PayPal" : record.patreonMemberId}</small>
         </div>
         <SupporterBadge record={record} />
       </div>
@@ -70,29 +125,32 @@ function SupporterDetails({ record }: { record: Supporter }) {
             </small>
           </dd>
         </div>
-        <div>
-          <dt>Latest charge status</dt>
-          <dd>
-            {record.lastChargeStatus || "Not supplied"}
-            <small>{date(record.lastChargeAt)}</small>
-          </dd>
-        </div>
+        {record.provider === "patreon" && (
+          <div>
+            <dt>Latest charge status</dt>
+            <dd>
+              {record.lastChargeStatus || "Not supplied"}
+              <small>{date(record.lastChargeAt)}</small>
+            </dd>
+          </div>
+        )}
         <div>
           <dt>Discord account</dt>
           <dd>
             {record.discordId || "Not linked"}
-            <small>
-              {record.identityState === "staff_linked"
-                ? "Matched by staff; not verified through Discord sign-in."
-                : "Record the account after confirming the member’s identity."}
-            </small>
+            <small>{discordDescription(record)}</small>
           </dd>
         </div>
         <div>
           <dt>SteamID64</dt>
           <dd>
             {record.steamId || "Not linked"}
-            <small>Staff-entered; Steam ownership is not verified by this page.</small>
+            <small>{steamDescription(record)}</small>
+            {record.match.sourceApplicationRevoked && (
+              <small className="warning-text">
+                The application it was copied from is no longer approved. The SteamID was kept; check it.
+              </small>
+            )}
           </dd>
         </div>
         <div>
@@ -113,6 +171,7 @@ function SupporterDetails({ record }: { record: Supporter }) {
             {record.founder ? (
               <>
                 Recorded {date(record.founder.awardedAt)}
+                <small>{record.founder.automatic ? "Recorded automatically by Gramps." : "Recorded by staff."}</small>
                 <small>
                   Lifetime standard whitelist promise. Awaiting the game’s queue-tier update; no access activated.
                 </small>
@@ -123,19 +182,18 @@ function SupporterDetails({ record }: { record: Supporter }) {
           </dd>
         </div>
       </dl>
+      <NextSteps record={record} />
     </>
   );
 }
 
 function SupporterReview({
   record: initialRecord,
-  policy,
   unavailable,
   onClose,
   onReviewed,
 }: {
   record: Supporter;
-  policy: FounderPolicy;
   unavailable: boolean;
   onClose: () => void;
   onReviewed: () => void;
@@ -156,9 +214,10 @@ function SupporterReview({
       if (inFlight.current) setBusy(false);
     };
   }, [setBusy]);
+  const ready = founderReady(record);
 
   function choose(decision: SupporterDecision) {
-    if (busy || unavailable || submitted.current || (decision === "founder" && !founderReady(record, policy))) return;
+    if (busy || unavailable || submitted.current || (decision === "founder" && !ready)) return;
     setReview({ decision, id: crypto.randomUUID() });
     setValidation("");
   }
@@ -168,7 +227,7 @@ function SupporterReview({
     if (!review || busy || unavailable || submitted.current) return;
     let input;
     try {
-      input = reviewInput(record, review.decision, review.id, new FormData(event.currentTarget), policy);
+      input = reviewInput(record, review.decision, review.id, new FormData(event.currentTarget));
     } catch (error) {
       setValidation(error instanceof Error ? error.message : "Check the required review fields.");
       return;
@@ -187,14 +246,21 @@ function SupporterReview({
       if (
         !response.ok ||
         response.supporter?.id !== record.id ||
-        response.supporter.patreonMemberId !== record.patreonMemberId ||
+        response.supporter.confirmKey !== record.confirmKey ||
         !Number.isInteger(response.supporter.version) ||
         response.supporter.version <= record.version
       ) {
         throw new Error("The saved record could not be confirmed. Refresh before another review.");
       }
       setRecord(response.supporter);
-      setResult({ saved: true, message: `Supporter review recorded. Review ID: ${review.id}` });
+      setResult({
+        saved: true,
+        message: `Supporter review recorded.${
+          response.automatic?.steamFilled
+            ? " Gramps also copied the SteamID from this Discord account’s approved whitelist application."
+            : ""
+        } Review ID: ${review.id}`,
+      });
     } catch (error) {
       if (!mounted.current) return;
       setResult({
@@ -213,6 +279,8 @@ function SupporterReview({
 
   const selected = review ? decisions[review.decision] : null;
   const eligiblePayment = record.founderEligiblePayment;
+  const offeredSteamId = applicationSteamId(record);
+  const steamHint = useId();
   return (
     <Modal
       className="supporter-dialog"
@@ -238,11 +306,7 @@ function SupporterReview({
         <SupporterDetails record={record} />
         {!review && (
           <div className="supporter-next">
-            <h3>Next steps</h3>
-            <p>
-              Match the accounts, check a completed payment, then review founder eligibility during the configured
-              launch window.
-            </p>
+            <h3>Actions</h3>
             <div className="action-list">
               <button
                 type="button"
@@ -250,16 +314,18 @@ function SupporterReview({
                 disabled={busy || unavailable}
                 onClick={() => choose("link")}
               >
-                {record.identityState === "staff_linked" ? "Review account match" : "Match accounts"}
+                {record.identityState === "unlinked" ? "Match accounts" : "Review account match"}
               </button>
-              <button
-                type="button"
-                className="button secondary small"
-                disabled={busy || unavailable}
-                onClick={() => choose("payment")}
-              >
-                Record checked payment
-              </button>
+              {record.provider === "patreon" && (
+                <button
+                  type="button"
+                  className="button secondary small"
+                  disabled={busy || unavailable}
+                  onClick={() => choose("payment")}
+                >
+                  Record checked payment
+                </button>
+              )}
               <button
                 type="button"
                 className="button secondary small"
@@ -271,20 +337,13 @@ function SupporterReview({
               <button
                 type="button"
                 className="button primary small"
-                disabled={busy || unavailable || !founderReady(record, policy)}
-                title={
-                  founderReady(record, policy)
-                    ? undefined
-                    : "Requires a configured launch window, matched accounts, and a qualifying checked payment"
-                }
+                disabled={busy || unavailable || !ready}
+                title={ready ? undefined : (record.founderBlockedMessage ?? undefined)}
                 onClick={() => choose("founder")}
               >
                 {record.founder ? "Founder promise recorded" : "Record founder promise"}
               </button>
             </div>
-            {!policy.configured && (
-              <p className="muted">Founder dates have not been set. No founder promise can be recorded yet.</p>
-            )}
           </div>
         )}
         {review && selected && !result && (
@@ -307,7 +366,6 @@ function SupporterReview({
                     Discord user ID
                     <input
                       name="discordId"
-                      required
                       pattern="[0-9]{17,20}"
                       maxLength={20}
                       inputMode="numeric"
@@ -319,14 +377,33 @@ function SupporterReview({
                     SteamID64
                     <input
                       name="steamId"
-                      required
                       pattern="[0-9]{17}"
                       maxLength={17}
                       inputMode="numeric"
-                      defaultValue={record.steamId ?? ""}
+                      defaultValue={record.steamId ?? offeredSteamId ?? ""}
                       placeholder="17-digit SteamID64"
+                      aria-describedby={offeredSteamId ? steamHint : undefined}
                     />
                   </label>
+                  {offeredSteamId && (
+                    <p className="muted" id={steamHint}>
+                      Filled in from this Discord account’s approved whitelist application. Check it belongs to this
+                      supporter before saving.
+                    </p>
+                  )}
+                  {record.steamSource === "application" && (
+                    <label className="supporter-check">
+                      <input type="checkbox" name="steamConfirmed" />
+                      <span>
+                        The SteamID belongs to the new Discord account too.
+                        <small>
+                          Needed only when you change the Discord account: this SteamID was copied from the current
+                          account’s application.
+                        </small>
+                      </span>
+                    </label>
+                  )}
+                  <p className="muted">Leave a field as it is to keep it. Only changed values are saved.</p>
                 </>
               )}
               {review.decision === "payment" && (
@@ -380,7 +457,11 @@ function SupporterReview({
             </fieldset>
             <div className="application-confirm">
               <strong>{selected.title}</strong>
-              <span>Patreon member {record.patreonMemberId}</span>
+              <span>
+                {record.provider === "paypal"
+                  ? `PayPal supporter ${recordName(record)}`
+                  : `Patreon member ${record.patreonMemberId}`}
+              </span>
               <span>This records staff evidence only. No game or Discord access changes.</span>
             </div>
           </>
@@ -407,6 +488,22 @@ function SupporterReview({
         </div>
       </form>
     </Modal>
+  );
+}
+
+function AutomationNotice({ automation }: { automation: AutomationStatus | undefined }) {
+  const steamFill = Boolean(automation?.steamFill),
+    founderAuto = Boolean(automation?.founderAuto);
+  return (
+    <div className="notice info supporter-automation">
+      <strong>Automatic matching.</strong>{" "}
+      <Badge kind={steamFill ? "good" : "neutral"}>SteamID fill {steamFill ? "on" : "off"}</Badge>{" "}
+      <Badge kind={founderAuto ? "good" : "neutral"}>Automatic founders {founderAuto ? "on" : "off"}</Badge>{" "}
+      {founderAuto
+        ? "Gramps records a founder promise itself when the Discord account came from Patreon, a SteamID is linked and the first Patreon payment qualifies. Staff can always record one."
+        : "Automatic founder recording is off. Records marked “Would be recorded automatically” show what it would record; staff record founder promises."}
+      {!steamFill && " SteamIDs are linked by staff; an approved application’s SteamID is shown for checking."}
+    </div>
   );
 }
 
@@ -477,10 +574,13 @@ function AdminSupporters() {
     (record) =>
       !filter ||
       (filter === "review" && record.reviewState !== "verified") ||
-      (filter === "unlinked" && record.identityState !== "staff_linked") ||
+      (filter === "unlinked" && accountsToMatch(record)) ||
+      (filter === "staff" && readyForStaff(record)) ||
+      (filter === "preview" && automaticPreview(record)) ||
+      (filter === "automatic" && record.founder?.automatic) ||
       (filter === "founder" && record.founder),
   );
-  const policy = data.founderPolicy;
+  const policy: FounderPolicy = data.founderPolicy;
   const windowDate = (value: string | null) =>
     value
       ? new Date(value).toLocaleString(undefined, { timeZone: "America/New_York", timeZoneName: "short" })
@@ -488,11 +588,17 @@ function AdminSupporters() {
   const founderWindow = policy.configured
     ? `${windowDate(policy.startsAt)} → ${windowDate(policy.endsAt)} (end exclusive)`
     : "15 days from launch · dates not set";
+  const patreonReady = data.enabled && data.configured;
+  const reviewUnavailable = (record: Supporter) =>
+    (record.provider === "patreon" && !patreonReady) ||
+    Boolean(resource.error) ||
+    resource.loading ||
+    resource.refreshing;
   return (
     <>
       <div className="supporter-intro">
         <div>
-          <p className="eyebrow">PATREON / PRIVATE STAFF RECORDS</p>
+          <p className="eyebrow">PATREON AND PAYPAL / PRIVATE STAFF RECORDS</p>
           <h2>
             THANK THE CREW.
             <br />
@@ -511,8 +617,8 @@ function AdminSupporters() {
               ? "Use the completed payment date, not the date a membership appeared here."
               : "The launch dates must be set before any founder promise can be recorded."}
           </small>
-          <Badge kind={data.enabled && data.configured ? "neutral" : "warn"}>
-            {data.enabled && data.configured ? "SUPPORTER RECORDS READY" : "NOT CONFIGURED"}
+          <Badge kind={patreonReady ? "neutral" : "warn"}>
+            {patreonReady ? "SUPPORTER RECORDS READY" : "NOT CONFIGURED"}
           </Badge>
           <small>
             {data.webhookConfigured
@@ -526,6 +632,7 @@ function AdminSupporters() {
         Wardogs queue tiers launch. No whitelist, priority tier, or Discord role is granted from this page. Current free
         whitelist access stays in place.
       </div>
+      <AutomationNotice automation={data.automation} />
       {data.note && <p className="supporter-note">{data.note}</p>}
       {resource.error && (
         <p className="notice warning" role="alert">
@@ -537,8 +644,10 @@ function AdminSupporters() {
           <strong>{records.filter((record) => record.reviewState !== "verified").length}</strong> awaiting review
         </span>
         <span>
-          <strong>{records.filter((record) => record.identityState !== "staff_linked").length}</strong> accounts to
-          match
+          <strong>{records.filter(accountsToMatch).length}</strong> accounts to match
+        </span>
+        <span>
+          <strong>{records.filter(readyForStaff).length}</strong> ready for staff
         </span>
         <span>
           <strong>{records.filter((record) => record.founder).length}</strong> founder promises
@@ -560,6 +669,9 @@ function AdminSupporters() {
           <option value="">All loaded supporters</option>
           <option value="review">Awaiting review</option>
           <option value="unlinked">Accounts to match</option>
+          <option value="staff">Ready for staff</option>
+          <option value="preview">Would be recorded automatically</option>
+          <option value="automatic">Recorded automatically</option>
           <option value="founder">Founder promises</option>
         </select>
         {filter && (
@@ -573,56 +685,67 @@ function AdminSupporters() {
       </div>
       <button
         className="button secondary"
-        disabled={
-          busy ||
-          resource.loading ||
-          resource.refreshing ||
-          Boolean(resource.error) ||
-          !data.enabled ||
-          !data.configured
-        }
+        disabled={busy || resource.loading || resource.refreshing || Boolean(resource.error) || !patreonReady}
         onClick={() => setAdding(true)}
       >
         Record existing Patreon member
       </button>
       <Card
-        title="Patreon supporters"
+        title="Supporters"
         subtitle="Membership status is not proof of a completed payment. Open a record to check evidence."
         badge={<Badge>ADMIN ONLY</Badge>}
       >
         {rows.length ? (
           <DataTable
-            label="Patreon supporters"
+            label="Supporters"
             rows={rows}
             columns={[
-              { label: "Supporter", value: (record) => record.displayName || record.patreonMemberId },
+              { label: "Supporter", value: (record) => record.displayName || record.confirmKey },
               { label: "Recurring status", value: (record) => record.patronStatus },
-              { label: "Account match", value: (record) => record.identityState === "staff_linked" },
+              { label: "Account match", value: (record) => record.identityState },
               { label: "Founder record", value: (record) => !!record.founder, firstDirection: "descending" },
               { label: "Actions" },
             ]}
             renderRow={(record) => (
               <tr key={record.id}>
                 <td>
-                  <strong>{record.displayName || "Patreon member"}</strong>
-                  <small>Member {record.patreonMemberId}</small>
+                  <strong>{recordName(record)}</strong>
+                  <small>{recordReference(record)}</small>
                   <small>{record.reviewState === "verified" ? "Observation reviewed" : "Needs staff review"}</small>
                 </td>
                 <td>
                   <SupporterBadge record={record} />
-                  <small>Latest charge: {record.lastChargeStatus || "not supplied"}</small>
+                  {record.provider === "patreon" && (
+                    <small>Latest charge: {record.lastChargeStatus || "not supplied"}</small>
+                  )}
                 </td>
                 <td>
-                  <Badge kind={record.identityState === "staff_linked" ? "neutral" : "warn"}>
-                    {record.identityState === "staff_linked" ? "Staff-linked" : "Not linked"}
+                  <Badge
+                    kind={
+                      record.identityState === "unlinked" || record.identityState === "partial" ? "warn" : "neutral"
+                    }
+                  >
+                    {identityLabels[record.identityState]}
                   </Badge>
+                  <small>{matchSummary(record)}</small>
                   <small>{record.steamId ? <CopyValue value={record.steamId} /> : "SteamID not recorded"}</small>
                 </td>
                 <td>
                   <Badge kind={record.founder ? "good" : "neutral"}>
-                    {record.founder ? "Permanent promise" : "Not recorded"}
+                    {record.founder
+                      ? record.founder.automatic
+                        ? "Recorded automatically"
+                        : "Permanent promise"
+                      : "Not recorded"}
                   </Badge>
-                  <small>{record.founder ? "Waiting for game update" : "Requires payment review"}</small>
+                  {record.nextSteps[0] ? (
+                    <small>
+                      {record.nextSteps[0].message}
+                      {record.nextSteps.length > 1 && ` (+${record.nextSteps.length - 1} more)`}
+                    </small>
+                  ) : (
+                    <small>{record.founder ? "Waiting for game update" : "Nothing left to do"}</small>
+                  )}
                 </td>
                 <td>
                   <button
@@ -650,10 +773,7 @@ function AdminSupporters() {
       {selected && (
         <SupporterReview
           record={selected}
-          policy={policy}
-          unavailable={
-            !data.enabled || !data.configured || Boolean(resource.error) || resource.loading || resource.refreshing
-          }
+          unavailable={reviewUnavailable(selected)}
           onClose={() => setSelected(null)}
           onReviewed={() => {
             void resource.refresh();
@@ -662,9 +782,7 @@ function AdminSupporters() {
       )}
       {adding && (
         <ManualMember
-          unavailable={
-            !data.enabled || !data.configured || Boolean(resource.error) || resource.loading || resource.refreshing
-          }
+          unavailable={!patreonReady || Boolean(resource.error) || resource.loading || resource.refreshing}
           onClose={() => setAdding(false)}
           onRecorded={resource.refresh}
         />
