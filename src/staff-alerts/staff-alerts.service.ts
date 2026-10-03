@@ -83,20 +83,46 @@ type StoredAlert = StaffAlertView & {
 };
 type ChannelCheck = { state: StaffAlertsChannelState; channel: TextChannel | null };
 
-/** Game-controlled or staff text: no control characters, collapsed spaces, capped. */
+/** Bidi controls and zero-width characters. Keeps U+200D and tag characters, which emoji sequences use. */
+const INVISIBLE = /[\u061c\u180e\u200b\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g;
+/**
+ * Nothing visible: spaces, format characters, the characters Unicode marks as ignorable (fillers,
+ * variation selectors and invisible marks) and the blank Braille pattern.
+ */
+const BLANK = /^[\p{Z}\p{Cf}\p{Default_Ignorable_Code_Point}\u2800]*$/u;
+
+/** Game-controlled or staff text: no control, bidi or zero-width characters, collapsed spaces, capped. */
 export function cleanText(value: string, max: number) {
-  const text = [...value]
-    .map((character) => (character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127 ? " " : character))
+  const text = [...value.replace(INVISIBLE, "")]
+    .map((character) => {
+      const code = character.charCodeAt(0);
+      return code < 32 || (code >= 127 && code <= 159) ? " " : character;
+    })
     .join("")
     .replace(/\s+/g, " ")
     .trim();
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
-/** Text for an embed: cleaned, Markdown escaped and unable to form a mention. */
+/** A player name for staff text, or "Unknown" when nothing visible is left. */
+export function playerLabel(name: string) {
+  const text = cleanText(name, 64);
+  return BLANK.test(text) ? "Unknown" : text;
+}
+/**
+ * Text for an embed: cleaned, Markdown escaped and unable to form a mention. Also escapes what
+ * escapeMarkdown leaves alone: link brackets, line-start subtext and quotes, and every `<` construct.
+ * escapeMarkdown never sees a `<`, because its `<:` and `<scheme:/` exceptions would leave the
+ * italics after one unescaped; each `<` comes back followed by a zero-width space, so it cannot open
+ * an emoji, mention, timestamp, command or channel link. cleanText turns U+0001 into a space, so the
+ * placeholder cannot already be in the text.
+ */
 export function discordText(value: string, max = 600) {
-  return escapeMarkdown(cleanText(value, max))
+  const text = cleanText(value, max).replaceAll("<", "\u0001");
+  return escapeMarkdown(text, { heading: true, bulletedList: true, numberedList: true, maskedLink: true })
+    .replace(/^(\s*)(-#|>)/gm, "$1\\$2")
+    .replace(/(?<!\\)((?:\\\\)*)([[\]])/g, "$1\\$2")
     .replace(/@(everyone|here)/gi, "@​$1")
-    .replace(/<([@#])/g, "<​$1");
+    .replaceAll("\u0001", "<​");
 }
 const clip = (value: string, max: number) => (value.length > max ? `${value.slice(0, max - 1)}…` : value);
 
@@ -234,9 +260,7 @@ export class StaffAlerts {
       key: input.key,
       title: cleanText(input.title, 80),
       lines: input.lines.map((line) => cleanText(line, 600)),
-      player: input.player
-        ? { steamId: input.player.steamId, name: cleanText(input.player.name, 64) || "Unknown" }
-        : null,
+      player: input.player ? { steamId: input.player.steamId, name: playerLabel(input.player.name) } : null,
       facts: { ...(input.facts ?? {}) },
       fields: (input.fields ?? []).slice(0, 4),
       links: (input.links ?? []).filter((link) => SAFE_LINK.test(link)).slice(0, 3),

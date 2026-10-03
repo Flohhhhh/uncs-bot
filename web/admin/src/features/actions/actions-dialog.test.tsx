@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../../api/client";
 import { AdminContext } from "../../app/context";
@@ -337,6 +338,31 @@ describe("server action review", () => {
     });
     fireEvent.submit(screen.getByRole("button", { name: "Send announcement" }).closest("form")!);
     expect(screen.getByRole("alert")).toHaveTextContent("single-line message");
+    expect(request).not.toHaveBeenCalled();
+  });
+  it.each([
+    ["broadcast", "paste", /In-game message/, "Send announcement", "single-line message"],
+    ["message", "type", /In-game message/, "Message player", "single-line message"],
+    ["kick", "paste", "Reason", "Kick player", "single-line reason"],
+  ] as const)("keeps every character of an over-long %s and refuses it before any request", async (...test) => {
+    const [action, entry, name, label, refusal] = test;
+    const user = userEvent.setup();
+    render(
+      <AdminContext.Provider value={context()}>
+        <ActionsDialog action={action} steamId={action === "broadcast" ? undefined : alice.steamId} onClose={vi.fn()} />
+      </AdminContext.Provider>,
+    );
+    const field = screen.getByRole("textbox", { name });
+    expect(field).toHaveAccessibleDescription("0/200");
+    const text = `${"Long announcement ".repeat(12)}ends here`.padEnd(230, ".");
+    await user.click(field);
+    if (entry === "paste") await user.paste(text);
+    else await user.type(field, text);
+    expect(field).toHaveValue(text);
+    expect(field).toHaveAttribute("aria-invalid", "true");
+    expect(field).toHaveAccessibleDescription("230/200 · 30 over the limit");
+    await user.click(screen.getByRole("button", { name: label }));
+    expect(screen.getByRole("alert")).toHaveTextContent(refusal);
     expect(request).not.toHaveBeenCalled();
   });
   it("does not send a map change before its modes and layouts have loaded successfully", async () => {

@@ -1796,6 +1796,20 @@ dialog select[multiple] {
 dialog textarea {
   resize: vertical;
 }
+dialog textarea[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+.character-count {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: right;
+}
+.character-count.over {
+  color: var(--danger);
+  font-weight: 600;
+}
 .dialog-footer,
 .dialog-actions {
   display: flex;
