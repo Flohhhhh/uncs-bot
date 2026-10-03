@@ -8,6 +8,7 @@ import {
   type GameServerSummary,
   type RconConnection,
 } from "../common/game-server";
+import type { StaffPolicy } from "../common/admin-policy";
 
 @Injectable()
 export class AdminSettings {
@@ -17,18 +18,22 @@ export class AdminSettings {
     if (!this.env.get("ADMIN_ENABLED"))
       throw new ServiceUnavailableException("The staff dashboard has not been connected yet.");
     const identity = this.identity(this.env.get("ADMIN_ORIGIN"));
+    return { ...identity, ...this.staffPolicy() };
+  }
+
+  /** Staff owner and role IDs. Unlike get(), readable while the dashboard is off, for Discord staff commands. */
+  staffPolicy() {
     const ids = (value: string) =>
       value
         .split(",")
         .map((id) => id.trim())
         .filter(Boolean);
     return {
-      ...identity,
       ownerIds: ids(this.env.get("ADMIN_OWNER_IDS")),
       adminRoleIds: ids(this.env.get("ADMIN_ADMIN_ROLE_IDS")),
       moderatorRoleIds: ids(this.env.get("ADMIN_MODERATOR_ROLE_IDS")),
       viewerRoleIds: ids(this.env.get("ADMIN_VIEWER_ROLE_IDS")),
-    };
+    } satisfies StaffPolicy;
   }
 
   applicant() {

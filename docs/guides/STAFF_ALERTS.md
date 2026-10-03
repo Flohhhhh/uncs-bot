@@ -161,7 +161,7 @@ These are steps in WarDogs Server Commands and Warcon, not Gramps code. They kee
 - In WarDogs Server Commands, remove every server under ST-00.
 - In Warcon, revoke the WarDogs key. If the WarDogs agent was used, stop and remove it.
 - Change the RCON password, because WarDogs was linked by direct RCON with our password. Set the new password in the server configuration on the host (xREALM) first, then update `WARDOGS_RCON_PASSWORD` (or the server's `password` in `WARDOGS_SERVERS`) on Railway.
-- Then rotate the `[WDServerFeed]` token, since a bot with RCON or config access could have read it. Set a new token in the server configuration on the host (xREALM) first, then update `WARDOGS_FEED_TOKEN` (or the server's `feedToken` in `WARDOGS_SERVERS`) on Railway.
+- Then rotate the `[WDServerFeed]` token, since a bot with RCON or config access could have read it. Set a new token in the server configuration on the host (xREALM) first, then update `WARDOGS_FEED_TOKEN` (or the server's `feedToken` in `WARDOGS_SERVERS`) on Railway. Both steps are in [Rotating passwords and tokens](SECRET_ROTATION.md).
 - Check the Warcon organisation ban list and the whitelist for entries WarDogs added, and decide on each one.
 - Never re-add the server: held bans and whitelist grants can run automatically on reconnect.
 
