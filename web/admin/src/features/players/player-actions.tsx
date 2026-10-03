@@ -80,10 +80,11 @@ export function PlayerSheet({
   const can = (action: ActionName) => allowed(action, admin.me, admin.overview, admin.stale, admin.busy);
   const notice = useId();
   const off = panelActions.filter((action) => !can(action)).length;
-  // The snapshot can expire while the panel is open and turn every action off; the page's own refresh is
-  // behind the panel, so the panel offers its own check. Otherwise an action is off for the staff role or the
-  // server build. Say why next to the disabled buttons.
-  const needsCheck = admin.stale;
+  // The snapshot can expire while the panel is open and turn every action off, or the server can stop offering
+  // them. The page's own refresh is behind the panel, and on records pages it does not read the roster, so the
+  // panel offers its own check. Otherwise an action is off for the staff role or the server build. Say why next
+  // to the disabled buttons.
+  const needsCheck = admin.stale || (!!player && off === panelActions.length && !admin.busy);
   // Once offered, Check again stays until the panel closes: a button removed while it has focus drops keyboard
   // and screen reader users out of the panel, and a check that succeeds would otherwise remove it.
   const [offered, setOffered] = useState(needsCheck);
@@ -104,15 +105,14 @@ export function PlayerSheet({
     admin.refresh();
   };
   let reason = "";
-  if (player && admin.stale)
+  if (player && needsCheck)
     reason = askedCheck
       ? "Checking the server for current details…"
-      : "Server details need a fresh check before choosing an action.";
+      : admin.stale
+        ? "Server details need a fresh check before choosing an action."
+        : "Unavailable for your role, connection, or server build. Check again to read the server's current details.";
   else if (player && off && !admin.busy)
-    reason =
-      off < panelActions.length
-        ? "Some actions are unavailable for your role, connection, or server build."
-        : "Unavailable for your role, connection, or server build. Refresh the dashboard before trying again.";
+    reason = "Some actions are unavailable for your role, connection, or server build.";
   const describedBy = (action: ActionName) => (!can(action) && reason ? notice : undefined);
   const button = (action: ActionName, kind = "secondary") => (
     <button
