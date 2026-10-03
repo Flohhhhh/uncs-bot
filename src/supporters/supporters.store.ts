@@ -152,6 +152,8 @@ export function paymentView(row: PaymentRow): PaymentView {
 
 const STEAM_FROM_APPLICATION =
   "This SteamID was copied from the previous Discord account's whitelist application. Enter the SteamID again, or confirm it belongs to the new Discord account, to change the Discord account.";
+const STEAM_FROM_PREVIOUS_ACCOUNT =
+  "The previous Discord account applied for the whitelist with this SteamID. Confirm it belongs to the new Discord account too, or enter the right SteamID64.";
 
 /** A founder refusal names its rule so staff see why nothing was recorded. */
 function founderConflict(reason: FounderBlockedReason, suffix = "") {
@@ -678,6 +680,18 @@ export class SupportersStore {
         // A SteamID copied from the old Discord account's application must not silently follow a new account.
         if (discordChanged && member.steamSource === "application" && !steamChanged && input.steamConfirmed !== true)
           throw new ConflictException({ message: STEAM_FROM_APPLICATION, blockedReason: "steam_from_application" });
+        // Nor may a SteamID the previous Discord account applied with arrive together with a new Discord account
+        // unconfirmed: the dashboard shows that application's SteamID for the account the record had.
+        if (discordChanged && steamChanged && member.discordId && input.steamConfirmed !== true) {
+          const previous = await tx.execute(sql`SELECT 1 FROM whitelist_applications
+            WHERE discord_user_id = ${member.discordId} AND steam_id = ${input.steamId}
+            AND status NOT IN ('declined', 'revoked') LIMIT 1`);
+          if (previous.rows.length)
+            throw new ConflictException({
+              message: STEAM_FROM_PREVIOUS_ACCOUNT,
+              blockedReason: "steam_from_application",
+            });
+        }
         const steamRestated = !steamChanged && input.steamConfirmed === true && member.steamId !== null;
         const discordId = discordChanged ? input.discordId! : member.discordId,
           steamId = steamChanged ? input.steamId! : member.steamId;

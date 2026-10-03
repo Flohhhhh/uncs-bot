@@ -262,7 +262,18 @@ export type NextStepContext = {
   importConfigured: boolean;
   /** Hours an imported first payment must stand before an automatic founder promise. */
   holdHours: number;
+  /**
+   * Whether the viewer may open a game server. An application on any other server is named without its SteamID or
+   * server; the step itself stays. Omitted, every server is shown.
+   */
+  serverVisible?: (serverId: string) => boolean;
 };
+
+/** The application behind this match is on a game server the viewer cannot open. */
+export function steamMatchHidden(steam: SteamMatch | null, context: Pick<NextStepContext, "serverVisible">) {
+  return Boolean(steam?.serverId && context.serverVisible && !context.serverVisible(steam.serverId));
+}
+const HIDDEN_SERVER = " on a server you cannot open";
 
 const PAYMENT_REASONS = new Set<string>([
   "no_payment",
@@ -287,8 +298,10 @@ const steamStepCodes: Record<SteamMatchBlock, string> = {
 };
 
 function steamStep(steam: SteamMatch, record: NextStepRecord, context: NextStepContext): NextStep {
-  const id = steam.steamId ? ` (${steam.steamId})` : "";
-  const server = steam.serverId ? ` on server ${steam.serverId}` : "";
+  const hidden = steamMatchHidden(steam, context);
+  const id = hidden ? ` (${HIDDEN_SERVER.trim()})` : steam.steamId ? ` (${steam.steamId})` : "";
+  const server = hidden ? HIDDEN_SERVER : steam.serverId ? ` on server ${steam.serverId}` : "";
+  const named = hidden ? "the SteamID" : `SteamID ${steam.steamId}`;
   // Only a Patreon record with the fill switched on is ever filled in; anything else waits for staff.
   const fills = record.provider === "patreon" && context.steamFill;
   const messages: Record<SteamMatchBlock, string> = {
@@ -312,12 +325,14 @@ function steamStep(steam: SteamMatch, record: NextStepRecord, context: NextStepC
     return {
       code: "steam_ready_automatic",
       area: "steam",
-      message: `Ready: Gramps copies SteamID ${steam.steamId} from the approved application${server} at the next sync or approval.`,
+      message: `Ready: Gramps copies ${named} from the approved application${server} at the next sync or approval.`,
     };
   return {
     code: "steam_available",
     area: "steam",
-    message: `The approved application${server} names SteamID ${steam.steamId}. Check it and link it here.`,
+    message: hidden
+      ? `The approved application${server} names a SteamID. An administrator of that server can check it and link it here.`
+      : `The approved application${server} names SteamID ${steam.steamId}. Check it and link it here.`,
   };
 }
 
@@ -383,7 +398,7 @@ export function supporterNextSteps(record: NextStepRecord, context: NextStepCont
       steps.push({
         code: "steam_differs_from_application",
         area: "steam",
-        message: `The linked SteamID differs from the one on this Discord account's approved application (${record.match.steam?.steamId}). Check which is right.`,
+        message: `The linked SteamID differs from the one on this Discord account's approved application (${steamMatchHidden(record.match.steam, context) ? HIDDEN_SERVER.trim() : record.match.steam?.steamId}). Check which is right.`,
       });
     if (record.match.linkedSteamShared)
       steps.push({

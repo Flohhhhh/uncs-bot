@@ -33,7 +33,8 @@ export type SteamMatchBlock =
   | "steam_on_another_record";
 /**
  * The SteamID a whitelist application of the record's Discord account names. `reason` is null only when the server
- * says the SteamID is safe to copy; otherwise it names why not, and `steamId` is given for staff to check.
+ * says the SteamID is safe to copy; otherwise it names why not, and `steamId` is given for staff to check. For an
+ * application on a game server the administrator cannot open, only `reason` is given.
  */
 export interface SteamMatch {
   reason: SteamMatchBlock | null;
@@ -83,6 +84,7 @@ export interface Supporter {
   needsDiscordLink: boolean;
   match: {
     steam: SteamMatch | null;
+    /** Null as well when the application is on a game server the administrator cannot open. */
     sourceApplication: { id: string; serverId: string; status: string } | null;
     sourceApplicationRevoked: boolean;
     patreonDiscordElsewhere: boolean;
@@ -99,9 +101,12 @@ export interface Supporter {
 export interface AutomationStatus {
   steamFill: boolean;
   founderAuto: boolean;
+  /** Hours an imported first payment must stand before an automatic founder promise. */
   holdHours?: number;
+  /** Patreon is configured, so matching has records to run on. */
   configured?: boolean;
   lastRunAt?: string | null;
+  /** Fixed text from the server when the last matching run could not finish. */
   lastError?: string | null;
 }
 /** Mirrors PatreonSyncStatus in src/supporters/patreon-sync.service.ts. It never carries the token. */

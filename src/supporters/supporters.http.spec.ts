@@ -87,7 +87,17 @@ describe("private supporters HTTP boundary", () => {
       .overrideProvider(SupportersStore)
       .useValue(store)
       .overrideProvider(AdminSettings)
-      .useValue({ get: () => config })
+      .useValue({
+        get: () => config,
+        servers: () => [
+          { id: "primary", name: "The UNCs", version: "a".repeat(64) },
+          { id: "partner", name: "Partner server", version: "b".repeat(64) },
+        ],
+        explicitServers: () => true,
+        // The partner server has its own staff; this administrator's roles are not among them.
+        serverRoles: (id: string) =>
+          id === "partner" ? { admin: ["partner-staff"], moderator: [], viewer: [] } : undefined,
+      })
       .overrideProvider(AdminStore)
       .useValue(adminStore)
       .overrideProvider(WardogsClient)
@@ -122,6 +132,33 @@ describe("private supporters HTTP boundary", () => {
     expect(result.headers["cache-control"]).toBe("no-store");
     expect(result.headers["cdn-cache-control"]).toBe("no-store");
     expect(result.headers["vercel-cdn-cache-control"]).toBe("no-store");
+  });
+  it("leaves out whitelist application details from a server the administrator cannot open", async () => {
+    const offered = (serverId: string) =>
+      supporterFixture({
+        discordId: "123456789012345678",
+        discordSource: "patreon",
+        patreonDiscordId: "123456789012345678",
+        identityState: "partial",
+        match: {
+          ...supporterFixture().match,
+          steam: {
+            reason: null,
+            steamId: `7656119800000009${serverId === "partner" ? 8 : 7}`,
+            applicationId: randomUUID(),
+            serverId,
+          },
+        },
+      });
+    store.list.mockResolvedValue([offered("partner"), offered("primary")]);
+    const result = await request(app.getHttpServer())
+      .get("/admin/api/supporters")
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .expect(200);
+    const [partner, primary] = result.body.supporters;
+    expect(partner.match.steam).toEqual({ reason: null, steamId: null, applicationId: null, serverId: null });
+    expect(JSON.stringify(partner)).not.toMatch(/76561198000000098|partner/);
+    expect(primary.match.steam).toMatchObject({ steamId: "76561198000000097", serverId: "primary" });
   });
   it("returns each record's next steps and the automatic matching status to administrators", async () => {
     store.list.mockResolvedValue([supporterFixture()]);

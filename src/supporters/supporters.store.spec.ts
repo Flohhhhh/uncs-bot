@@ -82,6 +82,8 @@ function fixture() {
     otherFounder: boolean;
     founder: boolean;
     action: Record<string, unknown> | null;
+    /** The record's current Discord account applied with the SteamID being linked. */
+    previousApplication: boolean;
   } = {
     duplicate: false,
     manualDuplicate: false,
@@ -89,8 +91,11 @@ function fixture() {
     otherFounder: false,
     founder: false,
     action: null,
+    previousApplication: false,
   };
   const query = jest.fn(async (config: { text: string }, _params: unknown[]) => {
+    if (config.text.startsWith("SELECT 1 FROM whitelist_applications"))
+      return { rows: state.previousApplication ? [{ "?column?": 1 }] : [] };
     if (config.text.startsWith('insert into "supporter_members"') && config.text.includes("returning"))
       return { rows: state.manualDuplicate ? [] : [[id]] };
     if (config.text.includes('from "supporter_members"') && config.text.endsWith("for update"))
@@ -440,6 +445,36 @@ describe("supporter persistence and founder eligibility", () => {
     await expect(
       steamOnly.store.mutate(id, link({ discordId: staff.id, steamId: "76561198000000002" }), staff, "123", policy),
     ).resolves.toMatchObject({ ok: true });
+  });
+  it("asks staff to confirm a SteamID the previous Discord account applied with before it follows a new one", async () => {
+    const { store, query, state, member } = fixture();
+    Object.assign(member, { steamId: null, steamSource: null });
+    state.previousApplication = true;
+    const moved = { discordId: "234567890123456789", steamId: "76561198000000002" };
+    await expect(store.mutate(id, link(moved), staff, "123", policy)).rejects.toMatchObject({
+      status: 409,
+      response: {
+        blockedReason: "steam_from_application",
+        message: expect.stringContaining("previous Discord account"),
+      },
+    });
+    const check = query.mock.calls.find(([config]) => config.text.startsWith("SELECT 1 FROM whitelist_applications"))!;
+    expect(check[0].text).toContain("status NOT IN ('declined', 'revoked')");
+    expect(check[1]).toEqual([staff.id, "76561198000000002"]);
+    expect(query.mock.calls.some(([config]) => config.text.startsWith("update"))).toBe(false);
+    await expect(
+      store.mutate(id, link({ ...moved, steamConfirmed: true }), staff, "123", policy),
+    ).resolves.toMatchObject({ ok: true });
+    // Only a new Discord account with a new SteamID is checked.
+    for (const change of [{ steamId: "76561198000000002" }, { discordId: "234567890123456789" }]) {
+      const other = fixture();
+      Object.assign(other.member, { steamId: null, steamSource: null });
+      other.state.previousApplication = true;
+      await expect(other.store.mutate(id, link(change), staff, "123", policy)).resolves.toMatchObject({ ok: true });
+      expect(
+        other.query.mock.calls.some(([config]) => config.text.startsWith("SELECT 1 FROM whitelist_applications")),
+      ).toBe(false);
+    }
   });
   it("refuses to move a founder onto an identity another founder holds, after locking it", async () => {
     const { store, query, state } = fixture();
