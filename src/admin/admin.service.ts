@@ -14,14 +14,27 @@ import { RconError } from "./wardogs.client";
 import { GameServers } from "./game-servers";
 import { auditAction } from "./server-configuration";
 
+/** Returns a sentence to add to the staff member's result, or null. */
+export type UnchangedQueueListener = (staff: Staff, serverId: string) => Promise<string | null>;
+
 @Injectable()
 export class AdminService {
   private readonly reads = new Map<string, { until: number; promise: Promise<unknown> }>();
   private readonly lastActions = new Map<string, number>();
+  private readonly unchangedQueue: UnchangedQueueListener[] = [];
   constructor(
     private readonly servers: GameServers,
     private readonly store: AdminStore,
   ) {}
+
+  /**
+   * Runs after a person's map-next finds its entry already next, which leaves the rotation unchanged.
+   * Map votes register here to close an open automatic ballot: they depend on this service, so it cannot
+   * depend on them.
+   */
+  onUnchangedQueue(listener: UnchangedQueueListener) {
+    this.unchangedQueue.push(listener);
+  }
 
   async read(resource: string, serverId?: string) {
     const id = this.servers.resolve(serverId),
@@ -152,6 +165,22 @@ export class AdminService {
           "The game request finished, but its final audit record could not be saved. Check the game and this action ID before repeating it.",
       };
     }
+    // Gramps' own queue changes (system:* actors) never close a ballot this way.
+    if (
+      action.action === "map-next" &&
+      !staff.id.startsWith("system:") &&
+      result.state === "applied" &&
+      result.changed === false
+    )
+      for (const listener of this.unchangedQueue) {
+        let note: string | null = null;
+        try {
+          note = await listener(staff, serverId);
+        } catch {
+          /* The game result stands; the listener reports its own failures. */
+        }
+        if (note) result = { ...result, message: `${result.message} ${note}` };
+      }
     return { id: action.id, ...result };
   }
 

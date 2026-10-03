@@ -8,6 +8,7 @@ import {
   ServiceUnavailableException,
   type OnApplicationBootstrap,
   type OnModuleDestroy,
+  type OnModuleInit,
 } from "@nestjs/common";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -106,6 +107,7 @@ const REFUSAL_BRAKE = 3;
 const BROADCAST_LIMIT = 200;
 /** A voted 50v50 still needs its offer minimum, less this allowance for leavers, when the ballot closes. */
 const FIFTY_CLOSE_ALLOWANCE = 10;
+const STAFF_QUEUED = "Staff queued the next map. Votes were not applied.";
 
 function pickPolicy(raw: unknown): VotingPolicy {
   const value = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
@@ -158,7 +160,7 @@ function isFiftyWinner(vote: Pick<MapVoteRecord, "winner" | "choices">) {
 }
 
 @Injectable()
-export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy {
+export class MapVotesService implements OnModuleInit, OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(MapVotesService.name);
   private timer?: ReturnType<typeof setTimeout>;
   private stopped = false;
@@ -802,8 +804,32 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
     await this.updateMessage(vote);
     return mapVoteView(vote);
   }
+  onModuleInit() {
+    this.admin.onUnchangedQueue((staff, serverId) => this.staffQueuedNext(staff, serverId));
+  }
   onApplicationBootstrap() {
     if (this.options().enabled) this.schedule();
+  }
+  /**
+   * A person queued the entry that is already next. The rotation, and so the ballot's fingerprint, did not
+   * change, so the open automatic ballot on that server is closed here; its result would replace the choice.
+   * Returns a note for the staff member's result, or null when no ballot was open.
+   */
+  private async staffQueuedNext(staff: Staff, serverId: string): Promise<string | null> {
+    if (!this.options().enabled) return null;
+    const open = (await this.store.automaticOpen()).filter((vote) => vote.serverId === serverId);
+    let closed = 0;
+    for (const vote of open)
+      try {
+        await this.cancelAutomatic(vote, STAFF_QUEUED, staff);
+        closed++;
+      } catch {
+        this.logger.warn(`Automatic map vote ${vote.id} could not be closed after staff queued the next map.`);
+      }
+    if (closed) return "The open community vote was closed, so it cannot replace this choice.";
+    return open.length
+      ? "The open community vote could not be closed. Close it in Map votes to keep this choice."
+      : null;
   }
   onModuleDestroy() {
     this.stopped = true;
@@ -1305,12 +1331,15 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
       sameRound(clock, { map: latest.currentMap, startedAt: latest.roundStartedAt.getTime() })
     );
   }
-  private async cancelAutomatic(vote: MapVoteRecord, reason: string) {
+  /** Closes an automatic ballot without a game change, as Gramps or as the staff member `by`. */
+  private async cancelAutomatic(vote: MapVoteRecord, reason: string, by?: Staff) {
     this.lastScores.delete(vote.id);
     const cancelled = await this.store.cancel(
       vote.id,
       randomUUID(),
-      { id: vote.actorId, name: "Gramps", role: "admin", csrf: "", serverId: vote.serverId },
+      by
+        ? { ...by, serverId: vote.serverId }
+        : { id: vote.actorId, name: "Gramps", role: "admin", csrf: "", serverId: vote.serverId },
       reason,
       reason,
     );

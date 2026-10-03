@@ -4,7 +4,7 @@ import { MapVotesService } from "./map-votes.service";
 import { MapVotesStore } from "./map-votes.store";
 import { MapVotesDiscord } from "./map-votes.discord";
 import { fixtureServers } from "../admin/game-server-fixture";
-import { AdminService } from "../admin/admin.service";
+import { AdminService, type UnchangedQueueListener } from "../admin/admin.service";
 import type { AdminStore } from "../admin/admin.store";
 import { AdminAuth } from "../admin/admin.auth";
 import { GameRounds } from "../admin/game-rounds";
@@ -142,6 +142,7 @@ function fixture(enabled = true, serverId = "primary") {
   const admin = {
     act: jest.fn().mockResolvedValue({ state: "pending", message: "Saved" }),
     receipt: jest.fn().mockResolvedValue({ record: null }),
+    onUnchangedQueue: jest.fn(),
   };
   const role = jest.fn().mockResolvedValue("admin");
   const auth = {
@@ -1423,6 +1424,12 @@ async function openBallot(
   return { ...f, automation, score: (value: number) => f.status({ factionScores: leadingScores(value) }) };
 }
 const later = (ms = 15_000) => jest.setSystemTime(Date.now() + ms);
+/** The listener map votes register with the dashboard's actions for a staff queue of the entry already next. */
+function registeredQueueListener(f: ReturnType<typeof fixture>) {
+  f.service.onModuleInit();
+  const [[listener]] = f.admin.onUnchangedQueue.mock.calls as [UnchangedQueueListener][];
+  return listener;
+}
 const broadcasts = (admin: { act: jest.Mock }) =>
   (admin.act.mock.calls as [Staff, { action: string; message: string }][]).filter(
     ([, action]) => action.action === "broadcast",
@@ -1668,6 +1675,46 @@ describe("automatic ballots that follow the round, not the clock", () => {
       "Staff changed the rotation. Votes were not applied.",
     );
     expect(f.admin.act).not.toHaveBeenCalled();
+  });
+  it("closes the ballot when staff queue the entry that is already next, so the vote cannot replace it", async () => {
+    const f = await openBallot();
+    const staffQueued = registeredQueueListener(f);
+    const queuer: Staff = { ...staff, id: "987654321098765432", name: "Queuing admin", serverId: "primary" };
+    // Another server's queue leaves this ballot open.
+    expect(await staffQueued(queuer, "other")).toBeNull();
+    expect(f.store.cancel).not.toHaveBeenCalled();
+    expect(await staffQueued(queuer, "primary")).toBe(
+      "The open community vote was closed, so it cannot replace this choice.",
+    );
+    expect(f.store.cancel).toHaveBeenCalledWith(
+      f.record.id,
+      expect.any(String),
+      expect.objectContaining({ id: queuer.id, name: "Queuing admin", serverId: "primary" }),
+      "Staff queued the next map. Votes were not applied.",
+      "Staff queued the next map. Votes were not applied.",
+    );
+    // The existing ballot message is edited; nothing new is posted.
+    expect(f.discord.update).toHaveBeenCalledWith(expect.objectContaining({ id: f.record.id, state: "cancelled" }));
+    expect(f.discord.publish).not.toHaveBeenCalled();
+    // At the close score nothing is queued over the staff choice.
+    f.score(95);
+    await f.service.tick();
+    expect(f.store.claimClose).not.toHaveBeenCalled();
+    expect(f.admin.act).not.toHaveBeenCalled();
+    // With no open ballot there is nothing to add to the staff result.
+    expect(await staffQueued(queuer, "primary")).toBeNull();
+  });
+  it("tells staff when the open ballot could not be closed after they queued the entry already next", async () => {
+    const f = await openBallot();
+    const staffQueued = registeredQueueListener(f);
+    f.store.cancel.mockRejectedValue(new ConflictException("This ballot cannot be closed during an operation."));
+    expect(await staffQueued(staff, "primary")).toBe(
+      "The open community vote could not be closed. Close it in Map votes to keep this choice.",
+    );
+    const off = await openBallot();
+    off.environment.MAP_VOTES_ENABLED = false;
+    expect(await registeredQueueListener(off)(staff, "primary")).toBeNull();
+    expect(off.store.automaticOpen).not.toHaveBeenCalled();
   });
   it.each([
     ["the score reaches 100", { factionScores: leadingScores(100) }, 60],
