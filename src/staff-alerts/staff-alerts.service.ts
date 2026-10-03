@@ -88,9 +88,16 @@ export function cleanText(value: string, max: number) {
     .trim();
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
-/** Text for an embed: cleaned, Markdown escaped and unable to form a mention. */
+/**
+ * Text for an embed: cleaned, Markdown escaped and unable to form a mention. Also escapes what
+ * escapeMarkdown leaves alone: link brackets, line-start subtext and quotes, and the underscores
+ * after an emoji-like `<:`.
+ */
 export function discordText(value: string, max = 600) {
-  return escapeMarkdown(cleanText(value, max))
+  const text = cleanText(value, max).replace(/<(a?:)/g, "<​$1");
+  return escapeMarkdown(text, { heading: true, bulletedList: true, numberedList: true, maskedLink: true })
+    .replace(/^(\s*)(-#|>)/gm, "$1\\$2")
+    .replace(/(?<!\\)((?:\\\\)*)([[\]])/g, "$1\\$2")
     .replace(/@(everyone|here)/gi, "@​$1")
     .replace(/<([@#])/g, "<​$1");
 }
