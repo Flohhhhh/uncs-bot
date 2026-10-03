@@ -1,4 +1,5 @@
 import { Global, Logger, Module, type INestApplication, type MiddlewareConsumer } from "@nestjs/common";
+import { APP_FILTER } from "@nestjs/core";
 import { Test } from "@nestjs/testing";
 import type { NextFunction, Request, Response } from "express";
 import { randomUUID } from "node:crypto";
@@ -13,6 +14,7 @@ import { TelemetryDeliveries } from "./telemetry.deliveries";
 import { TelemModule } from "./telemetry.module";
 import { TelemetryStore } from "./telemetry.store";
 import { emptyTotals } from "./telemetry.types";
+import { AppExceptionFilter } from "../common/filters/app-exception.filter";
 
 const feedToken = "dedicated-test-feed-token-".repeat(2);
 const deliveryKeys = [
@@ -82,7 +84,11 @@ describe("telemetry HTTP boundaries", () => {
     jest.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ roles: ["viewer"] })));
     jest.spyOn(Logger.prototype, "warn").mockImplementation();
     jest.spyOn(Logger.prototype, "error").mockImplementation();
-    const module = await Test.createTestingModule({ imports: [TestEnvModule, TelemModule] })
+    // Production registers this filter globally, so status assertions here go through it.
+    const module = await Test.createTestingModule({
+      imports: [TestEnvModule, TelemModule],
+      providers: [{ provide: APP_FILTER, useClass: AppExceptionFilter }],
+    })
       .overrideProvider(TelemetryStore)
       .useValue(store)
       .overrideProvider(AdminSettings)

@@ -690,6 +690,8 @@ describe("live faction assignment", () => {
       disconnectAfter?: boolean;
       failReadback?: boolean;
       refusal?: boolean;
+      /** Everyone else in the player list; by default one unlinked player. */
+      roster?: { steamId: string | null; faction: string | null }[];
     } = {},
   ) {
     const client = new WardogsClient(settings);
@@ -702,7 +704,7 @@ describe("live faction assignment", () => {
         if (sent && options.failReadback) throw new RconError("Connection unavailable");
         return {
           players: [
-            { steamId: null, faction: "RED" },
+            ...(options.roster ?? [{ steamId: null, faction: "RED" }]),
             ...(options.targetPresent === false || (sent && options.disconnectAfter)
               ? []
               : [{ steamId: id, faction: sent ? (options.after ?? "BLU") : (options.before ?? "RED") }]),
@@ -864,6 +866,38 @@ describe("live faction assignment", () => {
   it("can confirm a future server returning the exact faction name instead of a known player code", async () => {
     const { client } = mockTeamChange({ after: "Lonestar" });
     await expect(client.execute(teamAction)).resolves.toMatchObject({ state: "applied" });
+  });
+  it("refuses a move when the game lists the player's SteamID twice", async () => {
+    const { client, request } = mockTeamChange({ roster: [{ steamId: id, faction: "GRN" }] });
+    await expect(client.execute(teamAction)).rejects.toThrow("ambiguous player identity");
+    expect(request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+  });
+  const linked = (count: number, faction: string | null, first = 0) =>
+    Array.from({ length: count }, (_, index) => ({
+      steamId: `7656119800${String(first + index).padStart(7, "0")}`,
+      faction,
+    }));
+  const capped = { ...teamAction, maximumTargetPlayers: 50 };
+  it("moves a player onto a capped team from a complete roster below the cap", async () => {
+    const { client, request } = mockTeamChange({ roster: [...linked(49, "BLU"), ...linked(40, "RED", 100)] });
+    await expect(client.execute(capped)).resolves.toMatchObject({ state: "applied", changed: true });
+    expect(request.mock.calls.filter(([method]) => method === "PATCH")).toEqual([
+      ["PATCH", `/v1/players/${id}`, { faction: "Lonestar" }],
+    ]);
+  });
+  it.each([
+    ["the target team is full", linked(50, "BLU")],
+    ["a player has no SteamID", [...linked(10, "BLU"), { steamId: null, faction: "RED" }]],
+    ["a SteamID is listed twice", [...linked(10, "BLU"), ...linked(1, "RED", 5)]],
+    ["a player has no team", [...linked(10, "BLU"), ...linked(1, null, 20)]],
+  ])("refuses a capped move without sending it when %s", async (_case, roster) => {
+    const { client, request } = mockTeamChange({ roster });
+    await expect(client.execute(capped)).resolves.toEqual({
+      state: "failed",
+      changed: false,
+      message: "The target team is full or the roster is incomplete. No move was sent.",
+    });
+    expect(request.mock.calls.every(([method]) => method === "GET")).toBe(true);
   });
 });
 
