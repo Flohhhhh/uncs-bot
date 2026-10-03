@@ -37,9 +37,11 @@ export function founderReady(record: Supporter) {
 export function discordDescription(record: Supporter) {
   const reported = record.patreonDiscordId;
   if (!record.discordId)
-    return reported
-      ? `Patreon reports Discord account ${reported}, which another supporter record links.`
-      : "Record the account after confirming the member’s identity.";
+    return !reported
+      ? "Record the account after confirming the member’s identity."
+      : record.match.patreonDiscordElsewhere
+        ? `Patreon reports Discord account ${reported}, which another supporter record links.`
+        : `Patreon reports Discord account ${reported}. It is not linked to this record yet.`;
   const patreon =
     record.provider !== "patreon" || !reported
       ? ""

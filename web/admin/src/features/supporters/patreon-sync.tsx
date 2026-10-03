@@ -212,7 +212,8 @@ export function PatreonImport({
   // An attempt after the last success that is no longer running did not succeed.
   const failedAt =
     show && !running && attempt && (!success || Date.parse(attempt) > Date.parse(success)) ? attempt : null;
-  // From the last successful import: founder promises whose payment Patreon no longer reports as paid, and conflicts.
+  // From the last successful import: founder promises whose payment Patreon no longer reports as paid or that is no
+  // longer marked as the first payment, and Discord conflicts.
   const founderRechecks = show && success ? sync.founderReviews.length : 0;
   const conflicts = show && success ? sync.conflicts : 0;
   const tone =

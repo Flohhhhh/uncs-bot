@@ -54,6 +54,13 @@ const decisions = {
   },
 };
 
+/**
+ * A founder award, a Discord link or a checked payment can change who should hold the Founder or Supporter role, so
+ * the server queues a Discord role check after saving one while Discord roles are switched on. Marking an observation
+ * reviewed changes no role.
+ */
+const checksRoles = (decision: SupporterDecision) => decision !== "review";
+
 const recordName = (record: Supporter) =>
   record.displayName || (record.provider === "paypal" ? "PayPal supporter" : "Patreon member");
 const recordReference = (record: Supporter) =>
@@ -311,7 +318,9 @@ function SupporterReview({
       description={
         result
           ? result.saved
-            ? "Your review has been recorded. No game access or Discord role was changed."
+            ? review && checksRoles(review.decision)
+              ? "Your review has been recorded. No game access was changed. With Discord roles switched on, Gramps checks the linked Discord account’s roles next."
+              : "Your review has been recorded. No game access or Discord role was changed."
             : "Close this record and refresh to check what was saved before submitting another review."
           : (selected?.description ??
             "Review account matching and payment evidence before recording any future benefit.")
@@ -483,7 +492,11 @@ function SupporterReview({
                   ? `PayPal supporter ${recordName(record)}`
                   : `Patreon member ${record.patreonMemberId}`}
               </span>
-              <span>This records staff evidence only. No game or Discord access changes.</span>
+              <span>
+                {checksRoles(review.decision)
+                  ? "This records staff evidence only and changes no game access. With Discord roles switched on, Gramps then checks the linked Discord account’s roles."
+                  : "This records staff evidence only. No game or Discord access changes."}
+              </span>
             </div>
           </>
         )}
@@ -521,7 +534,7 @@ function AutomationStatusLine({ automation }: { automation: AutomationStatus | u
   const idle = (steamFill || founderAuto) && automation?.configured === false;
   return (
     <div className="status-row supporter-automation">
-      <p className={`status-line ${steamFill || founderAuto ? "good" : "quiet"}`}>
+      <p className={`status-line ${idle ? "attention" : steamFill || founderAuto ? "good" : "quiet"}`}>
         <span>
           Automatic matching:{" "}
           <strong>{steamFill && founderAuto ? "on" : steamFill || founderAuto ? "partly on" : "off"}</strong>
@@ -626,7 +639,10 @@ function AdminSupporters() {
   return (
     <>
       <div className="supporter-summary">
-        <p>Records only. Grants no game or Discord access. A membership is not a verified payment.</p>
+        <p>
+          Records only. Grants no game access; with Discord roles switched on, the Founder and Supporter roles follow
+          these records. A membership is not a verified payment.
+        </p>
         <span
           className={`pill ${policy.configured ? "neutral" : "warn"}`}
           title={
@@ -646,7 +662,8 @@ function AdminSupporters() {
               : "Verified member details can be entered by hand when records are ready."
           }
         >
-          Patreon webhook {data.webhookConfigured ? "connected" : "not connected"}
+          {/* The server knows only that the signing secret is set, not that Patreon delivers to it. */}
+          Patreon webhook {data.webhookConfigured ? "set up" : "not set up"}
         </span>
       </div>
       {data.sync && (

@@ -4,7 +4,7 @@ import { api } from "../../api/client";
 import { AdminContext, type AdminContextValue } from "../../app/context";
 import { SupportersPage } from "./index";
 import { PatreonImport, ago, ahead } from "./patreon-sync";
-import { applicationSteamId, founderReady, founderWindowLabel, reviewInput } from "./policy";
+import { applicationSteamId, discordDescription, founderReady, founderWindowLabel, reviewInput } from "./policy";
 import type {
   FounderPolicy,
   PatreonSyncResponse,
@@ -335,23 +335,29 @@ it("requires admin access and renders provider data as text, with no access-gran
   expect(
     within(dialog).getByText("Entered by staff; Steam ownership is not verified by this page."),
   ).toBeInTheDocument();
+  // The Founder and Supporter Discord roles follow these records while Discord roles are switched on.
   expect(
-    screen.getByText("Records only. Grants no game or Discord access. A membership is not a verified payment."),
+    screen.getByText(
+      "Records only. Grants no game access; with Discord roles switched on, the Founder and Supporter roles follow these records. A membership is not a verified payment.",
+    ),
   ).toBeInTheDocument();
+  expect(screen.queryByText(/Grants no game or Discord access/)).not.toBeInTheDocument();
 });
 
 it("states the record limits once and shows the founder window as one label", async () => {
   request.mockResolvedValue(data());
   render(page());
   await screen.findByRole("button", { name: "Review supporter" });
-  expect(screen.getAllByText(/Grants no game or Discord access/)).toHaveLength(1);
+  expect(screen.getAllByText(/Grants no game access/)).toHaveLength(1);
   expect(screen.queryByText(/THANK THE CREW/)).not.toBeInTheDocument();
   expect(screen.queryByText("Private records")).not.toBeInTheDocument();
   expect(screen.getByText(founderWindowLabel(policy))).toHaveAttribute(
     "title",
     expect.stringContaining("end not included"),
   );
-  expect(screen.getByText("Patreon webhook connected")).toBeInTheDocument();
+  // The server knows the signing secret is set, not that Patreon delivers to it.
+  expect(screen.getByText("Patreon webhook set up")).toBeInTheDocument();
+  expect(screen.queryByText(/webhook connected/)).not.toBeInTheDocument();
 });
 
 it("filters loaded supporters with counted chips instead of a select", async () => {
@@ -503,10 +509,48 @@ it("uses the qualifying payment rather than the latest renewal, preserving UUID,
     }),
   );
   expect(screen.getByRole("heading", { name: "Supporter record saved" })).toBeInTheDocument();
+  // A founder award queues a Discord role check while Discord roles are switched on, so no role claim is made.
+  expect(
+    screen.getByText(
+      "Your review has been recorded. No game access was changed. With Discord roles switched on, Gramps checks the linked Discord account’s roles next.",
+    ),
+  ).toBeInTheDocument();
+  expect(screen.queryByText(/No game access or Discord role was changed/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Save reviewed record" })).not.toBeInTheDocument();
+});
+
+it("says a reviewed observation changes no Discord role, and a founder, link or payment save leads to a role check", async () => {
+  request.mockImplementation(async (_path, options) =>
+    options?.method === "POST" ? { ok: true, replayed: false, supporter: { ...supporter, version: 8 } } : data(),
+  );
+  render(page());
+  const open = async () => {
+    const button = await screen.findByRole("button", { name: "Review supporter" });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+  };
+  await open();
+  fireEvent.click(screen.getByRole("button", { name: "Mark observation reviewed" }));
+  expect(screen.getByText("This records staff evidence only. No game or Discord access changes.")).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "Membership observation reviewed." } });
+  fireEvent.click(screen.getByRole("button", { name: "Save reviewed record" }));
+  await screen.findByRole("heading", { name: "Supporter record saved" });
   expect(
     screen.getByText("Your review has been recorded. No game access or Discord role was changed."),
   ).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "Save reviewed record" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  for (const action of ["Review account match", "Record checked payment", "Record founder promise"]) {
+    await open();
+    fireEvent.click(screen.getByRole("button", { name: action }));
+    expect(
+      screen.getByText(
+        "This records staff evidence only and changes no game access. With Discord roles switched on, Gramps then checks the linked Discord account’s roles.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/No game or Discord access changes/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  }
 });
 
 it("payment entry defaults first-payment attestation off and requires a completed-payment check", async () => {
@@ -638,6 +682,25 @@ it("shows where each identity came from and how the founder promise was recorded
   ).toBeInTheDocument();
   expect(within(dialog).getByText(/application it was copied from is no longer approved/)).toBeInTheDocument();
   expect(within(dialog).getByText("Recorded automatically by Gramps.")).toBeInTheDocument();
+});
+
+it("says another record links Patreon's Discord account only when the server says so", () => {
+  const unlinked: Supporter = {
+    ...supporter,
+    discordId: null,
+    discordSource: null,
+    patreonDiscordId: "34567890123456789",
+    identityState: "partial",
+  };
+  expect(discordDescription(unlinked)).toBe(
+    "Patreon reports Discord account 34567890123456789. It is not linked to this record yet.",
+  );
+  expect(discordDescription({ ...unlinked, match: { ...unlinked.match, patreonDiscordElsewhere: true } })).toBe(
+    "Patreon reports Discord account 34567890123456789, which another supporter record links.",
+  );
+  expect(discordDescription({ ...unlinked, patreonDiscordId: null })).toBe(
+    "Record the account after confirming the member’s identity.",
+  );
 });
 
 it("shows the first step still needed with a count in the table and every step in the record", async () => {
@@ -787,6 +850,9 @@ it("words switched-on matching by the server's rule and says when Patreon leaves
   await screen.findByRole("button", { name: "Review supporter" });
   const line = screen.getByText(/Automatic matching:/).closest("p")!;
   expect(line.querySelector("strong")).toHaveTextContent("on");
+  // Switched on but idle: the dot does not show it as working.
+  expect(line).toHaveClass("status-line", "attention");
+  expect(line).not.toHaveClass("good");
   expect(within(line).getByText("SteamID fill on")).toBeInTheDocument();
   expect(within(line).getByText("Automatic founders on")).toBeInTheDocument();
   const detail = line.nextElementSibling!;
