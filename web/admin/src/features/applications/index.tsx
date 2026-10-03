@@ -343,6 +343,7 @@ function AdminApplications() {
       <Empty
         title={resource.error ? "Applications could not be loaded" : "Loading applications…"}
         detail={resource.error ? "Use Refresh to try again." : undefined}
+        alert={!!resource.error}
       />
     );
   const needle = query.trim().toLocaleLowerCase();

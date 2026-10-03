@@ -22,7 +22,9 @@ export function configureSession(token: string, onAuthFailure?: (message: string
 }
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   // Callers can only reach this same-origin API. Never retry a mutation.
-  if (!/^[a-z][a-z0-9/-]*(?:\?[^#]*)?$/i.test(path) || path.includes(".."))
+  // Only the route can traverse; ".." in a query value, such as a searched name, is ordinary text.
+  const route = path.split("?", 1)[0];
+  if (!/^[a-z][a-z0-9/-]*(?:\?[^#]*)?$/i.test(path) || route.includes(".."))
     throw new ApiError("Invalid API path.", 400);
   if (options.signal?.aborted) throw options.signal.reason;
   const mutation = !["GET", "HEAD"].includes((options.method ?? "GET").toUpperCase());

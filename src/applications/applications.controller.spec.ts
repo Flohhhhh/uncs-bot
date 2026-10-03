@@ -1,5 +1,13 @@
-import { ForbiddenException, UnauthorizedException, type INestApplication } from "@nestjs/common";
+import {
+  ForbiddenException,
+  Module,
+  UnauthorizedException,
+  type INestApplication,
+  type MiddlewareConsumer,
+  type NestModule,
+} from "@nestjs/common";
 import { Test } from "@nestjs/testing";
+import type { Request, Response } from "express";
 import request from "supertest";
 import { AdminApiController, AdminGameController, AdminExceptionFilter } from "../admin/admin.controller";
 import { AdminAuth, AdminGuard, AdminServerGuard } from "../admin/admin.auth";
@@ -17,6 +25,7 @@ import {
   ApplicationsExceptionFilter,
   StaffApplicationsController,
 } from "./applications.controller";
+import { ApplicationsModule } from "./applications.module";
 import { ApplicationsService } from "./applications.service";
 import { ApplicationsStore } from "./applications.store";
 
@@ -137,6 +146,16 @@ describe("application HTTP routing and privacy", () => {
     expect(response.text).not.toMatch(/private|evil|primary/);
   });
 
+  it("returns mixed-case sign-in paths to the website like lowercase ones", async () => {
+    applicantAuth.callback.mockRejectedValueOnce(new UnauthorizedException("Expired OAuth state"));
+    const callback = await request(app.getHttpServer()).get("/Apply/Auth/Callback?code=private-code").expect(303);
+    expect(callback.headers.location).toBe("/whitelist?auth=sign_in");
+    expect(callback.text).not.toMatch(/private|Expired/);
+    enabled = false;
+    const login = await request(app.getHttpServer()).get("/APPLY/AUTH/LOGIN?server=event").expect(303);
+    expect(login.headers.location).toBe("/whitelist?auth=unavailable&server=event");
+  });
+
   it("routes the administrator applications list separately from existing resources", async () => {
     const response = await request(app.getHttpServer()).get("/admin/api/applications").expect(200);
     expect(response.body).toEqual({ serverId: "primary", applications: [privateRow] });
@@ -191,5 +210,35 @@ describe("application HTTP routing and privacy", () => {
     await request(app.getHttpServer()).get("/admin/api/applications").expect(503);
     expect(store.own).not.toHaveBeenCalled();
     expect(store.list).not.toHaveBeenCalled();
+  });
+});
+
+describe("applicant sign-in traffic limit", () => {
+  let app: INestApplication;
+  const signIn = jest.fn((_req: Request, res: Response) => res.status(204).end());
+  @Module({
+    controllers: [ApplicantAuthController],
+    providers: [ApplicationsExceptionFilter, { provide: ApplicantAuth, useValue: { login: signIn, callback: signIn } }],
+  })
+  class SignInOnly implements NestModule {
+    configure(consumer: MiddlewareConsumer) {
+      new ApplicationsModule().configure(consumer);
+    }
+  }
+  beforeAll(async () => {
+    const module = await Test.createTestingModule({ imports: [SignInOnly] })
+      .overrideGuard(ApplicationsEnabledGuard)
+      .useValue({ canActivate: () => true })
+      .compile();
+    app = module.createNestApplication({ logger: false });
+    await app.init();
+  });
+  afterAll(async () => app.close());
+
+  it("counts mixed-case sign-in paths against the sign-in limit, not the larger API limit", async () => {
+    for (let count = 0; count < 30; count++) await request(app.getHttpServer()).get("/apply/auth/login").expect(204);
+    await request(app.getHttpServer()).get("/APPLY/AUTH/LOGIN").expect(429);
+    await request(app.getHttpServer()).get("/Apply/Auth/Callback?code=junk").expect(429);
+    expect(signIn).toHaveBeenCalledTimes(30);
   });
 });

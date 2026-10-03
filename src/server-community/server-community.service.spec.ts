@@ -726,6 +726,8 @@ describe("welcome deployment settings", () => {
 });
 
 describe("existing Discord status message", () => {
+  // Card edits run apart from the observation pass; let the pending Discord calls finish.
+  const settle = () => jest.advanceTimersByTimeAsync(0);
   beforeEach(() => {
     jest.useFakeTimers().setSystemTime(time);
     jest.spyOn(Logger.prototype, "warn").mockImplementation(() => undefined);
@@ -738,23 +740,29 @@ describe("existing Discord status message", () => {
   it("edits only the configured message with mentions disabled, no sooner than a minute", async () => {
     const { service, look, message, channel, discord } = fixture({ SERVER_COMMUNITY_DISCORD_STATUS_ENABLED: true });
     await service.tick();
+    await settle();
     expect(discord.channels.fetch).toHaveBeenCalledWith("123456789012345678");
     expect(channel.messages.fetch).toHaveBeenCalledWith("223456789012345678");
     expect(message.edit).toHaveBeenCalledWith(
       expect.objectContaining({ allowedMentions: { parse: [], users: [], roles: [], repliedUser: false } }),
     );
     await look([firstId], "Europe");
+    await settle();
     expect(message.edit).toHaveBeenCalledTimes(1);
     await look([firstId], "Europe", 60_000);
+    await settle();
     expect(message.edit).toHaveBeenCalledTimes(2);
   });
 
   it("refreshes unchanged cards only after five minutes", async () => {
     const { service, look, message } = fixture({ SERVER_COMMUNITY_DISCORD_STATUS_ENABLED: true });
     await service.tick();
+    await settle();
     await look([firstId], "Kavkazi", 60_000);
+    await settle();
     expect(message.edit).toHaveBeenCalledTimes(1);
     await look([firstId], "Kavkazi", 240_000);
+    await settle();
     expect(message.edit).toHaveBeenCalledTimes(2);
   });
 
@@ -766,6 +774,8 @@ describe("existing Discord status message", () => {
       if (scenario === "other author") message.author.id = "someone else";
       if (scenario === "missing message") channel.messages.fetch.mockRejectedValueOnce(new Error("unknown message"));
       await expect(service.tick()).resolves.toBe(5_000);
+      await settle();
+      expect(channel.messages.fetch).toHaveBeenCalledTimes(scenario === "other guild" ? 0 : 1);
       expect(message.edit).not.toHaveBeenCalled();
     },
   );
@@ -785,7 +795,29 @@ describe("existing Discord status message", () => {
     const { service, game, message } = fixture({ SERVER_COMMUNITY_DISCORD_STATUS_ENABLED: true });
     game.overview.mockRejectedValueOnce(new Error("offline"));
     await service.tick();
+    await settle();
     expect(message.edit.mock.calls[0][0].content).toContain("No successful observation");
     expect(message.edit.mock.calls[0][0].content).not.toContain("Players: 0");
+  });
+
+  it("keeps observing while a card edit is slow, so a welcome queued meanwhile is still sent", async () => {
+    const { service, game, message } = fixture({
+      SERVER_COMMUNITY_DISCORD_STATUS_ENABLED: true,
+      SERVER_COMMUNITY_WELCOME_DELAY_SECONDS: 10,
+    });
+    service.onApplicationBootstrap();
+    await jest.advanceTimersByTimeAsync(55_000);
+    expect(message.edit).toHaveBeenCalledTimes(1);
+    // A player joins in the pass that edits the card, and Discord takes 70 seconds to answer. Had
+    // the pass waited, the next observation would come after the 30-second gap and start over.
+    message.edit.mockImplementationOnce(() => new Promise((resolve) => setTimeout(resolve, 70_000)));
+    game.overview.mockResolvedValue(snapshot([firstId, secondId]));
+    await jest.advanceTimersByTimeAsync(45_000);
+    expect(game.execute).toHaveBeenCalledTimes(1);
+    expect(game.execute).toHaveBeenCalledWith(expect.objectContaining({ action: "message", steamId: secondId }));
+    // A minute after the slow edit began, it is still the only one under way.
+    await jest.advanceTimersByTimeAsync(25_000);
+    expect(message.edit).toHaveBeenCalledTimes(2);
+    service.onModuleDestroy();
   });
 });
