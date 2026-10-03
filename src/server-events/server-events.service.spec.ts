@@ -127,6 +127,8 @@ function fixture(serverId = "primary", make: () => EventRecord = eventFixture) {
   };
   const environment: Record<string, unknown> = {
     SERVER_EVENTS_ENABLED: true,
+    // The owner has reviewed voted 50v50, so vote-started events here were recorded and keep running.
+    MAP_VOTES_FIFTY_ENABLED: true,
     WARDOGS_RCON_URL: "https://game.example.test",
     ADMIN_GUILD_ID: record.guildId,
   };
@@ -646,8 +648,6 @@ describe("a 50v50 started by a community vote", () => {
   const voteActor = { ...eventStaff, serverId: "primary" };
   function voting() {
     const f = fixture("primary", voteEventFixture);
-    // The owner has reviewed voted 50v50.
-    f.environment.MAP_VOTES_FIFTY_ENABLED = true;
     f.set(null);
     f.game.overview.mockImplementation(async () => fullServerSnapshot(Date.now()));
     f.game.configuration.mockResolvedValue({ revision: "r7", fields: [lockField(true)] });
@@ -936,6 +936,40 @@ describe("a 50v50 started by a community vote", () => {
       closedFaction: null,
       endReason: "rounds",
     });
+    expect(f.alerts.send).not.toHaveBeenCalled();
+  });
+  it("stops a voted 50v50 recorded before the owner's hold, before it switches the lock off", async () => {
+    const f = fixture("primary", voteEventFixture);
+    // Recorded at a ballot close while the flag was on; Gramps restarted with it off before preparing.
+    f.environment.MAP_VOTES_FIFTY_ENABLED = false;
+    f.set({ ...f.record, state: "preparing", progress: { ...f.record.progress, lockDisabledAt: undefined } });
+    f.game.configuration.mockResolvedValue({ revision: "r4", fields: [lockField(true)] });
+    await f.service.tick();
+    expect(f.store.stop).toHaveBeenCalledWith(f.record.id, {
+      id: expect.any(String),
+      ...systemStops.halted,
+      reason: "Voted 50v50 is held for the owner's in-person review.",
+      at: new Date(eventNow).toISOString(),
+    });
+    // The lock still has its value from before the event: nothing to restore.
+    expect(f.current()?.state).toBe("complete");
+    expect(f.admin.act).not.toHaveBeenCalled();
+    expect(f.alerts.send).not.toHaveBeenCalled();
+  });
+  it("stops a running multi-round voted 50v50 under the owner's hold and only restores the lock", async () => {
+    const f = fixture("primary", voteEventFixture);
+    f.environment.MAP_VOTES_FIFTY_ENABLED = false;
+    f.set({ ...f.record, options: { ...f.record.options, rounds: 3 } });
+    await f.service.tick();
+    expect(f.current()?.stop).toMatchObject({
+      actorId: systemStops.halted.actorId,
+      reason: "Voted 50v50 is held for the owner's in-person review.",
+    });
+    // The same pass puts the lock back; no team is sorted or player moved.
+    expect(actions(f)).toEqual([
+      expect.objectContaining({ action: "settings-save", changes: { lockOverpopulated: true } }),
+    ]);
+    expect(f.current()?.state).toBe("complete");
     expect(f.alerts.send).not.toHaveBeenCalled();
   });
   it("counts an unconfirmed move as moved and stops itself after an unknown result", async () => {

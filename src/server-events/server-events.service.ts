@@ -605,6 +605,15 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
           reason: "The reviewed event duration ended.",
           at: new Date().toISOString(),
         });
+      // A voted 50v50 recorded while the owner's flag was on stops once it is off, before it changes the
+      // team lock or sorts another round. The restore path puts the lock back. Staff are not alerted.
+      if (!event.stop && isVoteEvent(event) && this.voteEventsHeld())
+        event = await this.store.stop(event.id, {
+          id: randomUUID(),
+          ...systemStops.halted,
+          reason: sentence(FIFTY_HELD_REASON),
+          at: new Date().toISOString(),
+        });
       if (event.operation) {
         await this.recover(event);
         return 15_000;
