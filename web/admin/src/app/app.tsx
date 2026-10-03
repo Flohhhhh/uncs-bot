@@ -227,6 +227,12 @@ function Dashboard({
   const [unsavedChanges, setUnsavedChanges] = useState(false);
   const [logoutRequested, setLogoutRequested] = useState(false);
   const [refreshVersion, setRefreshVersion] = useState(0);
+  // Records pages do not read the live game, except for a player panel opened on them, which asks for the roster.
+  const [rosterWatchers, setRosterWatchers] = useState(0);
+  const liveRoster = gamePage || rosterWatchers > 0;
+  // The refresh that the latest finished overview read answered; null while no read is wanted.
+  const [answered, setAnswered] = useState<number | null>(null);
+  const checking = liveRoster && answered !== refreshVersion;
   const [logoutError, setLogoutError] = useState("");
   const [moreOpen, setMoreOpen] = useState(false);
   // A link inside a review waits until the review has closed, so the navigation guard lets it through.
@@ -246,6 +252,10 @@ function Dashboard({
   const invalidateOverview = useCallback(() => {
     freshness.current++;
     setStale(true);
+  }, []);
+  const watchRoster = useCallback(() => {
+    setRosterWatchers((count) => count + 1);
+    return () => setRosterWatchers((count) => count - 1);
   }, []);
   const openAction = useCallback(
     (action: ActionName, steamId?: string, options?: ActionOptions) =>
@@ -279,28 +289,32 @@ function Dashboard({
     };
   }, [refresh, invalidateOverview]);
   useEffect(() => {
-    if (!gamePage) {
+    if (!liveRoster) {
       setStale(true);
+      setAnswered(null);
       return;
     }
     const controller = new AbortController();
     const requestedFreshness = freshness.current;
+    const requestedVersion = refreshVersion;
     void api<Overview>(`servers/${server.id}/overview`, { signal: controller.signal })
       .then((value) => {
         if (!controller.signal.aborted) {
           setOverview(validateOverview(value));
           setStale(document.hidden || requestedFreshness !== freshness.current);
           setError("");
+          setAnswered(requestedVersion);
         }
       })
       .catch((error: unknown) => {
         if (!controller.signal.aborted) {
           setStale(true);
           setError(error instanceof Error ? error.message : "The server could not be read.");
+          setAnswered(requestedVersion);
         }
       });
     return () => controller.abort();
-  }, [gamePage, refreshVersion, server.id]);
+  }, [liveRoster, refreshVersion, server.id]);
   useEffect(() => {
     if (!overview) return;
     // Expire an unattended confirmation without adding another polling loop.
@@ -370,6 +384,8 @@ function Dashboard({
         server,
         overview,
         stale,
+        checking,
+        watchRoster,
         busy,
         setBusy,
         dialogOpen,

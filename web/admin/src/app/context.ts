@@ -8,6 +8,13 @@ export type AdminContextValue = {
   server?: SelectedServer;
   overview: Overview | null;
   stale: boolean;
+  /** A read of the server details is in flight. */
+  checking: boolean;
+  /**
+   * Asks for the live roster on a page that does not read it, such as Server activity, until the returned
+   * function is called. While anything asks, the roster is read now and on every refresh.
+   */
+  watchRoster: () => () => void;
   busy: boolean;
   setBusy: (value: boolean) => void;
   dialogOpen: boolean;

@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 import type { ActionName, Player } from "../../api/types";
@@ -70,6 +70,10 @@ export function PlayerSheet({
   const location = useLocation();
   const [move, setMove] = useState<{ players: Player[]; faction: string; key: string } | null>(null);
   const { steamId } = target;
+  const { watchRoster } = admin;
+  // Records pages such as Server activity do not read the live roster; the open panel asks for it, so its
+  // stats and actions come from a current read that Refresh keeps up to date.
+  useEffect(() => watchRoster(), [watchRoster]);
   const player = admin.overview?.players.find((entry) => entry.steamId === steamId);
   const teams = liveFactions(admin.overview);
   const current = player ? playerFaction(player, teams) : undefined;
@@ -77,11 +81,14 @@ export function PlayerSheet({
   const notice = useId();
   const off = panelActions.filter((action) => !can(action)).length;
   // The snapshot can expire while the panel is open and turn every action off; the page's own refresh is
-  // behind the panel. Otherwise an action is off for the staff role or the server build. Say why next to the
-  // disabled buttons.
+  // behind the panel, so the panel offers its own check. Otherwise an action is off for the staff role or the
+  // server build. Say why next to the disabled buttons.
+  const recheck = admin.stale && !admin.checking;
   let reason = "";
   if (player && admin.stale)
-    reason = "Server details need a fresh check. Close this panel and refresh before choosing an action.";
+    reason = admin.checking
+      ? "Checking the server for current details…"
+      : "Server details need a fresh check before choosing an action.";
   else if (player && off && !admin.busy)
     reason =
       off < panelActions.length
@@ -100,7 +107,6 @@ export function PlayerSheet({
     </button>
   );
   const linkable = isPublicIndividualSteamId(steamId);
-  const server = new URLSearchParams(location.search).get("server");
   return (
     <>
       <Sheet title={player?.name ?? target.name ?? steamId} onClose={onClose} className="player-sheet">
@@ -128,13 +134,9 @@ export function PlayerSheet({
             {admin.stale && <p className="muted">From the last roster check.</p>}
           </>
         ) : !admin.overview ? (
-          // Records pages do not read the live roster; never present that as the player leaving.
+          // Never present a roster that has not been read as the player leaving.
           <p className="notice info">
-            The live roster is not loaded on this page.{" "}
-            <Link to={{ pathname: "/players", search: server ? `?${new URLSearchParams({ server })}` : "" }}>
-              Open Live players
-            </Link>{" "}
-            to act on this player.
+            {admin.checking ? "Checking the live roster…" : "The live roster could not be read."}
           </p>
         ) : (
           <p className="notice info">
@@ -158,6 +160,13 @@ export function PlayerSheet({
         <div role="status" id={notice}>
           {reason && <p className="notice warning">{reason}</p>}
         </div>
+        {recheck && (
+          <p>
+            <button type="button" className="button secondary small" disabled={admin.busy} onClick={admin.refresh}>
+              Check again
+            </button>
+          </p>
+        )}
         {player && (
           <div className="player-sheet-actions">
             <section aria-label="Message">

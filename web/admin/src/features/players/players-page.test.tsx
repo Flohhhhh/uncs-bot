@@ -294,13 +294,14 @@ describe("live player controls", () => {
     const message = within(panel).getByRole("button", { name: "Message player" });
     expect(message).toBeDisabled();
     expect(availability(panel)).toBe(status);
-    expect(status).toHaveTextContent(
-      "Server details need a fresh check. Close this panel and refresh before choosing an action.",
-    );
+    expect(status).toHaveTextContent("Server details need a fresh check before choosing an action.");
     expect(message).toHaveAccessibleDescription(/fresh check/);
     expect(within(panel).getByRole("button", { name: "Move to Blue · Lonestar" })).toHaveAccessibleDescription(
       /fresh check/,
     );
+    // The page's own refresh is behind the panel, so the panel offers the check itself.
+    fireEvent.click(within(panel).getByRole("button", { name: "Check again" }));
+    expect(admin.refresh).toHaveBeenCalledTimes(1);
   });
   it.each([
     ["the staff role", "Add whitelist access", () => context({ me: { ...context().me!, role: "moderator" } })],

@@ -12,6 +12,8 @@ const context: AdminContextValue = {
   me: { id: "12345678901234567", name: "Admin", role: "admin", csrf: "fixture" },
   overview: null,
   stale: true,
+  checking: false,
+  watchRoster: vi.fn(),
   busy: false,
   dialogOpen: false,
   refreshVersion: 0,

@@ -116,18 +116,52 @@ it("opens the player panel from a name in the feed", async () => {
     "/activity?server=primary&view=combat&player=76561198000000001",
   );
 });
-it("does not claim a player left when this page has no live roster", async () => {
-  render(page({ ...context(), overview: null, stale: true }));
+it("asks for the live roster and does not claim a player left while it is being read", async () => {
+  const release = vi.fn();
+  const watchRoster = vi.fn(() => release);
+  render(page({ ...context(), overview: null, stale: true, checking: true, watchRoster }));
+  await waitFor(() => expect(lines()).toContain("Alice joined"));
+  expect(watchRoster).not.toHaveBeenCalled();
+  fireEvent.click(screen.getAllByRole("button", { name: "Alice" })[0]);
+  const panel = screen.getByRole("dialog");
+  expect(watchRoster).toHaveBeenCalledTimes(1);
+  expect(panel).toHaveTextContent("Checking the live roster…");
+  expect(panel).not.toHaveTextContent("no longer in the current roster");
+  expect(within(panel).queryByRole("button", { name: "Kick player" })).not.toBeInTheDocument();
+  expect(within(panel).queryByRole("button", { name: "Check again" })).not.toBeInTheDocument();
+  fireEvent.click(within(panel).getByRole("button", { name: "Close panel" }));
+  expect(release).toHaveBeenCalledTimes(1);
+});
+it("offers a check that works from the panel when an older roster needs a fresh read", async () => {
+  // A roster left behind by an earlier page, past its freshness, as Server activity holds it.
+  const admin = context({ stale: true });
+  const view = (state: Partial<AdminContextValue>) => page({ ...admin, ...state });
+  const rendered = render(view({}));
   await waitFor(() => expect(lines()).toContain("Alice joined"));
   fireEvent.click(screen.getAllByRole("button", { name: "Alice" })[0]);
   const panel = screen.getByRole("dialog");
-  expect(panel).toHaveTextContent("The live roster is not loaded on this page.");
+  expect(within(panel).getByRole("button", { name: "Kick player" })).toBeDisabled();
+  expect(panel).toHaveTextContent("Server details need a fresh check before choosing an action.");
+  expect(panel).not.toHaveTextContent(/close this panel/i);
+  fireEvent.click(within(panel).getByRole("button", { name: "Check again" }));
+  expect(admin.refresh).toHaveBeenCalledTimes(1);
+  rendered.rerender(view({ checking: true }));
+  expect(panel).toHaveTextContent("Checking the server for current details…");
+  expect(within(panel).queryByRole("button", { name: "Check again" })).not.toBeInTheDocument();
+  rendered.rerender(view({ stale: false }));
+  expect(within(panel).getByRole("button", { name: "Kick player" })).toBeEnabled();
+  expect(panel).not.toHaveTextContent("fresh check");
+});
+it("says when the live roster could not be read and offers another check", async () => {
+  const admin = context({ overview: null, stale: true });
+  render(page(admin));
+  await waitFor(() => expect(lines()).toContain("Alice joined"));
+  fireEvent.click(screen.getAllByRole("button", { name: "Alice" })[0]);
+  const panel = screen.getByRole("dialog");
+  expect(panel).toHaveTextContent("The live roster could not be read.");
   expect(panel).not.toHaveTextContent("no longer in the current roster");
-  expect(within(panel).getByRole("link", { name: "Open Live players" })).toHaveAttribute(
-    "href",
-    "/players?server=primary",
-  );
-  expect(within(panel).queryByRole("button", { name: "Kick player" })).not.toBeInTheDocument();
+  fireEvent.click(within(panel).getByRole("button", { name: "Check again" }));
+  expect(admin.refresh).toHaveBeenCalledTimes(1);
 });
 it("keeps working sources and the failed-source warning visible until a pending refresh succeeds", async () => {
   const fallback = request.getMockImplementation()!;

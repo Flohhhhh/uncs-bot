@@ -50,6 +50,8 @@ export function context(overrides: Partial<AdminContextValue> = {}): AdminContex
     me: { id: "12345678901234567", name: "Staff", role: "admin", csrf: "fixture" },
     overview: overview(),
     stale: false,
+    checking: false,
+    watchRoster: vi.fn(),
     busy: false,
     dialogOpen: false,
     setBusy: vi.fn(),

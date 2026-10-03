@@ -163,6 +163,86 @@ describe("React staff shell", () => {
       finish(new Response(JSON.stringify(overview)));
     });
   });
+  it("reads the live roster for a player panel on Server activity, and Refresh keeps it current", async () => {
+    vi.useFakeTimers();
+    const alice = { name: "UNC Alice", steamId: "76561198000000001", faction: "RED", kills: 3 };
+    let live: Overview = {
+      ...overview,
+      players: [alice],
+      capabilities: { routes: ["POST /v1/players/{steamId}/kick", "POST /v1/players/{steamId}/message"] },
+    };
+    const fetcher = mount();
+    const original = fetcher.getMockImplementation()!;
+    let failOverview = false;
+    fetcher.mockImplementation(async (url: string, init?: RequestInit) =>
+      url.endsWith("/overview")
+        ? failOverview
+          ? new Response(JSON.stringify({ message: "The game did not answer." }), { status: 503 })
+          : new Response(JSON.stringify(live))
+        : url.endsWith("/activity")
+          ? new Response(
+              JSON.stringify({
+                events: [
+                  {
+                    id: "join",
+                    observedAt: "2026-09-30T11:59:00Z",
+                    category: "players",
+                    message: "UNC Alice joined",
+                    steamId: alice.steamId,
+                  },
+                ],
+                limit: 300,
+                connection: "available",
+                startedAt: "2026-09-30T11:00:00Z",
+              }),
+            )
+          : original(url, init),
+    );
+    const reads = () => fetcher.mock.calls.filter(([url]) => url.endsWith("/overview")).length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText("Live", pill)).toBeInTheDocument();
+    expect(reads()).toBe(1);
+    // Server activity is a records page: the roster from Overview is kept but no longer counts as current.
+    fireEvent.click(screen.getByRole("link", { name: /Server activity/ }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(reads()).toBe(1);
+    fireEvent.click(screen.getAllByRole("button", { name: "UNC Alice" })[0]);
+    const panel = screen.getByRole("dialog");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(reads()).toBe(2);
+    expect(within(panel).getByRole("button", { name: "Kick player" })).toBeEnabled();
+    expect(panel).not.toHaveTextContent("fresh check");
+    // A failed read turns the actions off, and the panel's own check recovers them; no advice to leave the page.
+    failOverview = true;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+    });
+    expect(reads()).toBe(3);
+    expect(within(panel).getByRole("button", { name: "Kick player" })).toBeDisabled();
+    expect(panel).toHaveTextContent("Server details need a fresh check before choosing an action.");
+    expect(panel).not.toHaveTextContent(/close this panel|Open Live players/i);
+    failOverview = false;
+    live = { ...live, players: [{ ...alice, kills: 7 }] };
+    fireEvent.click(within(panel).getByRole("button", { name: "Check again" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(reads()).toBe(4);
+    expect(within(panel).getByRole("button", { name: "Kick player" })).toBeEnabled();
+    expect(within(panel).getByText("Kills").nextElementSibling).toHaveTextContent("7");
+    // Closing the panel stops the live reads again.
+    fireEvent.click(within(panel).getByRole("button", { name: "Close panel" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(40_000);
+    });
+    expect(reads()).toBe(4);
+  });
   it("expires an old confirmation snapshot while refresh is paused", async () => {
     vi.useFakeTimers();
     const fetcher = mount();
