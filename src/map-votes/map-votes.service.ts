@@ -1768,10 +1768,14 @@ export class MapVotesService implements OnModuleInit, OnApplicationBootstrap, On
       };
     }
   }
-  /** One in-game result notice for queued, tied or no-vote automatic ballots. Never retried. */
+  /**
+   * One in-game result notice for queued, tied or no-vote automatic ballots. Never retried. Like the opening
+   * notice, a ballot stored without settings (opened by an earlier build) never gains one.
+   */
   private async announceResult(vote: MapVoteRecord, verified: Staff | null) {
     const settings = automationSettings(vote.automation!);
-    if (!settings.announce.resultInGame || !["queued", "tied", "no_votes"].includes(vote.state)) return;
+    if (!vote.automation!.settings || !settings.announce.resultInGame) return;
+    if (!["queued", "tied", "no_votes"].includes(vote.state)) return;
     // A voted 50v50 is announced by its event's own notice.
     if (vote.state === "queued" && isFiftyWinner(vote)) return;
     try {

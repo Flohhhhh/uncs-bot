@@ -2085,6 +2085,15 @@ describe("automatic ballots that follow the round, not the clock", () => {
       "Vote tied: the rotation continues with Ozeti Normal.",
     ]);
   });
+  it("never announces the result of a ballot stored without settings by an earlier build", async () => {
+    const f = await openBallot({ settings: { announce: { resultInGame: true } } });
+    // Read without stored settings, the defaults would announce the result in game.
+    delete f.automation.settings;
+    f.score(95);
+    await f.service.tick();
+    expect(f.store.finish).toHaveBeenCalledWith(f.record.id, "queued", expect.any(String));
+    expect(broadcasts(f.admin)).toEqual([]);
+  });
   it("records a winner that is already next without a game write", async () => {
     const f = await openBallot();
     f.store.claimClose.mockImplementation(async () => {
