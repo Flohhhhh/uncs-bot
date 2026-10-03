@@ -88,8 +88,23 @@ it("defaults to no forced respawns and requires two different teams", async () =
   await selectTeams();
   expect(screen.getByRole("button", { name: "Review event" })).toBeEnabled();
   expect(
-    within(screen.getByRole("combobox", { name: "Team 2" })).queryByRole("option", { name: "Valkyra" }),
+    within(screen.getByRole("combobox", { name: "Team 2" })).queryByRole("option", { name: "Red · Valkyra" }),
   ).not.toBeInTheDocument();
+});
+it("labels event teams by their current colors", async () => {
+  events = [{ ...event, state: "complete" }];
+  show();
+  const first = await screen.findByRole("combobox", { name: "Team 1" });
+  await waitFor(() => expect(first).toBeEnabled());
+  expect(
+    within(first)
+      .getAllByRole("option")
+      .map((option) => option.textContent),
+  ).toEqual(["Choose team…", "Red · Valkyra", "Blue · Lonestar", "Green · Manticore"]);
+  expect(screen.getByRole("table", { name: "Optional events" })).toHaveTextContent("Red · Valkyra vs Blue · Lonestar");
+  await selectTeams();
+  fireEvent.click(screen.getByRole("button", { name: "Review event" }));
+  expect(screen.getByRole("dialog")).toHaveTextContent("Red · Valkyra vs Blue · Lonestar");
 });
 it("explains missing round timing before review and keeps the draft when timing is checked again", async () => {
   matchSeconds = undefined;
@@ -118,6 +133,20 @@ it("rechecks round timing when opening a start review and blocks a missing clock
   fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Check round timing" }));
   await waitFor(() => expect(submit).toBeEnabled());
   expect(within(screen.getByRole("dialog")).queryByRole("textbox")).not.toBeInTheDocument();
+});
+it("reports its draft to a page that shares it instead of clearing the page's warning", async () => {
+  const report = vi.fn();
+  const state = context();
+  render(
+    <AdminContext.Provider value={state}>
+      <EventsPage onUnsavedChange={report} />
+    </AdminContext.Provider>,
+  );
+  await selectTeams();
+  expect(report).toHaveBeenLastCalledWith(true);
+  fireEvent.click(screen.getByRole("button", { name: "Discard draft" }));
+  expect(report).toHaveBeenLastCalledWith(false);
+  expect(state.setUnsavedChanges).not.toHaveBeenCalled();
 });
 it("reviews a frozen start request without typing and waits for the separate confirmation button", async () => {
   const { state } = show();

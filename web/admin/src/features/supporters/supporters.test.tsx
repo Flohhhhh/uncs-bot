@@ -3,7 +3,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { api } from "../../api/client";
 import { AdminContext, type AdminContextValue } from "../../app/context";
 import { SupportersPage } from "./index";
-import { founderReady, reviewInput } from "./policy";
+import { founderReady, founderWindowLabel, reviewInput } from "./policy";
 import type { FounderPolicy, PaymentEvidence, Supporter, SupporterReviewResponse, SupportersResponse } from "./types";
 
 vi.mock("../../api/client", () => ({ api: vi.fn() }));
@@ -12,6 +12,8 @@ const context: AdminContextValue = {
   me: { id: "12345678901234567", name: "Admin", role: "admin", csrf: "fixture" },
   overview: null,
   stale: true,
+  checking: false,
+  watchRoster: vi.fn(),
   busy: false,
   dialogOpen: false,
   refreshVersion: 0,
@@ -267,8 +269,62 @@ it("requires admin access and renders provider data as text, with no access-gran
   expect(within(dialog).getByText("Matched by staff; not verified through Discord sign-in.")).toBeInTheDocument();
   expect(within(dialog).getByText("Staff-entered; Steam ownership is not verified by this page.")).toBeInTheDocument();
   expect(
-    screen.getByText(/No whitelist, priority tier, or Discord role is granted from this page/),
+    screen.getByText("Records only. Grants no game or Discord access. A membership is not a verified payment."),
   ).toBeInTheDocument();
+});
+
+it("states the record limits once and shows the founder window as one label", async () => {
+  request.mockResolvedValue(data());
+  render(page());
+  await screen.findByRole("button", { name: "Review supporter" });
+  expect(screen.getAllByText(/Grants no game or Discord access/)).toHaveLength(1);
+  expect(screen.queryByText(/THANK THE CREW/)).not.toBeInTheDocument();
+  expect(screen.queryByText("Private records")).not.toBeInTheDocument();
+  expect(screen.getByText(founderWindowLabel(policy))).toHaveAttribute(
+    "title",
+    expect.stringContaining("end not included"),
+  );
+  expect(screen.getByText("Patreon webhook connected")).toBeInTheDocument();
+});
+
+it("filters loaded supporters with counted chips instead of a select", async () => {
+  const founder = {
+    ...supporter,
+    id: "01234567-89ab-4cde-8fab-0123456789ff",
+    patreonMemberId: "founder-member",
+    displayName: "Founder supporter",
+    reviewState: "verified" as const,
+    founder: { awardedAt: policy.startsAt!, paymentId: payment.id },
+  };
+  request.mockResolvedValue({ ...data(), supporters: [supporter, founder] });
+  render(page());
+  await screen.findByText("Founder supporter");
+  expect(screen.queryByRole("combobox", { name: "Filter supporter records" })).not.toBeInTheDocument();
+  const chips = screen.getByRole("group", { name: "Filter supporter records" });
+  expect(within(chips).getByRole("button", { name: "All 2" })).toHaveAttribute("aria-pressed", "true");
+  expect(within(chips).getByRole("button", { name: "Awaiting review 1" })).toBeInTheDocument();
+  expect(within(chips).getByRole("button", { name: "Accounts to match 0" })).toBeInTheDocument();
+  fireEvent.click(within(chips).getByRole("button", { name: "Founder promises 1" }));
+  expect(within(chips).getByRole("button", { name: "Founder promises 1" })).toHaveAttribute("aria-pressed", "true");
+  expect(screen.getByText("Founder supporter")).toBeInTheDocument();
+  expect(screen.queryByText(supporter.displayName!)).not.toBeInTheDocument();
+  expect(screen.getByText("1 shown of 2 loaded")).toBeInTheDocument();
+  fireEvent.click(within(chips).getByRole("button", { name: "Accounts to match 0" }));
+  expect(screen.getByText("No matching supporters")).toBeInTheDocument();
+  expect(request).toHaveBeenCalledTimes(1);
+});
+
+it("labels the founder window by its last included New York day", () => {
+  const day = (value: string) =>
+    new Date(value).toLocaleDateString(undefined, { timeZone: "America/New_York", month: "short", day: "numeric" });
+  // Midnight to midnight, end exclusive: the last included day is October 14.
+  expect(founderWindowLabel(policy)).toBe(
+    `Founder window ${day("2026-09-30T12:00:00Z")}–${day("2026-10-14T12:00:00Z")} (EDT)`,
+  );
+  expect(founderWindowLabel({ ...policy, endsAt: "2026-10-15T16:00:00Z" })).toMatch(/ until .+ \(EDT\)$/);
+  expect(founderWindowLabel({ ...policy, endsAt: "2026-11-15T05:00:00Z" })).toMatch(/\(New York time\)$/);
+  expect(founderWindowLabel({ ...policy, configured: false })).toBe("Founder window · dates not set");
+  expect(founderWindowLabel({ ...policy, endsAt: policy.startsAt })).toBe("Founder window · dates not set");
 });
 
 it("founder eligibility requires first checked payment, linked identities, amount/currency and the exact date window", () => {

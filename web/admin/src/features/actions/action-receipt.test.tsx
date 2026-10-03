@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { api } from "../../api/client";
 import { AdminContext, type SelectedServer } from "../../app/context";
@@ -26,9 +26,9 @@ it("reads the exact server receipt only on demand, without polling or sending an
   const { rerender } = render(tree());
   expect(request).not.toHaveBeenCalled();
   check();
-  expect(await screen.findByRole("status", { name: "Saved action result" })).toHaveTextContent(
-    "Recorded outcome: Applied",
-  );
+  const saved = await screen.findByRole("status", { name: "Saved action result" });
+  expect(saved).toHaveTextContent("Recorded outcome: Applied");
+  expect(within(saved).getByText("Applied")).toHaveClass("pill", "good");
   const [path, options] = request.mock.calls[0];
   expect(path).toBe(`servers/east/audit/${id}`);
   expect(options?.body).toBeUndefined();
@@ -41,6 +41,18 @@ it("reads the exact server receipt only on demand, without polling or sending an
   fireEvent.click(screen.getByRole("button", { name: "Check saved result" }));
   await screen.findByRole("alert");
   expect(screen.queryByRole("status", { name: "Saved action result" })).not.toBeInTheDocument();
+});
+
+it.each([
+  ["accepted", "Accepted · not verified"],
+  ["started", "Unconfirmed"],
+] as const)("labels a recorded %s receipt with the shared outcome wording", async (state, label) => {
+  request.mockResolvedValue({ record: { ...receipt.record, state } });
+  render(tree());
+  check();
+  const saved = await screen.findByRole("status", { name: "Saved action result" });
+  expect(saved).toHaveTextContent(`Recorded outcome: ${label}`);
+  expect(within(saved).getByText(label)).toHaveClass("pill", "warn");
 });
 
 it("does not treat an absent receipt as a safe retry and can retry a failed read", async () => {
