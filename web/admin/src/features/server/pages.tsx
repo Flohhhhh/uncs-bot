@@ -29,9 +29,23 @@ function elapsed(seconds: number) {
     ? `${Math.floor(minutes / 60)}:${pad(minutes % 60)}:${pad(total % 60)}`
     : `${minutes}:${pad(total % 60)}`;
 }
-function NowItem({ label, value, note, title }: { label: string; value: ReactNode; note?: ReactNode; title?: string }) {
+function NowItem({
+  label,
+  value,
+  note,
+  title,
+  alert = false,
+}: {
+  label: string;
+  value: ReactNode;
+  note?: ReactNode;
+  title?: string;
+  /** Announce the tile because its read failed; loading and routine refreshes stay quiet. */
+  alert?: boolean;
+}) {
+  // The key mounts the alert as a new element, which screen readers announce more reliably than a role added in place.
   return (
-    <div className="now-item" title={title}>
+    <div className="now-item" title={title} role={alert ? "alert" : undefined} key={alert ? "alert" : "item"}>
       <span className="now-label">{label}</span>
       <strong className="now-value">{value}</strong>
       {note && <span className="now-note">{note}</span>}
@@ -71,10 +85,13 @@ export function OverviewPage() {
       ? runningRotationSnapshot(running.data, status.map)
       : null;
   const next = nextRoundSummary(rotationRead.error ? null : snapshot);
+  const nextFailed = !!rotationRead.error || (!snapshot && !rotationRead.loading);
   const votes = voting.data && Array.isArray(voting.data.votes) ? voting.data : null;
-  const vote = voteSummary(votes, voting.error || (voting.data && !votes ? "The voting status was unreadable." : ""));
+  const voteError = voting.error || (voting.data && !votes ? "The voting status was unreadable." : "");
+  const vote = voteSummary(votes, voteError);
   const top = [...players].sort((a, b) => compareValues(a.kills, b.kills, "descending")).slice(0, 8);
   const recent = activity.entries.filter((entry) => entry.category !== "combat").slice(0, 6);
+  const activityFailed = !recent.length && !activity.loading && activity.failed.length > 0;
   return (
     <>
       <div className="overview-actions">
@@ -155,8 +172,9 @@ export function OverviewPage() {
                 : undefined
           }
           title={next.note || undefined}
+          alert={nextFailed}
         />
-        {isAdmin && <NowItem label="Vote" value={vote.label} />}
+        {isAdmin && <NowItem label="Vote" value={vote.label} alert={!!voteError} />}
         <Link className="text-button now-link" to="/match">
           Match &amp; maps →
         </Link>
@@ -240,10 +258,14 @@ export function OverviewPage() {
               ))}
             </ol>
           ) : (
-            <p className="muted card-body">
+            <p
+              className="muted card-body"
+              role={activityFailed ? "alert" : undefined}
+              key={activityFailed ? "alert" : "empty"}
+            >
               {activity.loading
                 ? "Loading recent activity…"
-                : activity.failed.length
+                : activityFailed
                   ? "Recent activity could not be loaded."
                   : "No recent activity yet."}
             </p>
