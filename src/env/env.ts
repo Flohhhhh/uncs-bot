@@ -86,6 +86,19 @@ const watchlistEntry = z
     source: z.enum(["wardogs-network", "staff"]).optional(),
   })
   .strict();
+/** A postgres URL whose host is not Neon's transaction pooler, where session advisory locks are unreliable. */
+function directPostgresUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return (
+      (url.protocol === "postgres:" || url.protocol === "postgresql:") &&
+      !!url.hostname &&
+      !url.hostname.toLowerCase().includes("-pooler")
+    );
+  } catch {
+    return false;
+  }
+}
 const discordIds = z
   .string()
   .default("")
@@ -109,6 +122,19 @@ export const Env = z.object({
 
   /** Neon PostgreSQL connection string */
   DATABASE_URL: nonEmptyString,
+  /**
+   * Optional direct (unpooled) connection string, used only so one process at a time sends in-game community
+   * messages. Unset, every process sends as before. Blank counts as unset. Never logged.
+   */
+  DATABASE_URL_UNPOOLED: z
+    .string()
+    .trim()
+    .optional()
+    .transform((value) => value || undefined)
+    .refine(
+      (value) => value === undefined || directPostgresUrl(value),
+      "Use a direct postgresql:// connection string. Neon's -pooler host cannot hold the sender lock.",
+    ),
 
   /** Staff dashboard is opt-in; credentials never go to the browser. */
   ADMIN_ENABLED: z

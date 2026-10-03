@@ -5,6 +5,7 @@ import { RconError, RESERVED_SLOTS_CACHE_MS, WardogsClient, type ReservedSlots }
 import type { EnvService } from "../env/env.service";
 import { Env } from "../env/env";
 import { CommunityRotation, type RandomSource } from "./community-rotation";
+import { EVERY_PROCESS_SENDS, type CommunitySender } from "./community-sender";
 import type { CommunitySnapshot } from "./community-state";
 import { ServerCommunityWorker as ServerCommunityService, WHITELIST_RETRY_MS } from "./server-community.service";
 
@@ -23,6 +24,7 @@ function fixture(
   overrides: Record<string, unknown> = {},
   serverId = "primary",
   random: jest.Mock<number, []> & RandomSource = jest.fn(() => 0),
+  sender: CommunitySender = EVERY_PROCESS_SENDS,
 ) {
   const values: Record<string, unknown> = {
     ADMIN_GUILD_ID: "guild",
@@ -64,6 +66,7 @@ function fixture(
     { id: serverId, name: `Test ${serverId}`, version: "0".repeat(64) },
     undefined,
     new CommunityRotation(random),
+    sender,
   );
   const look = async (ids = [firstId], map = "Kavkazi", elapsed = 5_000) => {
     jest.setSystemTime(Date.now() + elapsed);
@@ -650,6 +653,118 @@ describe("whitelist-aware welcomes", () => {
     await service.tick();
     await expect(look([firstId, secondId])).resolves.toBe(30_000);
     expect(game.execute).not.toHaveBeenCalled();
+  });
+});
+
+describe("sender lease across overlapping processes", () => {
+  const thirdId = "76561198000000003";
+  const fourthId = "76561198000000004";
+  /** Stands in for the database lock: the test decides which lease, if any, this process holds. */
+  function lease(initial: number | null) {
+    let current = initial;
+    return {
+      lease: jest.fn((_serverId: string) => current),
+      set: (value: number | null) => {
+        current = value;
+      },
+    };
+  }
+  beforeEach(() => {
+    jest.useFakeTimers().setSystemTime(time);
+    jest.spyOn(Logger.prototype, "warn").mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    jest.restoreAllMocks();
+    jest.useRealTimers();
+  });
+
+  it("keeps observing but queues, sends and reads nothing while another process holds the lease", async () => {
+    const sender = lease(null);
+    const { service, look, game, store } = fixture(
+      { SERVER_COMMUNITY_WHITELISTED_WELCOME_VARIANTS: [["Welcome back"]] },
+      "primary",
+      undefined,
+      sender,
+    );
+    await service.tick();
+    await look([firstId, secondId]);
+    await look([firstId, secondId], "Europe");
+    expect(service.observations().lastObservedAt).toBe(new Date().toISOString());
+    expect(sender.lease).toHaveBeenCalledWith("primary");
+    expect(game.reservedSlots).not.toHaveBeenCalled();
+    expect(store.begin).not.toHaveBeenCalled();
+    expect(game.execute).not.toHaveBeenCalled();
+  });
+
+  it("takes over without replaying what it saw while observing, from the second observation under its lease", async () => {
+    const sender = lease(null);
+    const { service, look, game } = fixture({}, "primary", undefined, sender);
+    await service.tick();
+    await look([firstId, secondId]);
+    sender.set(1);
+    // The previous holder may already have welcomed this joiner, so the first observation only catches up.
+    await look([firstId, secondId, thirdId]);
+    await look([firstId, secondId, thirdId]);
+    expect(game.execute).not.toHaveBeenCalled();
+    await look([firstId, secondId, thirdId, fourthId]);
+    expect(game.execute.mock.calls.map(([action]) => action.steamId)).toEqual([fourthId]);
+  });
+
+  it.each([
+    ["lost", null],
+    ["lost and regained between observations", 2],
+  ])("drops a waiting follow-up once the lease is %s", async (_, next) => {
+    const sender = lease(1);
+    const { service, look, game } = fixture(
+      { SERVER_COMMUNITY_WELCOME_MESSAGES: ["Welcome!", "More info"] },
+      "primary",
+      undefined,
+      sender,
+    );
+    await service.tick();
+    await look([firstId, secondId]);
+    expect(game.execute).toHaveBeenCalledTimes(1);
+    sender.set(next);
+    for (let i = 0; i < 6; i++) await look([firstId, secondId]);
+    sender.set(3);
+    for (let i = 0; i < 6; i++) await look([firstId, secondId]);
+    expect(game.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts no receipt when the lease is lost during the whitelist read", async () => {
+    const sender = lease(1);
+    const { service, look, game, store } = fixture(
+      { SERVER_COMMUNITY_WHITELISTED_WELCOME_VARIANTS: [["Welcome back"]] },
+      "primary",
+      undefined,
+      sender,
+    );
+    game.reservedSlots.mockImplementationOnce(async () => {
+      sender.set(null);
+      return { ids: new Set([secondId]), loadedAt: new Date().toISOString() };
+    });
+    await service.tick();
+    await look([firstId, secondId]);
+    expect(store.begin).not.toHaveBeenCalled();
+    expect(game.execute).not.toHaveBeenCalled();
+  });
+
+  it("closes a receipt as failed and sends nothing when the lease is lost while the receipt is saved", async () => {
+    const sender = lease(1);
+    const { service, look, game, store } = fixture({}, "primary", undefined, sender);
+    await service.tick();
+    store.begin.mockImplementationOnce(async () => {
+      sender.set(null);
+      return { created: true, record: {} };
+    });
+    await look([firstId, secondId]);
+    expect(game.execute).not.toHaveBeenCalled();
+    expect(store.finish).toHaveBeenCalledWith(store.begin.mock.calls[0][1].id, {
+      state: "failed",
+      changed: false,
+      message:
+        "This Gramps process lost the community sender lock before sending this automatic message. Nothing was sent.",
+    });
   });
 });
 

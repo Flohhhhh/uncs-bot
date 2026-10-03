@@ -23,6 +23,7 @@ import { operation } from "../src/server-events/event-planner";
 import { TelemetryStore } from "../src/telemetry/telemetry.store";
 import { parseFeed } from "../src/telemetry/telemetry.types";
 import { defaultVotingPolicy } from "../src/common/voting-policy";
+import { CommunitySenderLock, directSenderConnection, senderLockKey } from "../src/server-community/community-sender";
 
 // Only the port is configurable. Never load the application's configuration or
 // DATABASE_URL: this suite requires an empty, disposable loopback test database.
@@ -36,6 +37,7 @@ describe("launch storage on isolated PostgreSQL", () => {
   let votes: MapVotesStore;
   let events: ServerEventsStore;
   let migratedLegacyData: Record<string, unknown[]>;
+  let senderLockUrl = "";
   const legacyApplicationId = randomUUID();
   const legacyServerInstanceId = randomUUID();
   const legacyEventId = randomUUID();
@@ -191,6 +193,7 @@ describe("launch storage on isolated PostgreSQL", () => {
       statement_timeout: 10_000,
     };
     client = new Pool({ ...connection, max: 3, application_name: "uncs_launch_fixture" });
+    senderLockUrl = `postgresql://uncs_launch_test:uncs_launch_test@127.0.0.1:${port}/uncs_launch_test`;
     expect((await client.query("SELECT current_database() AS database, current_user AS username")).rows).toEqual([
       { database: "uncs_launch_test", username: "uncs_launch_test" },
     ]);
@@ -344,6 +347,38 @@ describe("launch storage on isolated PostgreSQL", () => {
     expect(await admin.receipt(eastId, "central")).toBeNull();
     expect(await admin.receipt(oldId, "east")).toBeNull();
     expect((await admin.receipt(oldId, "primary"))?.state).toBe("accepted");
+  });
+
+  it("lets one process at a time hold a server's community sender lock and hands it over when that session ends", async () => {
+    const locks = [0, 1, 2].map(
+      () => new CommunitySenderLock(["primary", "east"], directSenderConnection(senderLockUrl)),
+    );
+    const [first, second, third] = locks;
+    try {
+      await first.check();
+      await second.check();
+      expect([first.lease("primary"), first.lease("east")]).toEqual([expect.any(Number), expect.any(Number)]);
+      expect([second.lease("primary"), second.lease("east")]).toEqual([null, null]);
+      // The holder's session ends without a goodbye, as when its process is killed or its connection drops.
+      const [classid, objid] = senderLockKey("primary").map((key) => key >>> 0);
+      const ended = await client.query(
+        `SELECT pg_terminate_backend(pid) AS ended FROM pg_locks
+          WHERE locktype = 'advisory' AND granted AND classid = $1 AND objid = $2 AND objsubid = 2`,
+        [classid, objid],
+      );
+      expect(ended.rows).toEqual([{ ended: true }]);
+      const deadline = Date.now() + 5_000;
+      while (first.lease("primary") !== null && Date.now() < deadline) await delay(20);
+      expect([first.lease("primary"), first.lease("east")]).toEqual([null, null]);
+      await second.check();
+      expect([second.lease("primary"), second.lease("east")]).toEqual([expect.any(Number), expect.any(Number)]);
+      // Shutdown closes the session, so the next process takes over at its first check.
+      await second.stop();
+      await third.check();
+      expect([third.lease("primary"), third.lease("east")]).toEqual([expect.any(Number), expect.any(Number)]);
+    } finally {
+      await Promise.all(locks.map((lock) => lock.stop()));
+    }
   });
 
   it("keeps acknowledged automatic messages from crowding notable receipts out of the activity feed", async () => {
