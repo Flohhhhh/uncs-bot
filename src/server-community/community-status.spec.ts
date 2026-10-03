@@ -6,7 +6,7 @@ import type { EnvService } from "../env/env.service";
 import { ServerCommunityService } from "./server-community.service";
 
 const definitions = ["primary", "event"].map((id) => ({ id, name: id, version: "0".repeat(64) }));
-function fixture(overrides: Record<string, unknown> = {}) {
+function fixture(overrides: Record<string, unknown> = {}, discord = { isReady: () => false } as Client) {
   const values: Record<string, unknown> = {
     SERVER_COMMUNITY_ENABLED: false,
     SERVER_COMMUNITY_WELCOME_ENABLED: true,
@@ -52,7 +52,7 @@ function fixture(overrides: Record<string, unknown> = {}) {
     servers as unknown as GameServers,
     {} as AdminStore,
     { get: (key: string) => values[key] } as EnvService,
-    { isReady: () => false } as Client,
+    discord,
   );
   return { service, servers, games };
 }
@@ -90,7 +90,7 @@ it("keeps per-server status-card targets separate and never returns target IDs",
   });
   expect(service.status("primary")).toMatchObject({
     welcome: { messages: ["First", "Second"], variants: [["First", "Second"]] },
-    discordStatus: { enabled: true, configured: true },
+    discordStatus: { enabled: true, configured: true, problem: null },
   });
   expect(service.status("event")).toMatchObject({ discordStatus: { enabled: true, configured: false } });
   expect(JSON.stringify(service.status("primary"))).not.toMatch(/private-|legacy-/);
@@ -152,5 +152,30 @@ it("lists whitelisted welcome variants with where and when each server's whiteli
   expect(games.event.reservedSlots).not.toHaveBeenCalled();
   expect(service.status("primary").welcome.whitelist).toEqual({ ...unread, lastLoadedAt: "2026-10-01T12:00:15.000Z" });
   expect(service.status("event").welcome.whitelist).toEqual(unread);
+  service.onModuleDestroy();
+});
+
+it("reports why a configured status card is not being updated, without its target IDs", async () => {
+  jest.useFakeTimers();
+  jest.spyOn(Logger.prototype, "warn").mockImplementation(() => undefined);
+  // ADMIN_GUILD_ID is unset, so the card cannot be checked or edited.
+  const { service, games } = fixture({ SERVER_COMMUNITY_ENABLED: true }, {
+    isReady: () => true,
+    user: { id: "bot" },
+  } as unknown as Client);
+  games.primary.overview.mockResolvedValue({
+    observedAt: "2026-10-01T12:00:00.000Z",
+    status: { serverName: "The UNCs", map: "Europe", players: { current: 0, max: 100 }, factionScores: [] },
+    players: [],
+  });
+  service.onApplicationBootstrap();
+  await jest.advanceTimersByTimeAsync(0);
+  expect(service.status("primary").discordStatus).toEqual({
+    enabled: true,
+    configured: true,
+    problem: "Discord status card is not being updated. Set ADMIN_GUILD_ID to the server that holds its channel.",
+  });
+  expect(service.status("event").discordStatus.problem).toBeNull();
+  expect(JSON.stringify(service.status("primary"))).not.toMatch(/private-|legacy-/);
   service.onModuleDestroy();
 });

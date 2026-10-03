@@ -37,5 +37,10 @@ export interface CommunityMessagesStatus {
     /** Every configured round message. One is chosen at random per round, never the previous round's. */
     messages?: string[];
   };
-  discordStatus: { enabled: boolean; configured: boolean };
+  discordStatus: {
+    enabled: boolean;
+    configured: boolean;
+    /** Why this process's latest card attempt made no edit, as fixed text without IDs; null otherwise. */
+    problem: string | null;
+  };
 }
