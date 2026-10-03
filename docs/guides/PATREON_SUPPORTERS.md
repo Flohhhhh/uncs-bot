@@ -55,11 +55,11 @@ A complete `SUPPORTER_FOUNDER_*` pair wins. If both pairs are complete they must
 
 Gramps can do two matching steps for **Patreon** supporters itself. Each has its own switch, and both are **off by default**:
 
-| Setting                             | Default | Effect                                                                                                                   |
-| ----------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `SUPPORTER_AUTO_STEAM_FILL_ENABLED` | `false` | Copies an empty SteamID from the same Discord account's approved whitelist application.                                  |
-| `SUPPORTER_AUTO_FOUNDER_ENABLED`    | `false` | Records a founder promise under the stricter automatic rule below.                                                       |
-| `SUPPORTER_AUTO_FOUNDER_HOLD_HOURS` | `72`    | Hours an imported first payment must stand (Patreon's refund window) before an automatic founder promise. From 0 to 720. |
+| Setting                             | Default | Effect                                                                                                                                   |
+| ----------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `SUPPORTER_AUTO_STEAM_FILL_ENABLED` | `false` | Copies an empty SteamID from the same Discord account's approved whitelist application.                                                  |
+| `SUPPORTER_AUTO_FOUNDER_ENABLED`    | `false` | Records a founder promise under the stricter automatic rule below.                                                                       |
+| `SUPPORTER_AUTO_FOUNDER_HOLD_HOURS` | `72`    | Hours an imported first payment must stand (Patreon's refund window) before an automatic founder promise. From 0 to 720; blank keeps 72. |
 
 Nothing runs while Patreon is not configured. PayPal records are never matched automatically: PayPal supplies no identity, so staff match them. Automatic matching never posts to Discord or pings anyone; a recorded founder only queues the usual Founder role check, which does nothing while [Discord roles](DISCORD_ROLES.md) are off. There is no HTTP endpoint that runs it.
 

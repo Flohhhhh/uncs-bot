@@ -293,8 +293,14 @@ export const Env = z.object({
     .enum(["true", "false"])
     .default("false")
     .transform((value) => value === "true"),
-  /** Hours an imported first payment must stand (Patreon's refund window) before an automatic founder promise. */
-  SUPPORTER_AUTO_FOUNDER_HOLD_HOURS: z.coerce.number().int().min(0).max(720).default(72),
+  /**
+   * Hours an imported first payment must stand (Patreon's refund window) before an automatic founder promise. A blank
+   * value keeps the default rather than becoming 0, which would switch the wait off.
+   */
+  SUPPORTER_AUTO_FOUNDER_HOLD_HOURS: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.coerce.number().int().min(0).max(720).default(72),
+  ),
 
   /**
    * Automatic UNC member, Founder and Supporter roles in ADMIN_GUILD_ID. Off by default; the status page

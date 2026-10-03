@@ -1,3 +1,4 @@
+import { Env } from "../env/env";
 import type { EnvService } from "../env/env.service";
 import { founderPolicy, patreonCampaign } from "./founder-policy";
 
@@ -18,6 +19,15 @@ describe("shared founder window and campaign", () => {
     });
     expect(founderPolicy(env({ SUPPORTER_FOUNDER_START_AT: start })).configured).toBe(false);
     expect(founderPolicy(env({ SUPPORTER_AUTO_FOUNDER_HOLD_HOURS: 0 })).automaticHoldHours).toBe(0);
+  });
+  it("keeps the 72-hour refund wait for a blank hold setting instead of switching it off", () => {
+    const hold = Env.shape.SUPPORTER_AUTO_FOUNDER_HOLD_HOURS;
+    for (const blank of [undefined, "", "   "]) expect(hold.parse(blank)).toBe(72);
+    expect(hold.parse("0")).toBe(0);
+    expect(hold.parse("24")).toBe(24);
+    expect(hold.parse("720")).toBe(720);
+    for (const invalid of ["-1", "721", "1.5", "soon"]) expect(hold.safeParse(invalid).success).toBe(false);
+    expect(founderPolicy(env({ SUPPORTER_AUTO_FOUNDER_HOLD_HOURS: hold.parse("") })).automaticHoldHours).toBe(72);
   });
   it("names the Patreon campaign only while Patreon is switched on", () => {
     expect(patreonCampaign(env({ PATREON_ENABLED: true, PATREON_CAMPAIGN_ID: "123" }))).toBe("123");
