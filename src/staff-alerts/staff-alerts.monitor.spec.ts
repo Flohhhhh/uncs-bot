@@ -552,6 +552,9 @@ describe("staff alert player names", () => {
     ["a right-to-left override", "Dad\u202e", "Dad"],
     ["only zero-width spaces", "\u200b\u200b", "Unknown"],
     ["only a Hangul filler", "\u3164", "Unknown"],
+    ["only a combining grapheme joiner", "\u034f", "Unknown"],
+    ["only variation selectors", "\ufe0f\u180b", "Unknown"],
+    ["a variation selector after visible text", "Dad\ufe0f", "Dad\ufe0f"],
   ])("shows a name with %s as visible text in the alert line and the Player field", async (_, name, shown) => {
     const discord = discordDouble();
     const env = { ADMIN_GUILD_ID: guild, STAFF_ALERTS_CHANNEL_ID: channelId } as Record<string, unknown>;

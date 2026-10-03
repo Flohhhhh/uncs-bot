@@ -81,8 +81,11 @@ type ChannelCheck = { state: StaffAlertsChannelState; channel: TextChannel | nul
 
 /** Bidi controls and zero-width characters. Keeps U+200D and tag characters, which emoji sequences use. */
 const INVISIBLE = /[\u061c\u180e\u200b\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g;
-/** Nothing visible: spaces, format characters and the fillers Unicode counts as letters or symbols. */
-const BLANK = /^[\p{Z}\p{Cf}\u115f\u1160\u3164\uffa0\u2800]*$/u;
+/**
+ * Nothing visible: spaces, format characters, the characters Unicode marks as ignorable (fillers,
+ * variation selectors and invisible marks) and the blank Braille pattern.
+ */
+const BLANK = /^[\p{Z}\p{Cf}\p{Default_Ignorable_Code_Point}\u2800]*$/u;
 
 /** Game-controlled or staff text: no control, bidi or zero-width characters, collapsed spaces, capped. */
 export function cleanText(value: string, max: number) {
