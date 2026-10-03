@@ -24,6 +24,7 @@ import {
   FOLLOW_UP_MS,
   MAX_PLAN_ENTRIES,
   MAX_WRITES_PER_PASS,
+  PREVIEW_COOLDOWN_MS,
   READY_POLL_MS,
   reconcileSchema,
   ROLE_KINDS,
@@ -78,7 +79,11 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
   private readonly attentionItems = new Map<string, AttentionItem>();
   private lastPass: PassSummary | null = null;
   private lastFullPass: PassSummary | null = null;
+  /** When the last staff real run and the last staff preview started; each has its own spacing. */
   private lastAdminAt = 0;
+  private lastPreviewAt = 0;
+  /** A staff preview is reading Discord. Previews never set `running`, which only real passes hold. */
+  private previewing = false;
   private readonly adminResults = new Map<string, { actorId: string; fingerprint: string; summary: PassSummary }>();
 
   constructor(
@@ -594,11 +599,27 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
     if (!this.discord.ready())
       throw new ServiceUnavailableException("Discord is not connected yet. Try again shortly.");
     if (this.running) throw new ConflictException("A role check is already running. Try again when it finishes.");
-    if (Date.now() - this.lastAdminAt < ADMIN_COOLDOWN_MS)
-      throw new HttpException("Wait 30 seconds between role checks.", 429);
-    this.lastAdminAt = Date.now();
+    const dryRun = input.dryRun === true;
+    // A preview changes nothing, so it never holds up a real run. It has its own shorter spacing and runs one at a
+    // time, because a preview of everyone still reads each member from Discord.
+    if (dryRun) {
+      if (this.previewing) throw new ConflictException("A preview is already running. Try again when it finishes.");
+      if (Date.now() - this.lastPreviewAt < PREVIEW_COOLDOWN_MS)
+        throw new HttpException(`Wait ${PREVIEW_COOLDOWN_MS / 1_000} seconds between previews.`, 429);
+      this.lastPreviewAt = Date.now();
+    } else {
+      if (Date.now() - this.lastAdminAt < ADMIN_COOLDOWN_MS)
+        throw new HttpException(`Wait ${ADMIN_COOLDOWN_MS / 1_000} seconds between role checks.`, 429);
+      this.lastAdminAt = Date.now();
+    }
     const users = input.discordUserId ? new Map([[input.discordUserId, "admin" as const]]) : null;
-    const summary = await this.pass("admin", users, staff.id, input.dryRun === true, input.reason);
+    if (dryRun) this.previewing = true;
+    let summary: PassSummary;
+    try {
+      summary = await this.pass("admin", users, staff.id, dryRun, input.reason);
+    } finally {
+      if (dryRun) this.previewing = false;
+    }
     // People left over by the write budget or a backoff get their follow-up like any other pass.
     if (!input.dryRun) this.wakeForDeferred();
     if (this.adminResults.size >= 100) this.adminResults.clear();

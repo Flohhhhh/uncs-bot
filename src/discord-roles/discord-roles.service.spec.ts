@@ -912,6 +912,64 @@ describe("staff role controls", () => {
     await expect(service.reconcile(admin, reconcile())).rejects.toMatchObject({ status: 429 });
   });
 
+  it("keeps previews out of the 30-second wait between real runs and spaces previews 5 seconds apart", async () => {
+    const { service, state, addMember } = fixture();
+    state.member.set(A, "application-a");
+    addMember(A);
+    let now = Date.parse("2026-10-03T12:00:00Z");
+    jest.spyOn(Date, "now").mockImplementation(() => now);
+    expect((await service.reconcile(admin, reconcile({ dryRun: true }))).summary.plan).toEqual([
+      { discordUserId: A, roleKind: "member", op: "add", why: "desired" },
+    ]);
+    // Previews are spaced on their own: 5 seconds, not 30.
+    await expect(service.reconcile(admin, reconcile({ dryRun: true }))).rejects.toMatchObject({
+      status: 429,
+      message: "Wait 5 seconds between previews.",
+    });
+    // The preview did not start the 30-second wait, so the real run it was for goes ahead at once.
+    expect((await service.reconcile(admin, reconcile())).summary).toMatchObject({ dryRun: false, added: 1 });
+    // A real run does not hold up the next preview, which shows nothing is left to change.
+    now += 5_000;
+    expect((await service.reconcile(admin, reconcile({ dryRun: true }))).summary.plan).toEqual([]);
+    // Real runs keep their 30-second spacing.
+    now += 24_999;
+    await expect(service.reconcile(admin, reconcile())).rejects.toMatchObject({
+      status: 429,
+      message: "Wait 30 seconds between role checks.",
+    });
+    now += 1;
+    await expect(service.reconcile(admin, reconcile())).resolves.toMatchObject({ ok: true, replayed: false });
+  });
+
+  it("refuses a second preview while one is still reading Discord, without holding up a real run", async () => {
+    const { service, state, addMember, discord } = fixture();
+    state.member.set(A, "application-a");
+    addMember(A);
+    let now = Date.parse("2026-10-03T12:00:00Z");
+    jest.spyOn(Date, "now").mockImplementation(() => now);
+    let release!: () => void;
+    discord.member.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve(null);
+        }),
+    );
+    const first = service.reconcile(admin, reconcile({ dryRun: true }));
+    await new Promise((resolve) => setImmediate(resolve));
+    now += 10_000;
+    await expect(service.reconcile(admin, reconcile({ dryRun: true }))).rejects.toMatchObject({
+      status: 409,
+      message: "A preview is already running. Try again when it finishes.",
+    });
+    expect((await service.reconcile(admin, reconcile())).summary).toMatchObject({ dryRun: false, added: 1 });
+    release();
+    expect((await first).summary.plan).toEqual([
+      { discordUserId: A, roleKind: null, op: "none", why: "not-in-server" },
+    ]);
+    // Once it finishes, the next preview runs.
+    await expect(service.reconcile(admin, reconcile({ dryRun: true }))).resolves.toMatchObject({ ok: true });
+  });
+
   it("refuses a run while another pass is running", async () => {
     const { service, state, addMember, discord } = fixture();
     state.member.set(A, "application-a");

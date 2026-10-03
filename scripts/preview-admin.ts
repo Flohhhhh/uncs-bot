@@ -1728,7 +1728,9 @@ const previewRoleNotes: PreviewPlanEntry[] = [
 ];
 let previewRolesApplied = false;
 let previewRolesRunning = false;
+// Like draft #117, real runs and previews are spaced separately: 30 seconds between runs, 5 between previews.
 let previewRolesLastRequestAt = 0;
+let previewRolesLastPreviewAt = 0;
 const previewRoleResults = new Map<string, { fingerprint: string; summary: Record<string, unknown> }>();
 const previewLedgerRow = (
   discordUserId: string,
@@ -1903,7 +1905,7 @@ const previewReconcileSchema = z
   })
   .strict();
 
-/** Simulated roles API with draft #117's switch, 30-second spacing, running and repeated-ID rules. */
+/** Simulated roles API with draft #117's switch, run and preview spacing, running and repeated-ID rules. */
 @Controller("admin/api/discord-roles")
 @UseFilters(AdminExceptionFilter)
 @UseGuards(AdminGuard)
@@ -1934,9 +1936,15 @@ class PreviewDiscordRolesController {
       throw new ServiceUnavailableException("Discord roles are switched off (DISCORD_ROLES_ENABLED=false).");
     if (previewRolesRunning)
       throw new ConflictException("A role check is already running. Try again when it finishes.");
-    if (Date.now() - previewRolesLastRequestAt < 30_000)
-      throw new HttpException("Wait 30 seconds between role checks.", 429);
-    previewRolesLastRequestAt = Date.now();
+    if (input.dryRun) {
+      if (Date.now() - previewRolesLastPreviewAt < 5_000)
+        throw new HttpException("Wait 5 seconds between previews.", 429);
+      previewRolesLastPreviewAt = Date.now();
+    } else {
+      if (Date.now() - previewRolesLastRequestAt < 30_000)
+        throw new HttpException("Wait 30 seconds between role checks.", 429);
+      previewRolesLastRequestAt = Date.now();
+    }
     const startedAt = new Date().toISOString();
     const only = (entries: PreviewPlanEntry[]) =>
       input.discordUserId ? entries.filter((entry) => entry.discordUserId === input.discordUserId) : entries;

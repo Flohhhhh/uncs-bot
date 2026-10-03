@@ -476,7 +476,7 @@ describe("run role check", () => {
     fireEvent.change(dialog.getByRole("textbox", { name: "Reason" }), { target: { value: "Monthly role check" } });
     fireEvent.click(dialog.getByRole("button", { name: "Run role check" }));
     expect(await dialog.findByRole("alert")).toHaveTextContent(
-      "Gramps allows one role check every 30 seconds, previews included. Wait a moment, then try again.",
+      "Gramps allows one role check every 30 seconds. Previews don’t count toward this wait. Wait a moment, then try again.",
     );
     expect(screen.getByRole("dialog", { name: "Run role check now" })).toBeInTheDocument();
     refuse = false;
@@ -541,7 +541,8 @@ describe("errors", () => {
 
   it.each<[number, string, string]>([
     [409, "A role check is already running. Try again when it finishes.", "A role check is already running."],
-    [429, "Wait 30 seconds between role checks.", "Gramps allows one role check every 30 seconds"],
+    [409, "A preview is already running. Try again when it finishes.", "A preview is already running."],
+    [429, "Wait 5 seconds between previews.", "Gramps allows one preview every 5 seconds."],
     [503, "Discord is not connected yet. Try again shortly.", "Discord is not connected yet. Try again shortly."],
     [404, "Cannot POST /admin/api/discord-roles/reconcile", "This server version has no Discord roles feature yet."],
   ])("explains a %i from the preview", async (status, message, shown) => {

@@ -83,10 +83,12 @@ A role that is not configured is simply skipped. Founder awards also need the fo
 
 - `dryRun: true` returns a plan of at most 100 `{discordUserId, roleKind, op, why}` entries and changes nothing. It is allowed while the feature is off.
 - A real run needs `DISCORD_ROLES_ENABLED=true`; otherwise it returns 503 "Discord roles are switched off (DISCORD_ROLES_ENABLED=false)".
-- It returns 409 while another pass is running and 429 when called again within 30 seconds. Repeating the same `id` returns the same result. A real run waits for the pass to finish (at most about a minute for 50 changes).
+- It returns 409 while another pass is running, and 409 for a preview while another preview is still reading Discord.
+- Real runs and previews are spaced separately. A real run within 30 seconds of the last real run returns 429 "Wait 30 seconds between role checks.", and a preview within 5 seconds of the last preview returns 429 "Wait 5 seconds between previews." A preview never counts toward the 30-second wait, so staff can preview and then run straight away, and a real run never holds up the next preview.
+- Repeating the same `id` returns the same result without waiting. A real run waits for the pass to finish (at most about a minute for 50 changes).
 - `discordUserId` limits the run to one person.
 
-The dashboard redesign owns the page itself. The intended panel shows each check with its fix, the last pass, the attention list including founders without Discord, recent actions, and **Preview** (dry run) and **Run role check now** buttons.
+The dashboard's **Discord roles** page (administrators only) shows each check with its fix, the last checks, the attention list including founders without Discord, recent role changes, and **Preview changes** (dry run) and **Run role check now** buttons. A real run from the page needs the feature switched on, every configured role passing its checks, and a preview from the last 10 minutes.
 
 ## When roles are checked
 

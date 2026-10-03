@@ -148,7 +148,10 @@ export const FOLLOW_UP_MS = 60_000;
 export const EVENT_DEBOUNCE_MS = 2_000;
 export const READY_POLL_MS = 5_000;
 export const SAFETY_PASS_MS = 6 * 3_600_000;
+/** Spacing between staff-requested real role checks. Previews do not count toward it. */
 export const ADMIN_COOLDOWN_MS = 30_000;
+/** Spacing between staff previews (dry runs), which only read, so one preview cannot be repeated back to back. */
+export const PREVIEW_COOLDOWN_MS = 5_000;
 export const MAX_PLAN_ENTRIES = 100;
 
 const line = z
