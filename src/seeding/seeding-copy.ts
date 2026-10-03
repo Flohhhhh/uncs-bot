@@ -6,7 +6,7 @@ export const SEEDING_NOTE_MAX_LENGTH = 200;
 export const SEEDING_WEBSITE = "https://theuncsgaming.com";
 
 export type RoleProblem = "missing" | "unsafe" | "unassignable" | "unavailable";
-export type ChannelProblem = "unusable" | "cannot-mention";
+export type ChannelProblem = "unusable" | "cannot-mention" | "hidden";
 
 /** Private replies to the member who ran /seeding join or leave or pressed a panel button. */
 export const MEMBER_COPY = {
@@ -64,6 +64,19 @@ export const CHANNEL_PROBLEMS: Record<ChannelProblem, string> = {
     "Gramps can't post in the ping channel. Use a text or announcement channel in this server where Gramps has View Channel and Send Messages.",
   "cannot-mention":
     "Gramps can't mention Seeder in the ping channel. Give Gramps Mention @everyone, @here and All Roles there; the ping still mentions only Seeder.",
+  hidden:
+    "No Seeder can see the ping channel, and Discord doesn't notify anyone about a mention they can't see. Give Seeder View Channel there, or pick a channel Seeders can see.",
+};
+
+/**
+ * Heads-ups, not refusals: Seeders may still see the ping channel through another role, so only "no Seeder can see
+ * it" stops a ping.
+ */
+export const CHANNEL_VIEW_WARNINGS = {
+  unknown:
+    "-# Heads-up: neither @everyone nor Seeder can view the ping channel. Unless Seeders see it through another role, pings there won't reach them.",
+  some: (hidden: number, total: number) =>
+    `-# Heads-up: ${hidden} of ${total} Seeders can't see the ping channel, so pings there won't reach them. Give Seeder View Channel there.`,
 };
 
 export const MENTIONABLE_WARNING =

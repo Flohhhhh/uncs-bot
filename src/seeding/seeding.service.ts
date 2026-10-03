@@ -3,6 +3,7 @@ import {
   ChannelType,
   Client,
   DiscordAPIError,
+  GatewayIntentBits,
   MessageFlags,
   PermissionFlagsBits,
   type Guild,
@@ -19,6 +20,7 @@ import { LEGACY_SERVER_ID } from "../common/game-server";
 import { EnvService } from "../env/env.service";
 import {
   CHANNEL_PROBLEMS,
+  CHANNEL_VIEW_WARNINGS,
   MEMBER_COPY,
   MENTIONABLE_WARNING,
   ROLE_PROBLEMS,
@@ -44,6 +46,8 @@ export function seedingRequest(interaction: {
 
 /** How long a ping waits for the game's player count before posting without it. */
 export const PLAYER_COUNT_TIMEOUT_MS = 10_000;
+/** How long the Seeder visibility check waits for Discord's full member list. */
+export const MEMBER_LIST_TIMEOUT_MS = 10_000;
 
 /** A role members can give themselves must not carry any of these. */
 const ELEVATED_PERMISSIONS = [
@@ -75,7 +79,9 @@ const MISSING_PERMISSIONS = 50013;
 type SeedingChannel = TextChannel | NewsChannel;
 type MemberContext = { guild: Guild; member: GuildMember };
 type RoleCheck = { role: Role | null; problem: RoleProblem | null };
-type ChannelCheck = { channel: SeedingChannel | null; problem: ChannelProblem | null };
+/** A warning is a heads-up for staff that never blocks a ping. */
+type ChannelCheck = { channel: SeedingChannel | null; problem: ChannelProblem | null; warning?: string };
+type ViewCheck = Pick<ChannelCheck, "problem" | "warning">;
 
 function discordCode(error: unknown) {
   return error instanceof DiscordAPIError ? Number(error.code) : undefined;
@@ -197,6 +203,7 @@ export class SeedingService {
 
     let channel: SeedingChannel;
     let content: string;
+    let warning: string | undefined;
     try {
       const { role, problem } = await this.checkRole(context.guild, roleId);
       // Pinging needs the role to exist and be safe, not for Gramps to be able to assign it.
@@ -210,6 +217,7 @@ export class SeedingService {
         return `${CHANNEL_PROBLEMS[target.problem ?? "unusable"]} Nothing was sent.`;
       }
       channel = target.channel;
+      warning = target.warning;
       const server = this.gameServer();
       content = seedingCall({
         roleId,
@@ -240,7 +248,8 @@ export class SeedingService {
       this.logger.warn(`Seeding ping in channel ${channelId} was not confirmed: ${describe(error)}`);
       return STAFF_COPY.pingUnknown(channelId);
     }
-    return STAFF_COPY.pingSent(channelId, config.cooldownMs);
+    const sentReply = STAFF_COPY.pingSent(channelId, config.cooldownMs);
+    return warning ? `${sentReply}\n${warning}` : sentReply;
   }
 
   /** Staff-only summary. Works while the switch is off, so staff can finish the setup first. */
@@ -262,9 +271,11 @@ export class SeedingService {
       } else ready = false;
 
       let channelLine = "not set (`SEEDING_PING_CHANNEL_ID`).";
+      let channelWarning: string | undefined;
       if (config.channelId) {
         const check = await this.pingChannel(guild, config.channelId, role);
         channelLine = `<#${config.channelId}>. ${check.problem ? CHANNEL_PROBLEMS[check.problem] : "Ready."}`;
+        channelWarning = check.warning;
         ready &&= !check.problem;
       } else ready = false;
 
@@ -281,6 +292,7 @@ export class SeedingService {
         }`,
       ];
       if (role?.mentionable) lines.push(MENTIONABLE_WARNING);
+      if (channelWarning) lines.push(channelWarning);
       return lines.join("\n");
     } catch (error) {
       return this.unexpected("status", error);
@@ -410,14 +422,47 @@ export class SeedingService {
     return channel;
   }
 
-  /** The ping channel, plus whether Gramps can actually notify the role there (otherwise the ping is silent). */
+  /**
+   * The ping channel, plus whether the ping can actually notify Seeders there: Gramps must be able to mention the
+   * role, and Seeders must be able to see the channel. Otherwise the ping is silent.
+   */
   private async pingChannel(guild: Guild, channelId: string, role: Role | null): Promise<ChannelCheck> {
     const channel = await this.textChannel(guild, channelId);
     if (!channel) return { channel: null, problem: "unusable" };
     const me = await this.me(guild);
     if (role && !role.mentionable && !(me && channel.permissionsFor(me).has(PermissionFlagsBits.MentionEveryone)))
       return { channel, problem: "cannot-mention" };
-    return { channel, problem: null };
+    if (!role) return { channel, problem: null };
+    return { channel, ...(await this.seederView(guild, channel, role)) };
+  }
+
+  /**
+   * Discord doesn't notify anyone about a mention in a channel they can't view. When @everyone or Seeder can view
+   * the channel, Seeders see it. Otherwise they may still see it through another role, so each Seeder is checked
+   * against the full member list. Only "no Seeder can see it" is a problem; anything Gramps can't settle is a
+   * warning, so a setup that works through another role is never refused.
+   */
+  private async seederView(guild: Guild, channel: SeedingChannel, role: Role): Promise<ViewCheck> {
+    if (channel.permissionsFor(role).has(PermissionFlagsBits.ViewChannel)) return { problem: null };
+    const seeders = (await this.allMembersLoaded(guild)) ? role.members : null;
+    if (!seeders?.size) return { problem: null, warning: CHANNEL_VIEW_WARNINGS.unknown };
+    const hidden = seeders.filter((seeder) => !channel.permissionsFor(seeder).has(PermissionFlagsBits.ViewChannel));
+    if (hidden.size === seeders.size) return { problem: "hidden" };
+    if (hidden.size) return { problem: null, warning: CHANNEL_VIEW_WARNINGS.some(hidden.size, seeders.size) };
+    return { problem: null };
+  }
+
+  /** Whether every member is in Gramps' cache, loading the list once when the GuildMembers intent allows it. */
+  private async allMembersLoaded(guild: Guild) {
+    if (guild.members.cache.size >= guild.memberCount) return true;
+    if (!this.discord.options.intents.has(GatewayIntentBits.GuildMembers)) return false;
+    try {
+      await guild.members.fetch({ time: MEMBER_LIST_TIMEOUT_MS });
+      return true;
+    } catch (error) {
+      this.logger.warn(`Could not load the member list for the Seeder check: ${describe(error)}`);
+      return false;
+    }
   }
 
   /** The primary WARDOGS server: the legacy single server, or the registry's `primary` entry (else its first). */

@@ -3,6 +3,8 @@ import {
   ChannelType,
   Collection,
   DiscordAPIError,
+  GatewayIntentBits,
+  IntentsBitField,
   MessageFlags,
   PermissionFlagsBits,
   PermissionsBitField,
@@ -14,13 +16,20 @@ import type { GameServerSummary } from "../common/game-server";
 import type { EnvService } from "../env/env.service";
 import {
   CHANNEL_PROBLEMS,
+  CHANNEL_VIEW_WARNINGS,
   MEMBER_COPY,
   MENTIONABLE_WARNING,
   ROLE_PROBLEMS,
   SEEDING_BUTTONS,
   STAFF_COPY,
 } from "./seeding-copy";
-import { PLAYER_COUNT_TIMEOUT_MS, SeedingService, seedingRequest, type SeedingRequest } from "./seeding.service";
+import {
+  MEMBER_LIST_TIMEOUT_MS,
+  PLAYER_COUNT_TIMEOUT_MS,
+  SeedingService,
+  seedingRequest,
+  type SeedingRequest,
+} from "./seeding.service";
 
 const GUILD = "200000000000000001",
   OTHER_GUILD = "200000000000000002",
@@ -36,6 +45,8 @@ const GUILD = "200000000000000001",
   ROLE_MANAGER = "500000000000000004",
   VIEWER = "500000000000000005",
   DISCORD_ADMIN = "500000000000000006",
+  SEEDER_ONE = "500000000000000007",
+  SEEDER_TWO = "500000000000000008",
   STRANGER = "500000000000000009",
   BOT = "500000000000000099";
 const JOIN_ID = "11111111-1111-4111-8111-111111111111";
@@ -65,7 +76,9 @@ function fakeChannel(id: string, permissions: bigint[]) {
     type: ChannelType.GuildText as ChannelType,
     guildId: GUILD,
     permissions: new PermissionsBitField(permissions),
-    permissionsFor: jest.fn(() => channel.permissions),
+    /** What a particular role or member gets here, as Discord works it out from roles and overrides. */
+    access: new Map<unknown, PermissionsBitField>(),
+    permissionsFor: jest.fn((target?: unknown) => channel.access.get(target) ?? channel.permissions),
     send: jest.fn(async (_payload: Record<string, unknown>) => ({ id: "600000000000000001" })),
   };
   return channel;
@@ -86,19 +99,7 @@ function fixture(overrides: Record<string, unknown> = {}, servers: GameServerSum
     ...overrides,
   };
   const env = { get: (key: string) => values[key] } as unknown as EnvService;
-  const role = {
-    id: ROLE,
-    managed: false,
-    mentionable: false,
-    permissions: new PermissionsBitField(),
-    members: { size: 2 },
-  };
-  const me = {
-    id: BOT,
-    permissions: new PermissionsBitField([PermissionFlagsBits.ManageRoles]),
-    roles: { highest: { comparePositionTo: jest.fn((_role: unknown) => 1) } },
-  };
-  const members = new Map(
+  const members = new Collection(
     [
       fakeMember(MEMBER),
       fakeMember(MODERATOR, [MOD_ROLE]),
@@ -106,13 +107,36 @@ function fixture(overrides: Record<string, unknown> = {}, servers: GameServerSum
       fakeMember(ROLE_MANAGER, [], [PermissionFlagsBits.ManageRoles]),
       fakeMember(VIEWER, [VIEWER_ROLE]),
       fakeMember(DISCORD_ADMIN, [], [PermissionFlagsBits.Administrator]),
+      fakeMember(SEEDER_ONE, [ROLE]),
+      fakeMember(SEEDER_TWO, [ROLE]),
     ].map((member) => [member.id, member]),
   );
+  const role = {
+    id: ROLE,
+    managed: false,
+    mentionable: false,
+    permissions: new PermissionsBitField(),
+    /** Like discord.js, only the cached members who have the role. */
+    get members() {
+      return members.filter((member) => member.roles.cache.has(ROLE));
+    },
+  };
+  const me = {
+    id: BOT,
+    permissions: new PermissionsBitField([PermissionFlagsBits.ManageRoles]),
+    roles: { highest: { comparePositionTo: jest.fn((_role: unknown) => 1) } },
+  };
+  /** Loading the whole member list over the gateway, which needs the Server Members intent. */
+  const fetchAll = jest.fn(async (_options: { time: number }) => members);
   const guild = {
     id: GUILD,
+    /** Every member is cached unless a test raises this. */
+    memberCount: members.size,
     members: {
+      cache: members,
       me: me as typeof me | null,
-      fetch: jest.fn(async (id: string) => {
+      fetch: jest.fn(async (id: string | { time: number }) => {
+        if (typeof id !== "string") return fetchAll(id);
         const member = members.get(id);
         if (!member) throw discordError(10007, 404);
         return member;
@@ -134,6 +158,7 @@ function fixture(overrides: Record<string, unknown> = {}, servers: GameServerSum
     [PANEL_CHANNEL, panelChannel],
   ]);
   const discord = {
+    options: { intents: new IntentsBitField([GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers]) },
     guilds: { fetch: jest.fn(async (_id: string) => guild) },
     channels: { fetch: jest.fn(async (id: string) => channels.get(id) ?? null) },
   };
@@ -153,7 +178,21 @@ function fixture(overrides: Record<string, unknown> = {}, servers: GameServerSum
     userId,
     channelId,
   });
-  return { service, values, role, me, members, guild, channel, panelChannel, discord, game, overview, request };
+  return {
+    service,
+    values,
+    role,
+    me,
+    members,
+    fetchAll,
+    guild,
+    channel,
+    panelChannel,
+    discord,
+    game,
+    overview,
+    request,
+  };
 }
 
 beforeEach(() => jest.spyOn(Logger.prototype, "warn").mockImplementation(() => undefined));
@@ -636,6 +675,69 @@ describe("/seeding ping", () => {
     expect(await service.ping(request(MODERATOR))).toBe(STAFF_COPY.pingSent(CHANNEL, 120 * MINUTE));
   });
 
+  describe("when neither @everyone nor Seeder can view the ping channel", () => {
+    /** For example an @everyone View Channel deny override with no allow for Seeder. */
+    function hiddenFromRole() {
+      const setup = fixture();
+      setup.channel.access.set(setup.role, new PermissionsBitField());
+      const blind = (...ids: string[]) =>
+        ids.forEach((id) => setup.channel.access.set(setup.members.get(id)!, new PermissionsBitField()));
+      return { ...setup, blind };
+    }
+
+    it("refuses, without using the cooldown, when no Seeder can see it", async () => {
+      const { service, channel, request, blind } = hiddenFromRole();
+      blind(SEEDER_ONE, SEEDER_TWO);
+      expect(await service.ping(request(MODERATOR))).toBe(`${CHANNEL_PROBLEMS.hidden} Nothing was sent.`);
+      expect(channel.send).not.toHaveBeenCalled();
+      expect(service.cooldownRemaining(GUILD)).toBe(0);
+    });
+
+    it("still pings when every Seeder sees it through another role", async () => {
+      const { service, channel, fetchAll, request } = hiddenFromRole();
+      expect(await service.ping(request(MODERATOR))).toBe(STAFF_COPY.pingSent(CHANNEL, 120 * MINUTE));
+      expect(channel.send).toHaveBeenCalledTimes(1);
+      // Every member is already cached, so there is nothing to load.
+      expect(fetchAll).not.toHaveBeenCalled();
+    });
+
+    it("pings with a heads-up when only some Seeders can see it", async () => {
+      const { service, channel, request, blind } = hiddenFromRole();
+      blind(SEEDER_TWO);
+      expect(await service.ping(request(MODERATOR))).toBe(
+        `${STAFF_COPY.pingSent(CHANNEL, 120 * MINUTE)}\n${CHANNEL_VIEW_WARNINGS.some(1, 2)}`,
+      );
+      expect(channel.send).toHaveBeenCalledTimes(1);
+    });
+
+    it("loads the full member list before deciding", async () => {
+      const { service, channel, guild, fetchAll, request, blind } = hiddenFromRole();
+      guild.memberCount += 40;
+      blind(SEEDER_ONE, SEEDER_TWO);
+      expect(await service.ping(request(MODERATOR))).toBe(`${CHANNEL_PROBLEMS.hidden} Nothing was sent.`);
+      expect(fetchAll).toHaveBeenCalledWith({ time: MEMBER_LIST_TIMEOUT_MS });
+      expect(channel.send).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["the member list can't be loaded", "load"],
+      ["Gramps lacks the Server Members intent", "intent"],
+      ["there are no Seeders yet", "empty"],
+    ])("pings with a heads-up, not a refusal, when %s", async (_label, cause) => {
+      const { service, channel, guild, members, fetchAll, discord, request, blind } = hiddenFromRole();
+      blind(SEEDER_ONE, SEEDER_TWO);
+      if (cause === "empty") for (const id of [SEEDER_ONE, SEEDER_TWO]) members.get(id)!.roles.cache.delete(ROLE);
+      else guild.memberCount += 40;
+      if (cause === "load") fetchAll.mockRejectedValueOnce(new Error("Members didn't arrive in time"));
+      if (cause === "intent") discord.options.intents = new IntentsBitField([GatewayIntentBits.Guilds]);
+      expect(await service.ping(request(MODERATOR))).toBe(
+        `${STAFF_COPY.pingSent(CHANNEL, 120 * MINUTE)}\n${CHANNEL_VIEW_WARNINGS.unknown}`,
+      );
+      expect(channel.send).toHaveBeenCalledTimes(1);
+      if (cause === "intent") expect(fetchAll).not.toHaveBeenCalled();
+    });
+  });
+
   it("refuses an unusable channel without using the cooldown", async () => {
     const { service, channel, discord, request } = fixture();
     channel.permissions = new PermissionsBitField([PermissionFlagsBits.ViewChannel]);
@@ -693,6 +795,7 @@ describe("/seeding status", () => {
     expect(reply).toContain("Seeders: 12.");
     expect(reply).toContain("Ping cooldown: 2 h. Ready now.");
     expect(reply).not.toContain(MENTIONABLE_WARNING);
+    expect(reply).not.toContain("Heads-up");
   });
 
   it("shows the cooldown remaining after a ping", async () => {
@@ -725,6 +828,31 @@ describe("/seeding status", () => {
     expect(reply).toContain("Configured: not yet.");
     expect(reply).toContain(ROLE_PROBLEMS.unassignable);
     expect(reply).toContain(CHANNEL_PROBLEMS["cannot-mention"]);
+  });
+
+  it("reports a ping channel no Seeder can see as not ready", async () => {
+    const { service, channel, role, members, request } = fixture();
+    // An @everyone View Channel deny, with no allow for Seeder or any role the Seeders have.
+    for (const target of [role, members.get(SEEDER_ONE)!, members.get(SEEDER_TWO)!])
+      channel.access.set(target, new PermissionsBitField());
+    const reply = await service.status(request(MODERATOR));
+    expect(reply).toContain("Configured: not yet.");
+    expect(reply).toContain(`Ping channel: <#${CHANNEL}>. ${CHANNEL_PROBLEMS.hidden}`);
+  });
+
+  it("stays ready but warns when Seeders might not see the ping channel", async () => {
+    const { service, channel, role, members, guild, fetchAll, request } = fixture();
+    channel.access.set(role, new PermissionsBitField());
+    channel.access.set(members.get(SEEDER_TWO)!, new PermissionsBitField());
+    const some = await service.status(request(MODERATOR));
+    expect(some).toContain("Configured: yes, ready to ping.");
+    expect(some).toContain(`Ping channel: <#${CHANNEL}>. Ready.`);
+    expect(some).toContain(CHANNEL_VIEW_WARNINGS.some(1, 2));
+    guild.memberCount += 40;
+    fetchAll.mockRejectedValueOnce(new Error("Members didn't arrive in time"));
+    const unknown = await service.status(request(MODERATOR));
+    expect(unknown).toContain("Configured: yes, ready to ping.");
+    expect(unknown).toContain(CHANNEL_VIEW_WARNINGS.unknown);
   });
 
   it("falls back to the cached member count and warns when anyone can mention the role", async () => {

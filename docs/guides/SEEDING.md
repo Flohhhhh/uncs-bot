@@ -29,7 +29,7 @@ Everything works only inside the `ADMIN_GUILD_ID` server. Elsewhere, Gramps says
 
 1. **Create the role.** Server Settings → Roles → **Create Role**, named `Seeder` (any name works). Clear every permission: Gramps refuses to hand out a role with moderation or management permissions (see [Safety checks](#safety-checks)). Leave **Allow anyone to @mention this role** off, so only staff pings reach it. **Display role members separately** is up to you.
 2. **Place it below Gramps.** In the role list, drag `Seeder` below Gramps' own role, and make sure Gramps has **Manage Roles**. Discord only lets a bot assign roles below its highest role; otherwise every join fails with Missing Permissions (50013).
-3. **Pick the ping channel.** A text or announcement channel in the same server. Gramps needs **View Channel** and **Send Messages** there, and **Mention @everyone, @here and All Roles** so the Seeder mention actually notifies people. A channel permission override for Gramps is enough. The ping's allowed mentions are restricted to the Seeder role, so that permission can't be used to ping anyone else.
+3. **Pick the ping channel.** A text or announcement channel in the same server that **Seeders can see**: Discord doesn't notify anyone about a mention in a channel they can't view. A public channel works; for a private one, give Seeder **View Channel** there. Gramps needs **View Channel** and **Send Messages** there, and **Mention @everyone, @here and All Roles** so the Seeder mention actually notifies people. A channel permission override for Gramps is enough. The ping's allowed mentions are restricted to the Seeder role, so that permission can't be used to ping anyone else.
 4. **Copy the IDs.** With Discord's Developer Mode on (User Settings → Advanced), right-click the role → **Copy Role ID**, and the channel → **Copy Channel ID**.
 5. **Set the variables** below and redeploy. `ADMIN_GUILD_ID` must already be set to this server.
 6. **Check it.** Run `/seeding status`. It should say `Configured: yes, ready to ping.` Otherwise each line says what to fix.
@@ -83,6 +83,14 @@ A ping is refused for such a role too. A ping does not need Gramps to be able to
 
 `/seeding status` warns when **Allow anyone to @mention this role** is on, because then any member can ping the Seeders, not just staff.
 
+## Can Seeders see the ping channel?
+
+When @everyone or Seeder can view the ping channel, Seeders see it and there's nothing more to check. Otherwise Seeders might still see it through another role, such as a verified-member role, so Gramps loads the full member list (this needs the Server Members intent) and checks each Seeder:
+
+- **No Seeder can see it:** `/seeding ping` refuses, says why, sends nothing and doesn't use the cooldown. `/seeding status` reports the ping channel as not ready.
+- **Some Seeders can't see it:** the ping goes out, and both the ping reply and `/seeding status` add a heads-up with how many Seeders it won't reach.
+- **Gramps can't tell** (the member list didn't load, or there are no Seeders yet): the ping goes out with a heads-up that neither @everyone nor Seeder can view the channel. `/seeding status` stays ready and shows the same heads-up.
+
 ## Troubleshooting
 
 | Reply                                                 | Fix                                                                                             |
@@ -95,5 +103,7 @@ A ping is refused for such a role too. A ping does not need Gramps to be able to
 | "The Seeder role isn't set up right"                  | The role failed a [safety check](#safety-checks). Use a plain role with no permissions.         |
 | "Gramps can't mention Seeder in the ping channel"     | Give Gramps Mention @everyone, @here and All Roles in that channel.                             |
 | "Gramps can't post in the ping channel"               | Use a text or announcement channel where Gramps has View Channel and Send Messages.             |
+| "No Seeder can see the ping channel"                  | Give Seeder View Channel in the ping channel, or pick a channel Seeders can see.                |
+| A "Heads-up" about who can view the ping channel      | Some Seeders may not see it and would miss pings. Give Seeder View Channel there.               |
 | "Gramps can't post the panel here"                    | Run `/seeding panel` in a text or announcement channel where Gramps can view and send messages. |
 | "Discord didn't confirm the ping"                     | Check the ping channel. If the call isn't there, ping again once the cooldown ends.             |

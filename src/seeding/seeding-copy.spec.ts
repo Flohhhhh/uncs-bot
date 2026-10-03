@@ -1,5 +1,6 @@
 import {
   CHANNEL_PROBLEMS,
+  CHANNEL_VIEW_WARNINGS,
   MEMBER_COPY,
   MENTIONABLE_WARNING,
   ROLE_PROBLEMS,
@@ -29,6 +30,8 @@ function everyLine() {
     STAFF_COPY.cooldown(90 * MINUTE),
     ...Object.values(ROLE_PROBLEMS),
     ...Object.values(CHANNEL_PROBLEMS),
+    CHANNEL_VIEW_WARNINGS.unknown,
+    CHANNEL_VIEW_WARNINGS.some(1, 2),
     MENTIONABLE_WARNING,
     panel.content,
     ...panel.components[0].components.map((button) => JSON.stringify(button.toJSON())),
