@@ -675,6 +675,18 @@ describe("/seeding ping", () => {
     expect(await service.ping(request(MODERATOR))).toBe(STAFF_COPY.pingSent(CHANNEL, 120 * MINUTE));
   });
 
+  it("trusts a channel the Seeder role can view without loading the member list", async () => {
+    const { service, channel, guild, fetchAll, request } = fixture();
+    // Some members are uncached, and loading them would fail, so only the role check can avoid a false heads-up.
+    guild.memberCount += 40;
+    fetchAll.mockRejectedValue(new Error("Members didn't arrive in time"));
+    const reply = await service.ping(request(MODERATOR));
+    expect(reply).toBe(STAFF_COPY.pingSent(CHANNEL, 120 * MINUTE));
+    expect(reply).not.toContain("Heads-up");
+    expect(fetchAll).not.toHaveBeenCalled();
+    expect(channel.send).toHaveBeenCalledTimes(1);
+  });
+
   describe("when neither @everyone nor Seeder can view the ping channel", () => {
     /** For example an @everyone View Channel deny override with no allow for Seeder. */
     function hiddenFromRole() {
@@ -838,6 +850,17 @@ describe("/seeding status", () => {
     const reply = await service.status(request(MODERATOR));
     expect(reply).toContain("Configured: not yet.");
     expect(reply).toContain(`Ping channel: <#${CHANNEL}>. ${CHANNEL_PROBLEMS.hidden}`);
+  });
+
+  it("trusts a ping channel the Seeder role can view without loading the member list", async () => {
+    const { service, guild, fetchAll, request } = fixture();
+    guild.memberCount += 40;
+    fetchAll.mockRejectedValue(new Error("Members didn't arrive in time"));
+    const reply = await service.status(request(MODERATOR));
+    expect(reply).toContain("Configured: yes, ready to ping.");
+    expect(reply).toContain(`Ping channel: <#${CHANNEL}>. Ready.`);
+    expect(reply).not.toContain("Heads-up");
+    expect(fetchAll).not.toHaveBeenCalled();
   });
 
   it("stays ready but warns when Seeders might not see the ping channel", async () => {
