@@ -8,7 +8,7 @@ import {
 import { EnvService } from "../env/env.service";
 import { GameServers } from "../admin/game-servers";
 import { publicGameServer } from "../common/game-server";
-import { feedCredentials, usableFeedToken } from "./telemetry.credentials";
+import { feedCredentials, feedServer, usableFeedToken } from "./telemetry.credentials";
 import { TelemetryDeliveries } from "./telemetry.deliveries";
 import { TelemetryStore } from "./telemetry.store";
 import {
@@ -81,7 +81,7 @@ export class TelemetryService {
   async ingest(authorization: unknown, body: unknown, id?: string) {
     let serverId: string;
     try {
-      serverId = this.servers.resolve(id);
+      serverId = feedServer(this.servers, id, authorization);
     } catch (error) {
       const reason = error instanceof BadRequestException ? "server not selected" : "unknown server";
       throw this.refuse(id, reason, error, false);

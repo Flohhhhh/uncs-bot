@@ -331,6 +331,28 @@ describe("optional community worker", () => {
     expect(game.execute).not.toHaveBeenCalled();
   });
 
+  it.each([undefined, new Error("pool ending")])(
+    "closes a receipt created as shutdown starts as failed and never sends it (finish error: %p)",
+    async (finishError) => {
+      const { service, look, game, store } = fixture();
+      await service.tick();
+      // SIGTERM lands while the audit insert is in flight; the row is still created.
+      store.begin.mockImplementationOnce(async () => {
+        service.onModuleDestroy();
+        return { created: true, record: {} };
+      });
+      if (finishError) store.finish.mockRejectedValueOnce(finishError);
+      await look([firstId, secondId]);
+      expect(game.execute).not.toHaveBeenCalled();
+      expect(store.finish).toHaveBeenCalledTimes(1);
+      expect(store.finish).toHaveBeenCalledWith(store.begin.mock.calls[0][1].id, {
+        state: "failed",
+        changed: false,
+        message: "Gramps stopped before sending this automatic message. Nothing was sent.",
+      });
+    },
+  );
+
   it("cancels its scheduled work on shutdown", () => {
     const { service } = fixture();
     service.onApplicationBootstrap();

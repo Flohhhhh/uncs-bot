@@ -121,6 +121,24 @@ describe("staff alert settings", () => {
     ).toBe(false);
   });
 
+  it("starts with the documented 500 known-good entries pasted from Never flag, up to 65,536 characters", () => {
+    const steamId = (index: number) => `765611980${String(index).padStart(8, "0")}`;
+    const full = Array.from({ length: 500 }, (_, index) => ({
+      steamId: steamId(index + 1),
+      note: `never flag: ${"Grandpa Moderator Joe".padEnd(56, ".")}, 2026-10-02`,
+    }));
+    const value = JSON.stringify(full);
+    expect(full[0].note).toHaveLength(80);
+    expect(value.length).toBeGreaterThan(32_768);
+    expect(
+      parse({ STAFF_ALERTS_PERFORMANCE_KNOWN_GOOD: value }).data?.STAFF_ALERTS_PERFORMANCE_KNOWN_GOOD,
+    ).toHaveLength(500);
+    const tooLong = `${value.slice(0, -1)}${" ".repeat(65_537 - value.length)}]`;
+    expect(tooLong).toHaveLength(65_537);
+    expect(parse({ STAFF_ALERTS_PERFORMANCE_KNOWN_GOOD: tooLong }).success).toBe(false);
+    expect(parse({ STAFF_ALERTS_PERFORMANCE_KNOWN_GOOD: tooLong.replace(" ", "") }).success).toBe(true);
+  });
+
   it("validates watch-list entries strictly", () => {
     const entry = {
       steamId: owner,

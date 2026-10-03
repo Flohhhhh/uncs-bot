@@ -9,6 +9,7 @@ import { AdminStore } from "../admin/admin.store";
 import { WardogsClient } from "../admin/wardogs.client";
 import { hash } from "../admin/admin.auth";
 import { legacyServerSettings } from "../admin/game-server-fixture";
+import { TelemetryDeliveries } from "./telemetry.deliveries";
 import { TelemModule } from "./telemetry.module";
 import { TelemetryStore } from "./telemetry.store";
 import { emptyTotals } from "./telemetry.types";
@@ -333,6 +334,33 @@ describe("telemetry HTTP boundaries", () => {
     for (let index = 0; index < 5000; index++) expect(deliver(`2001:db8::${index.toString(16)}`)).toBe("passed");
     expect(deliver("2001:db8::ffff")).toBe(429);
     expect(deliver("2001:db8::ffff", `Bearer ${feedToken}`)).toBe("passed");
+  });
+  it("keeps staff combat reads out of the public leaderboard's bucket", () => {
+    const rejected = jest.spyOn(app.get(TelemetryDeliveries), "rejectedRequest");
+    let limit!: (req: Request, res: Response, next: NextFunction) => void;
+    app.get(TelemModule).configure({
+      apply: (middleware: typeof limit) => {
+        limit = middleware;
+        return { forRoutes: () => undefined };
+      },
+    } as unknown as MiddlewareConsumer);
+    const read = (originalUrl: string) => {
+      let status: number | "passed" = 0;
+      const res = {} as Response;
+      Object.assign(res, { set: () => res, json: () => res, status: (code: number) => ((status = code), res) });
+      const req = { originalUrl, socket: { remoteAddress: "10.0.0.1" }, headers: {} };
+      limit(req as unknown as Request, res, () => (status = "passed"));
+      return status;
+    };
+    // One proxy address: anonymous public reads use up their own allowance only.
+    for (let count = 0; count < 300; count++) expect(read("/community/api/leaderboard")).toBe("passed");
+    expect(read("/community/api/leaderboard")).toBe(429);
+    expect(read("/admin/api/combat?period=week")).toBe("passed");
+    expect(read("/admin/api/servers/primary/combat")).toBe("passed");
+    for (let count = 2; count < 300; count++) read("/admin/api/combat");
+    expect(read("/ADMIN/API/COMBAT")).toBe(429);
+    // Read refusals are never filed as feed refusals.
+    expect(rejected).not.toHaveBeenCalled();
   });
   it("returns safe errors when the database is unavailable", async () => {
     store.snapshot.mockRejectedValueOnce(new Error("postgres://user:password@private-db applications.email"));

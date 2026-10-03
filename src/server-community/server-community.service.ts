@@ -327,7 +327,22 @@ export class ServerCommunityWorker implements OnApplicationBootstrap, OnModuleDe
         action,
         requestHash,
       );
-      if (!started.created || this.stopped) return false;
+      if (!started.created) return false;
+      if (this.stopped) {
+        // Shutdown began while the receipt was being saved. Close it so it does not read as Unconfirmed.
+        try {
+          await this.store.finish(action.id, {
+            state: "failed",
+            changed: false,
+            message: "Gramps stopped before sending this automatic message. Nothing was sent.",
+          });
+        } catch {
+          this.logger.warn(
+            "Community message was stopped before sending; its started audit record could not be closed.",
+          );
+        }
+        return false;
+      }
     } catch {
       this.logger.warn("Community message was not sent because its audit record could not be saved.");
       return false;
