@@ -136,7 +136,15 @@ export const Env = z.object({
     .default("false")
     .transform((value) => value === "true"),
   MAP_VOTES_CHANNEL_ID: discordId.optional(),
-  /** Optional private staff-only text channel in ADMIN_GUILD_ID for staff alerts. Never a community channel. */
+  /**
+   * Owner-only: lets automatic ballots offer "50v50 next round". Off by default and held for the owner's
+   * in-person review. SERVER_EVENTS_ENABLED (staff-run events) never puts 50v50 on a ballot by itself.
+   */
+  MAP_VOTES_FIFTY_ENABLED: flag(),
+  /**
+   * Optional private staff-only text channel in ADMIN_GUILD_ID for staff alerts, including the map-vote
+   * and 50v50 automation alerts. Never a community channel.
+   */
   STAFF_ALERTS_CHANNEL_ID: discordId.optional(),
   /** Alert-only staff alerts: Gramps never kicks, bans or edits the whitelist because of one. */
   STAFF_ALERTS_ENABLED: flag(),

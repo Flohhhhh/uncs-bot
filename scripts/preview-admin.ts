@@ -33,7 +33,8 @@ import { PatreonSyncService, type PatreonSyncStatus } from "../src/supporters/pa
 import { MapVotesModule } from "../src/map-votes/map-votes.module";
 import { MapVotesStore } from "../src/map-votes/map-votes.store";
 import { MapVotesDiscord } from "../src/map-votes/map-votes.discord";
-import type { MapVoteRecord } from "../src/map-votes/map-votes.types";
+import { ballotWinner, type MapVoteRecord } from "../src/map-votes/map-votes.types";
+import { automationSettings, closeReached } from "../src/common/voting-policy";
 import { ServerEventsModule } from "../src/server-events/server-events.module";
 import { ServerCommunityController } from "../src/server-community/server-community.controller";
 import { ServerCommunityService } from "../src/server-community/server-community.service";
@@ -55,8 +56,15 @@ import type {
 } from "../src/supporters/supporters.types";
 
 const previewPort = Number(process.env.PREVIEW_PORT || 4317);
+// PREVIEW_GAME_MODE=pre-round reproduces the 2 October waiting sample (1/100 players, scores 0);
+// full-server shows 100/100 players (a 34/33/33 roster, so 50v50 readiness can pass) and a 100-point
+// match in progress. PREVIEW_CLOCK=false hides the match clock on every server, as the live build did
+// on 2 October.
+const previewMode = process.env.PREVIEW_GAME_MODE ?? "live";
+const previewClock = process.env.PREVIEW_CLOCK !== "false";
 function createPreviewGame(name: string, reportsClock: boolean) {
   let previewRoundStart = Date.now() - 600_000;
+  const clock = reportsClock && previewClock && previewMode !== "pre-round";
 
   const players = [
     { name: "UncDap", steamId: "76561198066952872", faction: "RED", kills: 18, deaths: 7, cash: 14300, pingMs: 32 },
@@ -106,6 +114,19 @@ function createPreviewGame(name: string, reportsClock: boolean) {
       pingMs: 44,
     },
   ];
+  if (previewMode === "full-server")
+    // A full server: 34/33/33 across the three teams, every identity linked and unique.
+    players.push(
+      ...Array.from({ length: 100 - players.length }, (_, index) => ({
+        name: `Preview player ${index + 1}`,
+        steamId: String(76561198100000000n + BigInt(index)),
+        faction: ["RED", "BLU", "GRN"][(index + players.length) % 3],
+        kills: 0,
+        deaths: 0,
+        cash: 1000,
+        pingMs: 40,
+      })),
+    );
   const factions = [
     { code: "RED", name: "Valkyra", colorHex: "#D86060", score: 18420 },
     { code: "BLU", name: "Lonestar", colorHex: "#5B95D8", score: 14800 },
@@ -193,14 +214,26 @@ function createPreviewGame(name: string, reportsClock: boolean) {
         return {
           serverName: scalarValue(text, SESSION, "ServerName") || "Local preview",
           map: mapLabel(currentMap),
-          ...(reportsClock ? { matchSeconds: (Date.now() - previewRoundStart) / 1000 } : {}),
+          ...(clock ? { matchSeconds: (Date.now() - previewRoundStart) / 1000 } : {}),
           lighting,
           alternator: currentMap === "Kavkazi" ? "ZoneAlternator.Bakurani.Farmland.Circle" : "None",
           experiences: ["KOTH"],
           scoreTick: { current: 24, min: 18, max: 30 },
           ...(reportsClock ? { rotation: { nowIndex: 0, nextIndex: 1 } } : {}),
-          players: { current: players.length, max: 100 },
-          factionScores: factions.map(({ name, colorHex, score }) => ({ name, colorHex, score })),
+          players: {
+            current: previewMode === "pre-round" ? 1 : previewMode === "full-server" ? 100 : players.length,
+            max: 100,
+          },
+          factionScores: factions.map(({ name, colorHex, score }, index) => ({
+            name,
+            colorHex,
+            score:
+              previewMode === "pre-round"
+                ? 0
+                : previewMode === "full-server"
+                  ? Math.min(99, Math.floor(((Date.now() - previewRoundStart) / 18_000) * (1 - index * 0.2)))
+                  : score,
+          })),
         };
       if (path === "/v1/players") return { players };
       if (path === "/v1/server-id") return { serverId: `preview-${name}` };
@@ -391,6 +424,16 @@ const store = {
       .filter((record) => (record.details.serverId ?? "primary") === serverId)
       .reverse()
       .slice(0, 100);
+  },
+  async staffQueuedSince(serverId: string, since: Date) {
+    return [...records.values()].some(
+      (record) =>
+        record.action === "map-next" &&
+        (record.details.serverId ?? "primary") === serverId &&
+        record.createdAt >= since &&
+        !record.actorId.startsWith("system:") &&
+        record.state !== "failed",
+    );
   },
   async receipt(id: string, serverId: string) {
     const record = records.get(id);
@@ -870,6 +913,8 @@ const patreonSync = {
 };
 const previewEnvironment: Record<string, unknown> = {
   MAP_VOTES_ENABLED: process.env.PREVIEW_MAP_VOTES_ENABLED !== "false",
+  // Voted 50v50 stays held for the owner's review unless a rehearsal asks for it.
+  MAP_VOTES_FIFTY_ENABLED: process.env.PREVIEW_MAP_VOTES_FIFTY_ENABLED === "true",
   SERVER_EVENTS_ENABLED: true,
   WARDOGS_RCON_URL: "https://game.example.test",
   ADMIN_GUILD_ID: "111111111111111111",
@@ -1026,6 +1071,11 @@ async function seedPreviewStaffAlerts() {
     },
     deliver: true,
   });
+  await previewStaffAlerts.send(
+    "primary",
+    "preview:map-vote-review",
+    "The automatic map vote on UNCs Primary needs staff review: The queue result is unconfirmed. Automatic voting on this server is paused until staff close it.",
+  );
   if (offline) await previewStaffAlerts.review("primary", offline.id, "legit", { name: "Preview moderator" });
   previewStaffAlerts.snooze("event", "seeding", 240, "Preview moderator");
 }
@@ -1156,7 +1206,8 @@ const eventStore = {
       event.state === "complete" ||
       demoEventOperations.has(op.id) ||
       (event.operation && !manual) ||
-      (event.stop && op.kind !== "restore_lock")
+      (event.state === "needs_review" && op.kind !== "restore_lock") ||
+      (event.stop && op.kind !== "restore_lock" && op.kind !== "ended")
     )
       return null;
     demoEventOperations.set(op.id, {
@@ -1173,7 +1224,7 @@ const eventStore = {
       progress,
       version: version + 1,
       updatedAt: new Date(),
-      state: op.kind === "restore_lock" ? "stopping" : event.state,
+      state: op.kind === "restore_lock" || event.stop ? "stopping" : event.state,
     });
     return structuredClone(event);
   },
@@ -1215,13 +1266,40 @@ const eventStore = {
   async recover() {
     /* Preview effects run in this one in-memory process only. */
   },
+  async halt(id: string, reason: string, opId?: string) {
+    const event = demoServerEvents.get(id);
+    if (!event || ["complete", "needs_review"].includes(event.state)) return null;
+    if (opId ? event.operation?.id !== opId : event.operation) return null;
+    if (opId) Object.assign(demoEventOperations.get(opId) ?? {}, { state: "unknown", message: "Interrupted." });
+    Object.assign(event, {
+      stop: event.stop ?? {
+        id: randomUUID(),
+        actorId: "system:event-halt",
+        actorName: "Gramps 50v50 safety stop",
+        reason,
+        at: new Date().toISOString(),
+      },
+      state: "stopping",
+      operation: null,
+      message: `${reason} The team lock is being restored.`,
+      version: event.version + 1,
+      updatedAt: new Date(),
+    });
+    return structuredClone(event);
+  },
+  async completeRestored(id: string, version: number, message: string) {
+    const event = demoServerEvents.get(id)!;
+    if (event.version === version && !event.operation && event.stop && event.state === "stopping")
+      Object.assign(event, { state: "complete", message, version: version + 1, updatedAt: new Date() });
+    return structuredClone(event);
+  },
 };
 const demoVotePolicies = new Map<
   string,
   {
     serverId: string;
     version: number;
-    policy: import("../src/common/voting-policy").VotingPolicy;
+    policy: import("../src/common/voting-policy").StoredVotingPolicy;
     actorId: string;
     actorName: string;
     connectionHash: string;
@@ -1237,12 +1315,18 @@ const voteStore = {
   async savePolicy(
     serverId: string,
     version: number,
-    policy: import("../src/common/voting-policy").VotingPolicy,
+    next:
+      | import("../src/common/voting-policy").StoredVotingPolicy
+      | ((
+          previous: import("../src/common/voting-policy").StoredVotingPolicy | null,
+        ) => import("../src/common/voting-policy").StoredVotingPolicy),
     staff: Staff,
     connectionHash: string,
   ) {
-    if ((demoVotePolicies.get(serverId)?.version ?? 0) !== version)
+    const previous = demoVotePolicies.get(serverId);
+    if ((previous?.version ?? 0) !== version)
       throw new ConflictException("Voting controls changed. Reload saved controls.");
+    const policy = typeof next === "function" ? next(structuredClone(previous?.policy ?? null)) : next;
     const saved = { serverId, version: version + 1, policy, actorId: staff.id, actorName: staff.name, connectionHash };
     demoVotePolicies.set(serverId, structuredClone(saved));
     const closed: MapVoteRecord[] = [];
@@ -1258,11 +1342,42 @@ const voteStore = {
   async automaticOpen() {
     return structuredClone([...demoVotes.values()].filter((vote) => vote.state === "open" && vote.automation));
   },
-  async observeScore(id: string, score: number) {
+  async observeScore(id: string, score: number, step: number | null = null) {
     const vote = demoVotes.get(id);
     if (!vote?.automation || vote.state !== "open" || score < vote.automation.highestScore) return false;
+    if (score > vote.automation.highestScore && vote.automation.settings) {
+      vote.automation.maxStep = Math.max(vote.automation.maxStep ?? 0, step ?? 0);
+      vote.automation.lastScoreAt = new Date().toISOString();
+    }
     vote.automation.highestScore = score;
     return true;
+  },
+  async patchAutomation(
+    id: string,
+    patch: Partial<import("../src/common/voting-policy").VoteAutomation>,
+    states: MapVoteRecord["state"][] = ["open", "closing"],
+  ) {
+    const vote = demoVotes.get(id);
+    if (!vote?.automation || !states.includes(vote.state)) return null;
+    Object.assign(vote.automation, structuredClone(patch));
+    return structuredClone(vote);
+  },
+  async resolveReview(
+    id: string,
+    to: "queued" | "cancelled",
+    message: string,
+    patch: Partial<import("../src/common/voting-policy").VoteAutomation>,
+    messageId?: string,
+  ) {
+    const vote = demoVotes.get(id);
+    if (!vote?.automation || vote.state !== "needs_review") return null;
+    Object.assign(vote, { state: to, message, updatedAt: new Date() });
+    Object.assign(vote.automation, structuredClone(patch));
+    if (messageId && !vote.messageId) vote.messageId = messageId;
+    return structuredClone(vote);
+  },
+  async needsReview() {
+    return structuredClone([...demoVotes.values()].filter((vote) => vote.state === "needs_review" && vote.automation));
   },
   async claimReminder(id: string, stage: import("../src/common/voting-policy").VoteReminder, receiptId: string) {
     const vote = demoVotes.get(id);
@@ -1338,15 +1453,28 @@ const voteStore = {
   async due(now: Date) {
     return structuredClone([...demoVotes.values()].filter((vote) => vote.state === "open" && vote.closesAt <= now));
   },
-  async claimClose(id: string) {
+  async claimClose(id: string, scoreReached = false) {
     const vote = demoVotes.get(id);
     if (!vote || vote.state !== "open") return null;
+    if (!scoreReached && vote.closesAt.getTime() > Date.now()) return null;
+    if (scoreReached && (!vote.automation || !closeReached(vote.automation, vote.automation.highestScore))) return null;
     vote.state = "closing";
+    vote.winner = ballotWinner(
+      vote.counts,
+      vote.automation ? automationSettings(vote.automation).tieRule : "keep_rotation",
+      vote.choices.findIndex((choice) => choice.event === "50v50"),
+    );
     return structuredClone(vote);
   },
-  async finish(id: string, state: MapVoteRecord["state"], message: string) {
+  async finish(
+    id: string,
+    state: MapVoteRecord["state"],
+    message: string,
+    patch?: Partial<import("../src/common/voting-policy").VoteAutomation>,
+  ) {
     const vote = demoVotes.get(id)!;
     Object.assign(vote, { state, message });
+    if (patch && vote.automation) Object.assign(vote.automation, structuredClone(patch));
     return structuredClone(vote);
   },
   async cancel(id: string, requestId: string, staff: Staff, reason: string) {
@@ -1471,9 +1599,13 @@ async function main() {
     .useValue({
       check: async () => ({ name: "simulated-voting" }),
       publish: async () => "333333333333333333",
+      findBallotMessage: async () => null,
       update: async () => undefined,
       remind: async () => undefined,
     })
+    // Map-vote and 50v50 automation alerts land in the same simulated staff channel and Staff alerts status.
+    .overrideProvider(StaffAlerts)
+    .useValue(previewStaffAlerts)
     .compile();
   const app = module.createNestApplication(adapter, { rawBody: true });
   await app.listen(previewPort, "127.0.0.1");

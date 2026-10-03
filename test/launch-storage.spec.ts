@@ -18,11 +18,11 @@ import { AdminStore, COMMUNITY_MESSAGES_ACTOR_ID } from "../src/admin/admin.stor
 import type { ActionResult, AdminAction, Staff } from "../src/admin/admin.types";
 import { MapVotesStore } from "../src/map-votes/map-votes.store";
 import { ServerEventsStore } from "../src/server-events/server-events.store";
-import { eventFixture, eventStaff } from "../src/server-events/event-fixtures";
+import { eventFixture, eventStaff, voteEventFixture } from "../src/server-events/event-fixtures";
 import { operation } from "../src/server-events/event-planner";
 import { TelemetryStore } from "../src/telemetry/telemetry.store";
 import { parseFeed } from "../src/telemetry/telemetry.types";
-import { defaultVotingPolicy } from "../src/common/voting-policy";
+import { defaultVotingPolicy, defaultVotingSettings } from "../src/common/voting-policy";
 
 // Only the port is configurable. Never load the application's configuration or
 // DATABASE_URL: this suite requires an empty, disposable loopback test database.
@@ -573,6 +573,63 @@ describe("launch storage on isolated PostgreSQL", () => {
     const settled = (await events.get(event.id))!;
     expect((await events.completeUnchanged(event.id, settled.version))?.state).toBe("complete");
   });
+  it("halts a voted event atomically, settling only its own stale operation as unknown", async () => {
+    const { operation: _operation, ...vote } = voteEventFixture();
+    const event = (await events.create(vote)).event;
+    expect(event.options).toEqual(vote.options);
+    expect(event.progress).toEqual(vote.progress);
+    const op = operation(event, "move", { action: "team" });
+    const claimed = (await events.claim(event.id, event.version, op, eventStaff, event.progress))!;
+    expect(await events.halt(event.id, "Interrupted.", randomUUID())).toBeNull();
+    const halted = (await events.halt(event.id, "Interrupted.", op.id))!;
+    expect(halted).toMatchObject({
+      state: "stopping",
+      operation: null,
+      lastActionId: op.id,
+      stop: { actorId: "system:event-halt", reason: "Interrupted." },
+    });
+    expect(halted.version).toBe(claimed.version + 1);
+    expect((await events.operations(event.id))[0]).toMatchObject({ id: op.id, state: "unknown" });
+    // A late settlement cannot reopen the event, and only the notice and the restore may start now.
+    await events.settle(
+      event.id,
+      op.id,
+      { state: "applied", message: "Late" },
+      { state: "active", progress: event.progress, message: "Late" },
+    );
+    expect(await events.get(event.id)).toMatchObject({ state: "stopping" });
+    const move = operation(event, "move", { action: "team" });
+    expect(await events.claim(event.id, halted.version, move, eventStaff, event.progress)).toBeNull();
+    const ended = operation(event, "ended", { action: "broadcast", message: "50v50 is over." });
+    expect(await events.claim(event.id, halted.version, ended, eventStaff, event.progress)).toMatchObject({
+      state: "stopping",
+    });
+    await events.settle(
+      event.id,
+      ended.id,
+      { state: "applied", message: "Sent" },
+      { state: "stopping", progress: event.progress, message: "Sent" },
+    );
+    const stopped = (await events.get(event.id))!;
+    expect(await events.halt(event.id, "Again.")).toMatchObject({ stop: halted.stop });
+    // The lock already reads its original value: complete without a write, only from stopping.
+    expect((await events.completeRestored(event.id, stopped.version, "Already restored."))?.state).toBe("stopping");
+    const current = (await events.get(event.id))!;
+    expect(await events.completeRestored(event.id, current.version, "Already restored.")).toMatchObject({
+      state: "complete",
+      message: "Already restored.",
+    });
+    expect(await events.halt(event.id, "After completion.")).toBeNull();
+  });
+  it("never halts an event that waits for staff review", async () => {
+    const { operation: _operation, ...vote } = voteEventFixture();
+    const event = (await events.create(vote)).event;
+    const op = operation(event, "move", { action: "team" });
+    const claimed = (await events.claim(event.id, event.version, op, eventStaff, event.progress))!;
+    await events.recover(claimed, new Date(claimed.updatedAt.getTime() + 121_000));
+    expect(await events.halt(event.id, "Interrupted.", op.id)).toBeNull();
+    expect(await events.get(event.id)).toMatchObject({ state: "needs_review", stop: null });
+  });
   it("fails closed when the inflight-operation pointer cannot be resolved", async () => {
     const event = (await events.create(eventInput())).event;
     await client.query("UPDATE server_events SET operation_id = $1 WHERE id = $2", [randomUUID(), event.id]);
@@ -605,7 +662,7 @@ describe("launch storage on isolated PostgreSQL", () => {
       finalReminder: true,
     };
     await votes.savePolicy(input.serverId, 0, policy, staff, input.connectionHash);
-    await votes.create({ ...input, automation: { policy, highestScore: 50, reminders: {} } });
+    await votes.create({ ...input, automation: { policy, policyVersion: 1, highestScore: 50, reminders: {} } });
     await votes.published(input.id, messageId);
     return { input, policy };
   }
@@ -648,6 +705,74 @@ describe("launch storage on isolated PostgreSQL", () => {
     expect(await votes.observeScore(input.id, 85)).toBe(true);
     expect(await votes.observeScore(input.id, 0)).toBe(false);
     expect((await votes.get(input.id))?.automation?.highestScore).toBe(85);
+  });
+  it("merges a partial save with the stored settings under the version check", async () => {
+    const settings = { ...defaultVotingSettings, closeAtScore: 90 };
+    await votes.savePolicy("primary", 0, { ...defaultVotingPolicy, settings }, staff, "connection");
+    const result = await votes.savePolicy(
+      "primary",
+      1,
+      (previous) => ({ ...defaultVotingPolicy, modeChoices: true, settings: previous?.settings }),
+      staff,
+      "connection",
+    );
+    expect(result.saved.policy).toMatchObject({ modeChoices: true, settings: { closeAtScore: 90 } });
+    await expect(votes.savePolicy("primary", 1, (previous) => previous!, staff, "connection")).rejects.toMatchObject({
+      status: 409,
+    });
+    expect((await votes.policy("primary"))?.version).toBe(2);
+  });
+  it("opens an automatic ballot only under the saved controls version", async () => {
+    const input = ballotInput();
+    const policy = { ...defaultVotingPolicy, enabled: true };
+    await votes.savePolicy(input.serverId, 0, policy, staff, input.connectionHash);
+    await expect(
+      votes.create({ ...input, automation: { policy, policyVersion: 0, highestScore: 10, reminders: {} } }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(
+      (await votes.create({ ...input, automation: { policy, policyVersion: 1, highestScore: 10, reminders: {} } }))
+        .created,
+    ).toBe(true);
+  });
+  it("closes at the snapshot's early score with its tie rule and records a refusal", async () => {
+    const input = ballotInput();
+    const policy = { ...defaultVotingPolicy, enabled: true };
+    await votes.savePolicy(input.serverId, 0, policy, staff, input.connectionHash);
+    const settings = { ...defaultVotingSettings, closeAtScore: 90, tieRule: "first_option" as const };
+    await votes.create({
+      ...input,
+      automation: { policy, policyVersion: 1, settings, highestScore: 70, maxStep: 0, reminders: {} },
+    });
+    await votes.published(input.id, messageId);
+    await votes.cast(input.id, staff.id, 0, input.guildId, input.channelId, messageId);
+    await votes.cast(input.id, "999999999999999999", 1, input.guildId, input.channelId, messageId);
+    expect(await votes.observeScore(input.id, 80, 12)).toBe(true);
+    expect(await votes.claimClose(input.id, true)).toBeNull();
+    expect(await votes.observeScore(input.id, 88, 8)).toBe(true);
+    expect((await votes.get(input.id))?.automation).toMatchObject({ highestScore: 88, maxStep: 12 });
+    expect(await votes.claimClose(input.id, true)).toMatchObject({ state: "closing", counts: [1, 1], winner: 0 });
+    expect(await votes.finish(input.id, "cancelled", "Not queued.", { outcome: "refused" })).toMatchObject({
+      state: "cancelled",
+      automation: { outcome: "refused", maxStep: 12 },
+    });
+  });
+  it("patches automation only in allowed states and moves a ballot out of review once", async () => {
+    const { input } = await scoreBallot();
+    expect(await votes.patchAutomation(input.id, { outcome: "refused" }, ["closing"])).toBeNull();
+    expect((await votes.patchAutomation(input.id, { maxStep: 4 }))?.automation).toMatchObject({ maxStep: 4 });
+    expect(await votes.resolveReview(input.id, "cancelled", "Still open.", {})).toBeNull();
+    await client.query("UPDATE map_votes SET state = 'needs_review', message_id = NULL WHERE id = $1", [input.id]);
+    expect(await votes.needsReview()).toMatchObject([{ id: input.id }]);
+    const resolved = await votes.resolveReview(
+      input.id,
+      "cancelled",
+      "Published late.",
+      { outcome: "unposted" },
+      messageId,
+    );
+    expect(resolved).toMatchObject({ state: "cancelled", messageId, automation: { outcome: "unposted", maxStep: 4 } });
+    expect(await votes.resolveReview(input.id, "queued", "Again.", {})).toBeNull();
+    expect(await votes.needsReview()).toEqual([]);
   });
   it("refuses an automatic publication using controls superseded before its creation", async () => {
     const input = ballotInput();

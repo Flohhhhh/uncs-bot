@@ -23,11 +23,16 @@ export const STAFF_ALERT_KINDS = [
   "performance-window",
   "performance-match",
   "watchlist-join",
+  /** Map-vote and 50v50 automation that needs a person (StaffAlerts.send). */
+  "automation",
 ] as const;
 export type StaffAlertKind = (typeof STAFF_ALERT_KINDS)[number];
 export type StaffAlertSeverity = "info" | "warning" | "high";
-/** Dashboard filter and snooze group. Health and seeding share one hourly limit. */
-export type StaffAlertCategory = "health" | "seeding" | "performance" | "watchlist";
+/**
+ * Dashboard filter and snooze group. Health and seeding share one hourly limit. Automation alerts
+ * cannot be snoozed: a ballot or 50v50 that needs a person is never held back by a snooze.
+ */
+export type StaffAlertCategory = "health" | "seeding" | "performance" | "watchlist" | "automation";
 export const SNOOZE_CATEGORIES = ["health", "seeding", "performance", "watchlist", "all"] as const;
 export type StaffAlertSnoozeCategory = (typeof SNOOZE_CATEGORIES)[number];
 export const REVIEW_DECISIONS = ["ack", "legit", "never"] as const;
@@ -37,7 +42,8 @@ export function alertCategory(kind: StaffAlertKind): StaffAlertCategory {
   if (kind.startsWith("game-")) return "health";
   if (kind.startsWith("seeding-")) return "seeding";
   if (kind.startsWith("performance-")) return "performance";
-  return "watchlist";
+  if (kind.startsWith("watchlist-")) return "watchlist";
+  return "automation";
 }
 /** Only performance alerts take "legit" or "never"; any alert can be acknowledged. */
 export function reviewDecisions(kind: StaffAlertKind): StaffAlertDecision[] {
