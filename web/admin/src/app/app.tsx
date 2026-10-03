@@ -354,7 +354,7 @@ function Dashboard({
           <label className="mobile-navigation">
             Dashboard section
             <select
-              value={visiblePages.some(([id]) => id === navigationKey) ? navigationKey : ""}
+              value={visiblePages.some(([id]) => id === key) ? key : ""}
               disabled={busy || dialogOpen}
               onChange={(event) => navigate({ pathname: `/${event.target.value}`, search: location.search })}
             >
