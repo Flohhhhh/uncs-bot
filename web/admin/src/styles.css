@@ -2465,6 +2465,17 @@ dialog.sheet {
 .mode-choices input {
   width: auto;
 }
+/* Ballot settings share the switches' bordered group; their number fields fill the grid columns. */
+.ballot-settings .settings-grid {
+  gap: var(--space-3);
+}
+.ballot-settings .settings-grid label {
+  align-items: stretch;
+  margin: 0;
+}
+.ballot-settings .settings-grid input {
+  width: 100%;
+}
 .rotation-editor {
   padding: 0;
   list-style: none;

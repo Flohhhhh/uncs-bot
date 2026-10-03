@@ -2,18 +2,21 @@ import { z } from "zod";
 import { mapSelectionSchema } from "../admin/admin.types";
 import {
   defaultVotingSettings,
-  FIFTY_HELD_REASON,
-  voteChoiceKey,
+  settingRangeMessage,
+  votingIssues,
   votingSettingLimits as limits,
   type DeepPartial,
   type StoredVotingPolicy,
   type VoteTieRule,
+  type VotingIssue,
   type VotingPolicy,
+  type VotingRules,
   type VotingSettings,
 } from "../common/voting-policy";
+export { votingIssues, type VotingIssue, type VotingRules } from "../common/voting-policy";
 
 const whole = ({ min, max }: { min: number; max: number }, label: string) => {
-  const error = `${label} must be a whole number from ${min} to ${max}.`;
+  const error = settingRangeMessage(label, { min, max });
   return z.number({ error }).int({ error }).min(min, { error }).max(max, { error });
 };
 const flag = (label: string) => z.boolean({ error: `Choose on or off for ${label}.` });
@@ -96,48 +99,6 @@ export const saveVotingControlsSchema = z
   })
   .strict();
 
-export type VotingIssue = { path: (string | number)[]; message: string };
-/** `fiftyHeld`: the owner has not switched voted 50v50 on (MAP_VOTES_FIFTY_ENABLED), so it cannot be saved as offered. */
-export type VotingRules = { fiftyHeld?: boolean };
-/** Cross-field rules, with paths relative to the saved document `{ policy, settings }`. */
-export function votingIssues(policy: VotingPolicy, settings: VotingSettings, rules: VotingRules = {}): VotingIssue[] {
-  const issues: VotingIssue[] = [];
-  const add = (path: (string | number)[], message: string) => issues.push({ path, message });
-  if (rules.fiftyHeld && settings.fiftyFifty.offered)
-    add(["settings", "fiftyFifty", "offered"], `Leave the 50v50 option off: ${FIFTY_HELD_REASON}.`);
-  if (settings.openScoreCeiling > settings.closeAtScore - 5)
-    add(["settings", "openScoreCeiling"], "Close score must be at least 5 points above the opening ceiling.");
-  const names = { midpoint: "update", final: "last-chance" } as const;
-  for (const slot of ["midpoint", "final"] as const) {
-    if (!policy[slot === "midpoint" ? "midpointReminder" : "finalReminder"]) continue;
-    const reminder = settings.reminders[slot];
-    if (reminder.score >= settings.closeAtScore)
-      add(["settings", "reminders", slot, "score"], `The ${names[slot]} reminder must come before the close score.`);
-    if (!reminder.discord && !reminder.inGame)
-      add(["settings", "reminders", slot], `Send the ${names[slot]} reminder in Discord, in game, or both.`);
-  }
-  if (
-    policy.midpointReminder &&
-    policy.finalReminder &&
-    settings.reminders.midpoint.score >= settings.reminders.final.score
-  )
-    add(
-      ["settings", "reminders", "midpoint", "score"],
-      "The update reminder must come before the last-chance reminder.",
-    );
-  if (new Set(settings.pool.map(voteChoiceKey)).size !== settings.pool.length)
-    add(["settings", "pool"], "Each map pool entry must be a different map, mode or layout.");
-  if (policy.enabled && settings.source === "pool" && settings.pool.length < 2)
-    add(["settings", "pool"], "Add at least two map pool entries, or offer options from the saved rotation.");
-  if (policy.enabled && !policy.mapChoices && !policy.modeChoices && (rules.fiftyHeld || !settings.fiftyFifty.offered))
-    add(
-      ["policy", "mapChoices"],
-      rules.fiftyHeld
-        ? "Choose maps, rule variants or both before enabling voting."
-        : "Choose maps, rule variants, 50v50 or a combination before enabling voting.",
-    );
-  return issues;
-}
 export class VotingSettingsError extends Error {
   constructor(readonly issue: VotingIssue) {
     super(issue.message);

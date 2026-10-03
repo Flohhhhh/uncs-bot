@@ -109,6 +109,17 @@ it("allows a ballot at a confirmed position without demanding an unreported game
   expect(screen.queryByRole("link", { name: /Match & maps/ })).not.toBeInTheDocument();
   expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
 });
+it("says in review that a staff queue while the ballot is open keeps its winner from queuing", async () => {
+  show();
+  await choose("Europe");
+  await choose("Islands");
+  fireEvent.click(screen.getByRole("button", { name: "Review ballot" }));
+  // The close checks for a person's queue since the ballot opened, even of the entry already next.
+  expect(within(screen.getByRole("dialog")).getByText(/only if/)).toHaveTextContent(
+    "only if the rotation position, settings and your administrator access still match and no staff member queued the next map while it was open.",
+  );
+  expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+});
 it("shows automatic progress and keeps manual publication under staff override", async () => {
   const fallback = request.getMockImplementation()!;
   request.mockImplementation(async (path, options) =>
