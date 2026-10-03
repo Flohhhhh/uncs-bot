@@ -19,6 +19,7 @@ const policy: FounderPolicy = {
   currency: "USD",
   startsAt: "2026-09-30T04:00:00.000Z",
   endsAt: "2026-10-15T04:00:00.000Z",
+  source: "PATREON_FOUNDER",
 };
 const paid = (id: string, date: string, overrides: Partial<PatreonPledgeEvent> = {}): PatreonPledgeEvent => ({
   id,
@@ -36,6 +37,7 @@ const snapshot = (overrides: Partial<PatreonMemberSnapshot> = {}): PatreonMember
   lastChargeStatus: "Paid",
   lastChargeAt: new Date("2026-10-01T12:00:00Z"),
   discordId: null,
+  discordKnown: true,
   events: [paid("pledge_start:1", "2026-10-01T12:00:00Z", { type: "pledge_start" })],
   historyComplete: true,
   ...overrides,
@@ -81,7 +83,10 @@ function fixture() {
       observedAt: new Date(),
       reviewState: "verified",
       discordId: null as string | null,
+      discordSource: null as string | null,
+      patreonDiscordId: null as string | null,
       steamId: null as string | null,
+      steamSource: null as string | null,
       version: 4,
     },
     payments: [] as Record<string, unknown>[],
@@ -231,15 +236,19 @@ describe("Patreon API import persistence", () => {
     expect(lookup[0].text).toContain('"id" <>');
     const [update] = calls('update "supporter_members"');
     expect(update[0].text).toContain('"discord_id" =');
+    expect(update[0].text).toContain('"discord_source" =');
+    expect(update[0].text).toContain('"patreon_discord_id" =');
     expect(update[0].text).not.toContain('"steam_id"');
+    expect(update[0].text).not.toContain('"steam_source"');
+    expect(update[0].text).not.toContain('"steam_application_id"');
     expect(update[0].text).not.toContain('"review_state"');
-    expect(update[1]).toEqual(expect.arrayContaining([staff.id, 5]));
+    expect(update[1]).toEqual(expect.arrayContaining([staff.id, "patreon", 5]));
     const [[, audit]] = calls('insert into "supporter_actions"');
     expect(audit).toEqual(
       expect.arrayContaining(["system:patreon-sync", "Patreon sync", "patreon-discord-link", memberId]),
     );
   });
-  it("never overwrites an existing link and reports a Discord ID used by another record", async () => {
+  it("never overwrites an existing link, and records what Patreon reports with one version bump", async () => {
     const differs = fixture();
     differs.state.observed = false;
     differs.state.payments = [payment()];
@@ -247,8 +256,14 @@ describe("Patreon API import persistence", () => {
     expect(await differs.store.importApiMember(campaign, snapshot({ discordId: staff.id }), at)).toMatchObject({
       discordLinked: false,
       conflict: "discord-differs",
+      patreonDiscordChanged: true,
     });
-    expect(differs.calls("update")).toHaveLength(0);
+    const [update, ...others] = differs.calls("update");
+    expect(others).toHaveLength(0);
+    expect(update[0].text).toBe(
+      'update "supporter_members" set "patreon_discord_id" = $1, "version" = $2 where "supporter_members"."id" = $3',
+    );
+    expect(update[1]).toEqual([staff.id, 5, memberId]);
     expect(differs.calls('insert into "supporter_actions"')).toHaveLength(0);
     const same = fixture();
     same.state.observed = false;
@@ -264,8 +279,46 @@ describe("Patreon API import persistence", () => {
     expect(await used.store.importApiMember(campaign, snapshot({ discordId: staff.id }), at)).toMatchObject({
       discordLinked: false,
       conflict: "discord-in-use",
+      patreonDiscordChanged: true,
     });
-    expect(used.calls("update")).toHaveLength(0);
+    const [recorded] = used.calls("update");
+    expect(recorded[0].text).not.toContain('"discord_id" =');
+    expect(recorded[0].text).not.toContain('"discord_source"');
+    expect(recorded[1]).toEqual([staff.id, 5, memberId]);
+  });
+  it("writes nothing when Patreon still reports the account it reported before", async () => {
+    const { store, state, calls } = fixture();
+    state.observed = false;
+    state.payments = [payment()];
+    Object.assign(state.member, { discordId: staff.id, discordSource: "patreon", patreonDiscordId: staff.id });
+    expect(await store.importApiMember(campaign, snapshot({ discordId: staff.id }), at)).toMatchObject({
+      updated: false,
+      patreonDiscordChanged: false,
+    });
+    expect(calls("update")).toHaveLength(0);
+  });
+  it("clears what Patreon reports when the patron disconnects Discord, but keeps the link", async () => {
+    const { store, state, calls } = fixture();
+    state.observed = false;
+    state.payments = [payment()];
+    Object.assign(state.member, { discordId: staff.id, discordSource: "patreon", patreonDiscordId: staff.id });
+    expect(await store.importApiMember(campaign, snapshot({ discordId: null }), at)).toMatchObject({
+      patreonDiscordChanged: true,
+      discordId: staff.id,
+    });
+    const [update] = calls("update");
+    expect(update[0].text).not.toContain('"discord_id" =');
+    expect(update[1]).toEqual([null, 5, memberId]);
+  });
+  it("never clears what Patreon reported when its answer could not be read", async () => {
+    const { store, state, calls } = fixture();
+    state.observed = false;
+    state.payments = [payment()];
+    Object.assign(state.member, { discordId: staff.id, discordSource: "patreon", patreonDiscordId: staff.id });
+    expect(await store.importApiMember(campaign, snapshot({ discordId: null, discordKnown: false }), at)).toMatchObject(
+      { patreonDiscordChanged: false },
+    );
+    expect(calls("update")).toHaveLength(0);
   });
   it("keeps webhook ordering rules: an older API charge does not replace newer webhook state", async () => {
     const { store, state, calls } = fixture();
@@ -319,16 +372,26 @@ describe("Patreon API import persistence", () => {
     expect(text).toContain("x.paid_at < f.window_end + interval '36 hours'");
     expect(text).toContain('unverified.id AS "unverifiedPaymentId", unverified.reference AS "unverifiedReference"');
   });
+  it("also lists a founder whose own payment is no longer marked as the first payment", async () => {
+    const { store, query } = fixture();
+    await store.founderReviews(campaign);
+    const text = query.mock.calls[0][0].text;
+    expect(text).toContain("OR (x.id = f.payment_id AND NOT x.first_successful_payment_verified)");
+    expect(text).toContain("ELSE 'not_first_payment' END AS review_reason");
+    expect(text).toContain('unverified.review_reason AS "reviewReason"');
+  });
 });
 
 describe("founder eligibility for authenticated Patreon payments", () => {
   it("lists a verified first patreon_api payment like a manual receipt, ignoring only earlier webhook status rows", async () => {
     const { store, query } = fixture();
     await store.list(campaign, policy);
-    const text = query.mock.calls[0][0].text;
-    expect(text).toContain("p.source IN ('manual_receipt', 'patreon_api') AND p.verification_state = 'verified'");
-    expect(text).toContain("AND p.first_successful_payment_verified AND NOT EXISTS");
-    expect(text).toContain("AND (p.source = 'manual_receipt' OR earlier.source <> 'signed_status')");
+    const [statement, values] = query.mock.calls[0];
+    // One provider-neutral rule: every qualifying source is a bound parameter.
+    expect(statement.text).toMatch(/p\.source IN \(\$\d+, \$\d+, \$\d+\) AND p\.verification_state = 'verified'/);
+    expect(values).toEqual(expect.arrayContaining(["manual_receipt", "patreon_api", "paypal"]));
+    expect(statement.text).toContain("AND p.first_successful_payment_verified AND NOT EXISTS");
+    expect(statement.text).toContain("AND (p.source <> 'patreon_api' OR earlier.source <> 'signed_status')");
   });
   it("lists a staff receipt despite the earlier imported copy of its own charge, and prefers the receipt", async () => {
     const { store, query } = fixture();
@@ -404,7 +467,7 @@ describe("founder eligibility for authenticated Patreon payments", () => {
     state.copy = { id: randomUUID(), verification_state: "unverified" };
     await expect(
       store.mutate(memberId, founder(state.payments[0].id as string), staff, campaign, policy),
-    ).rejects.toMatchObject({ status: 409 });
+    ).rejects.toMatchObject({ status: 409, response: { blockedReason: "not_verified" } });
     expect(calls('insert into "supporter_founders"')).toHaveLength(0);
     expect(query.mock.calls.at(-1)![0].text).toBe("rollback");
   });
@@ -424,11 +487,18 @@ describe("founder eligibility for authenticated Patreon payments", () => {
     expect(calls('insert into "supporter_founders"')).toHaveLength(0);
     expect(query.mock.calls.at(-1)![0].text).toBe("rollback");
   });
-  it("keeps today's identity requirement: a Patreon-filled Discord ID alone is not enough", async () => {
-    const { store, state } = linked("patreon_api");
-    state.member.steamId = null;
+  it("applies the provider-neutral identity rule: a Patreon-filled Discord ID is enough, no identity is not", async () => {
+    const discordOnly = linked("patreon_api");
+    discordOnly.state.member.steamId = null;
     await expect(
-      store.mutate(memberId, founder(state.payments[0].id as string), staff, campaign, policy),
-    ).rejects.toMatchObject({ status: 409 });
+      discordOnly.store.mutate(memberId, founder(discordOnly.state.payments[0].id as string), staff, campaign, policy),
+    ).resolves.toMatchObject({ ok: true, replayed: false });
+    expect(discordOnly.calls('insert into "supporter_founders"')).toHaveLength(1);
+    const unlinked = linked("patreon_api");
+    Object.assign(unlinked.state.member, { discordId: null, steamId: null });
+    await expect(
+      unlinked.store.mutate(memberId, founder(unlinked.state.payments[0].id as string), staff, campaign, policy),
+    ).rejects.toMatchObject({ status: 409, response: { blockedReason: "no_identity" } });
+    expect(unlinked.calls('insert into "supporter_founders"')).toHaveLength(0);
   });
 });

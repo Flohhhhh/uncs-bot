@@ -34,9 +34,14 @@ export const reviewSchema = z
         (value) => [...value].every((character) => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127),
         "Use a single-line reason.",
       ),
+    // Approval only: staff confirmed this Discord member owns a SteamID that is already whitelisted.
+    existingAccessConfirmed: z.literal(true).optional(),
   })
   .strict();
 export type ApplicationReview = z.infer<typeof reviewSchema>;
+export type ReviewKind = "approve" | "decline" | "recheck" | "revoke";
+/** Live whitelist state shown to staff for unresolved requests; null for resolved ones. */
+export type WhitelistState = "active" | "saved" | "absent" | "unknown" | null;
 
 export function ownApplication(application: WhitelistApplication | undefined | null) {
   if (!application) return null;
@@ -52,7 +57,8 @@ export function ownApplication(application: WhitelistApplication | undefined | n
     consentVersion: application.consentVersion,
     contactConsentAt: application.contactConsentAt,
     rulesAcceptedAt: application.rulesAcceptedAt,
-    status: application.status,
+    // A revocation in progress looks like any other staff action in progress to the applicant.
+    status: application.status === "revoking" ? "processing" : application.status,
     submittedAt: application.submittedAt,
     updatedAt: application.updatedAt,
   };

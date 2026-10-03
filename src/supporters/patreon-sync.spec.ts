@@ -1,4 +1,8 @@
 import { Logger } from "@nestjs/common";
+import type { DiscordRolesDiscord, RoleMember } from "../discord-roles/discord-roles.discord";
+import { DiscordRolesService } from "../discord-roles/discord-roles.service";
+import type { DiscordRolesStore } from "../discord-roles/discord-roles.store";
+import type { RoleCheckView } from "../discord-roles/discord-roles.types";
 import { Env } from "../env/env";
 import type { EnvService } from "../env/env.service";
 import {
@@ -10,6 +14,7 @@ import {
   type PatreonPledgeEvent,
 } from "./patreon.client";
 import { PATREON_SYNC_STARTUP_DELAY_MS, PatreonSyncService } from "./patreon-sync.service";
+import type { SupporterMatchService } from "./supporter-match.service";
 import type { ApiImportResult, SupportersStore } from "./supporters.store";
 
 const token = "creator-token-PRIVATE-0123456789abcdef";
@@ -80,9 +85,14 @@ const imported = (overrides: Partial<ApiImportResult> = {}): ApiImportResult => 
   revoked: 0,
   discordLinked: false,
   conflict: null,
+  discordId: null,
+  patreonDiscordChanged: false,
   ...overrides,
 });
-function fixture(overrides: Record<string, unknown> = {}) {
+function fixture(
+  overrides: Record<string, unknown> = {},
+  roles: Pick<DiscordRolesService, "supporterChanged"> = { supporterChanged: jest.fn() },
+) {
   const values: Record<string, unknown> = {
     PATREON_ENABLED: true,
     PATREON_CAMPAIGN_ID: campaign,
@@ -95,12 +105,15 @@ function fixture(overrides: Record<string, unknown> = {}) {
     importApiMember: jest.fn().mockResolvedValue(imported()),
     founderReviews: jest.fn().mockResolvedValue([]),
   };
+  const match = { sweep: jest.fn(async (_trigger: string) => undefined) };
   const service = new PatreonSyncService(
     new PatreonClient(),
     store as unknown as SupportersStore,
     { get: (key: string) => values[key] } as EnvService,
+    roles as DiscordRolesService,
+    match as unknown as SupporterMatchService,
   );
-  return { service, store };
+  return { service, store, roles, match };
 }
 let fetchMock: jest.SpyInstance;
 let warn: jest.SpyInstance;
@@ -116,8 +129,8 @@ afterEach(() => {
   jest.useRealTimers();
   jest.restoreAllMocks();
 });
-function tracked(overrides: Record<string, unknown> = {}) {
-  const result = fixture(overrides);
+function tracked(overrides: Record<string, unknown> = {}, roles?: Pick<DiscordRolesService, "supporterChanged">) {
+  const result = fixture(overrides, roles);
   services.push(result.service);
   return result;
 }
@@ -176,6 +189,7 @@ describe("Patreon API client", () => {
       lastChargeStatus: "Paid",
       lastChargeAt: new Date("2026-10-01T12:00:00Z"),
       discordId,
+      discordKnown: true,
       events: [
         {
           id: "pledge_start:1",
@@ -199,11 +213,41 @@ describe("Patreon API client", () => {
     const { members } = await new PatreonClient().members(campaign, token);
     expect(members[0].displayName).toBe(expected);
   });
-  it("ignores a malformed Discord connection instead of linking it", async () => {
+  it("ignores a malformed Discord connection instead of linking it, and reports it as unknown", async () => {
     fetchMock.mockResolvedValueOnce(
       json(page([member("member-1", [], { user: "user-1" })], [user("user-1", { user_id: "not-a-snowflake" })])),
     );
-    expect((await new PatreonClient().members(campaign, token)).members[0].discordId).toBeNull();
+    expect((await new PatreonClient().members(campaign, token)).members[0]).toMatchObject({
+      discordId: null,
+      discordKnown: false,
+    });
+  });
+  it.each([
+    ["no Discord connection", [user("user-1", null)], { discordId: null, discordKnown: true }],
+    [
+      "a Discord connection without an ID",
+      [user("user-1", { user_id: null })],
+      { discordId: null, discordKnown: true },
+    ],
+    [
+      "no connections at all",
+      [{ id: "user-1", type: "user", attributes: { social_connections: null } }],
+      { discordId: null, discordKnown: true },
+    ],
+    [
+      "connections left out of the response",
+      [{ id: "user-1", type: "user", attributes: {} }],
+      { discordId: null, discordKnown: false },
+    ],
+    [
+      "malformed connections",
+      [{ id: "user-1", type: "user", attributes: { social_connections: "discord" } }],
+      { discordId: null, discordKnown: false },
+    ],
+    ["a user missing from the response", [], { discordId: null, discordKnown: false }],
+  ])("tells a disconnected Discord from an unreadable one: %s", async (_name, included, expected) => {
+    fetchMock.mockResolvedValueOnce(json(page([member("member-1", [], { user: "user-1" })], included)));
+    expect((await new PatreonClient().members(campaign, token)).members[0]).toMatchObject(expected);
   });
   it.each([
     ["a non-member resource", page([{ ...member("member-1"), type: "user" }])],
@@ -321,7 +365,16 @@ describe("first successful payment derivation", () => {
     expect(firstPaidEventId([at("pledge_start:1", "2026-10-01T00:00:00Z", "Declined"), paid], true)).toBe(
       "subscription:2",
     );
-    for (const status of ["Refunded", "Partially Refunded", "Fraud", "Refunded by Patreon"])
+    // A declined refund still means an earlier charge was taken.
+    for (const status of [
+      "Refunded",
+      "Partially Refunded",
+      "Fraud",
+      "Refunded by Patreon",
+      "Refund Pending",
+      "Refund Declined",
+      "Other",
+    ])
       expect(firstPaidEventId([at("pledge_start:1", "2026-10-01T00:00:00Z", status), paid], true)).toBeNull();
     expect(firstPaidEventId([paid, at("subscription:3", "2026-10-02T00:00:00Z", "Paid")], true)).toBeNull();
     expect(firstPaidEventId([], true)).toBeNull();
@@ -363,6 +416,154 @@ describe("Patreon sync worker", () => {
     expect(status.lastSuccessAt).not.toBeNull();
     expect(store.founderReviews).toHaveBeenCalledWith(campaign);
     expectNoToken();
+  });
+  it("runs automatic supporter matching after the import and before the founder reviews, without changing the status", async () => {
+    const { service, store, match } = tracked();
+    fetchMock.mockResolvedValueOnce(onePage());
+    match.sweep.mockImplementationOnce(async () => {
+      throw new Error("never rejects in production");
+    });
+    const failing = await service.sync();
+    // A sweep failure is reported by the match service, never as a failed sync.
+    expect(failing).toMatchObject({ lastError: expect.any(String) });
+    fetchMock.mockResolvedValueOnce(onePage());
+    match.sweep.mockResolvedValueOnce(undefined);
+    jest.spyOn(Date, "now").mockReturnValue(Date.now() + 60_000);
+    const status = await service.sync();
+    expect(status).toMatchObject({ lastError: null, members: 1 });
+    expect(match.sweep).toHaveBeenLastCalledWith("sync");
+    const order = (mock: jest.Mock) => mock.mock.invocationCallOrder.at(-1)!;
+    expect(order(store.importApiMember)).toBeLessThan(order(match.sweep));
+    expect(order(match.sweep)).toBeLessThan(order(store.founderReviews));
+  });
+  it("skips automatic matching after a failed import or a shutdown mid-sync", async () => {
+    const failed = tracked();
+    fetchMock.mockResolvedValueOnce(json({}, { status: 503 }));
+    await failed.service.sync();
+    expect(failed.match.sweep).not.toHaveBeenCalled();
+    const stopped = tracked();
+    fetchMock.mockResolvedValueOnce(onePage());
+    stopped.store.importApiMember.mockImplementationOnce(async () => {
+      stopped.service.onModuleDestroy();
+      return imported();
+    });
+    await stopped.service.sync();
+    expect(stopped.match.sweep).not.toHaveBeenCalled();
+    expect(stopped.store.founderReviews).not.toHaveBeenCalled();
+  });
+  it("asks the role service to check linked Discord accounts whose supporter record changed", async () => {
+    const { service, store, roles } = tracked();
+    store.importApiMember.mockResolvedValueOnce(imported({ discordLinked: true, discordId }));
+    fetchMock.mockResolvedValueOnce(onePage());
+    await service.sync();
+    expect(roles.supporterChanged).toHaveBeenCalledTimes(1);
+    expect(roles.supporterChanged).toHaveBeenCalledWith(discordId);
+    // A changed status on a record staff already linked can start or end support for the Supporter role.
+    const linked = "223456789012345678";
+    store.importApiMember.mockResolvedValueOnce(
+      imported({ created: false, updated: true, payments: 0, discordId: linked, conflict: "discord-differs" }),
+    );
+    fetchMock.mockResolvedValueOnce(onePage());
+    await service.sync();
+    expect(roles.supporterChanged).toHaveBeenCalledTimes(2);
+    expect(roles.supporterChanged).toHaveBeenLastCalledWith(linked);
+    // An unchanged record, or a changed one without a linked Discord account, queues nothing.
+    store.importApiMember.mockResolvedValueOnce(imported({ created: false, payments: 0, discordId: linked }));
+    fetchMock.mockResolvedValueOnce(onePage());
+    await service.sync();
+    store.importApiMember.mockResolvedValueOnce(imported({ discordLinked: false, conflict: "discord-in-use" }));
+    fetchMock.mockResolvedValueOnce(onePage());
+    await service.sync();
+    expect(roles.supporterChanged).toHaveBeenCalledTimes(2);
+  });
+  it("keeps importing when the role service throws", async () => {
+    const roles = {
+      supporterChanged: jest.fn(() => {
+        throw new Error("role queue unavailable");
+      }),
+    };
+    const { service, store } = tracked({}, roles);
+    store.importApiMember.mockResolvedValueOnce(imported({ discordLinked: true, discordId }));
+    fetchMock.mockResolvedValueOnce(onePage());
+    expect(await service.sync()).toMatchObject({ lastError: null, discordLinks: 1 });
+    expect(roles.supporterChanged).toHaveBeenCalledWith(discordId);
+  });
+  it("gives the Founder role to a Patreon API founder whose Discord ID the sync linked", async () => {
+    const guild = "100000000000000001";
+    const founderRole = "200000000000000002";
+    // The supporter was awarded on an imported payment before Patreon reported their Discord account, so the
+    // role service only learns who they are from the sync's link.
+    const roleStore = {
+      desired: jest.fn(async (users?: string[]) => ({
+        member: new Map<string, string>(),
+        founder: new Map(users?.includes(discordId) ? [[discordId, "patreon-api-founder"]] : []),
+      })),
+      revokedBasis: jest.fn(async () => new Map<string, string>()),
+      lastEffective: jest.fn(async () => null),
+      begin: jest.fn(async () => "role-action-1"),
+      finish: jest.fn(async () => undefined),
+    };
+    const view = (id: string | null, assignable: boolean): RoleCheckView => ({
+      id,
+      name: assignable ? "Founder" : null,
+      exists: assignable,
+      position: 1,
+      managed: false,
+      privileged: false,
+      staffRole: false,
+      assignable,
+      problem: assignable ? null : "Not configured.",
+    });
+    const discordMember = {
+      id: discordId,
+      joinedAt: new Date(Date.now() - 86_400_000),
+      has: () => false,
+      add: jest.fn(async () => undefined),
+      remove: jest.fn(async () => undefined),
+    } satisfies RoleMember;
+    const discord = {
+      ready: () => true,
+      check: jest.fn(async () => ({
+        manageRoles: true,
+        highestRolePosition: 9,
+        roles: { member: view(null, false), founder: view(founderRole, true) },
+      })),
+      member: jest.fn(async (_guild: string, userId: string) => (userId === discordId ? discordMember : null)),
+    };
+    const settings: Record<string, unknown> = {
+      DISCORD_ROLES_ENABLED: true,
+      ADMIN_GUILD_ID: guild,
+      DISCORD_FOUNDER_ROLE_ID: founderRole,
+    };
+    const roles = new DiscordRolesService(
+      roleStore as unknown as DiscordRolesStore,
+      discord as unknown as DiscordRolesDiscord,
+      { get: (key: string) => settings[key] } as unknown as EnvService,
+    );
+    try {
+      const { service, store } = tracked({}, roles);
+      store.importApiMember.mockResolvedValueOnce(
+        imported({ created: false, payments: 0, discordLinked: true, discordId }),
+      );
+      fetchMock.mockResolvedValueOnce(onePage());
+      await service.sync();
+      await roles.tick();
+      expect(roleStore.desired).toHaveBeenCalledWith([discordId]);
+      expect(discordMember.add).toHaveBeenCalledWith(founderRole, "Gramps: founding supporter");
+      expect(roleStore.begin).toHaveBeenCalledWith(
+        expect.objectContaining({
+          discordUserId: discordId,
+          roleKind: "founder",
+          roleId: founderRole,
+          operation: "add",
+          basisType: "founder",
+          basisId: "patreon-api-founder",
+        }),
+      );
+      expect(roleStore.finish).toHaveBeenCalledWith("role-action-1", "applied", true, "Role added.");
+    } finally {
+      roles.onModuleDestroy();
+    }
   });
   it("reports Discord conflicts and incomplete histories without failing the sync", async () => {
     const { service, store } = tracked();

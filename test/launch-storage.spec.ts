@@ -7,9 +7,15 @@ import { setTimeout as delay } from "node:timers/promises";
 import * as schema from "../src/database/schema";
 import { ApplicationsStore } from "../src/applications/applications.store";
 import { SupportersStore } from "../src/supporters/supporters.store";
+import {
+  SupporterMatchStore,
+  type AutoMatchOptions,
+  type AutoMatchResult,
+} from "../src/supporters/supporter-match.store";
 import type {
   FounderPolicy,
   ManualMemberInput,
+  PaypalInput,
   SupporterMutation,
   SupporterView,
 } from "../src/supporters/supporters.types";
@@ -21,6 +27,7 @@ import { ServerEventsStore } from "../src/server-events/server-events.store";
 import { eventFixture, eventStaff, voteEventFixture } from "../src/server-events/event-fixtures";
 import { operation } from "../src/server-events/event-planner";
 import { TelemetryStore } from "../src/telemetry/telemetry.store";
+import { DiscordRolesStore } from "../src/discord-roles/discord-roles.store";
 import { parseFeed } from "../src/telemetry/telemetry.types";
 import { defaultVotingPolicy, defaultVotingSettings } from "../src/common/voting-policy";
 
@@ -31,11 +38,16 @@ describe("launch storage on isolated PostgreSQL", () => {
   let workers: ReturnType<typeof worker>[] = [];
   let initialized = false;
   let supporters: SupportersStore;
+  let match: SupporterMatchStore;
   let applications: ApplicationsStore;
   let admin: AdminStore;
   let votes: MapVotesStore;
   let events: ServerEventsStore;
+  let roles: DiscordRolesStore;
+  let migratedApplicationAccess: unknown[] | undefined;
   let migratedLegacyData: Record<string, unknown[]>;
+  let migratedSupporterData: unknown[] | undefined;
+  const legacySupporterId = randomUUID();
   const legacyApplicationId = randomUUID();
   const legacyServerInstanceId = randomUUID();
   const legacyEventId = randomUUID();
@@ -46,6 +58,7 @@ describe("launch storage on isolated PostgreSQL", () => {
     return {
       pool,
       supporters: new SupportersStore(db),
+      match: new SupporterMatchStore(db),
       applications: new ApplicationsStore(db),
       votes: new MapVotesStore(db),
       events: new ServerEventsStore(db),
@@ -100,6 +113,7 @@ describe("launch storage on isolated PostgreSQL", () => {
     currency: "USD",
     startsAt: "2026-09-30T04:00:00.000Z",
     endsAt: "2026-10-15T04:00:00.000Z",
+    source: "SUPPORTER_FOUNDER",
   };
   const memberInput = (patreonMemberId = "sample-member"): ManualMemberInput => ({
     id: randomUUID(),
@@ -111,7 +125,7 @@ describe("launch storage on isolated PostgreSQL", () => {
   const review = (record: SupporterView) => ({
     id: randomUUID(),
     version: record.version,
-    confirm: record.patreonMemberId,
+    confirm: record.confirmKey,
     reason: "Reviewed fictional evidence",
   });
   async function register(name?: string) {
@@ -161,6 +175,7 @@ describe("launch storage on isolated PostgreSQL", () => {
     lastChargeStatus: "Paid",
     lastChargeAt: events.at(-1)?.date ?? null,
     discordId: null,
+    discordKnown: true,
     events,
     historyComplete,
   });
@@ -220,8 +235,38 @@ describe("launch storage on isolated PostgreSQL", () => {
           [legacyFirstReceivedAt, legacyLastReceivedAt],
         );
       }
+      if (file.startsWith("0005_")) {
+        // Supporter records written before the provider-neutral ledger must stay valid Patreon records.
+        await client.query(
+          `INSERT INTO supporter_members (id, campaign_id, patreon_member_id, display_name, observed_at, discord_id,
+             steam_id)
+           VALUES ($1, '999001', 'legacy-member', 'Legacy supporter', $2, $3, '76561198000000001')`,
+          [legacySupporterId, legacyFirstReceivedAt, staff.id],
+        );
+        await client.query(
+          `INSERT INTO supporter_payments (id, member_id, campaign_id, paid_at, amount_cents, currency, source,
+             reference, verification_state, first_successful_payment_verified, verified_by, recorded_at)
+           VALUES (gen_random_uuid(), $1, '999001', $2, 500, 'USD', 'manual_receipt', 'legacy-receipt',
+             'verified', true, $3, $2)`,
+          [legacySupporterId, legacyFirstReceivedAt, staff.id],
+        );
+      }
       await client.query(await readFile(join(directory, file), "utf8"));
     }
+    migratedApplicationAccess = (
+      await client.query(
+        "SELECT status, access_intent, whitelist_grant, revoked_at FROM whitelist_applications WHERE id = $1",
+        [legacyApplicationId],
+      )
+    ).rows;
+    migratedSupporterData = (
+      await client.query(
+        `SELECT m.provider, m.campaign_id, m.patreon_member_id, m.discord_source, m.patreon_discord_id,
+        m.steam_source, m.steam_application_id, p.source, p.minimum_confirmed,
+        p.recorded_by FROM supporter_members m JOIN supporter_payments p ON p.member_id = m.id WHERE m.id = $1`,
+        [legacySupporterId],
+      )
+    ).rows;
     migratedLegacyData = {
       applications: (
         await client.query("SELECT id, server_id, discord_user_id, steam_id, email, status FROM whitelist_applications")
@@ -232,10 +277,12 @@ describe("launch storage on isolated PostgreSQL", () => {
     };
     const db = drizzle({ client, schema });
     supporters = new SupportersStore(db);
+    match = new SupporterMatchStore(db);
     applications = new ApplicationsStore(db);
     admin = new AdminStore(db);
     votes = new MapVotesStore(db);
     events = new ServerEventsStore(db);
+    roles = new DiscordRolesStore(db);
     workers = ["a", "b"].map((name) =>
       worker(new Pool({ ...connection, max: 1, application_name: `uncs_launch_worker_${name}` })),
     );
@@ -244,7 +291,7 @@ describe("launch storage on isolated PostgreSQL", () => {
   beforeEach(async () => {
     if (!initialized) return;
     await client.query(
-      "TRUNCATE combat_events, combat_tracking, server_event_operations, server_events, map_vote_ballots, map_votes, map_vote_policies, supporter_actions, supporter_founders, supporter_payments, supporter_observations, supporter_members, whitelist_application_reviews, whitelist_applications, admin_actions, admin_sessions CASCADE",
+      "TRUNCATE combat_events, combat_tracking, server_event_operations, server_events, map_vote_ballots, map_votes, map_vote_policies, discord_role_actions, supporter_actions, supporter_founders, supporter_payments, supporter_observations, supporter_members, whitelist_application_reviews, whitelist_applications, admin_actions, admin_sessions CASCADE",
     );
   });
   afterAll(async () => {
@@ -279,6 +326,99 @@ describe("launch storage on isolated PostgreSQL", () => {
           last_cleanup_at: legacyLastReceivedAt,
         },
       ],
+    });
+  });
+
+  it("keeps applications from before revocation support as granted, unrevoked records", () => {
+    expect(migratedApplicationAccess).toEqual([
+      { status: "approved", access_intent: "grant", whitelist_grant: null, revoked_at: null },
+    ]);
+  });
+
+  it("keeps supporter records from before the provider-neutral ledger as Patreon records", () => {
+    expect(migratedSupporterData).toEqual([
+      {
+        provider: "patreon",
+        campaign_id: "999001",
+        patreon_member_id: "legacy-member",
+        // Links made before sources were recorded stay unclassified until the startup classification runs.
+        discord_source: null,
+        patreon_discord_id: null,
+        steam_source: null,
+        steam_application_id: null,
+        source: "manual_receipt",
+        minimum_confirmed: false,
+        recorded_by: null,
+      },
+    ]);
+  });
+
+  it("rejects identity sources that do not match the record's identities or provider", async () => {
+    const insert = (values: {
+      provider?: "patreon" | "paypal";
+      discordId?: string | null;
+      discordSource?: string | null;
+      patreonDiscordId?: string | null;
+      steamId?: string | null;
+      steamSource?: string | null;
+      steamApplicationId?: string | null;
+    }) => {
+      const provider = values.provider ?? "patreon";
+      return client.query(
+        `INSERT INTO supporter_members (id, provider, campaign_id, patreon_member_id, observed_at, discord_id,
+           discord_source, patreon_discord_id, steam_id, steam_source, steam_application_id)
+         VALUES ($1, $2, $3, $4, now(), $5, $6, $7, $8, $9, $10)`,
+        [
+          randomUUID(),
+          provider,
+          provider === "patreon" ? campaign : null,
+          provider === "patreon" ? randomUUID() : null,
+          values.discordId ?? null,
+          values.discordSource ?? null,
+          values.patreonDiscordId ?? null,
+          values.steamId ?? null,
+          values.steamSource ?? null,
+          values.steamApplicationId ?? null,
+        ],
+      );
+    };
+    const discordSource = "supporter_members_discord_source_check",
+      steamSource = "supporter_members_steam_source_check",
+      steamApplication = "supporter_members_steam_application_check",
+      patreonDiscord = "supporter_members_patreon_discord_check";
+    for (const [values, constraint] of [
+      [{ discordSource: "staff" }, discordSource],
+      [{ discordId: staff.id, discordSource: "someone" }, discordSource],
+      [{ provider: "paypal", discordId: staff.id, discordSource: "patreon" }, discordSource],
+      [{ steamSource: "staff" }, steamSource],
+      [
+        {
+          provider: "paypal",
+          steamId: "76561198000000001",
+          steamSource: "application",
+          steamApplicationId: randomUUID(),
+        },
+        steamSource,
+      ],
+      [{ steamId: "76561198000000001", steamSource: "application" }, steamApplication],
+      [{ steamId: "76561198000000001", steamSource: "staff", steamApplicationId: randomUUID() }, steamApplication],
+      [{ provider: "paypal", patreonDiscordId: staff.id }, patreonDiscord],
+    ] as const)
+      await expect(insert(values)).rejects.toMatchObject({ code: "23514", constraint });
+    await insert({
+      discordId: staff.id,
+      discordSource: "patreon",
+      patreonDiscordId: staff.id,
+      steamId: "76561198000000001",
+      steamSource: "application",
+      steamApplicationId: randomUUID(),
+    });
+    await insert({
+      provider: "paypal",
+      discordId: staff.id,
+      discordSource: "staff",
+      steamId: "76561198000000002",
+      steamSource: "staff",
     });
   });
 
@@ -972,7 +1112,7 @@ describe("launch storage on isolated PostgreSQL", () => {
     const observation = {
       hash: "c".repeat(64),
       campaignId: campaign,
-      patreonMemberId: record.patreonMemberId,
+      patreonMemberId: record.patreonMemberId!,
       displayName: null,
       patronStatus: "former_patron",
       lastChargeStatus: null,
@@ -980,7 +1120,12 @@ describe("launch storage on isolated PostgreSQL", () => {
       receivedAt: new Date(),
       trigger: "members:delete",
     };
-    expect(await supporters.ingest(observation)).toEqual({ duplicate: false });
+    // A new observation reports the linked Discord account so its roles can be checked.
+    expect(await supporters.ingest(observation)).toEqual({
+      duplicate: false,
+      memberId: record.id,
+      discordId: staff.id,
+    });
     expect(await supporters.ingest(observation)).toEqual({ duplicate: true });
     const saved = await supporters.get(record.id, campaign, policy);
     expect(saved).toMatchObject({
@@ -1006,7 +1151,7 @@ describe("launch storage on isolated PostgreSQL", () => {
         receivedAt: new Date("2026-09-30T12:00:05.000Z"),
         trigger: "members:pledge:create",
       }),
-    ).toEqual({ duplicate: false });
+    ).toEqual({ duplicate: false, memberId: created.id, discordId: staff.id });
     let record = await payment(
       (await supporters.get(created.id, campaign, policy))!,
       "2026-10-01T12:00:00.000Z",
@@ -1050,6 +1195,7 @@ describe("launch storage on isolated PostgreSQL", () => {
       lastChargeStatus: "Paid",
       lastChargeAt: new Date("2026-09-30T12:00:00.000Z"),
       discordId: staff.id,
+      discordKnown: true,
       events: [
         {
           id: "pledge_start:1001",
@@ -1076,8 +1222,11 @@ describe("launch storage on isolated PostgreSQL", () => {
     let [record] = await supporters.list(campaign, policy, undefined, "api-member");
     expect(record).toMatchObject({
       discordId: staff.id,
+      discordSource: "patreon",
+      patreonDiscordId: staff.id,
       steamId: null,
-      identityState: "unlinked",
+      steamSource: null,
+      identityState: "partial",
       reviewState: "pending",
       founderEligiblePayment: {
         source: "patreon_api",
@@ -1100,6 +1249,8 @@ describe("launch storage on isolated PostgreSQL", () => {
         policy,
       )
     ).supporter!;
+    // Resending the Discord ID Patreon filled in keeps it a Patreon link; only the new SteamID is a staff link.
+    expect(record).toMatchObject({ identityState: "patreon_linked", discordSource: "patreon", steamSource: "staff" });
     record = (
       await supporters.mutate(
         record.id,
@@ -1167,6 +1318,7 @@ describe("launch storage on isolated PostgreSQL", () => {
         paymentId: receipt.id,
         paymentSource: "manual_receipt",
         reference: "receipt-2001",
+        reviewReason: "unverified",
         unverifiedPaymentId: copy.id,
         unverifiedReference: "pledge_start:2001",
       },
@@ -1266,6 +1418,56 @@ describe("launch storage on isolated PostgreSQL", () => {
     },
   );
 
+  it("awards a Patreon API founder on the Discord ID the import linked and gives them the Founder role basis", async () => {
+    const patron = "678901234567890123";
+    const snapshot: PatreonMemberSnapshot = {
+      ...apiMember("sync-founder", [charge("pledge_start:7001", "2026-10-01T12:00:00.000Z")], true),
+      discordId: patron,
+    };
+    expect(await supporters.importApiMember(campaign, snapshot, new Date())).toMatchObject({
+      created: true,
+      payments: 1,
+      discordLinked: true,
+    });
+    let [record] = await supporters.list(campaign, policy, undefined, "sync-founder");
+    // Patreon supplied the Discord ID; staff linked nothing. One linked identity is enough for every provider.
+    expect(record).toMatchObject({
+      discordId: patron,
+      steamId: null,
+      founderBlockedReason: null,
+      founderEligiblePayment: {
+        source: "patreon_api",
+        reference: "pledge_start:7001",
+        firstSuccessfulPaymentVerified: true,
+        recordedBy: "system:patreon-sync",
+      },
+    });
+    expect((await roles.desired([patron])).founder.size).toBe(0);
+    record = (
+      await supporters.mutate(
+        record.id,
+        { ...review(record), kind: "founder", paymentId: record.founderEligiblePayment!.id },
+        staff,
+        campaign,
+        policy,
+      )
+    ).supporter!;
+    expect(record).toMatchObject({ founder: { source: "patreon_api" }, needsDiscordLink: false });
+    expect((await roles.desired([patron])).founder).toEqual(new Map([[patron, record.id]]));
+    expect(await roles.foundersWithoutDiscord()).toEqual([]);
+    expect(
+      (
+        await client.query<{ actor_id: string; kind: string }>(
+          "SELECT actor_id, kind FROM supporter_actions WHERE member_id = $1 ORDER BY created_at",
+          [record.id],
+        )
+      ).rows,
+    ).toEqual([
+      { actor_id: "system:patreon-sync", kind: "patreon-discord-link" },
+      { actor_id: staff.id, kind: "founder" },
+    ]);
+  });
+
   it("rolls back duplicate payment receipts and stale reviews without advancing the member", async () => {
     const original = await register("first-member");
     await payment(original, policy.startsAt!, "receipt-same");
@@ -1278,6 +1480,996 @@ describe("launch storage on isolated PostgreSQL", () => {
     expect((await client.query("SELECT kind FROM supporter_actions WHERE member_id = $1", [other.id])).rows).toEqual([
       { kind: "manual-member" },
     ]);
+  });
+
+  const paypalDonor = "345678901234567890";
+  const paypalInput = (overrides: Partial<PaypalInput> = {}): PaypalInput => ({
+    id: randomUUID(),
+    displayName: "Fictional PayPal donor",
+    discordId: paypalDonor,
+    paidAt: new Date("2026-10-01T16:00:00.000Z"),
+    amountCents: 500,
+    currency: "USD",
+    transactionId: "8AB12345CD678901E",
+    completedPaymentVerified: true,
+    firstSuccessfulPaymentVerified: true,
+    minimumConfirmed: false,
+    awardFounder: false,
+    reason: "Checked a fictional completed PayPal payment",
+    ...overrides,
+  });
+  async function supporterCounts() {
+    return (
+      await client.query(`SELECT (SELECT count(*)::int FROM supporter_members) AS members,
+        (SELECT count(*)::int FROM supporter_payments) AS payments,
+        (SELECT count(*)::int FROM supporter_actions) AS actions,
+        (SELECT count(*)::int FROM supporter_founders) AS founders`)
+    ).rows[0];
+  }
+
+  it("records a PayPal founder with only a Discord link and lists PayPal rows without a Patreon campaign", async () => {
+    const result = await supporters.recordPaypal(paypalInput({ awardFounder: true }), staff, null, policy);
+    expect(result).toMatchObject({
+      ok: true,
+      replayed: false,
+      founder: { awarded: true, eligible: true, blockedReason: null },
+      payment: {
+        source: "paypal",
+        reference: "8AB12345CD678901E",
+        amountCents: 500,
+        currency: "USD",
+        verificationState: "verified",
+        minimumConfirmed: false,
+        recordedBy: staff.id,
+      },
+      supporter: {
+        provider: "paypal",
+        patreonMemberId: null,
+        discordId: paypalDonor,
+        steamId: null,
+        reviewState: "verified",
+        version: 1,
+        founderBlockedReason: null,
+        needsDiscordLink: false,
+      },
+    });
+    expect(result.supporter.confirmKey).toBe(result.supporter.id);
+    expect(result.supporter.founder).toMatchObject({ paymentId: result.payment.id, source: "paypal" });
+    expect(result.supporter.payments).toMatchObject([{ id: result.payment.id, source: "paypal" }]);
+    const patreonRecord = await register();
+    expect((await supporters.list(null, policy)).map((record) => record.id)).toEqual([result.supporter.id]);
+    expect((await supporters.list(campaign, policy)).map((record) => record.id).sort()).toEqual(
+      [result.supporter.id, patreonRecord.id].sort(),
+    );
+    expect(await supporters.list(campaign, policy, undefined, "", "patreon")).toMatchObject([{ id: patreonRecord.id }]);
+    expect(await supporters.list(null, policy, undefined, "8ab12345cd")).toMatchObject([{ id: result.supporter.id }]);
+    expect(
+      (
+        await client.query(
+          "SELECT details->>'founderAwarded' AS founder, details->>'createdMember' AS created FROM supporter_actions WHERE kind = 'paypal-payment'",
+        )
+      ).rows,
+    ).toEqual([{ founder: "1", created: "1" }]);
+  });
+
+  it("attaches later PayPal payments to the same supporter and replays retries without writing again", async () => {
+    const first = paypalInput();
+    const created = await supporters.recordPaypal(first, staff, null, policy);
+    expect(await supporters.recordPaypal(first, staff, null, policy)).toMatchObject({
+      replayed: true,
+      payment: { id: created.payment.id },
+    });
+    // Another reviewer recording the same transaction with matching details receives the existing records.
+    expect(
+      await supporters.recordPaypal(
+        { ...first, id: randomUUID() },
+        { ...staff, id: "234567890123456789" },
+        null,
+        policy,
+      ),
+    ).toMatchObject({ replayed: true, supporter: { id: created.supporter.id } });
+    await expect(
+      supporters.recordPaypal({ ...first, id: randomUUID(), amountCents: 600 }, staff, null, policy),
+    ).rejects.toMatchObject({ status: 409 });
+    await expect(
+      supporters.recordPaypal({ ...first, reason: "Changed reason" }, staff, null, policy),
+    ).rejects.toMatchObject({ status: 409 });
+    await expect(
+      supporters.recordPaypal({ ...first, id: randomUUID(), awardFounder: true }, staff, null, policy),
+    ).rejects.toMatchObject({ status: 409, message: "Already recorded; use the founder action." });
+    const second = await supporters.recordPaypal(
+      paypalInput({
+        transactionId: "9ZY98765XW432101V",
+        displayName: "Renamed donor",
+        paidAt: new Date("2026-11-01T16:00:00.000Z"),
+        steamId: "76561198000000002",
+        firstSuccessfulPaymentVerified: false,
+      }),
+      staff,
+      null,
+      policy,
+    );
+    expect(second.supporter).toMatchObject({
+      id: created.supporter.id,
+      version: 2,
+      steamId: "76561198000000002",
+      displayName: "Fictional PayPal donor",
+    });
+    expect(second.supporter.payments.map((item) => item.reference)).toEqual(["9ZY98765XW432101V", "8AB12345CD678901E"]);
+    expect(second.founder).toEqual({ awarded: false, eligible: false, blockedReason: "not_first_payment" });
+    // Attaching by record ID needs the current version, and never replaces a linked account.
+    const attach = paypalInput({
+      transactionId: "AAAA1111BBBB2222",
+      discordId: undefined,
+      memberId: created.supporter.id,
+    });
+    await expect(supporters.recordPaypal({ ...attach, version: 1 }, staff, null, policy)).rejects.toMatchObject({
+      status: 409,
+    });
+    await expect(
+      supporters.recordPaypal({ ...attach, version: 2, discordId: "456789012345678901" }, staff, null, policy),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(await supporterCounts()).toEqual({ members: 1, payments: 2, actions: 2, founders: 0 });
+  });
+
+  it("records a non-USD founder only after staff confirm the minimum and rolls back a refused award", async () => {
+    const input = paypalInput({
+      currency: "CAD",
+      amountCents: 700,
+      awardFounder: true,
+      discordId: undefined,
+      steamId: "76561198000000003",
+    });
+    await expect(supporters.recordPaypal(input, staff, null, policy)).rejects.toMatchObject({
+      status: 409,
+      response: { blockedReason: "below_minimum" },
+    });
+    expect(await supporterCounts()).toEqual({ members: 0, payments: 0, actions: 0, founders: 0 });
+    const confirmed = await supporters.recordPaypal(
+      { ...input, id: randomUUID(), minimumConfirmed: true },
+      staff,
+      null,
+      policy,
+    );
+    expect(confirmed).toMatchObject({
+      founder: { awarded: true },
+      payment: { currency: "CAD", amountCents: 700, minimumConfirmed: true },
+      supporter: { discordId: null, steamId: "76561198000000003", needsDiscordLink: true },
+    });
+  });
+
+  it("allows one founder per person across Patreon and PayPal records", async () => {
+    let record = await register();
+    record = (
+      await supporters.mutate(
+        record.id,
+        { ...review(record), kind: "link", discordId: paypalDonor },
+        staff,
+        campaign,
+        policy,
+      )
+    ).supporter!;
+    expect(record).toMatchObject({ discordId: paypalDonor, steamId: null });
+    record = await payment(record);
+    expect(record.founderBlockedReason).toBeNull();
+    record = (
+      await supporters.mutate(
+        record.id,
+        { ...review(record), kind: "founder", paymentId: record.founderEligiblePayment!.id },
+        staff,
+        campaign,
+        policy,
+      )
+    ).supporter!;
+    expect(record.founder).toMatchObject({ source: "manual_receipt" });
+    await expect(
+      supporters.recordPaypal(paypalInput({ awardFounder: true }), staff, null, policy),
+    ).rejects.toMatchObject({
+      status: 409,
+      response: { blockedReason: "already_founder" },
+    });
+    const recorded = await supporters.recordPaypal(paypalInput(), staff, null, policy);
+    expect(recorded.founder).toEqual({ awarded: false, eligible: false, blockedReason: "already_founder" });
+    expect(recorded.supporter.founderBlockedReason).toBe("already_founder");
+  });
+
+  it("enforces each provider's record shape in the database", async () => {
+    for (const values of [
+      "'patreon', NULL, NULL",
+      "'paypal', '999001', 'paypal-with-campaign'",
+      "'stripe', NULL, NULL",
+    ])
+      await expect(
+        client.query(
+          `INSERT INTO supporter_members (id, provider, campaign_id, patreon_member_id, observed_at)
+           VALUES (gen_random_uuid(), ${values}, now())`,
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
+    const { supporter } = await supporters.recordPaypal(paypalInput(), staff, null, policy);
+    await expect(
+      client.query(
+        `INSERT INTO supporter_payments (id, member_id, campaign_id, paid_at, amount_cents, currency, source, reference,
+           verification_state, recorded_at)
+         VALUES (gen_random_uuid(), $1, NULL, now(), 500, 'USD', 'paypal', 'UNVERIFIED1234', 'unverified', now())`,
+        [supporter.id],
+      ),
+    ).rejects.toMatchObject({ code: "23514" });
+    await expect(
+      client.query(
+        `INSERT INTO supporter_payments (id, member_id, campaign_id, paid_at, amount_cents, currency, source, reference,
+           verification_state, recorded_at)
+         VALUES (gen_random_uuid(), $1, NULL, now(), 500, 'USD', 'paypal', '8AB12345CD678901E', 'verified', now())`,
+        [supporter.id],
+      ),
+    ).rejects.toMatchObject({ code: "23505" });
+  });
+
+  it("serializes simultaneous copies of one PayPal transaction into one payment", async () => {
+    const input = paypalInput();
+    const save =
+      (id: string) =>
+      ({ supporters }: ReturnType<typeof worker>) =>
+        supporters.recordPaypal({ ...input, id }, staff, null, policy);
+    const results = await overlap("supporter_payments", save(randomUUID()), save(randomUUID()));
+    expect(results.every((result) => result.status === "fulfilled")).toBe(true);
+    const values = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+    expect(values.map((value) => value.replayed).sort()).toEqual([false, true]);
+    expect(values[0].payment.id).toBe(values[1].payment.id);
+    expect(await supporterCounts()).toEqual({ members: 1, payments: 1, actions: 1, founders: 0 });
+  });
+
+  it("attaches simultaneous transactions from one donor to one PayPal supporter", async () => {
+    const save =
+      (transactionId: string) =>
+      ({ supporters }: ReturnType<typeof worker>) =>
+        supporters.recordPaypal(paypalInput({ transactionId }), staff, null, policy);
+    const results = await overlap("supporter_members", save("8AB12345CD678901E"), save("9ZY98765XW432101V"));
+    expect(results.every((result) => result.status === "fulfilled")).toBe(true);
+    const values = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+    expect(values[0].supporter.id).toBe(values[1].supporter.id);
+    expect(await supporterCounts()).toEqual({ members: 1, payments: 2, actions: 2, founders: 0 });
+  });
+
+  it("allows only one PayPal supporter to link the same SteamID", async () => {
+    const records = [
+      (await supporters.recordPaypal(paypalInput(), staff, null, policy)).supporter,
+      (
+        await supporters.recordPaypal(
+          paypalInput({ transactionId: "9ZY98765XW432101V", discordId: "456789012345678901" }),
+          staff,
+          null,
+          policy,
+        )
+      ).supporter,
+    ];
+    const save =
+      (index: number) =>
+      ({ supporters }: ReturnType<typeof worker>) =>
+        supporters.mutate(
+          records[index].id,
+          { ...review(records[index]), kind: "link", steamId: "76561198000000004" },
+          staff,
+          null,
+          policy,
+        );
+    const results = await overlap("supporter_members", save(0), save(1));
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.find((result) => result.status === "rejected")).toMatchObject({
+      reason: { cause: { code: "23505" } },
+    });
+    expect((await supporters.list(null, policy)).filter((record) => record.steamId !== null)).toHaveLength(1);
+  });
+
+  const uncApplication = (serverId: string, discordUserId = "345678901234567890", steamId = "76561198000000011") => ({
+    ...applicationInput(discordUserId, steamId),
+    serverId,
+    relationship: "unc_member" as const,
+  });
+  async function approve(id: string, serverId: string, grant: "granted" | "existing" = "granted") {
+    const review = { id: randomUUID(), reason: "Reviewed fictional member" };
+    expect((await applications.claim(id, review, "approve", { ...staff, serverId })).claimed).toBe(true);
+    return applications.finishApproval(id, review.id, { state: "applied", message: "Confirmed" }, grant);
+  }
+
+  it("registers an existing whitelist entry, revokes it once and records each step", async () => {
+    const created = (await applications.create(uncApplication("primary")))!;
+    expect(await approve(created.id, "primary", "existing")).toMatchObject({
+      status: "approved",
+      whitelistGrant: "existing",
+      accessIntent: "grant",
+    });
+    const actor = { ...staff, serverId: "primary" };
+    const review = { id: randomUUID(), reason: "Left the fictional community" };
+    const claim = await applications.claimRevoke(created.id, review, actor);
+    expect(claim).toMatchObject({ claimed: true, application: { status: "revoking", accessIntent: "revoke" } });
+    expect(
+      (await applications.claimRevoke(created.id, { id: randomUUID(), reason: "Second reviewer" }, actor)).claimed,
+    ).toBe(false);
+    const revoked = await applications.finishRevoke(created.id, review.id, { state: "applied", message: "Removed" });
+    expect(revoked).toMatchObject({ status: "revoked", accessIntent: "revoke", revokedAt: expect.any(Date) });
+    await expect(
+      applications.finishRevoke(created.id, review.id, { state: "applied", message: "Removed again" }),
+    ).rejects.toThrow("no longer matches its original claim");
+    expect(
+      (
+        await client.query(
+          "SELECT kind, state FROM whitelist_application_reviews WHERE application_id = $1 ORDER BY created_at, kind",
+          [created.id],
+        )
+      ).rows,
+    ).toEqual([
+      { kind: "approve", state: "applied" },
+      { kind: "revoke", state: "applied" },
+    ]);
+  });
+
+  it("restores approved access when the game refuses a revocation and allows a retry after an uncertain one", async () => {
+    const created = (await applications.create(uncApplication("primary")))!;
+    await approve(created.id, "primary");
+    const actor = { ...staff, serverId: "primary" };
+    const refused = { id: randomUUID(), reason: "First attempt" };
+    await applications.claimRevoke(created.id, refused, actor);
+    expect(
+      await applications.finishRevoke(created.id, refused.id, { state: "failed", message: "Refused" }),
+    ).toMatchObject({ status: "approved", accessIntent: "grant" });
+    const uncertain = { id: randomUUID(), reason: "Second attempt" };
+    await applications.claimRevoke(created.id, uncertain, actor);
+    expect(
+      await applications.finishRevoke(created.id, uncertain.id, { state: "unknown", message: "Lost response" }),
+    ).toMatchObject({ status: "needs_review", accessIntent: "revoke" });
+    expect((await applications.claimRevoke(created.id, { id: randomUUID(), reason: "Retry" }, actor)).claimed).toBe(
+      true,
+    );
+  });
+
+  it("revokes the approved application when its SteamID is removed on the Whitelist page, on that server only", async () => {
+    const east = (await applications.create(uncApplication("east")))!;
+    const central = (await applications.create(uncApplication("central")))!;
+    await approve(east.id, "east");
+    await approve(central.id, "central");
+    const actionId = randomUUID();
+    const revoked = await applications.recordExternalRevoke({
+      serverId: "east",
+      steamId: "76561198000000011",
+      actionId,
+      actorId: staff.id,
+      actorName: staff.name,
+      state: "applied",
+    });
+    expect(revoked.map((application) => application.id)).toEqual([east.id]);
+    expect((await applications.get(central.id, "central"))?.status).toBe("approved");
+    expect(
+      (await client.query("SELECT actor_id, reason, state FROM whitelist_application_reviews WHERE kind = 'revoke'"))
+        .rows,
+    ).toEqual([
+      { actor_id: staff.id, reason: `Removed from the Whitelist page (action ${actionId}).`, state: "applied" },
+    ]);
+    // The UNC role stays while another approved UNC application remains.
+    expect((await roles.desired()).member.get("345678901234567890")).toBe(central.id);
+    expect(await roles.revokedBasis()).toEqual(new Map());
+    await applications.recordExternalRevoke({
+      serverId: "central",
+      steamId: "76561198000000011",
+      actionId: randomUUID(),
+      actorId: staff.id,
+      actorName: staff.name,
+      state: "pending",
+    });
+    expect((await roles.desired()).member.size).toBe(0);
+    expect((await roles.revokedBasis()).has("345678901234567890")).toBe(true);
+  });
+
+  describe("automatic supporter matching", () => {
+    const patron = "456789012345678901";
+    const patronSteam = "76561198000000021";
+    // No waiting period, so list() verdicts do not depend on when the suite runs.
+    const automaticPolicy: FounderPolicy = { ...policy, automaticHoldHours: 0 };
+    const options = (overrides: Partial<AutoMatchOptions> = {}): AutoMatchOptions => ({
+      campaignId: campaign,
+      policy: automaticPolicy,
+      fillSteam: true,
+      recordFounder: true,
+      now: new Date(),
+      ...overrides,
+    });
+    async function importPatron(
+      patreonMemberId = "auto-patron",
+      discordId: string | null = patron,
+      event = charge(`pledge_start:${patreonMemberId}`, "2026-10-01T12:00:00.000Z"),
+    ) {
+      await supporters.importApiMember(
+        campaign,
+        { ...apiMember(patreonMemberId, [event], true), discordId },
+        new Date(),
+      );
+      return (await supporters.list(campaign, automaticPolicy, undefined, patreonMemberId))[0];
+    }
+    async function application(discordUserId = patron, steamId = patronSteam, serverId = "primary") {
+      return (await applications.create({ ...applicationInput(discordUserId, steamId), serverId }))!;
+    }
+    const kinds = async (memberId: string) =>
+      (
+        await client.query<{ actor_id: string; kind: string }>(
+          "SELECT actor_id, kind FROM supporter_actions WHERE member_id = $1 ORDER BY created_at, kind",
+          [memberId],
+        )
+      ).rows;
+
+    it("labels older links by the action that made them, once, without touching versions", async () => {
+      const fromPatreon = await importPatron("labelled-patreon");
+      // An older dashboard resent the Patreon Discord ID with the SteamID; that Link did not change the account.
+      await supporters.mutate(
+        fromPatreon.id,
+        { ...review(fromPatreon), kind: "link", discordId: patron, steamId: patronSteam },
+        staff,
+        campaign,
+        policy,
+      );
+      const relinked = await importPatron("labelled-staff", "567890123456789012");
+      await supporters.mutate(
+        relinked.id,
+        { ...review(relinked), kind: "link", discordId: "567890123456789013" },
+        staff,
+        campaign,
+        policy,
+      );
+      // Patreon linked one account, staff moved the link to another and then back: the last Link set it, so staff.
+      const returned = await importPatron("labelled-returned", "567890123456789014");
+      const moved = (
+        await supporters.mutate(
+          returned.id,
+          { ...review(returned), kind: "link", discordId: "567890123456789015" },
+          staff,
+          campaign,
+          policy,
+        )
+      ).supporter!;
+      await supporters.mutate(
+        returned.id,
+        { ...review(moved), kind: "link", discordId: "567890123456789014" },
+        staff,
+        campaign,
+        policy,
+      );
+      await client.query(
+        "UPDATE supporter_members SET discord_source = NULL, steam_source = NULL, steam_application_id = NULL",
+      );
+      const versions = async () => (await client.query("SELECT id, version FROM supporter_members ORDER BY id")).rows;
+      const before = await versions();
+      expect(await match.backfillSources()).toEqual({ discord: 3, steam: 1 });
+      expect(
+        (
+          await client.query(
+            "SELECT patreon_member_id, discord_source, steam_source FROM supporter_members ORDER BY patreon_member_id",
+          )
+        ).rows,
+      ).toEqual([
+        { patreon_member_id: "labelled-patreon", discord_source: "patreon", steam_source: "staff" },
+        { patreon_member_id: "labelled-returned", discord_source: "staff", steam_source: null },
+        { patreon_member_id: "labelled-staff", discord_source: "staff", steam_source: null },
+      ]);
+      expect(await match.backfillSources()).toEqual({ discord: 0, steam: 0 });
+      expect(await versions()).toEqual(before);
+    });
+
+    it("copies the approved SteamID and records an automatic founder with its Founder role basis, once", async () => {
+      const record = await importPatron();
+      expect(record).toMatchObject({ identityState: "partial", discordSource: "patreon", patreonDiscordId: patron });
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        steamFilled: false,
+        founderRecorded: false,
+        blocked: ["no_application", "no_steam"],
+      });
+      const created = await application();
+      expect(await approve(created.id, "primary")).toMatchObject({ whitelistGrant: "granted" });
+      expect((await supporters.get(record.id, campaign, automaticPolicy))?.automaticBlockedReason).toBe("no_steam");
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        steamFilled: true,
+        founderRecorded: true,
+        blocked: [],
+      });
+      const view = (await supporters.get(record.id, campaign, automaticPolicy))!;
+      expect(view).toMatchObject({
+        steamId: patronSteam,
+        steamSource: "application",
+        steamApplicationId: created.id,
+        identityState: "patreon_linked",
+        version: record.version + 1,
+        founder: { automatic: true, source: "patreon_api" },
+        match: { sourceApplication: { id: created.id, serverId: "primary", status: "approved" } },
+      });
+      expect(await kinds(record.id)).toEqual([
+        { actor_id: "system:patreon-sync", kind: "patreon-discord-link" },
+        { actor_id: "system:supporter-match", kind: "application-steam-link" },
+        { actor_id: "system:supporter-match", kind: "founder" },
+      ]);
+      expect((await roles.desired([patron])).founder).toEqual(new Map([[patron, record.id]]));
+      // A second run, from any trigger, writes nothing.
+      expect(await match.autoMatch(record.id, options())).toMatchObject({ steamFilled: false, founderRecorded: false });
+      expect(await kinds(record.id)).toHaveLength(3);
+      expect((await supporters.get(record.id, campaign, automaticPolicy))?.version).toBe(view.version);
+      expect(
+        await match.candidates(campaign, automaticPolicy, { fillSteam: true, recordFounder: true }, null, 10),
+      ).toEqual([]);
+      // A refund still lists the automatic founder for staff review; the promise itself is untouched.
+      await supporters.importApiMember(
+        campaign,
+        {
+          ...apiMember(
+            "auto-patron",
+            [{ ...charge("pledge_start:auto-patron", "2026-10-01T12:00:00.000Z"), paymentStatus: "Refunded" }],
+            true,
+          ),
+          discordId: patron,
+        },
+        new Date(),
+      );
+      expect(await supporters.founderReviews(campaign)).toEqual([
+        expect.objectContaining({ supporterId: record.id, paymentSource: "patreon_api", reviewReason: "unverified" }),
+      ]);
+    });
+
+    it("leaves an approval without a recorded grant for staff, showing the SteamID to check", async () => {
+      const record = await importPatron();
+      const created = await application();
+      const reviewed = { id: randomUUID(), reason: "Approved before grants were recorded" };
+      await applications.claim(created.id, reviewed, "approve", { ...staff, serverId: "primary" });
+      await applications.finishApproval(created.id, reviewed.id, { state: "applied", message: "Confirmed" }, null);
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        steamFilled: false,
+        blocked: ["application_not_confirmed", "no_steam"],
+      });
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        steamId: null,
+        match: { steam: { reason: "application_not_confirmed", steamId: patronSteam, applicationId: created.id } },
+      });
+    });
+
+    it("lets staff win for both identities and keeps what Patreon reports later", async () => {
+      let record = await importPatron();
+      await approve((await application()).id, "primary");
+      record = (
+        await supporters.mutate(
+          record.id,
+          { ...review(record), kind: "link", steamId: "76561198000000022" },
+          staff,
+          campaign,
+          policy,
+        )
+      ).supporter!;
+      expect(await match.autoMatch(record.id, options({ recordFounder: false }))).toMatchObject({ steamFilled: false });
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        steamId: "76561198000000022",
+        steamSource: "staff",
+      });
+      await supporters.importApiMember(
+        campaign,
+        {
+          ...apiMember("auto-patron", [charge("pledge_start:auto-patron", "2026-10-01T12:00:00.000Z")], true),
+          discordId: "567890123456789014",
+        },
+        new Date(),
+      );
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        discordId: patron,
+        discordSource: "patreon",
+        patreonDiscordId: "567890123456789014",
+        automaticBlockedReason: "discord_differs",
+      });
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        founderRecorded: false,
+        blocked: ["discord_differs"],
+      });
+    });
+
+    it("asks staff to confirm the previous Discord account's SteamID before it follows a new account", async () => {
+      const record = await importPatron();
+      await application();
+      const moved = { ...review(record), kind: "link" as const, discordId: "567890123456789017", steamId: patronSteam };
+      await expect(supporters.mutate(record.id, moved, staff, campaign, policy)).rejects.toMatchObject({
+        status: 409,
+        response: { blockedReason: "steam_from_application" },
+      });
+      expect(
+        (
+          await supporters.mutate(
+            record.id,
+            { ...moved, id: randomUUID(), steamConfirmed: true },
+            staff,
+            campaign,
+            policy,
+          )
+        ).supporter,
+      ).toMatchObject({ discordId: "567890123456789017", steamId: patronSteam, steamSource: "staff" });
+    });
+
+    it("records no automatic founder on a staff SteamID another Discord account applied with", async () => {
+      const record = await importPatron();
+      await supporters.mutate(
+        record.id,
+        { ...review(record), kind: "link", steamId: patronSteam },
+        staff,
+        campaign,
+        policy,
+      );
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        steamSource: "staff",
+        match: { linkedSteamShared: false },
+        automaticBlockedReason: null,
+      });
+      await application("567890123456789016", patronSteam);
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        match: { linkedSteamShared: true },
+        automaticBlockedReason: "steam_shared",
+      });
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        founderRecorded: false,
+        blocked: ["steam_shared"],
+      });
+    });
+
+    it("shows a Discord account Patreon reports for one record while another links it", async () => {
+      const linked = await register("linked-by-staff");
+      await supporters.mutate(
+        linked.id,
+        { ...review(linked), kind: "link", discordId: patron },
+        staff,
+        campaign,
+        policy,
+      );
+      const reported = await importPatron("reported-by-patreon");
+      expect(reported).toMatchObject({
+        discordId: null,
+        patreonDiscordId: patron,
+        match: { patreonDiscordElsewhere: true },
+      });
+      expect(await supporters.get(linked.id, campaign, automaticPolicy)).toMatchObject({
+        discordSource: "staff",
+        match: { discordReportedForOtherPatron: true },
+        automaticBlockedReason: "discord_not_from_patreon",
+      });
+    });
+
+    it("keeps a copied SteamID when its application is revoked, flags it, and copies nothing during a review", async () => {
+      const record = await importPatron();
+      const created = await application();
+      await approve(created.id, "primary");
+      expect(await match.autoMatch(record.id, options({ recordFounder: false }))).toMatchObject({ steamFilled: true });
+      const actor = { ...staff, serverId: "primary" };
+      const revocation = { id: randomUUID(), reason: "Left the fictional community" };
+      await applications.claimRevoke(created.id, revocation, actor);
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        founderRecorded: false,
+        blocked: ["source_application_revoked"],
+      });
+      await applications.finishRevoke(created.id, revocation.id, { state: "applied", message: "Removed" });
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        steamId: patronSteam,
+        steamSource: "application",
+        match: { sourceApplicationRevoked: true, steam: { reason: "no_approved_application" } },
+      });
+      const other = await importPatron("reviewing-patron", "567890123456789015");
+      const pending = await application("567890123456789015", "76561198000000023");
+      await applications.claim(pending.id, { id: randomUUID(), reason: "Approving" }, "approve", actor);
+      expect(await match.autoMatch(other.id, options({ recordFounder: false }))).toMatchObject({
+        steamFilled: false,
+        blocked: ["application_in_progress"],
+      });
+    });
+
+    it("makes a revocation claim wait for a SteamID copy that holds the application", async () => {
+      const created = await application();
+      await approve(created.id, "primary");
+      const holder = await client.connect();
+      let claim: Promise<unknown> | undefined;
+      try {
+        await holder.query("BEGIN");
+        // The lock automatic matching takes before reading the applications.
+        await holder.query("SELECT id FROM whitelist_applications WHERE discord_user_id = $1 ORDER BY id FOR SHARE", [
+          patron,
+        ]);
+        claim = workers[0].applications.claimRevoke(
+          created.id,
+          { id: randomUUID(), reason: "Left the fictional community" },
+          { ...staff, serverId: "primary" },
+        );
+        await waitForBlockedWorkers(1);
+      } finally {
+        await holder.query("COMMIT");
+        holder.release();
+      }
+      await expect(claim).resolves.toMatchObject({ claimed: true });
+    });
+
+    it("refuses to copy a SteamID that another record links while the copy waits for its lock", async () => {
+      const record = await importPatron();
+      await approve((await application()).id, "primary");
+      const holder = await client.connect();
+      let fill: Promise<unknown> | undefined;
+      try {
+        await holder.query("BEGIN");
+        // The lock a staff Link or a PayPal record takes before it writes this SteamID.
+        await holder.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`supporter:steam:${patronSteam}`]);
+        fill = workers[0].match.autoMatch(record.id, options({ recordFounder: false }));
+        await waitForBlockedWorkers(1);
+        await holder.query(
+          "INSERT INTO supporter_members (id, provider, observed_at, steam_id, steam_source) VALUES ($1, 'paypal', now(), $2, 'staff')",
+          [randomUUID(), patronSteam],
+        );
+      } finally {
+        await holder.query("COMMIT");
+        holder.release();
+      }
+      await expect(fill).resolves.toMatchObject({ steamFilled: false, blocked: ["steam_on_another_record"] });
+      expect((await supporters.get(record.id, campaign, automaticPolicy))?.steamId).toBeNull();
+    });
+
+    it("fills the SteamID and records the founder once when two matches overlap", async () => {
+      const record = await importPatron();
+      await approve((await application()).id, "primary");
+      const results = await overlap(
+        "supporter_members",
+        ({ match }) => match.autoMatch(record.id, options()),
+        ({ match }) => match.autoMatch(record.id, options()),
+      );
+      expect(results.every((result) => result.status === "fulfilled")).toBe(true);
+      const values = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+      expect(values.filter((value) => value.steamFilled)).toHaveLength(1);
+      expect(values.filter((value) => value.founderRecorded)).toHaveLength(1);
+      expect((await kinds(record.id)).map((row) => row.kind)).toEqual([
+        "patreon-discord-link",
+        "application-steam-link",
+        "founder",
+      ]);
+    });
+
+    it("records one founder when an automatic match and a PayPal founder award for the same person overlap", async () => {
+      const record = await importPatron();
+      await approve((await application()).id, "primary");
+      const results = await overlap<unknown>(
+        "supporter_members",
+        ({ match }) => match.autoMatch(record.id, options()),
+        ({ supporters }) =>
+          supporters.recordPaypal(
+            paypalInput({ discordId: patron, paidAt: new Date("2026-10-02T12:00:00.000Z"), awardFounder: true }),
+            staff,
+            null,
+            policy,
+          ),
+      );
+      expect((await client.query("SELECT count(*)::int AS count FROM supporter_founders")).rows).toEqual([
+        { count: 1 },
+      ]);
+      const automatic = results[0] as PromiseSettledResult<AutoMatchResult>;
+      const paypal = results[1];
+      if (automatic.status === "fulfilled" && automatic.value.founderRecorded)
+        expect(paypal).toMatchObject({
+          status: "rejected",
+          reason: { response: { blockedReason: "already_founder" } },
+        });
+      else {
+        expect(paypal.status).toBe("fulfilled");
+        expect(automatic).toMatchObject({ status: "fulfilled", value: { founderRecorded: false } });
+      }
+    });
+
+    it("leaves no partial records when a staff link takes the same SteamID first", async () => {
+      const record = await importPatron();
+      await approve((await application()).id, "primary");
+      const other = await register("staff-linked");
+      const results = await overlap<unknown>(
+        "supporter_members",
+        ({ match }) => match.autoMatch(record.id, options()),
+        ({ supporters }) =>
+          supporters.mutate(
+            other.id,
+            { ...review(other), kind: "link", steamId: patronSteam },
+            staff,
+            campaign,
+            policy,
+          ),
+      );
+      const holders = (
+        await client.query<{ id: string }>("SELECT id FROM supporter_members WHERE steam_id = $1", [patronSteam])
+      ).rows;
+      expect(holders).toHaveLength(1);
+      if (holders[0].id === other.id) {
+        // Both writes take the SteamID lock first, so the match waits, sees the staff link and fills nothing.
+        expect(results[0]).toMatchObject({ status: "fulfilled", value: { steamFilled: false } });
+        expect((await kinds(record.id)).map((row) => row.kind)).toEqual(["patreon-discord-link"]);
+        expect((await client.query("SELECT count(*)::int AS count FROM supporter_founders")).rows).toEqual([
+          { count: 0 },
+        ]);
+      } else expect(results[1].status).toBe("rejected");
+    });
+
+    it("records no automatic founder on a first payment in another currency", async () => {
+      const record = await importPatron("euro-patron", patron, {
+        ...charge("pledge_start:euro-patron", "2026-10-01T12:00:00.000Z"),
+        currency: "EUR",
+      });
+      await approve((await application()).id, "primary");
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        steamFilled: true,
+        founderRecorded: false,
+        blocked: ["below_minimum"],
+      });
+    });
+
+    it("waits out the hold after the first payment", async () => {
+      const record = await importPatron();
+      await approve((await application()).id, "primary");
+      expect(
+        await match.autoMatch(
+          record.id,
+          options({ policy: { ...policy, automaticHoldHours: 72 }, now: new Date("2026-10-02T12:00:00.000Z") }),
+        ),
+      ).toMatchObject({ steamFilled: true, founderRecorded: false, blocked: ["payment_too_recent"] });
+    });
+  });
+
+  it("reads who should hold each role and keeps an ordered role ledger", async () => {
+    const member = (await applications.create(uncApplication("primary")))!;
+    await approve(member.id, "primary");
+    const friend = (await applications.create({
+      ...applicationInput("456789012345678901", "76561198000000012"),
+      relationship: "friend_regular" as const,
+    }))!;
+    await approve(friend.id, "primary");
+    const founder = await supporters.recordPaypal(
+      {
+        id: randomUUID(),
+        displayName: "Fictional founder",
+        discordId: "567890123456789012",
+        paidAt: new Date("2026-10-01T16:00:00.000Z"),
+        amountCents: 500,
+        currency: "USD",
+        transactionId: "8AB12345CD678901E",
+        completedPaymentVerified: true,
+        firstSuccessfulPaymentVerified: true,
+        minimumConfirmed: false,
+        awardFounder: true,
+        reason: "Checked a fictional completed PayPal payment",
+      },
+      staff,
+      null,
+      policy,
+    );
+    await supporters.recordPaypal(
+      {
+        id: randomUUID(),
+        displayName: "Fictional unlinked founder",
+        steamId: "76561198000000013",
+        paidAt: new Date("2026-10-02T16:00:00.000Z"),
+        amountCents: 500,
+        currency: "USD",
+        transactionId: "9ZY98765XW432101V",
+        completedPaymentVerified: true,
+        firstSuccessfulPaymentVerified: true,
+        minimumConfirmed: false,
+        awardFounder: true,
+        reason: "Checked a fictional completed PayPal payment",
+      },
+      staff,
+      null,
+      policy,
+    );
+    const desired = await roles.desired();
+    expect(desired.member).toEqual(new Map([["345678901234567890", member.id]]));
+    expect(desired.founder).toEqual(new Map([["567890123456789012", founder.supporter.id]]));
+    expect((await roles.desired(["567890123456789012"])).member.size).toBe(0);
+    expect(await roles.foundersWithoutDiscord()).toMatchObject([
+      { displayName: "Fictional unlinked founder", provider: "paypal" },
+    ]);
+    expect(await roles.summary()).toEqual({ memberEligible: 1, founders: 2, foundersWithoutDiscord: 1 });
+    const base = {
+      trigger: "event" as const,
+      requestedBy: null,
+      guildId: "678901234567890123",
+      discordUserId: "345678901234567890",
+      roleKind: "member" as const,
+      roleId: "789012345678901234",
+      basisType: "application" as const,
+      basisId: member.id,
+    };
+    const last = (roleKind: "member" | "founder" = "member", roleId = base.roleId) =>
+      roles.lastEffective(base.guildId, base.discordUserId, roleKind, roleId);
+    const added = await roles.begin({ ...base, operation: "add" });
+    expect(await last()).toMatchObject({ id: added, state: "started" });
+    // History recorded for another role ID (a recreated role or a corrected setting) does not count.
+    expect(await last("member", "789012345678901299")).toBeNull();
+    await roles.finish(added, "unknown", false, "Lost response");
+    // Confirming it as the wrong operation changes nothing.
+    await roles.confirm(added, "remove");
+    expect(await last()).toMatchObject({ id: added, state: "unknown" });
+    await roles.confirm(added, "add");
+    expect(await last()).toMatchObject({ id: added, state: "applied", changed: true });
+    const failed = await roles.begin({ ...base, operation: "remove" });
+    await roles.finish(failed, "failed", false, "Refused");
+    // A failed attempt never replaces the latest effective change.
+    expect((await last())?.id).toBe(added);
+    await roles.note({ ...base, roleKind: "founder" });
+    expect(await last("founder")).toMatchObject({
+      operation: "note",
+      changed: false,
+      state: "applied",
+    });
+    expect((await roles.recent(25)).map((row) => row.actorId)).toEqual([
+      "system:discord-roles",
+      "system:discord-roles",
+      "system:discord-roles",
+    ]);
+  });
+
+  it("reads who supports right now for the Supporter role and which Supporter roles Gramps still holds", async () => {
+    const donor = "567890123456789013";
+    const patron = "567890123456789014";
+    const paypal = await supporters.recordPaypal(
+      {
+        id: randomUUID(),
+        displayName: "Fictional PayPal supporter",
+        discordId: donor,
+        paidAt: new Date("2026-11-01T12:00:00.000Z"),
+        amountCents: 500,
+        currency: "USD",
+        transactionId: "7AB12345CD678901E",
+        completedPaymentVerified: true,
+        firstSuccessfulPaymentVerified: true,
+        minimumConfirmed: false,
+        awardFounder: false,
+        reason: "Checked a fictional completed PayPal payment",
+      },
+      staff,
+      null,
+      policy,
+    );
+    const imported = await supporters.importApiMember(
+      campaign,
+      {
+        ...apiMember("supporter-sync", [charge("pledge_start:9001", "2026-11-02T12:00:00.000Z")], true),
+        discordId: patron,
+      },
+      new Date("2026-11-02T13:00:00.000Z"),
+    );
+    expect(imported).toMatchObject({ discordLinked: true, discordId: patron });
+    const within = new Date("2026-11-20T00:00:00.000Z");
+    expect(await roles.supporterDesired(undefined, campaign, within)).toEqual(
+      new Map([
+        [donor, paypal.supporter.id],
+        [patron, imported.memberId],
+      ]),
+    );
+    expect(await roles.supporterDesired([patron], campaign, within)).toEqual(new Map([[patron, imported.memberId]]));
+    // Patreon records count only for the configured campaign; with Patreon off only PayPal records count.
+    for (const other of [null, "999999"])
+      expect(await roles.supporterDesired(undefined, other, within)).toEqual(new Map([[donor, paypal.supporter.id]]));
+    // 31 days after the PayPal payment it no longer counts; the active patron still does.
+    expect(await roles.supporterDesired(undefined, campaign, new Date("2026-12-02T12:00:00.000Z"))).toEqual(
+      new Map([[patron, imported.memberId]]),
+    );
+    const base = {
+      trigger: "event" as const,
+      requestedBy: null,
+      guildId: "678901234567890123",
+      discordUserId: donor,
+      roleKind: "supporter" as const,
+      roleId: "789012345678901235",
+      basisType: "supporter" as const,
+      basisId: paypal.supporter.id,
+    };
+    const held = (roleId = base.roleId) => roles.heldBasis(base.guildId, "supporter", roleId);
+    expect(await held()).toEqual(new Map());
+    await roles.note({ ...base, discordUserId: patron, basisId: imported.memberId });
+    const added = await roles.begin({ ...base, operation: "add" });
+    await roles.finish(added, "applied", true, "Role added.");
+    // A noted role is never Gramps' own; history for another role ID does not count.
+    expect(await held()).toEqual(new Map([[donor, paypal.supporter.id]]));
+    expect(await held("789012345678901299")).toEqual(new Map());
+    const removal = await roles.begin({ ...base, operation: "remove" });
+    await roles.finish(removal, "unknown", false, "Lost response");
+    expect(await held()).toEqual(new Map([[donor, paypal.supporter.id]]));
+    await roles.confirm(removal, "remove");
+    expect(await held()).toEqual(new Map());
   });
 
   it("keeps duplicate applicant identities and SteamIDs from creating additional requests", async () => {

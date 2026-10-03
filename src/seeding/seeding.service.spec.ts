@@ -358,6 +358,22 @@ describe("/seeding join and leave", () => {
     expect(members.get(MEMBER)!.roles.remove).not.toHaveBeenCalled();
   });
 
+  it.each(["DISCORD_MEMBER_ROLE_ID", "DISCORD_FOUNDER_ROLE_ID", "DISCORD_SUPPORTER_ROLE_ID"])(
+    "never hands out or pings an automatic Discord role set in %s as the Seeder role",
+    async (setting) => {
+      const { service, values, members, channel, request } = fixture({ [setting]: ROLE });
+      expect(await service.join(request(MEMBER))).toBe(MEMBER_COPY.roleUnusable);
+      expect(await service.leave(request(SEEDER_ONE))).toBe(MEMBER_COPY.roleUnusable);
+      expect(await service.ping(request(MODERATOR))).toBe(`${ROLE_PROBLEMS.unsafe} Nothing was sent.`);
+      expect(members.get(MEMBER)!.roles.add).not.toHaveBeenCalled();
+      expect(members.get(SEEDER_ONE)!.roles.remove).not.toHaveBeenCalled();
+      expect(channel.send).not.toHaveBeenCalled();
+      // A different automatic role leaves the Seeder role usable.
+      values[setting] = "700000000000000099";
+      expect(await service.join(request(MEMBER))).toBe(MEMBER_COPY.joined);
+    },
+  );
+
   it("never hands out a role that gets moderation powers through a channel override", async () => {
     const { service, guild, members, request } = fixture();
     const overrides = (allow: bigint[]) => ({

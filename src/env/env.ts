@@ -299,6 +299,44 @@ export const Env = z.object({
     .optional()
     .transform((value) => value || undefined),
   PATREON_SYNC_INTERVAL_MINUTES: z.coerce.number().int().min(10).max(1440).default(30),
+  /** Provider-neutral founder window (Patreon and PayPal). A complete pair wins over PATREON_FOUNDER_*. */
+  SUPPORTER_FOUNDER_START_AT: z.iso.datetime({ offset: true }).optional(),
+  SUPPORTER_FOUNDER_END_AT: z.iso.datetime({ offset: true }).optional(),
+  /**
+   * Automatic supporter matching, for Patreon supporters only. Both switches are off by default. The SteamID fill
+   * copies an empty SteamID from the supporter's approved whitelist application. Automatic founders record founder
+   * promises under a stricter rule than staff awards; a founder promise cannot be undone yet, so leave it off until
+   * staff can void one (see the Patreon supporters guide).
+   */
+  SUPPORTER_AUTO_STEAM_FILL_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  SUPPORTER_AUTO_FOUNDER_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  /**
+   * Hours an imported first payment must stand (Patreon's refund window) before an automatic founder promise. A blank
+   * value keeps the default rather than becoming 0, which would switch the wait off.
+   */
+  SUPPORTER_AUTO_FOUNDER_HOLD_HOURS: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.coerce.number().int().min(0).max(720).default(72),
+  ),
+
+  /**
+   * Automatic UNC member, Founder and Supporter roles in ADMIN_GUILD_ID. Off by default; the status page
+   * and dry runs still work while off. Requires Manage Roles and a bot role above every configured role.
+   * A role whose ID is not set is skipped.
+   */
+  DISCORD_ROLES_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  DISCORD_MEMBER_ROLE_ID: discordId.optional(),
+  DISCORD_FOUNDER_ROLE_ID: discordId.optional(),
+  DISCORD_SUPPORTER_ROLE_ID: discordId.optional(),
 
   /** Website requests remain disabled until the reviewed schema is deployed. */
   WHITELIST_APPLICATIONS_ENABLED: z
@@ -309,6 +347,14 @@ export const Env = z.object({
   WHITELIST_APPLICATION_EMAIL_REQUIRED: z
     .enum(["true", "false"])
     .default("true")
+    .transform((value) => value === "true"),
+  /**
+   * Refuse (409) approving a SteamID already on the running whitelist until the request carries
+   * existingAccessConfirmed. Off by default: the dashboard must send that confirmation first.
+   */
+  WHITELIST_APPLICATION_EXISTING_CONFIRMATION_REQUIRED: z
+    .enum(["true", "false"])
+    .default("false")
     .transform((value) => value === "true"),
 
   /** A Discord server (guild) ID to use for development */

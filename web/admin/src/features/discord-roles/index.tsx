@@ -138,7 +138,10 @@ function AdminDiscordRoles() {
             <button
               type="button"
               className="button secondary"
-              disabled={busy || previewing || !!previewOff}
+              // aria-disabled, not disabled, while its own preview runs: a disabled button loses focus in the
+              // browser and keyboard users land at the top of the page. runPreview ignores the press instead.
+              disabled={busy || !!previewOff}
+              aria-disabled={previewing || undefined}
               aria-describedby={previewOff ? previewNote : undefined}
               onClick={() => void runPreview()}
             >

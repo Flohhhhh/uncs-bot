@@ -4,20 +4,58 @@ export interface FounderPolicy {
   startsAt: string | null;
   endsAt: string | null;
   configured: boolean;
+  /** Hours an imported first payment must stand before automatic matching records a founder promise. */
+  automaticHoldHours?: number;
 }
 export interface PaymentEvidence {
   id: string;
   paidAt: string;
   amountCents: number | null;
   currency: string | null;
-  source: "signed_status" | "manual_receipt" | "patreon_api";
+  source: "signed_status" | "manual_receipt" | "patreon_api" | "paypal";
   reference: string;
   verificationState: "verified" | "unverified";
   firstSuccessfulPaymentVerified: boolean;
+  minimumConfirmed?: boolean;
+  recordedBy?: string | null;
 }
+/** Why the server will not copy an application's SteamID. Mirrors SteamMatchBlock in src/supporters/supporter-match.rules.ts. */
+export type SteamMatchBlock =
+  | "no_application"
+  | "application_in_progress"
+  | "application_pending"
+  | "no_approved_application"
+  | "several_steam_ids"
+  | "invalid_steam_id"
+  | "application_not_confirmed"
+  | "steam_shared"
+  | "steam_rejected_before"
+  | "steam_on_another_record";
+/**
+ * The SteamID a whitelist application of the record's Discord account names. `reason` is null only when the server
+ * says the SteamID is safe to copy; otherwise it names why not, and `steamId` is given for staff to check. For an
+ * application on a game server the administrator cannot open, only `reason` is given.
+ */
+export interface SteamMatch {
+  reason: SteamMatchBlock | null;
+  steamId: string | null;
+  applicationId: string | null;
+  serverId: string | null;
+}
+export interface NextStep {
+  code: string;
+  /** `info` is a note, not a task: why no founder promise is possible on this record. */
+  area: "discord" | "steam" | "payment" | "founder" | "info";
+  message: string;
+}
+export type IdentityState = "unlinked" | "partial" | "patreon_linked" | "staff_linked";
 export interface Supporter {
   id: string;
-  patreonMemberId: string;
+  provider: "patreon" | "paypal";
+  /** Null for PayPal supporters. */
+  patreonMemberId: string | null;
+  /** Sent as `confirm` with every review: the Patreon member ID, or the record ID for PayPal. */
+  confirmKey: string;
   displayName: string | null;
   patronStatus: string | null;
   lastChargeStatus: string | null;
@@ -25,12 +63,51 @@ export interface Supporter {
   observedAt: string;
   reviewState: "pending" | "verified" | "unverified";
   discordId: string | null;
+  discordSource: "staff" | "patreon" | null;
+  patreonDiscordId: string | null;
   steamId: string | null;
-  identityState: "unlinked" | "staff_linked";
+  steamSource: "staff" | "application" | null;
+  steamApplicationId: string | null;
+  identityState: IdentityState;
   version: number;
   latestPayment: PaymentEvidence | null;
   founderEligiblePayment: PaymentEvidence | null;
-  founder: { awardedAt: string; paymentId: string } | null;
+  founder: {
+    awardedAt: string;
+    paymentId: string;
+    source?: PaymentEvidence["source"] | null;
+    automatic?: boolean;
+  } | null;
+  /** The server's verdict: why no founder promise can be recorded yet, or null when it can. */
+  founderBlockedReason: string | null;
+  founderBlockedMessage: string | null;
+  needsDiscordLink: boolean;
+  match: {
+    steam: SteamMatch | null;
+    /** Null as well when the application is on a game server the administrator cannot open. */
+    sourceApplication: { id: string; serverId: string; status: string } | null;
+    sourceApplicationRevoked: boolean;
+    patreonDiscordElsewhere: boolean;
+    discordReportedForOtherPatron: boolean;
+    /** Another Discord account has applied with the linked SteamID. */
+    linkedSteamShared: boolean;
+  };
+  /** The payment automatic matching would record a founder promise on. */
+  automaticPayment: PaymentEvidence | null;
+  automaticBlockedReason: string | null;
+  automaticBlockedMessage: string | null;
+  nextSteps: NextStep[];
+}
+export interface AutomationStatus {
+  steamFill: boolean;
+  founderAuto: boolean;
+  /** Hours an imported first payment must stand before an automatic founder promise. */
+  holdHours?: number;
+  /** Patreon is configured, so matching has records to run on. */
+  configured?: boolean;
+  lastRunAt?: string | null;
+  /** Fixed text from the server when the last matching run could not finish. */
+  lastError?: string | null;
 }
 /** Mirrors PatreonSyncStatus in src/supporters/patreon-sync.service.ts. It never carries the token. */
 export interface PatreonSyncStatus {
@@ -66,6 +143,8 @@ export interface PatreonSyncStatus {
     reference: string;
     unverifiedPaymentId: string;
     unverifiedReference: string;
+    /** `unverified`: the payment is no longer verified. `not_first_payment`: the founder's own payment lost its first-payment flag. */
+    reviewReason: "unverified" | "not_first_payment";
   }[];
 }
 /** POST supporters/sync: joins a running sync, or reuses one that finished moments ago. */
@@ -83,11 +162,14 @@ export interface SupportersResponse {
   supporters: Supporter[];
   note: string;
   sync: PatreonSyncStatus;
+  automation?: AutomationStatus;
 }
 export interface SupporterReviewResponse {
   ok: boolean;
   replayed: boolean;
   supporter: Supporter | null;
+  /** Set when the save let Gramps copy the SteamID from an approved application straight away. */
+  automatic?: { steamFilled: boolean; founderRecorded: boolean };
 }
 export type SupporterDecision = "link" | "payment" | "founder" | "review";
 interface ReviewBase {
@@ -98,7 +180,7 @@ interface ReviewBase {
 }
 export type SupporterReviewInput = ReviewBase &
   (
-    | { discordId: string; steamId: string }
+    | { discordId?: string; steamId?: string; steamConfirmed?: true }
     | {
         paidAt: string;
         amountCents: number;

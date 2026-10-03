@@ -23,12 +23,18 @@ function groupPlan(plan: PlanEntry[]) {
   };
 }
 
+/**
+ * A preview skips a role that fails its setup checks (`blocked`) and leaves out anyone Discord would not return
+ * (`failed`), so its plan then covers only what Gramps could check.
+ */
+const partialPreview = (summary: PassSummary) => summary.blocked > 0 || summary.failed > 0;
+
 function previewAnnouncement({ summary }: Preview) {
   if (summary.error) return `Preview stopped early. ${summary.error}`;
   const { adds, removes, capped } = groupPlan(summary.plan ?? []);
   return `Preview ready: ${plural(adds.length, "role")} to add and ${plural(removes.length, "role")} to remove${
     capped ? ". The real run may change more than the preview lists" : ""
-  }.`;
+  }${partialPreview(summary) ? ". Some roles or people could not be checked" : ""}.`;
 }
 
 /** Sends one preview or real run. A fresh ID per request; the server returns the same result for a repeated ID. */
@@ -107,6 +113,22 @@ export function PreviewResult({ preview }: { preview: Preview }) {
           The real run may change more people than are listed here.
         </p>
       )}
+      {!summary.error && summary.blocked > 0 && (
+        <p className="notice warning">
+          <strong>
+            {summary.blocked === 1
+              ? "1 role fails its setup checks, so this preview leaves it out."
+              : `${plural(summary.blocked, "role")} fail their setup checks, so this preview leaves them out.`}
+          </strong>{" "}
+          Fix the setup checks above, then preview again.
+        </p>
+      )}
+      {!summary.error && summary.failed > 0 && (
+        <p className="notice warning">
+          <strong>Gramps could not read {plural(summary.failed, "person", "people")} from Discord.</strong> This preview
+          leaves out their roles.
+        </p>
+      )}
       <dl className="sync-counts roles-plan-counts" aria-label="Preview counts">
         <div>
           <dt>Add</dt>
@@ -133,9 +155,15 @@ export function PreviewResult({ preview }: { preview: Preview }) {
           )}
         </>
       ) : (
-        !summary.error && (
+        !summary.error &&
+        (partialPreview(summary) ? (
+          <Empty
+            title="No changes found"
+            detail="Only the roles and people Gramps could check are covered. See the notes above."
+          />
+        ) : (
           <Empty title="Nothing would change" detail="Everyone already has the roles they have earned." />
-        )
+        ))
       )}
     </section>
   );

@@ -176,6 +176,13 @@ it("shows the counts, the last checks, the attention list and the latest 25 ledg
   expect(counts.getByText("UNC eligible").nextElementSibling).toHaveTextContent("42");
   expect(counts.getByText("Founders without Discord").nextElementSibling).toHaveTextContent("2");
   expect(counts.getByText("Supporters now").nextElementSibling).toHaveTextContent("5");
+  // Each detail names what the server counts: people (not applications), and supporters with Discord linked.
+  expect(counts.getByText("UNC eligible").nextElementSibling).toHaveTextContent(
+    "People with an approved UNC member application",
+  );
+  expect(counts.getByText("Supporters now").nextElementSibling).toHaveTextContent(
+    "Support right now, with Discord linked",
+  );
   const last = within(screen.getByRole("region", { name: "Last check" }));
   expect(last.getByText("After a change", { exact: false })).toBeInTheDocument();
   expect(last.getByText("Added").nextElementSibling).toHaveTextContent("1");
@@ -276,6 +283,27 @@ describe("preview", () => {
     expect(screen.getByText("Preview ready: 2 roles to add and 1 role to remove.")).toHaveAttribute("role", "status");
   });
 
+  it("keeps focus on Preview changes while its preview runs, and ignores another press", async () => {
+    let answer!: (value: ReconcileResponse) => void;
+    serve(rolesStatus(), () => new Promise<ReconcileResponse>((resolve) => (answer = resolve)));
+    render(page());
+    const button = await screen.findByRole("button", { name: "Preview changes" });
+    button.focus();
+    fireEvent.click(button);
+    const running = await screen.findByRole("button", { name: "Previewing…" });
+    // A disabled button would drop focus to the page in a browser; aria-disabled keeps it on the button.
+    expect(running).toBe(button);
+    expect(running).not.toBeDisabled();
+    expect(running).toHaveAttribute("aria-disabled", "true");
+    expect(running).toHaveFocus();
+    fireEvent.click(running);
+    expect(posts()).toHaveLength(1);
+    await act(async () => answer(dryRun(adds)));
+    await screen.findByRole("region", { name: "Preview of role changes" });
+    expect(button).toHaveFocus();
+    expect(button).not.toHaveAttribute("aria-disabled");
+  });
+
   it("sends one preview for a double click", async () => {
     serve(rolesStatus(), () => dryRun(adds));
     render(page());
@@ -287,6 +315,25 @@ describe("preview", () => {
     });
     await screen.findByRole("region", { name: "Preview of role changes" });
     expect(posts()).toHaveLength(1);
+  });
+
+  it("does not say nothing would change when a role was skipped or members could not be read", async () => {
+    serve(rolesStatus(), () => dryRun([], { blocked: 1, failed: 2 }));
+    render(page());
+    await preview();
+    const shown = within(screen.getByRole("region", { name: "Preview of role changes" }));
+    expect(shown.getByText("1 role fails its setup checks, so this preview leaves it out.")).toBeInTheDocument();
+    expect(shown.getByText("Gramps could not read 2 people from Discord.").closest("p")).toHaveTextContent(
+      "This preview leaves out their roles.",
+    );
+    expect(shown.getByText("No changes found")).toBeInTheDocument();
+    expect(shown.queryByText("Nothing would change")).not.toBeInTheDocument();
+    expect(shown.queryByText(/Everyone already has the roles/)).not.toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Preview ready: 0 roles to add and 0 roles to remove. Some roles or people could not be checked.",
+      ),
+    ).toHaveAttribute("role", "status");
   });
 
   it("says when nothing would change and when the preview could not finish", async () => {
@@ -476,7 +523,7 @@ describe("run role check", () => {
     fireEvent.change(dialog.getByRole("textbox", { name: "Reason" }), { target: { value: "Monthly role check" } });
     fireEvent.click(dialog.getByRole("button", { name: "Run role check" }));
     expect(await dialog.findByRole("alert")).toHaveTextContent(
-      "Gramps allows one role check every 30 seconds, previews included. Wait a moment, then try again.",
+      "Gramps allows one role check every 30 seconds. Previews don’t count toward this wait. Wait a moment, then try again.",
     );
     expect(screen.getByRole("dialog", { name: "Run role check now" })).toBeInTheDocument();
     refuse = false;
@@ -541,7 +588,8 @@ describe("errors", () => {
 
   it.each<[number, string, string]>([
     [409, "A role check is already running. Try again when it finishes.", "A role check is already running."],
-    [429, "Wait 30 seconds between role checks.", "Gramps allows one role check every 30 seconds"],
+    [409, "A preview is already running. Try again when it finishes.", "A preview is already running."],
+    [429, "Wait 5 seconds between previews.", "Gramps allows one preview every 5 seconds."],
     [503, "Discord is not connected yet. Try again shortly.", "Discord is not connected yet. Try again shortly."],
     [404, "Cannot POST /admin/api/discord-roles/reconcile", "This server version has no Discord roles feature yet."],
   ])("explains a %i from the preview", async (status, message, shown) => {

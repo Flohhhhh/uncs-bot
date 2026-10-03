@@ -138,3 +138,24 @@ describe("buttons", () => {
     expect(declared(dimmed, "cursor", 1024)).toBe("not-allowed");
   });
 });
+
+describe("Discord roles ledger", () => {
+  it.each([320, 375, 700])("wraps a ledger message inside its full-width phone card at %ipx", (width) => {
+    // A 220px minimum in a half-width card cell pushed the Recent role changes card into a sideways scroll.
+    expect(declared("td small.roles-ledger-message", "min-width", width)).toBe("0");
+    expect(declared('[data-mobile="cards"] td:has(.roles-ledger-message)', "grid-column", width)).toBe("1 / -1");
+  });
+  it("keeps the readable message width in the desktop table", () => {
+    expect(declared("td small.roles-ledger-message", "min-width", 1024)).toBe("220px");
+    expect(declared('[data-mobile="cards"] td:has(.roles-ledger-message)', "grid-column", 1024)).toBeUndefined();
+  });
+});
+
+describe("Supporters table", () => {
+  it("fits a 1280px desktop: narrow wrapping columns and a wrapping review button", () => {
+    // At 180px minimums with a one-line button the table needed 1129px and cut off Review supporter at 1366px.
+    expect(declared("td small.supporter-wrap", "min-width", 1280)).toBe("120px");
+    expect(declared(".supporter-review", "white-space", 1280)).toBe("normal");
+    expect(declared(".supporter-review", "max-width", 1280)).toBe("6.5rem");
+  });
+});

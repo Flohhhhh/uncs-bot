@@ -1,6 +1,7 @@
 import { type MiddlewareConsumer, Module, type NestModule, type RawBodyRequest } from "@nestjs/common";
 import type { NextFunction, Request, Response } from "express";
 import { AdminModule } from "../admin/admin.module";
+import { DiscordRolesModule } from "../discord-roles/discord-roles.module";
 import {
   PatreonWebhookController,
   SupportersAdminController,
@@ -10,9 +11,10 @@ import { PatreonClient } from "./patreon.client";
 import { PatreonSyncService } from "./patreon-sync.service";
 import { SupportersService } from "./supporters.service";
 import { SupportersStore } from "./supporters.store";
+import { SupporterMatchModule } from "./supporter-match.module";
 
 @Module({
-  imports: [AdminModule],
+  imports: [AdminModule, DiscordRolesModule, SupporterMatchModule],
   providers: [SupportersService, SupportersStore, SupportersExceptionFilter, PatreonClient, PatreonSyncService],
   controllers: [PatreonWebhookController, SupportersAdminController],
   exports: [SupportersService, SupportersStore, PatreonSyncService],
