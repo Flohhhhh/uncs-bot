@@ -1242,6 +1242,23 @@ td strong {
 .supporter-automation .pill {
   vertical-align: middle;
 }
+/* Step text and match summaries run long; they wrap so the table stays usable on a phone. */
+.supporter-wrap {
+  white-space: normal;
+  min-width: 180px;
+  max-width: 320px;
+  line-height: 1.6;
+}
+.supporter-offer {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 16px;
+}
+.supporter-offer p {
+  margin: 0;
+}
 .warning-text {
   color: #e9d397;
 }

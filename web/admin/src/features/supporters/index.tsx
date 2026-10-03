@@ -6,11 +6,13 @@ import { Badge, Card, Empty, Modal, ReasonField, date } from "../../components/u
 import { CopyValue, DataTable } from "../../components/data-table";
 import {
   accountsToMatch,
+  actionableSteps,
   applicationSteamId,
   automaticPreview,
   discordDescription,
   founderReady,
   identityLabels,
+  identityOrder,
   matchSummary,
   paymentDescription,
   readyForStaff,
@@ -71,11 +73,11 @@ function SupporterBadge({ record }: { record: Supporter }) {
 }
 
 function NextSteps({ record }: { record: Supporter }) {
-  const { payment, other } = stepGroups(record.nextSteps);
+  const { payment, other, info } = stepGroups(record.nextSteps);
   if (!record.nextSteps.length) return null;
   return (
     <div className="supporter-steps">
-      <h3>Still needed</h3>
+      {(other.length > 0 || payment.length > 0) && <h3>Still needed</h3>}
       {other.length > 0 && (
         <ul>
           {other.map((step) => (
@@ -93,7 +95,96 @@ function NextSteps({ record }: { record: Supporter }) {
           </ul>
         </>
       )}
+      {info.length > 0 && (
+        <>
+          <h3>Founder promise not possible</h3>
+          <ul>
+            {info.map((step) => (
+              <li key={step.code}>{step.message}</li>
+            ))}
+          </ul>
+        </>
+      )}
     </div>
+  );
+}
+
+/**
+ * The account-match fields. An approved application's SteamID is never filled in: staff choose to use it, and only
+ * while the Discord account is the one that applied. Why a SteamID is flagged is shown beside the field.
+ */
+function LinkFields({ record }: { record: Supporter }) {
+  const [discordId, setDiscordId] = useState(record.discordId ?? "");
+  const steamInput = useRef<HTMLInputElement>(null);
+  const hint = useId();
+  const offered = applicationSteamId(record);
+  const steamNote = record.nextSteps.find((step) => step.area === "steam")?.message;
+  const discordChanged = discordId.trim() !== (record.discordId ?? "");
+  return (
+    <>
+      <label>
+        Discord user ID
+        <input
+          name="discordId"
+          pattern="[0-9]{17,20}"
+          maxLength={20}
+          inputMode="numeric"
+          defaultValue={record.discordId ?? ""}
+          onChange={(event) => setDiscordId(event.target.value)}
+          placeholder="Discord user ID, not a display name"
+        />
+      </label>
+      <label>
+        SteamID64
+        <input
+          ref={steamInput}
+          name="steamId"
+          pattern="[0-9]{17}"
+          maxLength={17}
+          inputMode="numeric"
+          defaultValue={record.steamId ?? ""}
+          placeholder="17-digit SteamID64"
+          aria-describedby={steamNote || offered ? hint : undefined}
+        />
+      </label>
+      {(steamNote || offered) && (
+        <div className="supporter-offer" id={hint}>
+          {steamNote && <p className="muted">{steamNote}</p>}
+          {offered &&
+            (discordChanged ? (
+              <p className="muted">
+                SteamID {offered} is on the current Discord account’s application, so it is not offered for a new
+                Discord account.
+              </p>
+            ) : (
+              <button
+                type="button"
+                className="button secondary small"
+                onClick={() => {
+                  if (!steamInput.current) return;
+                  steamInput.current.value = offered;
+                  steamInput.current.focus();
+                }}
+              >
+                Use SteamID {offered}
+              </button>
+            ))}
+        </div>
+      )}
+      {record.discordId && (
+        <label className="supporter-check">
+          <input type="checkbox" name="steamConfirmed" />
+          <span>
+            The SteamID belongs to the new Discord account too.
+            <small>
+              Needed only when you change the Discord account and keep or enter a SteamID from the current account’s
+              whitelist application.
+            </small>
+          </span>
+        </label>
+      )}
+      <p className="muted">Leave a field as it is to keep it. Only changed values are saved.</p>
+    </>
   );
 }
 
@@ -279,8 +370,6 @@ function SupporterReview({
 
   const selected = review ? decisions[review.decision] : null;
   const eligiblePayment = record.founderEligiblePayment;
-  const offeredSteamId = applicationSteamId(record);
-  const steamHint = useId();
   return (
     <Modal
       className="supporter-dialog"
@@ -296,7 +385,7 @@ function SupporterReview({
       description={
         result
           ? result.saved
-            ? "Your review has been recorded. No game access or Discord role was changed."
+            ? "Your review has been recorded. No whitelist or game access was granted. When Discord roles are switched on, they follow this record."
             : "Close this record and refresh to check what was saved before submitting another review."
           : (selected?.description ??
             "Review account matching and payment evidence before recording any future benefit.")
@@ -360,52 +449,7 @@ function SupporterReview({
               </div>
             )}
             <fieldset disabled={sending} className="review-fields">
-              {review.decision === "link" && (
-                <>
-                  <label>
-                    Discord user ID
-                    <input
-                      name="discordId"
-                      pattern="[0-9]{17,20}"
-                      maxLength={20}
-                      inputMode="numeric"
-                      defaultValue={record.discordId ?? ""}
-                      placeholder="Discord user ID, not a display name"
-                    />
-                  </label>
-                  <label>
-                    SteamID64
-                    <input
-                      name="steamId"
-                      pattern="[0-9]{17}"
-                      maxLength={17}
-                      inputMode="numeric"
-                      defaultValue={record.steamId ?? offeredSteamId ?? ""}
-                      placeholder="17-digit SteamID64"
-                      aria-describedby={offeredSteamId ? steamHint : undefined}
-                    />
-                  </label>
-                  {offeredSteamId && (
-                    <p className="muted" id={steamHint}>
-                      Filled in from this Discord account’s approved whitelist application. Check it belongs to this
-                      supporter before saving.
-                    </p>
-                  )}
-                  {record.steamSource === "application" && (
-                    <label className="supporter-check">
-                      <input type="checkbox" name="steamConfirmed" />
-                      <span>
-                        The SteamID belongs to the new Discord account too.
-                        <small>
-                          Needed only when you change the Discord account: this SteamID was copied from the current
-                          account’s application.
-                        </small>
-                      </span>
-                    </label>
-                  )}
-                  <p className="muted">Leave a field as it is to keep it. Only changed values are saved.</p>
-                </>
-              )}
+              {review.decision === "link" && <LinkFields key={review.id} record={record} />}
               {review.decision === "payment" && (
                 <>
                   <div className="supporter-form-grid">
@@ -462,7 +506,10 @@ function SupporterReview({
                   ? `PayPal supporter ${recordName(record)}`
                   : `Patreon member ${record.patreonMemberId}`}
               </span>
-              <span>This records staff evidence only. No game or Discord access changes.</span>
+              <span>
+                This records staff evidence only. No whitelist or game access is granted. When Discord roles are
+                switched on, they follow this record.
+              </span>
             </div>
           </>
         )}
@@ -494,16 +541,48 @@ function SupporterReview({
 function AutomationNotice({ automation }: { automation: AutomationStatus | undefined }) {
   const steamFill = Boolean(automation?.steamFill),
     founderAuto = Boolean(automation?.founderAuto);
+  // Nothing runs without Patreon, whatever the switches say.
+  const inactive = automation?.configured === false;
+  const hold = automation?.holdHours;
   return (
-    <div className="notice info supporter-automation">
-      <strong>Automatic matching.</strong>{" "}
-      <Badge kind={steamFill ? "good" : "neutral"}>SteamID fill {steamFill ? "on" : "off"}</Badge>{" "}
-      <Badge kind={founderAuto ? "good" : "neutral"}>Automatic founders {founderAuto ? "on" : "off"}</Badge>{" "}
-      {founderAuto
-        ? "Gramps records a founder promise itself when the Discord account came from Patreon, a SteamID is linked and the first Patreon payment qualifies. Staff can always record one."
-        : "Automatic founder recording is off. Records marked “Would be recorded automatically” show what it would record; staff record founder promises."}
-      {!steamFill && " SteamIDs are linked by staff; an approved application’s SteamID is shown for checking."}
-    </div>
+    <>
+      <div className="notice info supporter-automation">
+        <strong>Automatic matching.</strong>{" "}
+        <Badge kind={steamFill && !inactive ? "good" : "neutral"}>SteamID fill {steamFill ? "on" : "off"}</Badge>{" "}
+        <Badge kind={founderAuto && !inactive ? "good" : "neutral"}>
+          Automatic founders {founderAuto ? "on" : "off"}
+        </Badge>{" "}
+        {inactive && (
+          <>
+            <Badge kind="warn">Inactive: Patreon not configured</Badge>{" "}
+          </>
+        )}
+        {founderAuto
+          ? "Gramps records a founder promise itself when the Discord account came from Patreon, a SteamID is linked and the first Patreon payment qualifies. Staff can always record one."
+          : "Automatic founder recording is off. Choose the “Would be recorded automatically” filter to see what it would record; staff record founder promises."}
+        {typeof hold === "number" &&
+          ` An automatic founder promise waits ${hold} hours after the first payment, Patreon’s refund window.`}
+        {!steamFill && " SteamIDs are linked by staff; an approved application’s SteamID is shown for checking."}
+        {automation?.lastRunAt && ` Last run ${date(automation.lastRunAt)}.`}
+      </div>
+      {automation?.lastError && (
+        <p className="notice warning" role="alert">
+          {automation.lastError}
+          {automation.lastRunAt && ` Last attempt ${date(automation.lastRunAt)}.`}
+        </p>
+      )}
+    </>
+  );
+}
+
+/** The first step staff can act on, with a count of the rest; a note that no founder promise is possible is not one. */
+function StillNeeded({ record }: { record: Supporter }) {
+  const steps = actionableSteps(record);
+  return (
+    <small className="supporter-wrap">
+      {steps[0] ? steps[0].message : "Nothing left to do"}
+      {steps.length > 1 && ` (+${steps.length - 1} more)`}
+    </small>
   );
 }
 
@@ -629,8 +708,9 @@ function AdminSupporters() {
       </div>
       <div className="notice info">
         <strong>Future benefit only.</strong> Founder recognition records lifetime standard whitelist access for when
-        Wardogs queue tiers launch. No whitelist, priority tier, or Discord role is granted from this page. Current free
-        whitelist access stays in place.
+        Wardogs queue tiers launch. No whitelist, priority tier, or game access is granted from this page. When Discord
+        roles are switched on, the Founder and Supporter roles follow these records. Current free whitelist access stays
+        in place.
       </div>
       <AutomationNotice automation={data.automation} />
       {data.note && <p className="supporter-note">{data.note}</p>}
@@ -702,8 +782,9 @@ function AdminSupporters() {
             columns={[
               { label: "Supporter", value: (record) => record.displayName || record.confirmKey },
               { label: "Recurring status", value: (record) => record.patronStatus },
-              { label: "Account match", value: (record) => record.identityState },
+              { label: "Account match", value: identityOrder },
               { label: "Founder record", value: (record) => !!record.founder, firstDirection: "descending" },
+              { label: "Still needed" },
               { label: "Actions" },
             ]}
             renderRow={(record) => (
@@ -720,14 +801,10 @@ function AdminSupporters() {
                   )}
                 </td>
                 <td>
-                  <Badge
-                    kind={
-                      record.identityState === "unlinked" || record.identityState === "partial" ? "warn" : "neutral"
-                    }
-                  >
+                  <Badge kind={accountsToMatch(record) ? "warn" : "neutral"}>
                     {identityLabels[record.identityState]}
                   </Badge>
-                  <small>{matchSummary(record)}</small>
+                  <small className="supporter-wrap">{matchSummary(record)}</small>
                   <small>{record.steamId ? <CopyValue value={record.steamId} /> : "SteamID not recorded"}</small>
                 </td>
                 <td>
@@ -738,14 +815,10 @@ function AdminSupporters() {
                         : "Permanent promise"
                       : "Not recorded"}
                   </Badge>
-                  {record.nextSteps[0] ? (
-                    <small>
-                      {record.nextSteps[0].message}
-                      {record.nextSteps.length > 1 && ` (+${record.nextSteps.length - 1} more)`}
-                    </small>
-                  ) : (
-                    <small>{record.founder ? "Waiting for game update" : "Nothing left to do"}</small>
-                  )}
+                  {record.founder && <small>Waiting for game update</small>}
+                </td>
+                <td>
+                  <StillNeeded record={record} />
                 </td>
                 <td>
                   <button

@@ -3,7 +3,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { api } from "../../api/client";
 import { AdminContext, type AdminContextValue } from "../../app/context";
 import { SupportersPage } from "./index";
-import { applicationSteamId, founderReady, reviewInput } from "./policy";
+import { applicationSteamId, discordDescription, founderReady, reviewInput } from "./policy";
 import type { FounderPolicy, PaymentEvidence, Supporter, SupporterReviewResponse, SupportersResponse } from "./types";
 
 vi.mock("../../api/client", () => ({ api: vi.fn() }));
@@ -294,9 +294,9 @@ it("requires admin access and renders provider data as text, with no access-gran
   expect(
     within(dialog).getByText("Entered by staff; Steam ownership is not verified by this page."),
   ).toBeInTheDocument();
-  expect(
-    screen.getByText(/No whitelist, priority tier, or Discord role is granted from this page/),
-  ).toBeInTheDocument();
+  expect(screen.getByText(/No whitelist, priority tier, or game access is granted from this page/)).toHaveTextContent(
+    "When Discord roles are switched on, the Founder and Supporter roles follow these records.",
+  );
 });
 
 it("follows the server's founder verdict instead of judging eligibility in the browser", () => {
@@ -409,7 +409,9 @@ it("uses the qualifying payment rather than the latest renewal, preserving UUID,
   );
   expect(screen.getByRole("heading", { name: "Supporter record saved" })).toBeInTheDocument();
   expect(
-    screen.getByText("Your review has been recorded. No game access or Discord role was changed."),
+    screen.getByText(
+      "Your review has been recorded. No whitelist or game access was granted. When Discord roles are switched on, they follow this record.",
+    ),
   ).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Save reviewed record" })).not.toBeInTheDocument();
 });
@@ -598,13 +600,28 @@ it("lets staff review a PayPal record, confirming with its record ID, even while
   expect(JSON.parse(String(postCalls()[0][1]?.body))).toMatchObject({ confirm: supporter.id, paymentId: payment.id });
 });
 
-it("fills in the SteamID an approved application offers only when none is linked, and says to check it", async () => {
+function form(values: Record<string, string>) {
+  const input = new FormData();
+  input.set("reason", "Checked both accounts with the supporter");
+  for (const [key, value] of Object.entries(values)) input.set(key, value);
+  return input;
+}
+
+it("offers an approved application's SteamID without filling it in, only for the Discord account that applied", async () => {
   const offered = {
     ...supporter,
     steamId: null,
     steamSource: null,
     identityState: "partial" as const,
     match: { ...supporter.match, steam: automaticSteam },
+    nextSteps: [
+      {
+        code: "steam_available",
+        area: "steam" as const,
+        message:
+          "The approved application on server primary names SteamID 76561198000000009. Check it and link it here.",
+      },
+    ],
   };
   request.mockImplementation(async (_path, options) =>
     options?.method === "POST"
@@ -618,8 +635,19 @@ it("fills in the SteamID an approved application offers only when none is linked
   render(page());
   fireEvent.click(await screen.findByRole("button", { name: "Review supporter" }));
   fireEvent.click(screen.getByRole("button", { name: "Review account match" }));
-  expect(screen.getByLabelText("SteamID64")).toHaveValue(automaticSteam.steamId);
-  expect(screen.getByText(/Check it belongs to this supporter before saving/)).toBeInTheDocument();
+  const steam = screen.getByLabelText("SteamID64");
+  expect(steam).toHaveValue("");
+  // The server's own step explains the SteamID next to the field.
+  expect(steam).toHaveAccessibleDescription(/names SteamID 76561198000000009\. Check it and link it here\./);
+  // Changing the Discord account withdraws the offer.
+  const discord = screen.getByLabelText("Discord user ID");
+  fireEvent.change(discord, { target: { value: "34567890123456789" } });
+  expect(screen.queryByRole("button", { name: `Use SteamID ${automaticSteam.steamId}` })).not.toBeInTheDocument();
+  expect(screen.getByText(/not offered for a new Discord account/)).toBeInTheDocument();
+  fireEvent.change(discord, { target: { value: supporter.discordId } });
+  fireEvent.click(screen.getByRole("button", { name: `Use SteamID ${automaticSteam.steamId}` }));
+  expect(steam).toHaveValue(automaticSteam.steamId);
+  expect(steam).toHaveFocus();
   fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "Checked the applicant's SteamID." } });
   fireEvent.click(screen.getByRole("button", { name: "Save reviewed record" }));
   await screen.findByRole("heading", { name: "Supporter record saved" });
@@ -630,12 +658,91 @@ it("fills in the SteamID an approved application offers only when none is linked
   expect(applicationSteamId(linked)).toBeNull();
 });
 
-function form(values: Record<string, string>) {
-  const input = new FormData();
-  input.set("reason", "Checked both accounts with the supporter");
-  for (const [key, value] of Object.entries(values)) input.set(key, value);
-  return input;
-}
+it.each([
+  "application_in_progress",
+  "application_pending",
+  "steam_shared",
+  "steam_rejected_before",
+  "steam_on_another_record",
+  "invalid_steam_id",
+])("never offers a SteamID flagged %s, and shows why", async (reason) => {
+  const flagged = {
+    ...supporter,
+    steamId: null,
+    steamSource: null,
+    identityState: "partial" as const,
+    match: { ...supporter.match, steam: { ...automaticSteam, reason } },
+    nextSteps: [{ code: reason, area: "steam" as const, message: `Flagged: ${reason}. Check it before linking.` }],
+  };
+  expect(applicationSteamId(flagged)).toBeNull();
+  request.mockResolvedValue(data(flagged));
+  render(page());
+  fireEvent.click(await screen.findByRole("button", { name: "Review supporter" }));
+  fireEvent.click(screen.getByRole("button", { name: "Review account match" }));
+  expect(screen.getByLabelText("SteamID64")).toHaveValue("");
+  expect(screen.getByLabelText("SteamID64")).toHaveAccessibleDescription(
+    `Flagged: ${reason}. Check it before linking.`,
+  );
+  expect(screen.queryByRole("button", { name: /^Use SteamID/ })).not.toBeInTheDocument();
+});
+
+it("asks staff to confirm the current Discord account's SteamID before it goes with a new account", () => {
+  const offered: Supporter = {
+    ...supporter,
+    steamId: null,
+    steamSource: null,
+    match: { ...supporter.match, steam: automaticSteam },
+  };
+  const newDiscord = "34567890123456789";
+  expect(() =>
+    reviewInput(offered, "link", "id", form({ discordId: newDiscord, steamId: automaticSteam.steamId })),
+  ).toThrow("The current Discord account applied for the whitelist with this SteamID");
+  // A flagged SteamID is not offered, but it is still the old account's.
+  const flagged = { ...offered, match: { ...offered.match, steam: { ...automaticSteam, reason: "steam_shared" } } };
+  expect(() =>
+    reviewInput(flagged, "link", "id", form({ discordId: newDiscord, steamId: automaticSteam.steamId })),
+  ).toThrow("Confirm it belongs to the new Discord account too");
+  expect(
+    reviewInput(
+      offered,
+      "link",
+      "id",
+      form({ discordId: newDiscord, steamId: automaticSteam.steamId, steamConfirmed: "on" }),
+    ),
+  ).toMatchObject({ discordId: newDiscord, steamId: automaticSteam.steamId, steamConfirmed: true });
+  expect(reviewInput(offered, "link", "id", form({ discordId: newDiscord, steamId: "76561198000000002" }))).toEqual(
+    expect.not.objectContaining({ steamConfirmed: expect.anything() }),
+  );
+  // The box sent with a SteamID that stays covers an application the server knows of and this page cannot show.
+  expect(reviewInput(supporter, "link", "id", form({ discordId: newDiscord, steamConfirmed: "on" }))).toMatchObject({
+    discordId: newDiscord,
+    steamConfirmed: true,
+  });
+  expect(reviewInput(offered, "link", "id", form({ steamId: "76561198000000002", steamConfirmed: "on" }))).toEqual(
+    expect.not.objectContaining({ steamConfirmed: expect.anything() }),
+  );
+});
+
+it("says whether another record links the Discord account Patreon reports, and when Patreon stops reporting one", () => {
+  const unlinked: Supporter = {
+    ...supporter,
+    discordId: null,
+    discordSource: null,
+    patreonDiscordId: "34567890123456789",
+  };
+  expect(discordDescription(unlinked)).toBe("Patreon reports Discord account 34567890123456789. It is not linked yet.");
+  expect(discordDescription({ ...unlinked, match: { ...unlinked.match, patreonDiscordElsewhere: true } })).toBe(
+    "Patreon reports Discord account 34567890123456789, which another supporter record links.",
+  );
+  const fromPatreon: Supporter = { ...supporter, discordSource: "patreon", patreonDiscordId: null };
+  expect(discordDescription(fromPatreon)).toBe("From Patreon (the patron connected it).");
+  expect(
+    discordDescription({
+      ...fromPatreon,
+      nextSteps: [{ code: "discord_not_reported", area: "discord", message: "Patreon no longer reports it." }],
+    }),
+  ).toBe("From Patreon (the patron connected it). Patreon does not currently report this account.");
+});
 
 it("asks staff to restate a SteamID copied from an application before changing the Discord account", () => {
   const copied: Supporter = {
@@ -669,7 +776,21 @@ it("filters accounts to match, records ready for staff, automatic previews and a
       displayName: "Partly matched patron",
       steamId: null,
       identityState: "partial",
-      nextSteps: [],
+      nextSteps: [{ code: "no_whitelist_application", area: "steam", message: "No whitelist application yet." }],
+    },
+    {
+      ...supporter,
+      id: "d",
+      displayName: "Patron after the window",
+      steamId: null,
+      identityState: "partial",
+      nextSteps: [
+        {
+          code: "founder_outside_window",
+          area: "info",
+          message: "This payment was not made inside the founder window.",
+        },
+      ],
     },
     {
       ...supporter,
@@ -694,6 +815,14 @@ it("filters accounts to match, records ready for staff, automatic previews and a
   expect(screen.getByText("SteamID fill off")).toBeInTheDocument();
   const filter = screen.getByRole("combobox", { name: "Filter supporter records" });
   const shown = () => screen.getAllByRole("button", { name: "Review supporter" }).length;
+  // Only a record with a Discord or SteamID step is an account to match, and only it gets the warning badge.
+  const after = screen.getByText("Patron after the window").closest("tr")!;
+  expect(within(after).getByText("Partly matched")).toHaveClass("neutral");
+  expect(within(after).getByText("Nothing left to do")).toBeInTheDocument();
+  expect(within(screen.getByText("Partly matched patron").closest("tr")!).getByText("Partly matched")).toHaveClass(
+    "warn",
+  );
+  expect(screen.getByText("accounts to match")).toHaveTextContent("1 accounts to match");
   fireEvent.change(filter, { target: { value: "unlinked" } });
   expect(screen.getByText("Partly matched patron")).toBeInTheDocument();
   expect(shown()).toBe(1);
@@ -706,4 +835,92 @@ it("filters accounts to match, records ready for staff, automatic previews and a
   fireEvent.change(filter, { target: { value: "staff" } });
   expect(screen.getByText("Would be automatic")).toBeInTheDocument();
   expect(shown()).toBe(1);
+});
+
+it("keeps a note that no founder promise is possible apart from the steps still needed", async () => {
+  const note = { code: "founder_outside_window", area: "info" as const, message: "Not inside the founder window." };
+  const discordStep = { code: "connect_discord_in_patreon", area: "discord" as const, message: "Connect Discord." };
+  request.mockResolvedValue(data({ ...supporter, nextSteps: [discordStep, note] }));
+  render(page());
+  const row = (await screen.findByText(supporter.displayName!)).closest("tr")!;
+  expect(within(row).getByText("Connect Discord.")).toBeInTheDocument();
+  expect(within(row).queryByText(/more\)/)).not.toBeInTheDocument();
+  fireEvent.click(within(row).getByRole("button", { name: "Review supporter" }));
+  const dialog = screen.getByRole("dialog");
+  const still = within(dialog).getByRole("heading", { name: "Still needed" });
+  const notPossible = within(dialog).getByRole("heading", { name: "Founder promise not possible" });
+  expect(still.nextElementSibling).toHaveTextContent("Connect Discord.");
+  expect(still.nextElementSibling).not.toHaveTextContent("Not inside the founder window.");
+  expect(notPossible.nextElementSibling).toHaveTextContent("Not inside the founder window.");
+});
+
+it("puts the step still needed in its own wrapping column", async () => {
+  request.mockResolvedValue(data());
+  render(page());
+  const row = (await screen.findByText(supporter.displayName!)).closest("tr")!;
+  const headers = screen.getAllByRole("columnheader").map((header) => header.textContent ?? "");
+  const column = (label: string) => headers.findIndex((header) => header.includes(label));
+  expect(column("Still needed")).toBeGreaterThan(column("Founder record"));
+  const cells = within(row).getAllByRole("cell");
+  const step = within(row).getByText(supporter.nextSteps[0].message);
+  expect(cells[column("Still needed")]).toContainElement(step);
+  expect(step).toHaveClass("supporter-wrap");
+  expect(cells[column("Founder record")]).not.toHaveTextContent(supporter.nextSteps[0].message);
+});
+
+it("sorts the account match column from not linked to matched through Patreon", async () => {
+  const states = ["patreon_linked", "unlinked", "staff_linked", "partial"] as const;
+  request.mockResolvedValue({
+    ...data(),
+    supporters: states.map((identityState, index) => ({
+      ...supporter,
+      id: `record-${index}`,
+      displayName: `Record ${identityState}`,
+      identityState,
+    })),
+  });
+  render(page());
+  await screen.findByText("Record unlinked");
+  fireEvent.click(screen.getByRole("button", { name: /Account match/ }));
+  const order = screen
+    .getAllByRole("row")
+    .slice(1)
+    .map((row) => within(row).getByText(/^Record /).textContent);
+  expect(order).toEqual(["Record unlinked", "Record partial", "Record staff_linked", "Record patreon_linked"]);
+});
+
+it("shows a failed matching run, an unconfigured Patreon and the refund wait in the automation notice", async () => {
+  request.mockResolvedValue({
+    ...data(),
+    automation: {
+      steamFill: true,
+      founderAuto: false,
+      holdHours: 72,
+      configured: false,
+      lastRunAt: "2026-10-03T12:00:00Z",
+      lastError: "Automatic supporter matching could not finish.",
+    },
+  });
+  render(page());
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("Automatic supporter matching could not finish.");
+  expect(alert).toHaveTextContent("Last attempt");
+  expect(screen.getByText("Inactive: Patreon not configured")).toHaveClass("warn");
+  expect(screen.getByText("SteamID fill on")).toHaveClass("neutral");
+  const notice = screen.getByText("Automatic matching.").parentElement!;
+  expect(notice).toHaveTextContent("waits 72 hours after the first payment");
+  expect(notice).toHaveTextContent("Choose the “Would be recorded automatically” filter");
+  expect(notice).toHaveTextContent("Last run");
+});
+
+it("shows no automation alert while the last run finished", async () => {
+  request.mockResolvedValue({
+    ...data(),
+    automation: { steamFill: true, founderAuto: true, holdHours: 24, configured: true, lastError: null },
+  });
+  render(page());
+  await screen.findByText(supporter.displayName!);
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.queryByText("Inactive: Patreon not configured")).not.toBeInTheDocument();
+  expect(screen.getByText("SteamID fill on")).toHaveClass("good");
 });

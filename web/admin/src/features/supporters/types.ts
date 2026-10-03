@@ -28,7 +28,8 @@ export interface SteamMatch {
 }
 export interface NextStep {
   code: string;
-  area: "discord" | "steam" | "payment" | "founder";
+  /** `info` is a note, not a task: why no founder promise is possible on this record. */
+  area: "discord" | "steam" | "payment" | "founder" | "info";
   message: string;
 }
 export type IdentityState = "unlinked" | "partial" | "patreon_linked" | "staff_linked";
@@ -71,6 +72,7 @@ export interface Supporter {
     sourceApplicationRevoked: boolean;
     patreonDiscordElsewhere: boolean;
     discordReportedForOtherPatron: boolean;
+    linkedSteamShared?: boolean;
   };
   automaticBlockedReason: string | null;
   automaticBlockedMessage: string | null;
@@ -79,9 +81,12 @@ export interface Supporter {
 export interface AutomationStatus {
   steamFill: boolean;
   founderAuto: boolean;
+  /** Hours an imported first payment must stand before an automatic founder promise. */
   holdHours?: number;
+  /** Patreon is configured, so matching has records to run on. */
   configured?: boolean;
   lastRunAt?: string | null;
+  /** Fixed text from the server when the last matching run could not finish. */
   lastError?: string | null;
 }
 export interface SupportersResponse {

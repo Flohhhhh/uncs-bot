@@ -30,15 +30,23 @@ export function founderReady(record: Supporter) {
 export function discordDescription(record: Supporter) {
   const reported = record.patreonDiscordId;
   if (!record.discordId)
-    return reported
-      ? `Patreon reports Discord account ${reported}, which another supporter record links.`
-      : "Record the account after confirming the member’s identity.";
+    return !reported
+      ? "Record the account after confirming the member’s identity."
+      : record.match.patreonDiscordElsewhere
+        ? `Patreon reports Discord account ${reported}, which another supporter record links.`
+        : `Patreon reports Discord account ${reported}. It is not linked yet.`;
+  // The server raises this step only while the import keeps Patreon's answer current.
+  const notReported = record.nextSteps.some((step) => step.code === "discord_not_reported");
   const patreon =
-    record.provider !== "patreon" || !reported
+    record.provider !== "patreon"
       ? ""
-      : reported === record.discordId
-        ? " Patreon reports the same account."
-        : ` Patreon now reports a different account: ${reported}.`;
+      : !reported
+        ? notReported
+          ? " Patreon does not currently report this account."
+          : ""
+        : reported === record.discordId
+          ? " Patreon reports the same account."
+          : ` Patreon now reports a different account: ${reported}.`;
   if (record.discordSource === "patreon") return `From Patreon (the patron connected it).${patreon}`;
   if (record.discordSource === "staff") return `Entered by staff; not verified through Discord sign-in.${patreon}`;
   return `Linked before match sources were recorded.${patreon}`;
@@ -68,11 +76,15 @@ export function matchSummary(record: Supporter) {
   return `Discord: ${sourceLabel(record.discordId, record.discordSource)} · SteamID: ${sourceLabel(record.steamId, record.steamSource)}`;
 }
 
-/** The SteamID an approved application offers, for staff to check when the record has none. */
+/**
+ * The SteamID an approved application offers staff to check and link when the record has none: only one the SteamID
+ * rule accepts, or one approved without a recorded grant. A SteamID that is shared, was rejected before, is held by
+ * another record, is invalid, or is under review is never offered.
+ */
+const OFFERED_REASONS = new Set<string | null>([null, "application_not_confirmed"]);
 export function applicationSteamId(record: Supporter) {
-  return !record.steamId && record.match.steam?.steamId && record.match.steam.reason !== "application_pending"
-    ? record.match.steam.steamId
-    : null;
+  const steam = record.match.steam;
+  return !record.steamId && steam?.steamId && OFFERED_REASONS.has(steam.reason) ? steam.steamId : null;
 }
 
 const READY_FOR_STAFF = new Set([
@@ -88,16 +100,29 @@ export const automaticPreview = (record: Supporter) =>
   record.nextSteps.some(
     (step) => step.code === "founder_ready_automatic" || step.code === "founder_ready_automatic_off",
   );
+/** Records with a Discord or SteamID step left: something staff can still match or check. */
 export const accountsToMatch = (record: Supporter) =>
-  record.identityState === "unlinked" || record.identityState === "partial";
+  record.nextSteps.some((step) => step.area === "discord" || step.area === "steam");
+/** Steps staff can act on; `info` notes only say why no founder promise is possible. */
+export const actionableSteps = (record: Supporter) => record.nextSteps.filter((step) => step.area !== "info");
 
-/** Steps grouped for the record dialog; payment problems share one heading. */
+/** Steps grouped for the record dialog; payment problems share one heading, and notes are kept apart from tasks. */
 export function stepGroups(steps: NextStep[]) {
   return {
     payment: steps.filter((step) => step.area === "payment"),
-    other: steps.filter((step) => step.area !== "payment"),
+    other: steps.filter((step) => step.area !== "payment" && step.area !== "info"),
+    info: steps.filter((step) => step.area === "info"),
   };
 }
+
+const identityRank: Record<Supporter["identityState"], number> = {
+  unlinked: 0,
+  partial: 1,
+  staff_linked: 2,
+  patreon_linked: 3,
+};
+/** Sorts the account match column from least to most matched. */
+export const identityOrder = (record: Supporter) => identityRank[record.identityState];
 
 export function reviewInput(
   record: Supporter,
@@ -123,12 +148,19 @@ export function reviewInput(
     // Only a value that changes is sent, so an unchanged identity keeps where it came from.
     const discordChanged = Boolean(discordId) && discordId !== record.discordId;
     const steamChanged = Boolean(steamId) && steamId !== record.steamId;
-    const steamConfirmed =
-      discordChanged && !steamChanged && record.steamSource === "application" && values.get("steamConfirmed") === "on";
-    if (discordChanged && !steamChanged && record.steamSource === "application" && !steamConfirmed)
+    const confirmed = values.get("steamConfirmed") === "on";
+    // A SteamID from the current Discord account's application must not follow a new Discord account unconfirmed.
+    if (discordChanged && !steamChanged && record.steamSource === "application" && !confirmed)
       throw new Error(
         "This SteamID was copied from the old Discord account’s application. Confirm it belongs to the new account, or enter the right SteamID64.",
       );
+    if (discordChanged && steamChanged && steamId === record.match.steam?.steamId && !confirmed)
+      throw new Error(
+        "The current Discord account applied for the whitelist with this SteamID. Confirm it belongs to the new Discord account too, or enter the right SteamID64.",
+      );
+    // The server can know of an application this page does not show, so a confirmation goes with any SteamID that
+    // stays with, or arrives with, a new Discord account.
+    const steamConfirmed = discordChanged && confirmed && Boolean(steamChanged ? steamId : record.steamId);
     if (!discordChanged && !steamChanged)
       throw new Error("Change the Discord user ID or the SteamID64 before saving. Unchanged values are kept.");
     return {
