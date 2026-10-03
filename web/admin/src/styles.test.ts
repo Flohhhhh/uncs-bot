@@ -138,3 +138,15 @@ describe("buttons", () => {
     expect(declared(dimmed, "cursor", 1024)).toBe("not-allowed");
   });
 });
+
+describe("Discord roles ledger", () => {
+  it.each([320, 375, 700])("wraps a ledger message inside its full-width phone card at %ipx", (width) => {
+    // A 220px minimum in a half-width card cell pushed the Recent role changes card into a sideways scroll.
+    expect(declared("td small.roles-ledger-message", "min-width", width)).toBe("0");
+    expect(declared('[data-mobile="cards"] td:has(.roles-ledger-message)', "grid-column", width)).toBe("1 / -1");
+  });
+  it("keeps the readable message width in the desktop table", () => {
+    expect(declared("td small.roles-ledger-message", "min-width", 1024)).toBe("220px");
+    expect(declared('[data-mobile="cards"] td:has(.roles-ledger-message)', "grid-column", 1024)).toBeUndefined();
+  });
+});

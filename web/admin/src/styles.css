@@ -4062,6 +4062,17 @@ td small.roles-ledger-message {
   max-width: 420px;
   white-space: normal;
 }
+/* On phones each ledger row is a card: the result takes the card's full width and its message wraps inside it,
+   instead of pushing the card into a sideways scroll. */
+@media (max-width: 700px) {
+  td small.roles-ledger-message {
+    min-width: 0;
+    max-width: none;
+  }
+  [data-mobile="cards"] td:has(.roles-ledger-message) {
+    grid-column: 1 / -1;
+  }
+}
 .roles-dialog .notice {
   margin-top: var(--space-3);
 }
