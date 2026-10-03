@@ -1436,7 +1436,7 @@ async function main() {
               enabled: false,
               message: "GG! Get whitelisted at theuncsgaming.com/whitelist. Thanks for playing on The UNCs.",
             },
-            discordStatus: { enabled: false, configured: false },
+            discordStatus: { enabled: false, configured: false, problem: null },
           }),
         },
       },

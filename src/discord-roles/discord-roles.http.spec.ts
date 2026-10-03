@@ -1,4 +1,5 @@
-import { Global, Module, type INestApplication } from "@nestjs/common";
+import { Global, Logger, Module, type INestApplication } from "@nestjs/common";
+import { APP_FILTER } from "@nestjs/core";
 import { Test } from "@nestjs/testing";
 import { randomUUID } from "node:crypto";
 import request from "supertest";
@@ -6,6 +7,7 @@ import { hash } from "../admin/admin.auth";
 import { AdminSettings } from "../admin/admin.settings";
 import { AdminStore } from "../admin/admin.store";
 import { WardogsClient } from "../admin/wardogs.client";
+import { AppExceptionFilter } from "../common/filters/app-exception.filter";
 import { EnvService } from "../env/env.service";
 import { DiscordRolesDiscord } from "./discord-roles.discord";
 import { DiscordRolesModule } from "./discord-roles.module";
@@ -71,7 +73,12 @@ describe("Discord roles HTTP boundary", () => {
         : undefined,
     );
     jest.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ roles: ["staff"] })));
-    const module = await Test.createTestingModule({ imports: [TestEnvModule, DiscordRolesModule] })
+    jest.spyOn(Logger.prototype, "error").mockImplementation();
+    // Production registers this filter globally, so status assertions here go through it.
+    const module = await Test.createTestingModule({
+      imports: [TestEnvModule, DiscordRolesModule],
+      providers: [{ provide: APP_FILTER, useClass: AppExceptionFilter }],
+    })
       .overrideProvider(AdminSettings)
       .useValue({ get: () => config })
       .overrideProvider(AdminStore)
