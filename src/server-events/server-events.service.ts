@@ -120,6 +120,11 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
   private readonly logger = new Logger(ServerEventsService.name);
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   private stopped = false;
+  /**
+   * The worker starts in this service's bootstrap hook, which runs after the Discord sign-in, but the dashboard
+   * answers before it. Until then no event is armed, so none waits unwatched and starts late.
+   */
+  private workerStarted = false;
   private readonly running = new Set<string>();
   private readonly alerted = new Map<string, { count: number; at: number }>();
   private readonly watched = new Map<string, number>();
@@ -189,6 +194,8 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
   async start(staff: Staff, input: unknown) {
     this.staff(staff);
     this.available();
+    if (!this.workerStarted)
+      throw new ServiceUnavailableException("Gramps is still starting. No event was created. Try again shortly.");
     const parsed = startEventSchema.safeParse(input);
     if (!parsed.success)
       throw new BadRequestException(
@@ -496,6 +503,7 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
     return eventView((await this.store.get(id))!);
   }
   onApplicationBootstrap() {
+    this.workerStarted = true;
     if (this.enabled()) for (const server of this.servers.list()) this.schedule(server.id, 0);
   }
   onModuleDestroy() {

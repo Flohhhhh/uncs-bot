@@ -11,6 +11,7 @@ import { AdminStore } from "./admin.store";
 import { WardogsClient } from "./wardogs.client";
 import { hash } from "./admin.auth";
 import { AppController } from "../app.controller";
+import { StartupState } from "../startup/startup";
 import { MapVotesController } from "../map-votes/map-votes.controller";
 import { MapVotesService } from "../map-votes/map-votes.service";
 import { ServerEventsController } from "../server-events/server-events.controller";
@@ -64,6 +65,8 @@ describe("admin HTTP boundaries", () => {
     viewerRoleIds: ["viewer"],
     secure: true,
   };
+  const started = new StartupState();
+  started.finish();
   beforeEach(async () => {
     jest.clearAllMocks();
     store.session.mockImplementation(async (key) => (key === hash(token) ? session : undefined));
@@ -81,6 +84,7 @@ describe("admin HTTP boundaries", () => {
       providers: [
         { provide: MapVotesService, useValue: votes },
         { provide: ServerEventsService, useValue: events },
+        { provide: StartupState, useValue: started },
       ],
     })
       .overrideProvider(HttpAdapterHost)

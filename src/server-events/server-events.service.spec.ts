@@ -25,7 +25,7 @@ import { eventView, systemStops, type EventRecord, type EventSnapshot } from "./
 
 type Field = { id: string; value: boolean | number | null; editable: boolean };
 const lockField = (value: boolean | null, editable = true): Field => ({ id: "lockOverpopulated", value, editable });
-function fixture(serverId = "primary", make: () => EventRecord = eventFixture) {
+function fixture(serverId = "primary", make: () => EventRecord = eventFixture, workerStarted = true) {
   const record = make();
   record.serverId = serverId;
   let current: EventRecord | null = record;
@@ -135,8 +135,8 @@ function fixture(serverId = "primary", make: () => EventRecord = eventFixture) {
   const servers = fixtureServers(game, () => environment.WARDOGS_RCON_URL as string, serverId);
   const alerts = { send: jest.fn(async (_server: string, _key: string, _message: string) => true) };
   /** A new process: fresh in-memory round state over the same storage and game. */
-  const make2 = () =>
-    new ServerEventsService(
+  const make2 = () => {
+    const created = new ServerEventsService(
       store as unknown as ServerEventsStore,
       servers,
       admin as unknown as AdminService,
@@ -145,6 +145,15 @@ function fixture(serverId = "primary", make: () => EventRecord = eventFixture) {
       new GameRounds(servers),
       alerts as unknown as StaffAlerts,
     );
+    if (workerStarted) {
+      // Nest starts the event worker after the Discord sign-in. Start it here without scheduling a tick.
+      const enabled = environment.SERVER_EVENTS_ENABLED;
+      environment.SERVER_EVENTS_ENABLED = false;
+      created.onApplicationBootstrap();
+      environment.SERVER_EVENTS_ENABLED = enabled;
+    }
+    return created;
+  };
   const service = make2();
   const input = {
     id: record.id,
@@ -236,6 +245,16 @@ describe("durable optional event service", () => {
     expect(await f.service.start(eventStaff, f.input)).toEqual(started);
     expect(f.game.configuration).toHaveBeenCalledTimes(reads);
     await expect(f.service.start(eventStaff, { ...f.input, durationMinutes: 90 })).rejects.toThrow("different request");
+  });
+  it("arms no event while Gramps is still starting, before its worker runs after the Discord sign-in", async () => {
+    const f = fixture("primary", eventFixture, false);
+    f.set(null);
+    await expect(f.service.start(eventStaff, f.input)).rejects.toThrow("still starting");
+    expect(f.game.configuration).not.toHaveBeenCalled();
+    expect(f.store.create).not.toHaveBeenCalled();
+    f.service.onApplicationBootstrap();
+    expect((await f.service.start(eventStaff, f.input)).state).toBe("preparing");
+    f.service.onModuleDestroy();
   });
   it("starts a staff event without a match clock once the round is live", async () => {
     const f = fixture();
