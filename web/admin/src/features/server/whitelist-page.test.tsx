@@ -8,6 +8,7 @@ import { WhitelistPage } from "./pages";
 
 vi.mock("../../api/client", () => ({ api: vi.fn() }));
 const request = vi.mocked(api);
+// Braces keep the hook from returning the mock, which Vitest would then call as a teardown.
 beforeEach(() => {
   request.mockReset();
 });
@@ -102,4 +103,11 @@ it("shows a failed read as unavailable rather than as an empty whitelist", async
   mount();
   expect(await screen.findByText("Whitelist could not be loaded")).toBeInTheDocument();
   expect(screen.queryByText("No player entries available")).not.toBeInTheDocument();
+});
+
+it("announces a failed whitelist read without announcing the read while it loads", async () => {
+  request.mockRejectedValue(new Error("The game server did not respond."));
+  mount();
+  expect(screen.getByText("Loading whitelist…").closest("[role=alert]")).toBeNull();
+  expect(await screen.findByRole("alert")).toHaveTextContent("Whitelist could not be loaded");
 });

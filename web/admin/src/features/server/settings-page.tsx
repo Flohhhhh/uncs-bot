@@ -344,7 +344,7 @@ export function SettingsPage() {
   useEffect(() => setUnsavedChanges(!!draft), [draft, setUnsavedChanges]);
   useEffect(() => () => setUnsavedChanges(false), [setUnsavedChanges]);
   if (admin.me.role !== "admin") return <Empty title="Administrator access required" />;
-  if (!resource.data) return <Empty title={resource.error || "Loading server settings…"} />;
+  if (!resource.data) return <Empty title={resource.error || "Loading server settings…"} alert={!!resource.error} />;
   const snapshot = draft?.snapshot ?? resource.data;
   const disabled = admin.busy || !!resource.error || document.hidden;
   const outdated = !!draft && draft.snapshot.revision !== resource.data.revision;

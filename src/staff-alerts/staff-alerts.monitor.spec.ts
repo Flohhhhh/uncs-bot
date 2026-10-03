@@ -10,7 +10,7 @@ import { legacyServerSettings } from "../admin/game-server-fixture";
 import { EnvService } from "../env/env.service";
 import { TelemetryStore } from "../telemetry/telemetry.store";
 import { FEED_CONTEXT, TelemetryFeedContext } from "./feed-context";
-import { EnvWatchlistSource, NETWORK_BAN_SOURCES } from "./network-bans";
+import { EnvWatchlistSource, NETWORK_BAN_SOURCES, type NetworkBanEntry } from "./network-bans";
 import { StaffAlertsMonitorModule } from "./staff-alerts-monitor.module";
 import { StaffAlertsController } from "./staff-alerts.controller";
 import { ZodError } from "zod";
@@ -440,6 +440,60 @@ describe("staff alerts worker", () => {
     expect(worker.view().seeding.lowSince).not.toBeNull();
     expect(alerts.list("primary")).toEqual([]);
     expect(discord.channel.send).not.toHaveBeenCalled();
+  });
+
+  it("keeps reading while Discord is slow to post, so a map change meanwhile is not taken for a restart", async () => {
+    const { worker, game, alerts, discord } = workerFixture({ STAFF_ALERTS_HEALTH_ENABLED: true });
+    const players = crowd(30);
+    game.set(snapshot(players, live));
+    worker.start();
+    await jest.advanceTimersByTimeAsync(30_000);
+    // The game reports a new build, and Discord takes 50 seconds to accept that alert.
+    discord.channel.send.mockImplementationOnce(
+      () => new Promise((resolve) => setTimeout(() => resolve({ id: "999999999999999999" }), 50_000)),
+    );
+    game.set(snapshot(players, live, "CL-507061"));
+    await jest.advanceTimersByTimeAsync(15_000);
+    expect(alerts.list("primary").map((alert) => alert.kind)).toEqual(["game-build"]);
+    // The next map loads with everyone still connected while that post is under way. Had the
+    // reads waited for it, the next one would come after the round gap and look like a restart.
+    const reads = game.overview.mock.calls.length;
+    game.set(snapshot(players, nextMap, "CL-507061"));
+    await jest.advanceTimersByTimeAsync(90_000);
+    expect(alerts.list("primary").map((alert) => [alert.kind, alert.delivery.state])).toEqual([
+      ["game-build", "posted"],
+    ]);
+    expect(worker.view().lastRestartAt).toBeNull();
+    expect(game.overview.mock.calls.length).toBe(reads + 6);
+    worker.stop();
+  });
+
+  it("records alerts without posting them while ten earlier posts still wait on Discord", async () => {
+    const entry = (steamId: string): NetworkBanEntry => ({
+      steamId,
+      communities: 2,
+      reasons: ["Aimbot"],
+      evidenceUrls: [],
+      recordedAt: null,
+      source: "wardogs-network",
+    });
+    const source = {
+      name: "Test list",
+      lookup: jest.fn(async (steamIds: string[]) => new Map(steamIds.map((steamId) => [steamId, entry(steamId)]))),
+    };
+    const { pass, alerts, discord } = workerFixture({ STAFF_ALERTS_WATCHLIST_ENABLED: true }, { sources: [source] });
+    discord.channel.send.mockImplementation(() => new Promise(() => undefined));
+    const players = crowd(12);
+    await pass(snapshot([]), 0);
+    // One listed player joins every 11 minutes, inside the hourly limit, and no post ever finishes.
+    for (let count = 1; count <= players.length; count++) await pass(snapshot(players.slice(0, count)), 11 * 60_000);
+    const waiting = "earlier posts still waiting on Discord";
+    expect(alerts.list("primary").map((alert) => alert.delivery.reason)).toEqual([
+      waiting,
+      waiting,
+      ...Array.from({ length: 10 }, () => null),
+    ]);
+    expect(discord.channel.send).toHaveBeenCalledTimes(10);
   });
 
   it("does not call one failed read across an ordinary rotation a restart", async () => {

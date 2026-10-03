@@ -123,11 +123,13 @@ export function workerFixture(
     options.sources ?? [],
     options.feed ?? null,
   );
-  /** Advances the clock and runs one pass against this roster. */
+  /** Advances the clock and runs one pass against this roster, then lets its alert posts finish. */
   const pass = async (next?: Overview, advance = 10_000) => {
     jest.setSystemTime(Date.now() + advance);
     if (next) game.set(next);
-    return worker.tick();
+    const delay = await worker.tick();
+    await jest.advanceTimersByTimeAsync(0);
+    return delay;
   };
   return { env, game, servers, discord, alerts, worker, pass };
 }

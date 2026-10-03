@@ -131,6 +131,16 @@ describe("React staff shell", () => {
     // The old address is replaced, so Back does not bounce through the redirect.
     expect(router.state.historyAction).toBe("REPLACE");
   });
+  it("announces a new page by focusing its heading instead of reading refreshed content aloud", async () => {
+    mount("/players");
+    await screen.findByText("Live", pill);
+    expect(screen.getByRole("heading", { level: 1 })).toHaveFocus();
+    expect(document.getElementById("page")?.closest("[aria-live]")).toBeNull();
+    fireEvent.click(screen.getByRole("link", { name: /Server activity/ }));
+    await waitFor(() => expect(document.title).toBe("Server activity · The UNCs Admin"));
+    expect(screen.getByRole("heading", { level: 1 })).toHaveFocus();
+    expect(document.getElementById("page")?.closest("[aria-live]")).toBeNull();
+  });
   it("requires a fresh server check after returning from a records page", async () => {
     const fetcher = mount();
     await screen.findByText("Live", pill);

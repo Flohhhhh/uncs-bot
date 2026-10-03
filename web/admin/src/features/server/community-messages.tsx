@@ -186,6 +186,7 @@ export function CommunityMessages() {
           <Empty
             title="Message status could not be loaded"
             detail="No activation state has been assumed."
+            alert
             action={
               <button
                 type="button"

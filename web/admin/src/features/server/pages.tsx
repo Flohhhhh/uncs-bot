@@ -29,9 +29,23 @@ function elapsed(seconds: number) {
     ? `${Math.floor(minutes / 60)}:${pad(minutes % 60)}:${pad(total % 60)}`
     : `${minutes}:${pad(total % 60)}`;
 }
-function NowItem({ label, value, note, title }: { label: string; value: ReactNode; note?: ReactNode; title?: string }) {
+function NowItem({
+  label,
+  value,
+  note,
+  title,
+  alert = false,
+}: {
+  label: string;
+  value: ReactNode;
+  note?: ReactNode;
+  title?: string;
+  /** Announce the tile because its read failed; loading and routine refreshes stay quiet. */
+  alert?: boolean;
+}) {
+  // The key mounts the alert as a new element, which screen readers announce more reliably than a role added in place.
   return (
-    <div className="now-item" title={title}>
+    <div className="now-item" title={title} role={alert ? "alert" : undefined} key={alert ? "alert" : "item"}>
       <span className="now-label">{label}</span>
       <strong className="now-value">{value}</strong>
       {note && <span className="now-note">{note}</span>}
@@ -75,6 +89,7 @@ export function OverviewPage() {
   const vote = voteSummary(votes, voting.error || (voting.data && !votes ? "The voting status was unreadable." : ""));
   const top = [...players].sort((a, b) => compareValues(a.kills, b.kills, "descending")).slice(0, 8);
   const recent = activity.entries.filter((entry) => entry.category !== "combat").slice(0, 6);
+  const activityFailed = !recent.length && !activity.loading && activity.failed.length > 0;
   return (
     <>
       <div className="overview-actions">
@@ -155,8 +170,9 @@ export function OverviewPage() {
                 : undefined
           }
           title={next.note || undefined}
+          alert={!!rotationRead.error}
         />
-        {isAdmin && <NowItem label="Vote" value={vote.label} />}
+        {isAdmin && <NowItem label="Vote" value={vote.label} alert={!!voting.error} />}
         <Link className="text-button now-link" to="/match">
           Match &amp; maps →
         </Link>
@@ -240,10 +256,14 @@ export function OverviewPage() {
               ))}
             </ol>
           ) : (
-            <p className="muted card-body">
+            <p
+              className="muted card-body"
+              role={activityFailed ? "alert" : undefined}
+              key={activityFailed ? "alert" : "empty"}
+            >
               {activity.loading
                 ? "Loading recent activity…"
-                : activity.failed.length
+                : activityFailed
                   ? "Recent activity could not be loaded."
                   : "No recent activity yet."}
             </p>
@@ -271,7 +291,13 @@ export function WhitelistPage() {
   const [filter, setFilter] = useState("");
   const [managed, setManaged] = useState<SheetPlayer | null>(null);
   if (!data)
-    return <Empty title={error ? "Whitelist could not be loaded" : "Loading whitelist…"} detail={error || ""} />;
+    return (
+      <Empty
+        title={error ? "Whitelist could not be loaded" : "Loading whitelist…"}
+        detail={error || ""}
+        alert={!!error}
+      />
+    );
   // Names only for players in the latest roster; offline entries stay SteamIDs.
   const online = new Map((overview?.players ?? []).map((player) => [player.steamId, player]));
   const search = query.trim().toLowerCase();
@@ -388,7 +414,8 @@ export function BansPage() {
   const { data, error } = useResource<Ban[]>("bans");
   const [query, setQuery] = useState("");
   const [picking, setPicking] = useState(false);
-  if (!data) return <Empty title={error ? "Bans could not be loaded" : "Loading bans…"} detail={error} />;
+  if (!data)
+    return <Empty title={error ? "Bans could not be loaded" : "Loading bans…"} detail={error} alert={!!error} />;
   const invalidCount = data.filter((ban) => !isPublicIndividualSteamId(ban.steamId)).length;
   const rows = data.filter((ban) =>
     [ban.steamId, ban.reason, ban.bannedBy].some((value) => value?.toLowerCase().includes(query.trim().toLowerCase())),

@@ -431,12 +431,55 @@ function AdminSupporters() {
   const [selected, setSelected] = useState<Supporter | null>(null);
   const [adding, setAdding] = useState(false);
   const data = resource.data;
+  const searchForm = (
+    <form
+      className="supporter-search"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (busy || resource.loading || resource.refreshing || query.trim().length > 100) return;
+        if (query.trim() === search) resource.refresh();
+        else setSearch(query.trim());
+      }}
+    >
+      <label className="search">
+        <input
+          type="search"
+          maxLength={100}
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          aria-label="Search all supporter records"
+          placeholder="Patreon name, membership ID, Discord ID, or SteamID"
+        />
+      </label>
+      <button className="button secondary" disabled={busy || resource.loading || resource.refreshing}>
+        Search all records
+      </button>
+      {search && (
+        <button
+          type="button"
+          className="button secondary"
+          disabled={busy || resource.loading || resource.refreshing}
+          onClick={() => {
+            setQuery("");
+            setSearch("");
+          }}
+        >
+          Clear search
+        </button>
+      )}
+    </form>
+  );
+  // A failed search keeps its form, so it can still be changed or cleared.
   if (!data)
     return (
-      <Empty
-        title={resource.error ? "Supporter records could not be loaded" : "Loading supporters…"}
-        detail={resource.error ? "Refresh to try again. No empty list has been assumed." : undefined}
-      />
+      <>
+        {search && <div className="toolbar">{searchForm}</div>}
+        <Empty
+          title={resource.error ? "Supporter records could not be loaded" : "Loading supporters…"}
+          detail={resource.error ? "Refresh to try again. No empty list has been assumed." : undefined}
+          alert={!!resource.error}
+        />
+      </>
     );
   const records = data.supporters;
   const rows = records.filter((supporterFilters.find((entry) => entry.id === filter) ?? supporterFilters[0]).matches);
@@ -484,42 +527,7 @@ function AdminSupporters() {
         </p>
       )}
       <div className="toolbar">
-        <form
-          className="supporter-search"
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (busy || resource.loading || resource.refreshing || query.trim().length > 100) return;
-            if (query.trim() === search) resource.refresh();
-            else setSearch(query.trim());
-          }}
-        >
-          <label className="search">
-            <input
-              type="search"
-              maxLength={100}
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              aria-label="Search all supporter records"
-              placeholder="Patreon name, membership ID, Discord ID, or SteamID"
-            />
-          </label>
-          <button className="button secondary" disabled={busy || resource.loading || resource.refreshing}>
-            Search all records
-          </button>
-          {search && (
-            <button
-              type="button"
-              className="button secondary"
-              disabled={busy || resource.loading || resource.refreshing}
-              onClick={() => {
-                setQuery("");
-                setSearch("");
-              }}
-            >
-              Clear search
-            </button>
-          )}
-        </form>
+        {searchForm}
         <button
           className="button secondary"
           disabled={busy || resource.loading || resource.refreshing || Boolean(resource.error) || !ready}

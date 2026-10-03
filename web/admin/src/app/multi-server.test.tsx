@@ -90,6 +90,38 @@ it("switches servers from More only on an explicit choice", async () => {
   await screen.findByText("Events player");
   expect(screen.queryByRole("dialog", { name: "More" })).not.toBeInTheDocument();
 });
+it.each([
+  ["/audit", "/activity", "actions", "Server activity", "Activity views", "All activity"],
+  ["/combat", "/activity", "combat", "Server activity", "Activity views", "All activity"],
+  ["/events", "/match", "events", "Match & maps", "Match & maps", "Next round"],
+  ["/votes", "/match", "voting", "Match & maps", "Match & maps", "Next round"],
+])("lets the phone tab bar open the parent section from %s", async (path, parent, view, section, tablist, first) => {
+  // Only the roster answers; the hub's own reads fail, which leaves its views and tabs in place.
+  const { router } = mount(`${path}?server=primary`, async (url) =>
+    url.endsWith("/overview")
+      ? json(overview("Primary"))
+      : new Response(JSON.stringify({ message: "Unavailable" }), { status: 503 }),
+  );
+  await waitFor(() => expect(router.state.location.pathname).toBe(parent));
+  expect(new URLSearchParams(router.state.location.search).get("view")).toBe(view);
+  // The first navigation group is the phone tab bar; the sub-page is a view of the hub it names.
+  const tabs = screen.getByRole("list", { name: "Live" });
+  const link = within(tabs).getByRole("link", { name: section });
+  await waitFor(() => expect(link).toHaveAttribute("aria-current", "page"));
+  expect(
+    within(screen.getByRole("tablist", { name: tablist })).getByRole("tab", { selected: true }),
+  ).not.toHaveTextContent(first);
+  fireEvent.click(link);
+  await waitFor(() => expect(router.state.location.search).toBe("?server=primary"));
+  expect(router.state.location.pathname).toBe(parent);
+  expect(within(screen.getByRole("tablist", { name: tablist })).getByRole("tab", { selected: true })).toHaveTextContent(
+    first,
+  );
+  expect(within(screen.getByRole("list", { name: "Live" })).getByRole("link", { name: section })).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
+});
 it("cancels a previous server read and ignores its late response after a switch", async () => {
   let complete!: (response: Response) => void;
   const pending = new Promise<Response>((resolve) => {

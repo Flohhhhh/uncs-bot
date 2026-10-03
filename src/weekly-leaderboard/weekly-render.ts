@@ -61,9 +61,17 @@ export function mapName(map: string | null | undefined) {
 }
 
 const count = (value: number, noun: string) => `${value.toLocaleString("en-US")} ${noun}${value === 1 ? "" : "s"}`;
-/** Two decimals, or a dash with no deaths, as on the website. */
-export const kdLabel = (kills: number, deaths: number) =>
-  deaths > 0 ? (Math.round((kills / deaths) * 100) / 100).toFixed(2) : "—";
+/**
+ * Two decimals, or a dash with no deaths, as on the website. Integer half-up rounding matches the store's
+ * round(numeric, 2); float division would print 41/40 as 1.02 because 41/40*100 is 102.4999...
+ */
+export const kdLabel = (kills: number, deaths: number) => {
+  if (!(deaths > 0)) return "—";
+  const scaled = kills * 100;
+  const whole = Math.floor(scaled / deaths);
+  const cents = 2 * (scaled - whole * deaths) >= deaths ? whole + 1 : whole;
+  return `${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, "0")}`;
+};
 
 export type ShoutOut = { label: string; text: string };
 

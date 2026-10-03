@@ -15,6 +15,22 @@ const TOKEN_REUSED =
 const TOKEN_MALFORMED =
   "PATREON_CREATOR_ACCESS_TOKEN does not look like a Patreon access token. Copy the Creator's Access Token again.";
 
+/**
+ * Deployment secrets that must never double as a Patreon credential. Shared by the webhook secret and the
+ * creator token checks, so both refuse the same reuse.
+ */
+export function deploymentSecrets(env: EnvService) {
+  return [
+    env.get("DISCORD_BOT_TOKEN"),
+    env.get("DATABASE_URL"),
+    env.get("ADMIN_DISCORD_CLIENT_SECRET"),
+    env.get("ADMIN_SESSION_SECRET"),
+    env.get("WARDOGS_RCON_PASSWORD"),
+    env.get("WARDOGS_FEED_TOKEN"),
+    ...(env.get("WARDOGS_SERVERS") ?? []).flatMap((server) => [server.password, server.feedToken]),
+  ];
+}
+
 export type PatreonSyncConflict = {
   supporterId: string;
   patreonMemberId: string;
@@ -95,16 +111,7 @@ export class PatreonSyncService implements OnApplicationBootstrap, OnModuleDestr
   ) {}
 
   private otherSecrets() {
-    return [
-      this.env.get("PATREON_WEBHOOK_SECRET"),
-      this.env.get("WARDOGS_RCON_PASSWORD"),
-      this.env.get("WARDOGS_FEED_TOKEN"),
-      this.env.get("ADMIN_SESSION_SECRET"),
-      this.env.get("ADMIN_DISCORD_CLIENT_SECRET"),
-      this.env.get("DISCORD_BOT_TOKEN"),
-      this.env.get("DATABASE_URL"),
-      ...(this.env.get("WARDOGS_SERVERS") ?? []).flatMap((server) => [server.password, server.feedToken]),
-    ];
+    return [this.env.get("PATREON_WEBHOOK_SECRET"), ...deploymentSecrets(this.env)];
   }
   /** Mirrors the webhook secret checks: a reused or malformed secret is never sent to Patreon. */
   private token(): { token: string | null; problem: string | null } {

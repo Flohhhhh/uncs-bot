@@ -4,7 +4,7 @@ import type { ButtonContext } from "necord";
 import { MapVotesComponent } from "./map-votes.component";
 import { MapVotesService } from "../../map-votes/map-votes.service";
 function fixture() {
-  const service = { cast: jest.fn().mockResolvedValue({ map: "Europe" }) };
+  const service = { cast: jest.fn().mockResolvedValue({ map: "Europe", experiences: ["KOTH"] }) };
   const component = new MapVotesComponent(service as unknown as MapVotesService);
   const interaction = {
     deferReply: jest.fn(),
@@ -21,13 +21,14 @@ function fixture() {
 }
 it("acknowledges privately before saving the vote and privately confirms the chosen map", async () => {
   const { component, service, interaction, context } = fixture();
-  await component.vote(context, "vote", "0");
+  await component.vote(context, "vote", "1");
   expect(interaction.deferReply).toHaveBeenCalledTimes(1);
   expect(interaction.deferReply).toHaveBeenCalledWith({ flags: MessageFlags.Ephemeral });
   expect(interaction.deferReply.mock.invocationCallOrder[0]).toBeLessThan(service.cast.mock.invocationCallOrder[0]);
-  expect(service.cast).toHaveBeenCalledWith("vote", "0", interaction.user.id, "guild", "channel", "message", true);
+  expect(service.cast).toHaveBeenCalledWith("vote", "1", interaction.user.id, "guild", "channel", "message", true);
+  // The ballot button reads "2. Ozeti · King of the Hill", never the catalog ID.
   expect(interaction.editReply).toHaveBeenCalledWith({
-    content: expect.stringContaining("Europe"),
+    content: "Your vote is now choice 2: Ozeti · King of the Hill. You can choose again until the ballot closes.",
     allowedMentions: { parse: [] },
   });
 });

@@ -8,6 +8,7 @@ import { BansPage } from "./pages";
 
 vi.mock("../../api/client", () => ({ api: vi.fn() }));
 const request = vi.mocked(api);
+// Braces keep the hook from returning the mock, which Vitest would then call as a teardown.
 beforeEach(() => {
   request.mockReset();
 });
@@ -76,4 +77,11 @@ it("keeps the ban picker closed while the roster needs a fresh check", async () 
   request.mockResolvedValue([]);
   mount(context({ stale: true }));
   expect(await screen.findByRole("button", { name: "+ Ban player" })).toBeDisabled();
+});
+
+it("announces a failed ban read without announcing the read while it loads", async () => {
+  request.mockRejectedValue(new Error("The game server did not respond."));
+  mount();
+  expect(screen.getByText("Loading bans…").closest("[role=alert]")).toBeNull();
+  expect(await screen.findByRole("alert")).toHaveTextContent("Bans could not be loaded");
 });

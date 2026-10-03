@@ -1,6 +1,7 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { DiscordAPIError, Events, RESTJSONErrorCodes } from "discord.js";
 import { Context, type ContextOf, On } from "necord";
+import { createHash } from "node:crypto";
 import { WelcomeService } from "../../welcome/welcome.service";
 
 @Injectable()
@@ -25,6 +26,13 @@ export class GuildMemberAddListener {
         content: `👋 ${member}`,
         embeds: [this.welcomeService.createEmbed(member, settings)],
         allowedMentions: { users: [member.id] },
+        // One nonce per join, so a REST retry or a second process during a deploy overlap gets the first
+        // welcome back instead of posting another. A leave and rejoin has a new join time, so it is welcomed.
+        nonce: createHash("sha256")
+          .update(`guild-welcome:${member.guild.id}:${member.id}:${member.joinedTimestamp ?? ""}`)
+          .digest("hex")
+          .slice(0, 25),
+        enforceNonce: true,
       });
     } catch (error) {
       // The exception filter does not log these codes, so without this the welcome would fail without a trace.

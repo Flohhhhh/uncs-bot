@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, expect, it, vi } from "vitest";
 import { api } from "../../api/client";
@@ -151,4 +151,31 @@ it("does not name a next round when a moderator's rotation read fails", async ()
   const now = screen.getByRole("region", { name: "Now" });
   expect(await within(now).findByText("Rotation could not be read")).toBeInTheDocument();
   expect(within(now).getByText("Unavailable")).toBeInTheDocument();
+  expect(screen.getByRole("alert")).toHaveTextContent(/Next round\s*Unavailable\s*Rotation could not be read/);
+});
+it("announces failed overview reads to screen readers but keeps loading quiet", async () => {
+  const failing = ["activity", "audit-notable", "settings", "map-votes"];
+  request.mockImplementation(async (path) =>
+    failing.includes(path) ? Promise.reject(new Error(`${path} unavailable`)) : (reads[path] as never),
+  );
+  show();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.getByText("Loading recent activity…").closest("[role=alert]")).toBeNull();
+  const now = screen.getByRole("region", { name: "Now" });
+  for (const checking of within(now).getAllByText("Checking…")) expect(checking.closest("[role=alert]")).toBeNull();
+  const activity = await screen.findByText("Recent activity could not be loaded.");
+  expect(activity).toHaveAttribute("role", "alert");
+  const settings = await within(now).findByText("Settings could not be read");
+  expect(settings.closest("[role=alert]")).toHaveTextContent(/Next round\s*Unavailable/);
+  await waitFor(() => expect(screen.getAllByRole("alert")).toHaveLength(3));
+  expect(within(now).getByText("Vote").closest("[role=alert]")).toHaveTextContent(/Vote\s*Unavailable/);
+});
+it("keeps successful overview reads out of the alert queue", async () => {
+  show();
+  await screen.findByText("Saved next round");
+  await screen.findByText(
+    (_, element) => element?.className === "activity-line" && element.textContent === "Cara joined",
+  );
+  expect(within(screen.getByRole("region", { name: "Now" })).getByText("None")).toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });

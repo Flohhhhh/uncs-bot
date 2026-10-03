@@ -29,7 +29,7 @@ import {
 import { initialRoundState, observeRound } from "./round-state";
 import { initialSeedingState, observeSeeding, seedingView, type SeedingAlert } from "./seeding-state";
 import { settingsView, staffAlertsOptions, type StaffAlertsOptions } from "./staff-alerts.config";
-import { cleanText, StaffAlerts } from "./staff-alerts.service";
+import { cleanText, StaffAlerts, type StaffAlertInput } from "./staff-alerts.service";
 
 export const ACTIVE_DELAY_MS = 10_000;
 export const IDLE_DELAY_MS = 15_000;
@@ -45,6 +45,8 @@ const ONLINE_AT_START = "online when Gramps started, recorded only";
 const SOURCE_TIMEOUT_MS = 3_000;
 const FEED_TIMEOUT_MS = 2_000;
 const NO_ACTION = "Gramps took no action.";
+/** Alert posts that may wait on Discord at once per server; past this, alerts are recorded only. */
+const POSTS_MAX = 10;
 
 /** Why a read failed. A schema mismatch counts as unreadable; anything unclassified as an error. */
 export function failureKind(error: unknown): RconErrorKind {
@@ -143,6 +145,7 @@ export class StaffAlertsWorker {
   /** Notes on a raised performance alert (by key), so an amend keeps them. */
   private readonly performanceNotes = new Map<string, string[]>();
   private readonly sourceErrors = new Map<string, { error: string; at: string } | null>();
+  private posting = 0;
 
   constructor(
     private readonly server: GameServerSummary,
@@ -188,7 +191,7 @@ export class StaffAlertsWorker {
         overview = await this.game.overview();
       } catch (error) {
         if (this.stopped) return FAILED_DELAY_MS;
-        await this.failed(failureKind(error), options);
+        this.failed(failureKind(error), options);
         return FAILED_DELAY_MS;
       }
       if (this.stopped) return FAILED_DELAY_MS;
@@ -202,12 +205,12 @@ export class StaffAlertsWorker {
     }
   }
 
-  private async failed(kind: RconErrorKind, options: StaffAlertsOptions) {
+  private failed(kind: RconErrorKind, options: StaffAlertsOptions) {
     const now = Date.now();
     if (kind !== "paused") this.reachable = false;
     const health = observeHealth(this.health, { ok: false, kind }, now, options.health);
     this.health = health.state;
-    if (options.health.enabled) for (const alert of health.alerts) await this.raiseHealth(alert);
+    if (options.health.enabled) for (const alert of health.alerts) this.raiseHealth(alert);
     if (options.seeding.enabled)
       this.seeding = observeSeeding(
         this.seeding,
@@ -244,7 +247,7 @@ export class StaffAlertsWorker {
       options.health,
     );
     this.health = health.state;
-    if (options.health.enabled) for (const alert of health.alerts) await this.raiseHealth(alert);
+    if (options.health.enabled) for (const alert of health.alerts) this.raiseHealth(alert);
 
     if (options.seeding.enabled) {
       const seeding = observeSeeding(
@@ -254,7 +257,7 @@ export class StaffAlertsWorker {
         options.seeding,
       );
       this.seeding = seeding.state;
-      for (const alert of seeding.alerts) await this.raiseHealth(alert);
+      for (const alert of seeding.alerts) this.raiseHealth(alert);
     }
 
     if (options.performance.mode !== "off" && round) {
@@ -279,8 +282,24 @@ export class StaffAlertsWorker {
     if (options.watchlist.enabled) await this.checkWatchlist(overview, options, now);
   }
 
-  private async raiseHealth(alert: HealthAlert | SeedingAlert) {
-    await this.alerts.raise({
+  /**
+   * Records an alert and posts it without holding up the reads. raise() records the alert and
+   * applies its repeat window and hourly limit before it first waits, so only the post runs on. A
+   * post can take about a minute while discord.js retries, and the next read would then come after
+   * the round gap and could look like a restart. While POSTS_MAX posts are still waiting, a further
+   * alert is recorded but not posted.
+   */
+  private raise(input: StaffAlertInput) {
+    const backlog = input.deliver && !input.suppressed && this.posting >= POSTS_MAX;
+    this.posting++;
+    void this.alerts
+      .raise(backlog ? { ...input, suppressed: "earlier posts still waiting on Discord" } : input)
+      .catch(() => null)
+      .finally(() => this.posting--);
+  }
+
+  private raiseHealth(alert: HealthAlert | SeedingAlert) {
+    this.raise({
       serverId: this.server.id,
       serverName: this.server.name,
       kind: alert.kind,
@@ -361,7 +380,7 @@ export class StaffAlertsWorker {
     const fields: [string, string][] = [];
     if (candidate.kd !== null) fields.push(["Round K/D", one(candidate.kd)]);
     if (candidate.rate !== null) fields.push(["Kills/min", one(candidate.rate)]);
-    await this.alerts.raise({
+    this.raise({
       serverId: this.server.id,
       serverName: this.server.name,
       kind: candidate.kind,
@@ -438,7 +457,7 @@ export class StaffAlertsWorker {
         const isKnownGood = knownGood.has(steamId) || this.alerts.sessionNever().has(steamId);
         const text = watchlistText(entry, name, presentAtStart, isKnownGood);
         const highlighted = entry.communities !== null && entry.communities >= options.watchlist.highlightCommunities;
-        await this.alerts.raise({
+        this.raise({
           serverId: this.server.id,
           serverName: this.server.name,
           kind: "watchlist-join",

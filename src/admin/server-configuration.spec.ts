@@ -540,6 +540,43 @@ describe("server configuration boundaries", () => {
       expect(snapshot.rotation.editable).toBe(true);
     },
   );
+  it("reads a saved rotation mode in any case as its option, so next-map and voting still see an ordered rotation", async () => {
+    const f = fixture();
+    f.document.text = original.replace("RotationMode=Ordered", "RotationMode=ordered");
+    const view = await f.game.configuration();
+    expect(view.fields.find((field) => field.id === "rotationMode")).toMatchObject({
+      value: "Ordered",
+      editable: true,
+      note: "",
+    });
+    expect(view.rotation.mode).toBe("Ordered");
+    await expect(f.game.execute(save({ rotationMode: "ordered" }))).rejects.toThrow("Choose an available");
+    expect(f.request.mock.calls.some(([method]) => method === "PUT")).toBe(false);
+  });
+  it("still locks a saved rotation mode that matches no option", async () => {
+    const f = fixture();
+    f.document.text = original.replace("RotationMode=Ordered", "RotationMode=Shuffle");
+    const view = await f.game.configuration();
+    expect(view.fields.find((field) => field.id === "rotationMode")).toMatchObject({ value: null, editable: false });
+    expect(view.rotation.mode).toBe("");
+  });
+  it.each([
+    ["empty", ""],
+    ["longer than staff may save", "U".repeat(70)],
+  ])("shows a saved server name that is %s so staff can correct it, while saves stay strict", async (_case, name) => {
+    const f = fixture();
+    f.document.text = original.replace('ServerName="The UNCs"', `ServerName="${name}"`);
+    const view = await f.game.configuration();
+    expect(view.fields.find((field) => field.id === "serverName")).toMatchObject({
+      value: name,
+      editable: true,
+      note: "",
+    });
+    await expect(f.game.execute(save({ serverName: name }))).rejects.toThrow();
+    expect(f.request.mock.calls.some(([method]) => method === "PUT")).toBe(false);
+    await f.game.execute(save({ serverName: "The UNCs" }));
+    expect(f.saved().text).toContain('ServerName="The UNCs"');
+  });
   it("still shows a host-saved server name that reads as redaction", async () => {
     const f = fixture();
     f.document.text = original.replace('ServerName="The UNCs"', 'ServerName="Redacted"');
