@@ -44,7 +44,8 @@ export class ApplicationsModule implements NestModule {
         });
         const now = Date.now();
         for (const [key, value] of traffic) if (value.until <= now) traffic.delete(key);
-        const auth = req.originalUrl.split("?")[0].startsWith("/apply/auth/");
+        // Express matches routes case-insensitively, so /APPLY/AUTH/LOGIN reaches sign-in too.
+        const auth = /^\/apply\/auth\//i.test(req.originalUrl.split("?")[0]);
         const key = `${auth ? "auth" : "api"}:${req.socket.remoteAddress ?? "unknown"}`;
         let counter = traffic.get(key);
         if (!counter && traffic.size < 5000) {
