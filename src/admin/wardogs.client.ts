@@ -472,7 +472,11 @@ export class WardogsClient {
     if (targets.length !== 1)
       throw new RconError("Choose one faction currently reported by the game. Refresh the teams.");
     if (before.players.length === 0)
-      throw new RconError("The selected player is no longer connected. Refresh the player list.");
+      return {
+        state: "failed",
+        changed: false,
+        message: "The selected player is no longer connected. No move was sent.",
+      };
     if (before.players.length !== 1)
       throw new RconError("The game returned an ambiguous player identity. Refresh before moving anyone.");
     if (this.changedRound(action.expectedRound, before.round))

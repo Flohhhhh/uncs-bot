@@ -1,13 +1,16 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { assignedFaction } from "../../../../../src/common/faction-colors";
+import { roundStamp, sameRound } from "../../../../../src/common/game-round";
 import { useGameApi } from "../../api/server-client";
-import type { ActionResult, Player } from "../../api/types";
+import type { ActionResult, Overview, Player } from "../../api/types";
+import { validateOverview } from "../../api/validation";
 import { useGameAdmin as useAdmin } from "../../app/context";
 import { Badge, Modal, Table } from "../../components/ui";
 import { allowed, errorMessage, rejectionState } from "../actions/policy";
 import { ActionReceipt } from "../actions/action-receipt";
 import { FactionOptions, liveFactions, playerFaction } from "./factions";
 
-type ItemState = ActionResult["state"] | "queued" | "sending" | "skipped";
+type ItemState = ActionResult["state"] | "queued" | "sending" | "skipped" | "unmatched" | "refused";
 export type TeamItem = {
   id: string;
   steamId: string;
@@ -27,7 +30,19 @@ const labels: Record<ItemState, string> = {
   failed: "Failed",
   unknown: "Unconfirmed",
   skipped: "Already on team",
+  unmatched: "Skipped · roster changed",
+  refused: "Skipped · roster changed",
 };
+
+/**
+ * The pause before the next move, at least 2.2 s. A move costs about seven game requests (the roster read
+ * before it, then the server's own reads around the change), so a batch keeps to half of the game's
+ * advertised allowance and leaves the rest for the staff-alerts and community workers that share it.
+ */
+function moveSpacing(live: Overview) {
+  const allowance = live.capabilities.limits?.maxRequestsPerMinutePerIp;
+  return Math.max(2200, allowance ? Math.ceil((60_000 * 7) / (allowance / 2)) : 0);
+}
 
 export function TeamResults({ items }: { items: TeamItem[] }) {
   return (
@@ -45,7 +60,7 @@ export function TeamResults({ items }: { items: TeamItem[] }) {
                   ? "good"
                   : item.state === "failed"
                     ? "bad"
-                    : ["unknown", "pending", "sending"].includes(item.state)
+                    : ["unknown", "pending", "sending", "unmatched", "refused"].includes(item.state)
                       ? "warn"
                       : "neutral"
               }
@@ -55,7 +70,7 @@ export function TeamResults({ items }: { items: TeamItem[] }) {
           </td>
           <td className="audit-detail">
             {item.message}
-            {!["queued", "skipped", "sending"].includes(item.state) && <ActionReceipt id={item.id} />}
+            {!["queued", "skipped", "unmatched", "sending"].includes(item.state) && <ActionReceipt id={item.id} />}
           </td>
         </tr>
       ))}
@@ -132,31 +147,70 @@ export function TeamMoveDialog({
     setError("");
     admin.setBusy(true);
     const batch = items.map((item) => ({ ...item }));
+    const reviewedRound = roundStamp(admin.overview!.status, Date.parse(admin.overview!.observedAt));
     let didSend = false;
     let didStop = false;
+    let stopReason = "";
+    let spacing = moveSpacing(admin.overview!);
+    // Hiding the page invalidates the review, as it does for the dashboard's own snapshot.
+    let hidden = document.hidden;
+    const hiddenReason = "The dashboard was hidden during the moves.";
+    const visibilityChanged = () => {
+      hidden ||= document.hidden;
+    };
+    document.addEventListener("visibilitychange", visibilityChanged);
     const publish = () => {
       if (mounted.current) setItems(batch.map((item) => ({ ...item })));
     };
     try {
       for (const item of batch) {
-        if (didSend && item.from !== faction) await new Promise((resolve) => setTimeout(resolve, 2200));
-        const latest = current.current;
-        const latestTeams = liveFactions(latest.overview);
-        const latestPlayer = latest.overview?.players.find((player) => player.steamId === item.steamId);
-        if (
-          stopRequested.current ||
-          !mounted.current ||
-          !allowed("team", latest.me, latest.overview, latest.stale, false) ||
-          !latestTeams.some((team) => team.name === faction) ||
-          !latestPlayer ||
-          (playerFaction(latestPlayer, latestTeams)?.name ?? "") !== item.from
-        ) {
+        if (didSend && item.from !== faction) await new Promise((resolve) => setTimeout(resolve, spacing));
+        if (stopRequested.current || !mounted.current || hidden) {
+          if (hidden) stopReason = hiddenReason;
           didStop = true;
           break;
         }
         if (item.from === faction) {
           item.state = "skipped";
           item.message = "Already on the chosen team in the reviewed roster. No request sent.";
+          publish();
+          continue;
+        }
+        // The open dialog pauses the dashboard's roster polling, so read the live roster before every move
+        // instead of trusting a snapshot that only expires because of that pause.
+        let live: Overview;
+        try {
+          live = validateOverview(await api<Overview>("overview"));
+        } catch {
+          stopReason = "The live roster could not be read before the next move.";
+          didStop = true;
+          break;
+        }
+        spacing = moveSpacing(live);
+        const liveTeams = liveFactions(live);
+        const liveRound = roundStamp(live.status, Date.parse(live.observedAt));
+        if (
+          stopRequested.current ||
+          !mounted.current ||
+          hidden ||
+          !allowed("team", current.current.me, live, false, false) ||
+          !liveTeams.some((team) => team.name === faction)
+        ) {
+          if (hidden) stopReason = hiddenReason;
+          didStop = true;
+          break;
+        }
+        if (reviewedRound && (!liveRound || !sameRound(reviewedRound, liveRound))) {
+          stopReason = "The round changed during the moves.";
+          didStop = true;
+          break;
+        }
+        const livePlayer = live.players.find((player) => player.steamId === item.steamId);
+        if (!livePlayer || (playerFaction(livePlayer, liveTeams)?.name ?? "") !== item.from) {
+          item.state = "unmatched";
+          item.message = livePlayer
+            ? "Changed team after the review. No request sent."
+            : "Left the server after the review. No request sent.";
           publish();
           continue;
         }
@@ -173,6 +227,12 @@ export function TeamMoveDialog({
               steamId: item.steamId,
               confirm: item.steamId,
               faction,
+              // Sent only when the server reads the same team from the roster, so a color format the
+              // dashboard accepts and the server does not can never refuse the move.
+              ...(assignedFaction(livePlayer.faction, live.status.factionScores) === item.from
+                ? { expectedFaction: item.from }
+                : {}),
+              ...(reviewedRound ? { expectedRound: reviewedRound } : {}),
               reason: "Staff requested team move.",
             }),
           });
@@ -180,6 +240,10 @@ export function TeamMoveDialog({
             ? result.state
             : "unknown";
           item.message = result.message || "The outcome could not be confirmed. Check Action history before repeating.";
+          // The server refused before sending anything because this player left or changed team since the
+          // roster read. It reads as the same skip as the dialog's own roster check, keeping the server's
+          // message and receipt. A new round is refused the same way, and the next roster read stops the batch.
+          if (item.state === "failed" && result.changed === false) item.state = "refused";
         } catch (failure) {
           item.state = rejectionState(failure);
           item.message = `${errorMessage(failure)} Check this action in Action history before repeating it.`;
@@ -191,6 +255,7 @@ export function TeamMoveDialog({
         }
       }
     } finally {
+      document.removeEventListener("visibilitychange", visibilityChanged);
       current.current.setBusy(false);
       if (didStop) current.current.invalidateOverview();
       if (mounted.current) {
@@ -202,7 +267,7 @@ export function TeamMoveDialog({
           setError(
             stopRequested.current
               ? "Stopped at your request. Sent moves keep their recorded outcomes. Refresh the roster before reviewing the remaining players."
-              : "Stopped before sending the remaining requests. Review Action history and refresh the roster before a new review. Attempted players will not be retried automatically.",
+              : `${stopReason ? `${stopReason} ` : ""}Stopped before sending the remaining requests. Review Action history and refresh the roster before a new review. Attempted players will not be retried automatically.`,
           );
         else void current.current.refresh();
       }

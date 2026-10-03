@@ -247,4 +247,81 @@ describe("React staff shell", () => {
     fireEvent.change(search, { target: { value: "not-this-receipt" } });
     expect(screen.getByText("No matching staff actions")).toBeInTheDocument();
   });
+  it("finishes a 25-player team move that runs past the paused dashboard's 60-second snapshot expiry", async () => {
+    vi.useFakeTimers();
+    const players = Array.from({ length: 25 }, (_, index) => ({
+      name: `Player ${index + 1}`,
+      steamId: String(76561198000000101n + BigInt(index)),
+      faction: "RED",
+    }));
+    const live: Overview = {
+      ...overview,
+      status: {
+        ...overview.status,
+        map: "Harbor",
+        matchSeconds: 120,
+        players: { current: players.length, max: 100 },
+        factionScores: [
+          { name: "Valkyra", colorHex: "#D86060", score: 0 },
+          { name: "Lonestar", colorHex: "#5B95D8", score: 0 },
+        ],
+      },
+      players,
+      capabilities: { routes: ["PATCH /v1/players/{steamId}"] },
+    };
+    const moves: { steamId: string; at: number }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url.endsWith("/actions")) {
+          const action = JSON.parse(String(init?.body));
+          moves.push({ steamId: action.steamId, at: Date.now() });
+          // The server reads the roster, sends the change and reads it back before answering.
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          return new Response(JSON.stringify({ id: action.id, state: "applied", changed: true, message: "Confirmed" }));
+        }
+        return new Response(
+          JSON.stringify(
+            url.endsWith("/me")
+              ? { id: "staff", name: "Test staff", role: "admin", csrf: "csrf" }
+              : url.endsWith("/servers")
+                ? {
+                    legacy: true,
+                    servers: [{ id: "primary", name: "Test server", version: "0".repeat(64), role: "admin" }],
+                  }
+                : url.endsWith("/overview")
+                  ? live
+                  : [],
+          ),
+        );
+      }),
+    );
+    render(
+      <RouterProvider
+        router={createMemoryRouter([{ path: "/*", element: <App /> }], { initialEntries: ["/players"] })}
+      />,
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    const loaded = Date.now();
+    fireEvent.click(screen.getByLabelText("Select all shown players"));
+    fireEvent.change(screen.getByRole("combobox", { name: "Destination team for selected players" }), {
+      target: { value: "Lonestar" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Review move" }));
+    // Reviewing 25 names takes a moment; the open dialog pauses the dashboard's own roster refresh.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Move 25 players/ }));
+    // A second at a time, so each state change renders as it would in the browser.
+    for (let second = 0; second < 90; second++)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+    expect(moves.map((move) => move.steamId)).toEqual(players.map((player) => player.steamId));
+    expect(moves.at(-1)!.at - loaded).toBeGreaterThan(60_000);
+    expect(screen.getByRole("heading", { name: "Team requests complete" })).toBeInTheDocument();
+  });
 });
