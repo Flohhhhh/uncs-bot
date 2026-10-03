@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 import type { ActionName, Player } from "../../api/types";
@@ -70,23 +70,49 @@ export function PlayerSheet({
   const location = useLocation();
   const [move, setMove] = useState<{ players: Player[]; faction: string; key: string } | null>(null);
   const { steamId } = target;
+  const { watchRoster } = admin;
+  // Records pages such as Server activity do not read the live roster; the open panel asks for it, so its
+  // stats and actions come from a current read that Refresh keeps up to date.
+  useEffect(() => watchRoster(), [watchRoster]);
   const player = admin.overview?.players.find((entry) => entry.steamId === steamId);
   const teams = liveFactions(admin.overview);
   const current = player ? playerFaction(player, teams) : undefined;
   const can = (action: ActionName) => allowed(action, admin.me, admin.overview, admin.stale, admin.busy);
   const notice = useId();
   const off = panelActions.filter((action) => !can(action)).length;
-  // The snapshot can expire while the panel is open and turn every action off; the page's own refresh is
-  // behind the panel. Otherwise an action is off for the staff role or the server build. Say why next to the
-  // disabled buttons.
+  // The snapshot can expire while the panel is open and turn every action off, or the server can stop offering
+  // them. The page's own refresh is behind the panel, and on records pages it does not read the roster, so the
+  // panel offers its own check. Otherwise an action is off for the staff role or the server build. Say why next
+  // to the disabled buttons.
+  const needsCheck = admin.stale || (!!player && off === panelActions.length && !admin.busy);
+  // Once offered, Check again stays until the panel closes: a button removed while it has focus drops keyboard
+  // and screen reader users out of the panel, and a check that succeeds would otherwise remove it.
+  const [offered, setOffered] = useState(needsCheck);
+  useEffect(() => {
+    if (needsCheck) setOffered(true);
+  }, [needsCheck]);
+  // The read this panel asked for: the one its opening starts or finds in flight, or the one Check again starts.
+  // Only that read is announced as a check; the dashboard's background reads leave the reason as it is, so a
+  // server that keeps failing does not change the status line on every tick.
+  const [askedVersion, setAskedVersion] = useState(admin.refreshVersion);
+  const askedCheck = admin.checking && admin.refreshVersion === askedVersion;
+  const waiting = admin.checking || admin.busy;
+  const checkAgain = () => {
+    // aria-disabled, not disabled, so the button keeps focus while the check runs; the press is ignored instead.
+    if (waiting) return;
+    // Refresh starts the read for the next version.
+    setAskedVersion(admin.refreshVersion + 1);
+    admin.refresh();
+  };
   let reason = "";
-  if (player && admin.stale)
-    reason = "Server details need a fresh check. Close this panel and refresh before choosing an action.";
+  if (player && needsCheck)
+    reason = askedCheck
+      ? "Checking the server for current details…"
+      : admin.stale
+        ? "Server details need a fresh check before choosing an action."
+        : "Unavailable for your role, connection, or server build. Check again to read the server's current details.";
   else if (player && off && !admin.busy)
-    reason =
-      off < panelActions.length
-        ? "Some actions are unavailable for your role, connection, or server build."
-        : "Unavailable for your role, connection, or server build. Refresh the dashboard before trying again.";
+    reason = "Some actions are unavailable for your role, connection, or server build.";
   const describedBy = (action: ActionName) => (!can(action) && reason ? notice : undefined);
   const button = (action: ActionName, kind = "secondary") => (
     <button
@@ -100,7 +126,6 @@ export function PlayerSheet({
     </button>
   );
   const linkable = isPublicIndividualSteamId(steamId);
-  const server = new URLSearchParams(location.search).get("server");
   return (
     <>
       <Sheet title={player?.name ?? target.name ?? steamId} onClose={onClose} className="player-sheet">
@@ -128,13 +153,9 @@ export function PlayerSheet({
             {admin.stale && <p className="muted">From the last roster check.</p>}
           </>
         ) : !admin.overview ? (
-          // Records pages do not read the live roster; never present that as the player leaving.
+          // Never present a roster that has not been read as the player leaving.
           <p className="notice info">
-            The live roster is not loaded on this page.{" "}
-            <Link to={{ pathname: "/players", search: server ? `?${new URLSearchParams({ server })}` : "" }}>
-              Open Live players
-            </Link>{" "}
-            to act on this player.
+            {askedCheck ? "Checking the live roster…" : "The live roster could not be read."}
           </p>
         ) : (
           <p className="notice info">
@@ -158,6 +179,13 @@ export function PlayerSheet({
         <div role="status" id={notice}>
           {reason && <p className="notice warning">{reason}</p>}
         </div>
+        {(offered || needsCheck) && (
+          <p>
+            <button type="button" className="button secondary small" aria-disabled={waiting} onClick={checkAgain}>
+              Check again
+            </button>
+          </p>
+        )}
         {player && (
           <div className="player-sheet-actions">
             <section aria-label="Message">

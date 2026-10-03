@@ -1,5 +1,5 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { and, desc, eq, gt, inArray, lt, not, sql } from "drizzle-orm";
+import { and, desc, eq, gt, gte, inArray, like, lt, ne, not, sql } from "drizzle-orm";
 import { DATABASE, type Database } from "../database/database.types";
 import { adminActions, adminSessions } from "../database/schema";
 import type { ActionResult, AdminAction, Staff } from "./admin.types";
@@ -85,6 +85,27 @@ export class AdminStore {
       .where(and(eq(actionServer, serverId), notable ? not(routineDelivery) : undefined))
       .orderBy(desc(adminActions.createdAt))
       .limit(100);
+  }
+
+  /**
+   * Whether a person (not a `system:*` actor) sent a map-next for this server at or after `since` that the
+   * game did not refuse. Started and unconfirmed queues count: they may still change the next map.
+   */
+  async staffQueuedSince(serverId: string, since: Date) {
+    const [found] = await this.db
+      .select({ id: adminActions.id })
+      .from(adminActions)
+      .where(
+        and(
+          eq(adminActions.action, "map-next"),
+          eq(actionServer, serverId),
+          gte(adminActions.createdAt, since),
+          not(like(adminActions.actorId, "system:%")),
+          ne(adminActions.state, "failed"),
+        ),
+      )
+      .limit(1);
+    return !!found;
   }
 
   async receipt(id: string, serverId = LEGACY_SERVER_ID) {

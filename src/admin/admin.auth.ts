@@ -13,6 +13,7 @@ import { AdminSettings } from "./admin.settings";
 import { AdminStore } from "./admin.store";
 import type { Staff, StaffRole } from "./admin.types";
 import { restrictedServerRole, type GameServerSummary } from "../common/game-server";
+import { staffRoleFor } from "../common/admin-policy";
 import { GameServers } from "./game-servers";
 
 export type StaffRequest = Request & { staff: Staff };
@@ -112,15 +113,7 @@ export class AdminAuth {
     if (member.pending === true)
       throw new ForbiddenException("Complete the Discord server membership screening first.");
     const roles: string[] = Array.isArray(member.roles) ? member.roles.filter((role) => typeof role === "string") : [];
-    const matches = (allowed: string[]) => roles.some((role) => allowed.includes(role));
-    const role =
-      config.ownerIds.includes(userId) || matches(config.adminRoleIds)
-        ? "admin"
-        : matches(config.moderatorRoleIds)
-          ? "moderator"
-          : matches(config.viewerRoleIds)
-            ? "viewer"
-            : undefined;
+    const role = staffRoleFor(userId, roles, config);
     if (!role) {
       this.memberCache.delete(userId);
       throw new ForbiddenException("Your Discord account does not have dashboard access.");
