@@ -77,6 +77,8 @@
   --space-6: 32px;
   --radius-sm: 4px;
   --radius-md: 8px;
+  /* Space the phone tab bar covers at the bottom of the viewport; none on wider screens. */
+  --tabbar-height: 0px;
   --display: "Barlow Condensed", "Arial Narrow", Impact, sans-serif;
   --body: "DM Sans", "Segoe UI", Arial, sans-serif;
   font-family: var(--body);
@@ -246,7 +248,8 @@ a {
 button {
   cursor: pointer;
 }
-button:disabled {
+button:disabled,
+button[aria-disabled="true"] {
   opacity: 0.45;
   cursor: not-allowed;
 }
@@ -793,7 +796,7 @@ main {
   background: var(--surface-2);
   color: var(--cream);
 }
-.secondary:hover:not(:disabled) {
+.secondary:hover:not(:disabled, [aria-disabled="true"]) {
   background: var(--surface-3);
   border-color: var(--line-hover);
 }
@@ -2105,6 +2108,10 @@ dialog.sheet {
   }
 }
 @media (max-width: 740px) {
+  :root {
+    /* 56px links and the 1px top border, above the home indicator. */
+    --tabbar-height: calc(57px + env(safe-area-inset-bottom));
+  }
   .shell {
     display: block;
   }
@@ -2180,7 +2187,7 @@ dialog.sheet {
     color: var(--accent);
   }
   main {
-    padding-bottom: calc(57px + env(safe-area-inset-bottom));
+    padding-bottom: var(--tabbar-height);
   }
   .topbar {
     height: 56px;
@@ -2357,7 +2364,8 @@ dialog.sheet {
 }
 .settings-savebar {
   position: sticky;
-  bottom: 12px;
+  /* Clear of the phone tab bar, which is fixed over the bottom of the viewport. */
+  bottom: calc(var(--tabbar-height) + 12px);
   z-index: 2;
   display: flex;
   align-items: center;
@@ -3232,6 +3240,8 @@ dialog .map-picker-fields > label {
 }
 /* Activity */
 .activity-head {
+  /* Anchors the help panel to the content column, so it cannot run past the screen wherever the "?" lands. */
+  position: relative;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -3260,9 +3270,6 @@ dialog .map-picker-fields > label {
 .activity-status.attention::before {
   background: var(--warn);
 }
-.activity-help {
-  position: relative;
-}
 .activity-help summary {
   display: grid;
   place-items: center;
@@ -3284,11 +3291,12 @@ dialog .map-picker-fields > label {
   color: var(--cream);
 }
 .activity-help-panel {
+  /* Across from the head row's left edge, but down from where it would sit in flow: just under the "?". */
   position: absolute;
   z-index: 5;
-  top: calc(100% + var(--space-2));
   left: 0;
-  width: min(380px, calc(100vw - 32px));
+  width: min(380px, 100%);
+  margin-top: var(--space-2);
   padding: var(--space-3) var(--space-4);
   background: var(--surface-2);
   border: 1px solid var(--line);

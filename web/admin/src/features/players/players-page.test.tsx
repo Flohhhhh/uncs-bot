@@ -206,10 +206,13 @@ describe("live player controls", () => {
     expect(container.querySelector("img")).toBeNull();
     expect(screen.getByLabelText("Select all shown players")).toBeDisabled();
     const panel = openPanel("<img src=x onerror=alert(1)>");
+    // Check again only reads the server, as the dashboard's Refresh does for a viewer.
     const actions = within(panel)
       .getAllByRole("button")
       .filter(
-        (button) => !["Close panel", `Copy SteamID ${alice.steamId}`].includes(button.getAttribute("aria-label")!),
+        (button) =>
+          !["Close panel", `Copy SteamID ${alice.steamId}`].includes(button.getAttribute("aria-label")!) &&
+          button.textContent !== "Check again",
       );
     expect(actions.length).toBeGreaterThan(4);
     expect(actions.every((button) => (button as HTMLButtonElement).disabled)).toBe(true);
@@ -294,13 +297,14 @@ describe("live player controls", () => {
     const message = within(panel).getByRole("button", { name: "Message player" });
     expect(message).toBeDisabled();
     expect(availability(panel)).toBe(status);
-    expect(status).toHaveTextContent(
-      "Server details need a fresh check. Close this panel and refresh before choosing an action.",
-    );
+    expect(status).toHaveTextContent("Server details need a fresh check before choosing an action.");
     expect(message).toHaveAccessibleDescription(/fresh check/);
     expect(within(panel).getByRole("button", { name: "Move to Blue · Lonestar" })).toHaveAccessibleDescription(
       /fresh check/,
     );
+    // The page's own refresh is behind the panel, so the panel offers the check itself.
+    fireEvent.click(within(panel).getByRole("button", { name: "Check again" }));
+    expect(admin.refresh).toHaveBeenCalledTimes(1);
   });
   it.each([
     ["the staff role", "Add whitelist access", () => context({ me: { ...context().me!, role: "moderator" } })],
@@ -326,18 +330,46 @@ describe("live player controls", () => {
     expect(off).toHaveAccessibleDescription(/your role, connection, or server build/);
     expect(message).toBeEnabled();
     expect(message).not.toHaveAccessibleDescription();
+    // Only some actions are off and the live roster is current, so the panel offers no check.
+    expect(within(panel).queryByRole("button", { name: "Check again" })).not.toBeInTheDocument();
   });
-  it("says why every player action is off for a viewer", () => {
-    const admin = context();
-    admin.me.role = "viewer";
-    show(admin);
+  it.each([
+    [
+      "a viewer",
+      () => {
+        const admin = context();
+        admin.me.role = "viewer";
+        return admin;
+      },
+    ],
+    [
+      "a server that offers no player actions",
+      () => {
+        const admin = context();
+        admin.overview!.capabilities.routes = [];
+        return admin;
+      },
+    ],
+  ])("says why every player action is off for %s and offers the panel's own check", (_cause, setup) => {
+    const admin = setup();
+    const view = (state: Partial<AdminContextValue>) => tree({ ...admin, ...state });
+    const { rerender } = render(view({}));
     const panel = openPanel(alice.name);
-    expect(availability(panel)).toHaveTextContent(
-      "Unavailable for your role, connection, or server build. Refresh the dashboard before trying again.",
+    const status = availability(panel);
+    // The dashboard's Refresh is behind the panel, so the advice points at the panel's own check.
+    expect(status).toHaveTextContent(
+      "Unavailable for your role, connection, or server build. Check again to read the server's current details.",
     );
+    expect(status).not.toHaveTextContent(/Refresh the dashboard/);
     expect(within(panel).getByRole("button", { name: "Message player" })).toHaveAccessibleDescription(
       /your role, connection, or server build/,
     );
+    fireEvent.click(within(panel).getByRole("button", { name: "Check again" }));
+    expect(admin.refresh).toHaveBeenCalledTimes(1);
+    rerender(view({ checking: true, refreshVersion: 1 }));
+    expect(status).toHaveTextContent("Checking the server for current details…");
+    rerender(view({ refreshVersion: 1 }));
+    expect(status).toHaveTextContent(/Check again to read the server's current details/);
   });
   it("removes player actions if the selected player leaves while the panel is open", () => {
     const admin = context();
