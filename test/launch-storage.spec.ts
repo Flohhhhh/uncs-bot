@@ -1783,12 +1783,30 @@ describe("launch storage on isolated PostgreSQL", () => {
         campaign,
         policy,
       );
+      // Patreon linked one account, staff moved the link to another and then back: the last Link set it, so staff.
+      const returned = await importPatron("labelled-returned", "567890123456789014");
+      const moved = (
+        await supporters.mutate(
+          returned.id,
+          { ...review(returned), kind: "link", discordId: "567890123456789015" },
+          staff,
+          campaign,
+          policy,
+        )
+      ).supporter!;
+      await supporters.mutate(
+        returned.id,
+        { ...review(moved), kind: "link", discordId: "567890123456789014" },
+        staff,
+        campaign,
+        policy,
+      );
       await client.query(
         "UPDATE supporter_members SET discord_source = NULL, steam_source = NULL, steam_application_id = NULL",
       );
       const versions = async () => (await client.query("SELECT id, version FROM supporter_members ORDER BY id")).rows;
       const before = await versions();
-      expect(await match.backfillSources()).toEqual({ discord: 2, steam: 1 });
+      expect(await match.backfillSources()).toEqual({ discord: 3, steam: 1 });
       expect(
         (
           await client.query(
@@ -1797,6 +1815,7 @@ describe("launch storage on isolated PostgreSQL", () => {
         ).rows,
       ).toEqual([
         { patreon_member_id: "labelled-patreon", discord_source: "patreon", steam_source: "staff" },
+        { patreon_member_id: "labelled-returned", discord_source: "staff", steam_source: null },
         { patreon_member_id: "labelled-staff", discord_source: "staff", steam_source: null },
       ]);
       expect(await match.backfillSources()).toEqual({ discord: 0, steam: 0 });

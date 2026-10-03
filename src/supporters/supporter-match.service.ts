@@ -11,7 +11,7 @@ export const SUPPORTER_MATCH_SWEEP_LIMIT = 2_000;
 const MATCH_FAILED =
   "Automatic supporter matching could not finish. Records already saved were kept; the next sync or approval retries.";
 const SOURCES_FAILED =
-  "Older supporter links could not be classified at startup. They stay unclassified (and are never matched automatically) until the next restart.";
+  "Older supporter links could not be classified at startup and stay unclassified until the next restart. Matching still runs, but no founder promise is recorded automatically on a Discord account that is not labelled as coming from Patreon.";
 
 export type SupporterMatchTrigger = "startup" | "sync" | "webhook" | "approval" | "link";
 export type SupporterMatchStatus = {
@@ -104,7 +104,8 @@ export class SupporterMatchService implements OnApplicationBootstrap, OnModuleDe
 
   /**
    * Labels older links once the application has started, every time, whether or not matching is on: the labels only
-   * say where existing links came from. Matching waits for it, so an unlabelled link is never matched.
+   * say where existing links came from. Matching waits until labelling finishes or fails. Only automatic founder
+   * recording depends on the labels (it needs a Discord account labelled `patreon`); the SteamID fill does not.
    */
   onApplicationBootstrap() {
     this.ready = new Promise((resolve) => {

@@ -129,7 +129,7 @@ describe("startup", () => {
     expect(on.store.candidates).toHaveBeenCalledTimes(1);
     expect(on.service.status().lastTrigger).toBe("startup");
   });
-  it("holds matching until the labels are written, so an unlabelled link is never matched", async () => {
+  it("holds matching until the labels are written", async () => {
     jest.useFakeTimers();
     const { service, store } = fixture();
     service.onApplicationBootstrap();
@@ -140,7 +140,7 @@ describe("startup", () => {
     await early;
     expect(store.backfillSources.mock.invocationCallOrder[0]).toBeLessThan(store.autoMatch.mock.invocationCallOrder[0]);
   });
-  it("matches after a failed labelling, logging fixed text only", async () => {
+  it("matches after a failed labelling, saying only founder recording is withheld, in fixed text", async () => {
     jest.useFakeTimers();
     const { service, store } = fixture();
     store.backfillSources.mockRejectedValueOnce(new Error(`duplicate key ${discordId}`));
@@ -148,6 +148,9 @@ describe("startup", () => {
     await jest.advanceTimersByTimeAsync(SUPPORTER_MATCH_STARTUP_DELAY_MS);
     expect(JSON.stringify(warn.mock.calls)).not.toContain(discordId);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("could not be classified"));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("Matching still runs"));
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("never matched");
+    expect(store.candidates).toHaveBeenCalledTimes(1);
   });
   it("cancels the startup timer when the module is destroyed and releases anything waiting", async () => {
     jest.useFakeTimers();
