@@ -87,7 +87,9 @@ const supporter: Supporter = {
     sourceApplicationRevoked: false,
     patreonDiscordElsewhere: false,
     discordReportedForOtherPatron: false,
+    linkedSteamShared: false,
   },
+  automaticPayment: null,
   automaticBlockedReason: "discord_not_from_patreon",
   automaticBlockedMessage: "The Discord account was entered by staff.",
   nextSteps: [
@@ -723,6 +725,76 @@ it("fills in the SteamID an approved application offers only when none is linked
   expect(applicationSteamId(linked)).toBeNull();
 });
 
+it("leaves out a SteamID the server says is not safe to copy, and says why in the server's words", async () => {
+  const message =
+    "Another Discord account has applied with this SteamID (76561198000000009). Check who owns it before linking.";
+  for (const reason of ["steam_shared", "application_not_confirmed", "application_in_progress"] as const) {
+    const record: Supporter = {
+      ...supporter,
+      steamId: null,
+      steamSource: null,
+      identityState: "partial",
+      match: { ...supporter.match, steam: { ...automaticSteam, reason } },
+      nextSteps: [{ code: reason, area: "steam", message }],
+    };
+    expect(applicationSteamId(record)).toBeNull();
+  }
+  request.mockResolvedValue(
+    data({
+      ...supporter,
+      steamId: null,
+      steamSource: null,
+      identityState: "partial",
+      match: { ...supporter.match, steam: { ...automaticSteam, reason: "steam_shared" } },
+      nextSteps: [{ code: "steam_shared", area: "steam", message }],
+    }),
+  );
+  render(page());
+  fireEvent.click(await screen.findByRole("button", { name: "Review supporter" }));
+  fireEvent.click(screen.getByRole("button", { name: "Review account match" }));
+  const steam = screen.getByLabelText("SteamID64");
+  expect(steam).toHaveValue("");
+  expect(steam).toHaveAccessibleDescription(`Not filled in. ${message}`);
+  expect(screen.queryByText(/Filled in from this Discord account/)).not.toBeInTheDocument();
+});
+
+it("shows why no founder promise is possible as a note, not as a task", async () => {
+  const note = "This payment was not made inside the founder window.";
+  request.mockResolvedValue(
+    data({
+      ...supporter,
+      founderEligiblePayment: null,
+      founderBlockedReason: "outside_window",
+      founderBlockedMessage: note,
+      nextSteps: [{ code: "founder_outside_window", area: "info", message: note }],
+    }),
+  );
+  render(page());
+  fireEvent.click(await screen.findByRole("button", { name: "Review supporter" }));
+  const dialog = screen.getByRole("dialog");
+  expect(within(dialog).getByRole("heading", { name: "Founder promise" })).toBeInTheDocument();
+  expect(within(dialog).queryByRole("heading", { name: "Still needed" })).not.toBeInTheDocument();
+  expect(within(dialog).getByText(note, { selector: "li" })).toBeInTheDocument();
+  expect(within(dialog).getByRole("button", { name: "Record founder promise" })).toBeDisabled();
+});
+
+it("words switched-on matching by the server's rule and says when Patreon leaves it idle", async () => {
+  request.mockResolvedValue({
+    ...data(),
+    automation: { steamFill: true, founderAuto: true, holdHours: 48, configured: false },
+  });
+  render(page());
+  await screen.findByRole("button", { name: "Review supporter" });
+  const line = screen.getByText(/Automatic matching:/).closest("p")!;
+  expect(line.querySelector("strong")).toHaveTextContent("on");
+  expect(within(line).getByText("SteamID fill on")).toBeInTheDocument();
+  expect(within(line).getByText("Automatic founders on")).toBeInTheDocument();
+  const detail = line.nextElementSibling!;
+  expect(detail).toHaveTextContent("Patreon is not configured, so nothing is matched automatically.");
+  expect(detail).toHaveTextContent("has stood for 48 hours");
+  expect(detail).not.toHaveTextContent("Staff can always record one");
+});
+
 function form(values: Record<string, string>) {
   const input = new FormData();
   input.set("reason", "Checked both accounts with the supporter");
@@ -860,6 +932,7 @@ it("puts founder records to recheck and Discord conflicts on the status line", a
             reference: payment.reference,
             unverifiedPaymentId: "01234567-89ab-4cde-8fab-0123456789ae",
             unverifiedReference: "refunded-charge",
+            reviewReason: "unverified",
           },
         ],
       }),
@@ -883,6 +956,34 @@ it("puts founder records to recheck and Discord conflicts on the status line", a
     within(screen.getByRole("list", { name: "Founder records to recheck" })).getByText("founder-member"),
   ).toBeVisible();
   expect(screen.getByText("Payment refunded-charge is not verified")).toBeVisible();
+});
+
+it("says when a founder's own payment is no longer marked as the first payment", async () => {
+  request.mockResolvedValue(
+    data(
+      supporter,
+      syncStatus({
+        founderReviews: [
+          {
+            supporterId: supporter.id,
+            patreonMemberId: "founder-member",
+            paymentId: payment.id,
+            paymentSource: "patreon_api",
+            reference: "first-charge",
+            unverifiedPaymentId: payment.id,
+            unverifiedReference: "first-charge",
+            reviewReason: "not_first_payment",
+          },
+        ],
+      }),
+    ),
+  );
+  render(page());
+  await screen.findByRole("button", { name: "Sync now" });
+  expect(within(importLine()).getByText("1 founder record to recheck")).toBeInTheDocument();
+  fireEvent.click(screen.getByText("Last import"));
+  expect(screen.getByText("Payment first-charge is no longer marked as the first payment")).toBeVisible();
+  expect(screen.queryByText(/is not verified/)).not.toBeInTheDocument();
 });
 
 it("offers Sync now only to administrators", () => {

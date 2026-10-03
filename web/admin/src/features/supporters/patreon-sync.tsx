@@ -93,7 +93,11 @@ function LastImport({ sync }: { sync: PatreonSyncStatus }) {
               {sync.founderReviews.map((review) => (
                 <li key={`${review.supporterId}:${review.unverifiedPaymentId}`}>
                   <CopyValue value={review.patreonMemberId} label="Patreon member ID" />
-                  <small>Payment {review.unverifiedReference} is not verified</small>
+                  <small>
+                    {review.reviewReason === "not_first_payment"
+                      ? `Payment ${review.unverifiedReference} is no longer marked as the first payment`
+                      : `Payment ${review.unverifiedReference} is not verified`}
+                  </small>
                 </li>
               ))}
             </ul>

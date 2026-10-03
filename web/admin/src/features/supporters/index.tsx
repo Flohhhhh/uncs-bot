@@ -17,6 +17,7 @@ import {
   paymentDescription,
   readyForStaff,
   reviewInput,
+  steamCandidateNote,
   steamDescription,
   stepGroups,
 } from "./policy";
@@ -73,11 +74,21 @@ function SupporterBadge({ record }: { record: Supporter }) {
 }
 
 function NextSteps({ record }: { record: Supporter }) {
-  const { payment, other } = stepGroups(record.nextSteps);
+  const { payment, notes, other } = stepGroups(record.nextSteps);
   if (!record.nextSteps.length) return null;
   return (
     <div className="supporter-steps">
-      <h3>Still needed</h3>
+      {notes.length > 0 && (
+        <>
+          <h3>Founder promise</h3>
+          <ul>
+            {notes.map((step) => (
+              <li key={step.code}>{step.message}</li>
+            ))}
+          </ul>
+        </>
+      )}
+      {other.length + payment.length > 0 && <h3>Still needed</h3>}
       {other.length > 0 && (
         <ul>
           {other.map((step) => (
@@ -282,6 +293,7 @@ function SupporterReview({
   const selected = review ? decisions[review.decision] : null;
   const eligiblePayment = record.founderEligiblePayment;
   const offeredSteamId = applicationSteamId(record);
+  const candidateNote = steamCandidateNote(record);
   const steamHint = useId();
   return (
     <Modal
@@ -385,14 +397,20 @@ function SupporterReview({
                       inputMode="numeric"
                       defaultValue={record.steamId ?? offeredSteamId ?? ""}
                       placeholder="17-digit SteamID64"
-                      aria-describedby={offeredSteamId ? steamHint : undefined}
+                      aria-describedby={offeredSteamId || candidateNote ? steamHint : undefined}
                     />
                   </label>
-                  {offeredSteamId && (
+                  {offeredSteamId ? (
                     <p className="muted" id={steamHint}>
                       Filled in from this Discord account’s approved whitelist application. Check it belongs to this
                       supporter before saving.
                     </p>
+                  ) : (
+                    candidateNote && (
+                      <p className="muted" id={steamHint}>
+                        Not filled in. {candidateNote}
+                      </p>
+                    )
                   )}
                   {record.steamSource === "application" && (
                     <label className="supporter-check">
@@ -498,6 +516,9 @@ function SupporterReview({
 function AutomationStatusLine({ automation }: { automation: AutomationStatus | undefined }) {
   const steamFill = Boolean(automation?.steamFill),
     founderAuto = Boolean(automation?.founderAuto);
+  const hold = automation?.holdHours ?? 72;
+  // Automatic matching only reads Patreon records, so nothing runs while Patreon is not configured.
+  const idle = (steamFill || founderAuto) && automation?.configured === false;
   return (
     <div className="status-row supporter-automation">
       <p className={`status-line ${steamFill || founderAuto ? "good" : "quiet"}`}>
@@ -509,10 +530,13 @@ function AutomationStatusLine({ automation }: { automation: AutomationStatus | u
         <span>Automatic founders {founderAuto ? "on" : "off"}</span>
       </p>
       <p className="muted">
+        {idle && "Patreon is not configured, so nothing is matched automatically. "}
         {founderAuto
-          ? "Gramps records a founder promise itself when the Discord account came from Patreon, a SteamID is linked and the first Patreon payment qualifies. Staff can always record one."
+          ? `Gramps records a Patreon founder promise itself only when the Discord account came from Patreon, a SteamID with nothing to check is linked, and the first Patreon payment qualifies and has stood for ${hold} hours. Staff record every other founder promise the founder rule allows.`
           : "Automatic founder recording is off. Records marked “Would be recorded automatically” show what it would record; staff record founder promises."}
-        {!steamFill && " SteamIDs are linked by staff; an approved application’s SteamID is shown for checking."}
+        {steamFill
+          ? " Gramps copies an empty SteamID on a Patreon record from the Discord account’s approved whitelist application when nothing about it needs checking."
+          : " SteamIDs are linked by staff; a SteamID that is safe to copy from an approved application is filled in for checking."}
       </p>
     </div>
   );

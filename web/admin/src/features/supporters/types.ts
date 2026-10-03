@@ -19,16 +19,32 @@ export interface PaymentEvidence {
   minimumConfirmed?: boolean;
   recordedBy?: string | null;
 }
-/** The SteamID an approved whitelist application offers; `reason` is null when Gramps may copy it. */
+/** Why the server will not copy an application's SteamID. Mirrors SteamMatchBlock in src/supporters/supporter-match.rules.ts. */
+export type SteamMatchBlock =
+  | "no_application"
+  | "application_in_progress"
+  | "application_pending"
+  | "no_approved_application"
+  | "several_steam_ids"
+  | "invalid_steam_id"
+  | "application_not_confirmed"
+  | "steam_shared"
+  | "steam_rejected_before"
+  | "steam_on_another_record";
+/**
+ * The SteamID a whitelist application of the record's Discord account names. `reason` is null only when the server
+ * says the SteamID is safe to copy; otherwise it names why not, and `steamId` is given for staff to check.
+ */
 export interface SteamMatch {
-  reason: string | null;
+  reason: SteamMatchBlock | null;
   steamId: string | null;
   applicationId: string | null;
   serverId: string | null;
 }
 export interface NextStep {
   code: string;
-  area: "discord" | "steam" | "payment" | "founder";
+  /** `info` is a note, not a task: why no founder promise is possible on this record. */
+  area: "discord" | "steam" | "payment" | "founder" | "info";
   message: string;
 }
 export type IdentityState = "unlinked" | "partial" | "patreon_linked" | "staff_linked";
@@ -71,7 +87,11 @@ export interface Supporter {
     sourceApplicationRevoked: boolean;
     patreonDiscordElsewhere: boolean;
     discordReportedForOtherPatron: boolean;
+    /** Another Discord account has applied with the linked SteamID. */
+    linkedSteamShared: boolean;
   };
+  /** The payment automatic matching would record a founder promise on. */
+  automaticPayment: PaymentEvidence | null;
   automaticBlockedReason: string | null;
   automaticBlockedMessage: string | null;
   nextSteps: NextStep[];
@@ -118,6 +138,8 @@ export interface PatreonSyncStatus {
     reference: string;
     unverifiedPaymentId: string;
     unverifiedReference: string;
+    /** `unverified`: the payment is no longer verified. `not_first_payment`: the founder's own payment lost its first-payment flag. */
+    reviewReason: "unverified" | "not_first_payment";
   }[];
 }
 /** POST supporters/sync: joins a running sync, or reuses one that finished moments ago. */

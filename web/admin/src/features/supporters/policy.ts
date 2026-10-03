@@ -75,11 +75,19 @@ export function matchSummary(record: Supporter) {
   return `Discord: ${sourceLabel(record.discordId, record.discordSource)} · SteamID: ${sourceLabel(record.steamId, record.steamSource)}`;
 }
 
-/** The SteamID an approved application offers, for staff to check when the record has none. */
+/**
+ * The SteamID to fill in for staff to check when the record has none: only one the server says is safe to copy (an
+ * approved application with a recorded grant that nothing else claims). Any other candidate is left out.
+ */
 export function applicationSteamId(record: Supporter) {
-  return !record.steamId && record.match.steam?.steamId && record.match.steam.reason !== "application_pending"
+  return !record.steamId && record.match.steam?.steamId && record.match.steam.reason === null
     ? record.match.steam.steamId
     : null;
+}
+/** The server's own words for why an application's SteamID was not filled in, when the record has no SteamID. */
+export function steamCandidateNote(record: Supporter) {
+  if (record.steamId || !record.match.steam?.steamId || record.match.steam.reason === null) return null;
+  return record.nextSteps.find((step) => step.area === "steam")?.message ?? null;
 }
 
 const READY_FOR_STAFF = new Set([
@@ -98,11 +106,12 @@ export const automaticPreview = (record: Supporter) =>
 export const accountsToMatch = (record: Supporter) =>
   record.identityState === "unlinked" || record.identityState === "partial";
 
-/** Steps grouped for the record dialog; payment problems share one heading. */
+/** Steps grouped for the record dialog; payment problems share one heading, and notes are not tasks. */
 export function stepGroups(steps: NextStep[]) {
   return {
     payment: steps.filter((step) => step.area === "payment"),
-    other: steps.filter((step) => step.area !== "payment"),
+    notes: steps.filter((step) => step.area === "info"),
+    other: steps.filter((step) => step.area !== "payment" && step.area !== "info"),
   };
 }
 
