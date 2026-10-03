@@ -811,27 +811,26 @@ export class MapVotesService implements OnModuleInit, OnApplicationBootstrap, On
     if (this.options().enabled) this.schedule();
   }
   /**
-   * A person queued the entry that is already next. The rotation, and so the ballot's fingerprint, did not
-   * change, so the open automatic ballot on that server is closed here; its result would replace the choice.
-   * A ballot already closing cannot be closed: its close checks for this queue before sending a winner.
-   * Returns a note for the staff member's result, or null when no automatic ballot is active.
+   * A person queued the entry that is already next. The rotation, its fingerprint and the configuration
+   * revision did not change, so the open ballot on that server, automatic or manual, is closed here; its
+   * result would replace the choice. A ballot already closing cannot be closed: its close checks for this
+   * queue before sending a winner. Returns a note for the staff member's result, or null when no ballot is active.
    */
   private async staffQueuedNext(staff: Staff, serverId: string): Promise<string | null> {
     if (!this.options().enabled) return null;
-    const open = (await this.store.automaticOpen()).filter((vote) => vote.serverId === serverId);
+    const ballots = async () => (await this.store.history(serverId)).filter((vote) => vote.serverId === serverId);
+    const open = (await ballots()).filter((vote) => vote.state === "open");
     let closed = 0;
     for (const vote of open)
       try {
         await this.cancelAutomatic(vote, STAFF_QUEUED, staff);
         closed++;
       } catch {
-        this.logger.warn(`Automatic map vote ${vote.id} could not be closed after staff queued the next map.`);
+        this.logger.warn(`Map vote ${vote.id} could not be closed after staff queued the next map.`);
       }
     if (closed) return "The open community vote was closed, so it cannot replace this choice.";
     // Read again: a ballot read as open may have started closing before it could be closed.
-    const busy = (await this.store.history(serverId)).find(
-      (vote) => vote.automation && (vote.state === "publishing" || vote.state === "closing"),
-    );
+    const busy = (await ballots()).find((vote) => vote.state === "publishing" || vote.state === "closing");
     if (busy?.state === "closing")
       return "A community vote on this server is closing now and may still change the next map. Check Map votes.";
     if (busy) return "A community vote on this server is opening now. Close it in Map votes to keep this choice.";
@@ -1339,7 +1338,7 @@ export class MapVotesService implements OnModuleInit, OnApplicationBootstrap, On
       sameRound(clock, { map: latest.currentMap, startedAt: latest.roundStartedAt.getTime() })
     );
   }
-  /** Closes an automatic ballot without a game change, as Gramps or as the staff member `by`. */
+  /** Closes a ballot without a game change, as Gramps or as the staff member `by`. */
   private async cancelAutomatic(vote: MapVoteRecord, reason: string, by?: Staff) {
     this.lastScores.delete(vote.id);
     const cancelled = await this.store.cancel(
@@ -1640,9 +1639,10 @@ export class MapVotesService implements OnModuleInit, OnApplicationBootstrap, On
         if ((await this.store.get(vote.id))?.state !== "closing" || this.stopped) return;
         const winner = vote.choices[vote.winner];
         const entry = stripEvent(winner);
-        // A person's queue since the ballot opened wins. Queuing the entry already next leaves the rotation,
-        // and so every check above, unchanged, and a ballot already closing cannot be closed by it.
-        if (automation && (await this.admin.staffQueuedSince(vote.serverId, vote.createdAt))) {
+        // A person's queue since the ballot opened wins, for automatic and manual ballots alike. Queuing the
+        // entry already next leaves the rotation and its revision, and so every check above, unchanged, and a
+        // ballot already closing cannot be closed by it.
+        if (await this.admin.staffQueuedSince(vote.serverId, vote.createdAt)) {
           state = "cancelled";
           message = STAFF_QUEUED;
         } else if (winner.event === "50v50") {

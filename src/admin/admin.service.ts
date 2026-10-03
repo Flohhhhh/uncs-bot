@@ -29,8 +29,7 @@ export class AdminService {
 
   /**
    * Runs after a person's map-next finds its entry already next, which leaves the rotation unchanged.
-   * Map votes register here to close an open automatic ballot: they depend on this service, so it cannot
-   * depend on them.
+   * Map votes register here to close an open ballot: they depend on this service, so it cannot depend on them.
    */
   onUnchangedQueue(listener: UnchangedQueueListener) {
     this.unchangedQueue.push(listener);
@@ -186,7 +185,7 @@ export class AdminService {
 
   /**
    * Whether a person queued a map on this server since `since`, including the entry already next, which
-   * leaves the rotation unchanged. An automatic ballot checks this before it sends its winner.
+   * leaves the rotation unchanged. Every ballot, automatic or manual, checks this before it sends its winner.
    */
   staffQueuedSince(serverId: string, since: Date) {
     return this.store.staffQueuedSince(serverId, since);
