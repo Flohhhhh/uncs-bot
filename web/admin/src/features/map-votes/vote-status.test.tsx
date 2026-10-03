@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { expect, it } from "vitest";
 import { VoteResults, voteSummary, type VoteList } from "./vote-status";
+import { defaultVotingPolicy, defaultVotingSettings } from "../../../../../src/common/voting-policy";
 const ballot: VoteList = {
   enabled: true,
   serverId: "event",
@@ -68,4 +69,43 @@ it("summarizes voting in one short line without presenting a failed read as curr
   expect(voteSummary(ballot, "Read failed")).toEqual({ label: "Unavailable", kind: "warn" });
   expect(voteSummary(null).label).toBe("Checking…");
   expect(voteSummary(null, "Read failed").label).toBe("Unavailable");
+});
+it("states an automatic ballot's own close score and its early close", () => {
+  const settings = {
+    ...defaultVotingSettings,
+    closeAtScore: 90,
+    reminders: { ...defaultVotingSettings.reminders, midpoint: { score: 40, discord: true, inGame: true } },
+  };
+  const automatic: VoteList = {
+    ...ballot,
+    votes: [
+      {
+        ...ballot.votes[0],
+        automation: {
+          policy: { ...defaultVotingPolicy, enabled: true, midpointReminder: true },
+          settings,
+          highestScore: 45,
+          reminders: { midpoint: { id: "r", state: "applied", message: "Sent", at: "2026-10-02T03:58:00Z" } },
+        },
+      },
+    ],
+  };
+  expect(voteSummary(automatic).label).toBe("Open · ends by 90 points");
+  render(<VoteResults data={automatic} />);
+  expect(
+    screen.getByText(/Closes when the leading team reaches 90 points, or from 80 if one more scoring step could end/),
+  ).toBeInTheDocument();
+  expect(screen.getByText("Score 40 update: sent")).toBeInTheDocument();
+  expect(screen.queryByText(/95/)).not.toBeInTheDocument();
+});
+it("keeps the exact close score for a ballot stored before customizable settings", () => {
+  const older: VoteList = {
+    ...ballot,
+    votes: [{ ...ballot.votes[0], automation: { policy: defaultVotingPolicy, highestScore: 30, reminders: {} } }],
+  };
+  expect(voteSummary(older).label).toBe("Open · ends at 95 points");
+  render(<VoteResults data={older} />);
+  expect(screen.getByText(/^Closes when the leading team reaches 95 points/)).toHaveTextContent(
+    "Closes when the leading team reaches 95 points · 6 votes",
+  );
 });

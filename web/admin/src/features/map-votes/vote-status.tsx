@@ -1,6 +1,12 @@
 import type { mapVoteView } from "../../../../../src/map-votes/map-votes.types";
 import type { AutomaticVoteStatus } from "../../../../../src/common/map-vote-automation";
 import { selectionLabel } from "../../../../../src/common/map-labels";
+import {
+  automationSettings,
+  closeThreshold,
+  type VoteAutomation,
+  type VoteReminder,
+} from "../../../../../src/common/voting-policy";
 import { Badge, Card, date } from "../../components/ui";
 
 export type Vote = ReturnType<typeof mapVoteView>;
@@ -28,6 +34,19 @@ export function activeVote(data: VoteList) {
   return data.votes.find((item) => activeStates.includes(item.state));
 }
 const shortTime = (value: string) => new Date(value).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+/**
+ * The ballot's own close score. Ballots stored with settings can also close one scoring step early, from 10
+ * points below it; older ballots close exactly at it.
+ */
+function closeRule(automation: VoteAutomation) {
+  const { score, early } = closeThreshold(automation);
+  return automation.settings
+    ? {
+        short: `ends by ${score} points`,
+        full: `Closes when the leading team reaches ${score} points, or from ${early} if one more scoring step could end the match`,
+      }
+    : { short: `ends at ${score} points`, full: `Closes when the leading team reaches ${score} points` };
+}
 /** One short line for summaries: "None", "Off", or "Open · ends 12:52". */
 export function voteSummary(data: VoteList | null | undefined, error = ""): { label: string; kind: string } {
   if (!data) return { label: error ? "Unavailable" : "Checking…", kind: error ? "warn" : "neutral" };
@@ -38,7 +57,7 @@ export function voteSummary(data: VoteList | null | undefined, error = ""): { la
   if (!vote) return { label: "None", kind: "neutral" };
   if (vote.state === "open")
     return {
-      label: vote.automation ? "Open · ends at 95 points" : `Open · ends ${shortTime(vote.closesAt)}`,
+      label: `Open · ${vote.automation ? closeRule(vote.automation).short : `ends ${shortTime(vote.closesAt)}`}`,
       kind: "good",
     };
   return { label: voteStateLabels[vote.state], kind: vote.state === "needs_review" ? "warn" : "neutral" };
@@ -79,7 +98,7 @@ export function VoteResults({ data, error = "" }: { data: VoteList; error?: stri
             <p>
               {vote.state === "open"
                 ? vote.automation
-                  ? "Closes when the leading team reaches 95 points"
+                  ? closeRule(vote.automation).full
                   : `Closes ${date(vote.closesAt)}`
                 : vote.message}
               {total !== null && ` · ${total} ${total === 1 ? "vote" : "votes"}`}
@@ -110,7 +129,8 @@ export function VoteResults({ data, error = "" }: { data: VoteList; error?: stri
             {vote.automation &&
               Object.entries(vote.automation.reminders).map(([stage, reminder]) => (
                 <small className="muted" key={stage}>
-                  {stage === "midpoint" ? "Score 50 update" : "Score 85 reminder"}:{" "}
+                  Score {automationSettings(vote.automation!).reminders[stage as VoteReminder].score}{" "}
+                  {stage === "midpoint" ? "update" : "reminder"}:{" "}
                   {reminder.state === "accepted" || reminder.state === "applied" ? "sent" : reminder.message}
                 </small>
               ))}
