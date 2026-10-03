@@ -77,6 +77,8 @@
   --space-6: 32px;
   --radius-sm: 4px;
   --radius-md: 8px;
+  /* Space the phone tab bar covers at the bottom of the viewport; none on wider screens. */
+  --tabbar-height: 0px;
   --display: "Barlow Condensed", "Arial Narrow", Impact, sans-serif;
   --body: "DM Sans", "Segoe UI", Arial, sans-serif;
   font-family: var(--body);
@@ -2105,6 +2107,10 @@ dialog.sheet {
   }
 }
 @media (max-width: 740px) {
+  :root {
+    /* 56px links and the 1px top border, above the home indicator. */
+    --tabbar-height: calc(57px + env(safe-area-inset-bottom));
+  }
   .shell {
     display: block;
   }
@@ -2180,7 +2186,7 @@ dialog.sheet {
     color: var(--accent);
   }
   main {
-    padding-bottom: calc(57px + env(safe-area-inset-bottom));
+    padding-bottom: var(--tabbar-height);
   }
   .topbar {
     height: 56px;
@@ -2357,7 +2363,8 @@ dialog.sheet {
 }
 .settings-savebar {
   position: sticky;
-  bottom: 12px;
+  /* Clear of the phone tab bar, which is fixed over the bottom of the viewport. */
+  bottom: calc(var(--tabbar-height) + 12px);
   z-index: 2;
   display: flex;
   align-items: center;
