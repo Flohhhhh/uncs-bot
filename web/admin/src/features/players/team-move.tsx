@@ -10,7 +10,7 @@ import { allowed, errorMessage, rejectionState } from "../actions/policy";
 import { ActionReceipt } from "../actions/action-receipt";
 import { FactionOptions, liveFactions, playerFaction } from "./factions";
 
-type ItemState = ActionResult["state"] | "queued" | "sending" | "skipped" | "unmatched";
+type ItemState = ActionResult["state"] | "queued" | "sending" | "skipped" | "unmatched" | "refused";
 export type TeamItem = {
   id: string;
   steamId: string;
@@ -31,6 +31,7 @@ const labels: Record<ItemState, string> = {
   unknown: "Unconfirmed",
   skipped: "Already on team",
   unmatched: "Skipped · roster changed",
+  refused: "Skipped · roster changed",
 };
 
 /**
@@ -59,7 +60,7 @@ export function TeamResults({ items }: { items: TeamItem[] }) {
                   ? "good"
                   : item.state === "failed"
                     ? "bad"
-                    : ["unknown", "pending", "sending", "unmatched"].includes(item.state)
+                    : ["unknown", "pending", "sending", "unmatched", "refused"].includes(item.state)
                       ? "warn"
                       : "neutral"
               }
@@ -217,7 +218,6 @@ export function TeamMoveDialog({
         item.message = "Waiting for the game’s response.";
         publish();
         didSend = true;
-        let refused = false;
         try {
           const result = await api<ActionResult>("actions", {
             method: "POST",
@@ -241,14 +241,15 @@ export function TeamMoveDialog({
             : "unknown";
           item.message = result.message || "The outcome could not be confirmed. Check Action history before repeating.";
           // The server refused before sending anything because this player left or changed team since the
-          // roster read. A new round is refused the same way, and the next roster read stops the batch.
-          refused = item.state === "failed" && result.changed === false;
+          // roster read. It reads as the same skip as the dialog's own roster check, keeping the server's
+          // message and receipt. A new round is refused the same way, and the next roster read stops the batch.
+          if (item.state === "failed" && result.changed === false) item.state = "refused";
         } catch (failure) {
           item.state = rejectionState(failure);
           item.message = `${errorMessage(failure)} Check this action in Action history before repeating it.`;
         }
         publish();
-        if (stopRequested.current || item.state === "unknown" || (item.state === "failed" && !refused)) {
+        if (stopRequested.current || item.state === "failed" || item.state === "unknown") {
           didStop = true;
           break;
         }
