@@ -1,10 +1,12 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { api } from "../../api/client";
 import { AdminContext } from "../../app/context";
 import { PlayersPage } from "./players-page";
-import { alice, context } from "./test-fixtures";
+import { alice, bob, context, overview } from "./test-fixtures";
 
 vi.mock("../../api/client", () => ({ api: vi.fn() }));
+afterEach(() => vi.useRealTimers());
 
 describe("live player controls", () => {
   it("does not claim an empty roster while waiting for the first response", () => {
@@ -178,6 +180,52 @@ describe("live player controls", () => {
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Message player" }));
     expect(admin.openAction).toHaveBeenCalledWith("message", alice.steamId);
   });
+  it.each(["unmatched", "refused"])(
+    "keeps a player skipped as %s selected after the batch because no move was sent",
+    async (state) => {
+      vi.useFakeTimers();
+      const live = overview();
+      // Bob changes team during the batch: the dialog's own roster read sees it, or the server refuses the move.
+      if (state === "unmatched") live.players[1] = { ...bob, faction: "GRN" };
+      vi.mocked(api).mockImplementation(async (path, options) =>
+        path === "overview"
+          ? live
+          : JSON.parse(String(options?.body)).steamId === bob.steamId
+            ? {
+                state: "failed",
+                changed: false,
+                message: "The player's team changed before this move. No move was sent.",
+              }
+            : { state: "applied", changed: true, message: "Confirmed" },
+      );
+      render(
+        <AdminContext.Provider value={context()}>
+          <PlayersPage />
+        </AdminContext.Provider>,
+      );
+      fireEvent.click(screen.getByLabelText("Select UNC Alice"));
+      fireEvent.click(screen.getByLabelText("Select Bob"));
+      fireEvent.change(screen.getByLabelText("Destination team for selected players"), {
+        target: { value: "Lonestar" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Review move" }));
+      const dialog = screen.getByRole("dialog");
+      fireEvent.submit(
+        within(dialog)
+          .getByRole("button", { name: /^Move 2 players/ })
+          .closest("form")!,
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2200);
+      });
+      expect(within(dialog).getByRole("heading", { name: "Team requests complete" })).toBeInTheDocument();
+      expect(within(dialog).getByRole("row", { name: /^Bob/ })).toHaveTextContent("Skipped · roster changed");
+      expect(dialog).toHaveTextContent("1 not sent.");
+      expect(screen.getByLabelText("Select Bob")).toBeChecked();
+      expect(screen.getByLabelText("Select UNC Alice")).not.toBeChecked();
+      expect(screen.getByText("1 selected")).toBeInTheDocument();
+    },
+  );
   it("removes player actions if the selected player leaves while the menu is open", () => {
     const admin = context();
     const tree = (present: boolean) => (

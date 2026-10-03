@@ -33,6 +33,10 @@ const labels: Record<ItemState, string> = {
   unmatched: "Skipped · roster changed",
   refused: "Skipped · roster changed",
 };
+/** No move reached the game for this player: the batch stopped first, or their roster entry changed. */
+export function notSent(item: TeamItem) {
+  return item.state === "queued" || item.state === "unmatched" || item.state === "refused";
+}
 
 /**
  * The pause before the next move, at least 2.2 s. A move costs about seven game requests (the roster read
@@ -289,7 +293,7 @@ export function TeamMoveDialog({
       }
       description={
         done || running
-          ? `${destination?.label ?? faction}. Each player has their own recorded outcome. ${items.filter((item) => item.state === "queued").length} not sent.`
+          ? `${destination?.label ?? faction}. Each player has their own recorded outcome. ${items.filter(notSent).length} not sent.`
           : "Review the named players and destination. This changes team assignment without sending a forced kill; players may need to respawn."
       }
       onClose={onClose}
