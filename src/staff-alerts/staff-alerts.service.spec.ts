@@ -347,23 +347,29 @@ describe("alert-only staff alert delivery", () => {
     ["-# x", "\\-# x"],
     ["# x", "\\# x"],
     ["> x", "\\> x"],
-    ["<:x __y__", "<​:x \\_\\_y\\_\\_"],
-  ])("escapes the name %s so it cannot render as a link, heading, subtext, quote or underline", async (name, shown) => {
-    const rich = richFixture();
-    await rich.service.raise(
-      input({
-        kind: "watchlist-join",
-        severity: "warning",
-        player: { steamId, name },
-        lines: [`${name} joined.`, `Reason: ${name}.`],
-      }),
-    );
-    const embed = sent(rich, 0).embeds[0];
-    const [first, reason] = embed.description.split("\n");
-    expect(embed.fields.find((item: { name: string }) => item.name === "Player").value).toBe(shown);
-    expect(first).toBe(`${shown} joined.`);
-    expect(reason).not.toMatch(/(?<!\\)[[\]]|(?<!\\)__/);
-  });
+    ["<:x __y__", "<\u200b:x \\_\\_y\\_\\_"],
+    ["<x:/*y*", "<\u200bx:/\\*y\\*"],
+    ["<x:/_y_", "<\u200bx:/\\_y\\_"],
+    ["<t:0:R>", "<\u200bt:0:R>"],
+  ])(
+    "escapes the name %s so it cannot render as a link, heading, subtext, quote, italics or timestamp",
+    async (name, shown) => {
+      const rich = richFixture();
+      await rich.service.raise(
+        input({
+          kind: "watchlist-join",
+          severity: "warning",
+          player: { steamId, name },
+          lines: [`${name} joined.`, `Reason: ${name}.`],
+        }),
+      );
+      const embed = sent(rich, 0).embeds[0];
+      const [first, reason] = embed.description.split("\n");
+      expect(embed.fields.find((item: { name: string }) => item.name === "Player").value).toBe(shown);
+      expect(first).toBe(`${shown} joined.`);
+      expect(reason).not.toMatch(/(?<!\\)[[\]*_]|<[^\u200b]/);
+    },
+  );
 
   it("adds no dashboard button until the dashboard can show the alert", async () => {
     const off = richFixture();

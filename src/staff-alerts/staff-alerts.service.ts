@@ -103,16 +103,19 @@ export function playerLabel(name: string) {
 }
 /**
  * Text for an embed: cleaned, Markdown escaped and unable to form a mention. Also escapes what
- * escapeMarkdown leaves alone: link brackets, line-start subtext and quotes, and the underscores
- * after an emoji-like `<:`.
+ * escapeMarkdown leaves alone: link brackets, line-start subtext and quotes, and every `<` construct.
+ * escapeMarkdown never sees a `<`, because its `<:` and `<scheme:/` exceptions would leave the
+ * italics after one unescaped; each `<` comes back followed by a zero-width space, so it cannot open
+ * an emoji, mention, timestamp, command or channel link. cleanText turns U+0001 into a space, so the
+ * placeholder cannot already be in the text.
  */
 export function discordText(value: string, max = 600) {
-  const text = cleanText(value, max).replace(/<(a?:)/g, "<​$1");
+  const text = cleanText(value, max).replaceAll("<", "\u0001");
   return escapeMarkdown(text, { heading: true, bulletedList: true, numberedList: true, maskedLink: true })
     .replace(/^(\s*)(-#|>)/gm, "$1\\$2")
     .replace(/(?<!\\)((?:\\\\)*)([[\]])/g, "$1\\$2")
     .replace(/@(everyone|here)/gi, "@​$1")
-    .replace(/<([@#])/g, "<​$1");
+    .replaceAll("\u0001", "<​");
 }
 const clip = (value: string, max: number) => (value.length > max ? `${value.slice(0, max - 1)}…` : value);
 
