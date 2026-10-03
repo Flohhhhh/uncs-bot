@@ -117,6 +117,17 @@ describe("Discord role setup checks", () => {
     expect(supporter.roles.founder.problem).toBe("The Founder and Supporter roles must be two different roles.");
     expect(supporter.roles.member.assignable).toBe(true);
   });
+  it("refuses the opt-in Seeder role, which members add to themselves", async () => {
+    const { discord } = fixture();
+    const result = await discord.check(GUILD, ids, [], FOUNDER);
+    expect(result.roles.founder).toMatchObject({
+      assignable: false,
+      problem: "This is the Seeder role (SEEDING_ROLE_ID), which members add to themselves. Use a separate role.",
+    });
+    expect(result.roles.member.assignable).toBe(true);
+    expect(result.roles.supporter.assignable).toBe(true);
+    expect((await discord.check(GUILD, ids, [], null)).roles.founder.assignable).toBe(true);
+  });
   it("asks for Manage Roles before anything else about an otherwise valid role", async () => {
     const { discord } = fixture({ manageRoles: false });
     const result = await discord.check(GUILD, ids, []);

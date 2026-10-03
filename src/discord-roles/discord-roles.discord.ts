@@ -44,11 +44,15 @@ export class DiscordRolesDiscord {
     return this.client.isReady();
   }
 
-  /** Reads the bot's own permissions and every configured role. Nothing is changed. */
+  /**
+   * Reads the bot's own permissions and every configured role. Nothing is changed. `seederRoleId` is the opt-in
+   * Seeder role (SEEDING_ROLE_ID), which members add to themselves, so it can never be an earned role.
+   */
   async check(
     guildId: string,
     roleIds: Record<DiscordRoleKind, string | undefined>,
     staffRoleIds: string[],
+    seederRoleId?: string | null,
   ): Promise<RolesCheck> {
     const guild = await this.client.guilds.fetch(guildId);
     const me = guild.members.me ?? (await guild.members.fetchMe());
@@ -88,13 +92,15 @@ export class DiscordRolesDiscord {
               ? "This role grants moderation or administrator permissions. Gramps only assigns roles without them."
               : staffRole
                 ? "This role is a dashboard staff role. Use a separate role for the community tag."
-                : shared
-                  ? `The ${label.name} and ${LABELS[shared].name} roles must be two different roles.`
-                  : !manageRoles
-                    ? "Give the bot's role the Manage Roles permission."
-                    : !role.editable
-                      ? `Drag the bot's role above "${role.name}" in Server Settings, Roles.`
-                      : null;
+                : seederRoleId && role.id === seederRoleId
+                  ? "This is the Seeder role (SEEDING_ROLE_ID), which members add to themselves. Use a separate role."
+                  : shared
+                    ? `The ${label.name} and ${LABELS[shared].name} roles must be two different roles.`
+                    : !manageRoles
+                      ? "Give the bot's role the Manage Roles permission."
+                      : !role.editable
+                        ? `Drag the bot's role above "${role.name}" in Server Settings, Roles.`
+                        : null;
       return {
         id,
         name: role.name,

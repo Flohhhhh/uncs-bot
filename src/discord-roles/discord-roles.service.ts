@@ -113,6 +113,8 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
         ...ids(this.env.get("ADMIN_MODERATOR_ROLE_IDS")),
         ...ids(this.env.get("ADMIN_VIEWER_ROLE_IDS")),
       ],
+      // Members give themselves the opt-in Seeder role, so it can never be one of the earned roles.
+      seederRoleId: this.env.get("SEEDING_ROLE_ID") ?? null,
     };
   }
 
@@ -295,7 +297,7 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
     try {
       if (!options.guildId) throw new SetupProblem("Set ADMIN_GUILD_ID to the community Discord server.");
       const guildId = options.guildId;
-      const check = await this.discord.check(guildId, options.roleIds, options.staffRoleIds);
+      const check = await this.discord.check(guildId, options.roleIds, options.staffRoleIds, options.seederRoleId);
       for (const kind of ROLE_KINDS)
         if (options.roleIds[kind] && !check.roles[kind].assignable) {
           blockedKinds.add(kind);
@@ -522,7 +524,7 @@ export class DiscordRolesService implements OnApplicationBootstrap, OnModuleDest
         : null;
     if (!checkProblem)
       try {
-        check = await this.discord.check(options.guildId!, options.roleIds, options.staffRoleIds);
+        check = await this.discord.check(options.guildId!, options.roleIds, options.staffRoleIds, options.seederRoleId);
       } catch {
         checkProblem = "The Discord server could not be read. Check that the bot is in ADMIN_GUILD_ID.";
       }

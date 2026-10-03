@@ -1007,6 +1007,22 @@ describe("staff role controls", () => {
     await expect(service.reconcile(admin, reconcile(change))).rejects.toMatchObject({ status: 400 });
   });
 
+  it("tells the setup check which role is the opt-in Seeder role, in the status and in a pass", async () => {
+    const SEEDER = "300000000000000077";
+    const { service, discord, state, addMember } = fixture({ SEEDING_ROLE_ID: SEEDER });
+    const seederArgument = () => (discord.check.mock.calls.at(-1) as unknown[] | undefined)?.[3];
+    await service.status(admin);
+    expect(seederArgument()).toBe(SEEDER);
+    state.member.set(A, "application-a");
+    addMember(A);
+    await service.reconcile(admin, reconcile({ dryRun: true }));
+    expect(discord.check).toHaveBeenCalledTimes(2);
+    expect(seederArgument()).toBe(SEEDER);
+    const unset = fixture();
+    await unset.service.status(admin);
+    expect((unset.discord.check.mock.calls.at(-1) as unknown[] | undefined)?.[3]).toBeNull();
+  });
+
   it("reports setup, readiness, counts and founders without a linked Discord account", async () => {
     const { service, discord } = fixture({ DISCORD_ROLES_ENABLED: false });
     await expect(service.status(admin)).resolves.toMatchObject({
