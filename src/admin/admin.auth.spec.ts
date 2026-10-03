@@ -17,7 +17,7 @@ const config = {
   viewerRoleIds: ["viewer-role"],
   secure: true,
 };
-function fixture() {
+function fixture(ownerIds: string[] = []) {
   const session = {
     userId: "123456789012345678",
     displayName: "Test staff",
@@ -25,7 +25,7 @@ function fixture() {
     expiresAt: new Date(Date.now() + 60_000),
   };
   const store = { session: jest.fn().mockResolvedValue(session), createSession: jest.fn(), deleteSession: jest.fn() };
-  const settings = { get: () => config } as unknown as AdminSettings;
+  const settings = { get: () => ({ ...config, ownerIds }) } as unknown as AdminSettings;
   const auth = new AdminAuth(settings, store as unknown as AdminStore);
   const req = {
     method: "POST",
@@ -77,6 +77,29 @@ describe("Discord dashboard access", () => {
     jest.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ roles: ["mod-role"] })));
     expect((await auth.authenticate(req)).role).toBe("moderator");
     expect(store.session).toHaveBeenCalledWith(hash("b".repeat(64)));
+  });
+  it.each([
+    ["a staff role", [], ["admin-role"]],
+    ["an owner ID", ["123456789012345678"], []],
+  ])("refuses a member still in membership screening who has %s", async (_case, ownerIds, roles) => {
+    const { auth, store, req, session } = fixture(ownerIds);
+    const screening = "Complete the Discord server membership screening first.";
+    const network = jest
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => new Response(JSON.stringify({ roles, pending: true })));
+    await expect(auth.authenticate({ ...req, method: "GET" } as Request)).rejects.toThrow(screening);
+    // Nothing was cached, so the next read asks Discord again.
+    await expect(auth.authenticate({ ...req, method: "GET" } as Request)).rejects.toThrow(screening);
+    expect(network).toHaveBeenCalledTimes(2);
+    const login = loginCallback(auth);
+    network
+      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "private-oauth-token" })))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ id: session.userId, username: "Staff", mfa_enabled: true })),
+      );
+    await expect(auth.callback(login.req, login.res as unknown as Response)).rejects.toThrow(screening);
+    expect(store.createSession).not.toHaveBeenCalled();
+    expect(login.res.cookie).toHaveBeenCalledTimes(1);
   });
   it("rejects expired sessions even if returned by storage", async () => {
     const { auth, req, session } = fixture();
