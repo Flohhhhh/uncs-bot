@@ -3239,6 +3239,8 @@ dialog .map-picker-fields > label {
 }
 /* Activity */
 .activity-head {
+  /* Anchors the help panel to the content column, so it cannot run past the screen wherever the "?" lands. */
+  position: relative;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -3267,9 +3269,6 @@ dialog .map-picker-fields > label {
 .activity-status.attention::before {
   background: var(--warn);
 }
-.activity-help {
-  position: relative;
-}
 .activity-help summary {
   display: grid;
   place-items: center;
@@ -3291,11 +3290,12 @@ dialog .map-picker-fields > label {
   color: var(--cream);
 }
 .activity-help-panel {
+  /* Across from the head row's left edge, but down from where it would sit in flow: just under the "?". */
   position: absolute;
   z-index: 5;
-  top: calc(100% + var(--space-2));
   left: 0;
-  width: min(380px, calc(100vw - 32px));
+  width: min(380px, 100%);
+  margin-top: var(--space-2);
   padding: var(--space-3) var(--space-4);
   background: var(--surface-2);
   border: 1px solid var(--line);

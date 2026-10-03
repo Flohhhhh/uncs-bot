@@ -113,3 +113,19 @@ describe("phone tab bar", () => {
     expect(pixels(declared(".settings-savebar", "bottom", 1024), 1024, 34)).toBe(12);
   });
 });
+
+describe("Server activity help", () => {
+  it.each([320, 375, 390, 741, 820, 950, 1024, 1366])(
+    "keeps the open panel inside the content column at %ipx",
+    (width) => {
+      // The "?" can land anywhere along the status row, so the panel lines up with the row's left edge instead of
+      // the toggle's, and is never wider than the row.
+      expect(declared(".activity-head", "position", width)).toBe("relative");
+      expect(declared(".activity-help", "position", width)).toBeUndefined();
+      expect(declared(".activity-help-panel", "position", width)).toBe("absolute");
+      expect(declared(".activity-help-panel", "left", width)).toBe("0");
+      expect(declared(".activity-help-panel", "right", width)).toBeUndefined();
+      expect(declared(".activity-help-panel", "width", width)).toBe("min(380px, 100%)");
+    },
+  );
+});
