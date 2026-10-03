@@ -6,7 +6,7 @@ import { DataTable } from "../../components/data-table";
 import { allowed } from "../actions/policy";
 import { PlayerButton, PlayerSheet, type SheetPlayer } from "./player-actions";
 import { FactionChip, FactionOptions, liveFactions, playerFaction } from "./factions";
-import { TeamMoveDialog, TeamResults, type TeamMoveResult } from "./team-move";
+import { notSent, TeamMoveDialog, TeamResults, type TeamMoveResult } from "./team-move";
 import { EmptyRoster } from "./empty-roster";
 
 /** A one-line, honest summary of a move that finished without a failure or stop. */
@@ -75,7 +75,8 @@ export function PlayersPage() {
     });
   }
   function completed(result: TeamMoveResult) {
-    const attempted = new Set(result.items.filter((item) => item.state !== "queued").map((item) => item.steamId));
+    // Players skipped for a roster change were never sent a move either, so they stay selected for a new review.
+    const attempted = new Set(result.items.filter((item) => !notSent(item)).map((item) => item.steamId));
     setSelected((previous) => new Set([...previous].filter((id) => !attempted.has(id))));
     // Keep the full results only when something needs attention: they list the unsent players.
     if (result.stopped || result.items.some((item) => item.state === "failed" || item.state === "unknown")) {

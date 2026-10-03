@@ -1428,7 +1428,7 @@ async function main() {
                 "GG! Same time next round?",
               ],
             },
-            discordStatus: { enabled: false, configured: false },
+            discordStatus: { enabled: false, configured: false, problem: null },
           }),
         },
       },

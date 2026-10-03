@@ -1,9 +1,10 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { useState } from "react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import { AdminContext } from "../app/context";
 import { context } from "../features/players/test-fixtures";
+import { pressEscape } from "../test/dialog";
 import { ActionButton, Empty, Modal, OutcomeBadge, Sheet, Tabs, type OutcomeState } from "./ui";
 
 describe("OutcomeBadge", () => {
@@ -41,6 +42,57 @@ describe("Empty", () => {
     expect(retry).toHaveBeenCalledTimes(1);
   });
 });
+
+const admin = context();
+function dialogTree(busy: boolean, onClose: () => void) {
+  return (
+    <AdminContext.Provider value={admin}>
+      <Modal title="Review" onClose={onClose} busy={busy}>
+        <p>Review body</p>
+      </Modal>
+    </AdminContext.Provider>
+  );
+}
+
+/** A page heading, an opener and a dialog that can remove or disable its opener, as a row's result can. */
+function Page() {
+  const [open, setOpen] = useState(false);
+  const [opener, setOpener] = useState<"ready" | "removed" | "disabled">("ready");
+  return (
+    <AdminContext.Provider value={admin}>
+      <main id="main-content" tabIndex={-1}>
+        <h1 tabIndex={-1}>Whitelist</h1>
+        {opener !== "removed" && (
+          <button type="button" disabled={opener === "disabled"} onClick={() => setOpen(true)}>
+            Remove
+          </button>
+        )}
+        {open && (
+          <Modal title="Remove from whitelist" onClose={() => setOpen(false)}>
+            <button type="button" onClick={() => setOpener("removed")}>
+              Finish removal
+            </button>
+            <button type="button" onClick={() => setOpener("disabled")}>
+              Finish without removal
+            </button>
+            <button type="button" onClick={() => setOpen(false)}>
+              Cancel
+            </button>
+          </Modal>
+        )}
+      </main>
+    </AdminContext.Provider>
+  );
+}
+/** Opens the dialog from its button with the keyboard, and moves focus into it as a browser would. */
+function openFromButton() {
+  const opener = screen.getByRole("button", { name: "Remove" });
+  opener.focus();
+  fireEvent.click(opener);
+  const dialog = screen.getByRole("dialog") as HTMLDialogElement;
+  screen.getByRole("button", { name: "Cancel" }).focus();
+  return { opener, dialog };
+}
 
 describe("Modal", () => {
   const modal = (eyebrow?: string | null) => (
@@ -80,6 +132,113 @@ describe("Modal", () => {
     fireEvent.click(screen.getByRole("button", { name: "Close dialog" }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(opener).toHaveFocus();
+  });
+  it("returns focus to the button that opened it on Cancel", () => {
+    render(<Page />);
+    const { opener } = openFromButton();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(opener).toHaveFocus();
+  });
+  it("returns focus to the button that opened it on Escape", () => {
+    render(<Page />);
+    const { opener, dialog } = openFromButton();
+    pressEscape(dialog);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(opener).toHaveFocus();
+  });
+  it.each(["removal", "without removal"])(
+    "focuses the page heading when the opener cannot take focus back (finish %s)",
+    (finish) => {
+      render(<Page />);
+      openFromButton();
+      fireEvent.click(screen.getByRole("button", { name: `Finish ${finish}` }));
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(screen.getByRole("heading", { name: "Whitelist" })).toHaveFocus();
+    },
+  );
+  it("returns focus to the panel behind it when the opener inside the panel is gone", () => {
+    function Panel() {
+      const [open, setOpen] = useState(false);
+      const [present, setPresent] = useState(true);
+      return (
+        <AdminContext.Provider value={admin}>
+          <main id="main-content" tabIndex={-1}>
+            <h1 tabIndex={-1}>Live players</h1>
+          </main>
+          <Sheet title="UncDap" onClose={vi.fn()}>
+            {present && (
+              <button type="button" onClick={() => setOpen(true)}>
+                Move to Lonestar
+              </button>
+            )}
+          </Sheet>
+          {open && (
+            <Modal title="Move UncDap" onClose={() => setOpen(false)}>
+              <button type="button" onClick={() => setPresent(false)}>
+                Finish move
+              </button>
+              <button type="button" onClick={() => setOpen(false)}>
+                Cancel
+              </button>
+            </Modal>
+          )}
+        </AdminContext.Provider>
+      );
+    }
+    render(<Panel />);
+    const opener = screen.getByRole("button", { name: "Move to Lonestar" });
+    opener.focus();
+    fireEvent.click(opener);
+    fireEvent.click(screen.getByRole("button", { name: "Finish move" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    // The page behind a modal panel is inert, so the heading could not take focus there.
+    expect(screen.getByRole("dialog", { name: "UncDap" })).toHaveFocus();
+  });
+  it("closes on Escape when idle", () => {
+    const onClose = vi.fn();
+    render(dialogTree(false, onClose));
+    pressEscape(screen.getByRole("dialog") as HTMLDialogElement);
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+  it("stays open through repeated Escape presses while busy", () => {
+    const onClose = vi.fn();
+    const { rerender } = render(dialogTree(true, onClose));
+    const dialog = screen.getByRole("dialog") as HTMLDialogElement;
+    expect(dialog).toHaveAttribute("closedby", "none");
+    // The close listener would reopen a dialog that Escape closed, so check that Escape never reaches the
+    // dialog as a close request at all, not only that the dialog ends up open.
+    const requests = vi.fn();
+    dialog.addEventListener("cancel", requests);
+    dialog.addEventListener("close", requests);
+    pressEscape(dialog);
+    // Chrome no longer lets the page cancel a second Escape without a new click in between.
+    pressEscape(dialog, { cancelable: false });
+    expect(requests).not.toHaveBeenCalled();
+    expect(dialog.open).toBe(true);
+    expect(screen.getByText("Review body")).toBeVisible();
+    expect(onClose).not.toHaveBeenCalled();
+    rerender(dialogTree(false, onClose));
+    expect(dialog).not.toHaveAttribute("closedby");
+    pressEscape(dialog);
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+  it("reopens a busy dialog the browser closes anyway, and reports the close once idle", () => {
+    const onClose = vi.fn();
+    const { rerender } = render(dialogTree(true, onClose));
+    const dialog = screen.getByRole("dialog") as HTMLDialogElement;
+    // A close request that never reaches the page as a keydown, such as the Android back gesture.
+    const closeNatively = () =>
+      act(() => {
+        dialog.close();
+        dialog.dispatchEvent(new Event("close"));
+      });
+    closeNatively();
+    expect(dialog.open).toBe(true);
+    expect(onClose).not.toHaveBeenCalled();
+    rerender(dialogTree(false, onClose));
+    closeNatively();
+    expect(onClose).toHaveBeenCalledOnce();
   });
 });
 
@@ -229,5 +388,150 @@ describe("Sheet", () => {
     expect(close).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Close panel" }));
     expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets the parent remove a sheet the browser closes natively", () => {
+    const close = vi.fn();
+    render(
+      <Sheet title="UncDap" onClose={close}>
+        <p>Stats</p>
+      </Sheet>,
+    );
+    const sheet = screen.getByRole("dialog", { name: "UncDap" }) as HTMLDialogElement;
+    // A close request that never reaches the page as a keydown, such as the Android back gesture.
+    act(() => {
+      sheet.close();
+      sheet.dispatchEvent(new Event("close"));
+    });
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("focuses the page heading when the control that opened it is gone", () => {
+    function Removable() {
+      const [open, setOpen] = useState(false);
+      const [present, setPresent] = useState(true);
+      return (
+        <main id="main-content" tabIndex={-1}>
+          <h1 tabIndex={-1}>Live players</h1>
+          {present && (
+            <button type="button" onClick={() => setOpen(true)}>
+              UncDap
+            </button>
+          )}
+          {open && (
+            <Sheet title="Player" onClose={() => setOpen(false)}>
+              <button type="button" onClick={() => setPresent(false)}>
+                Leave roster
+              </button>
+            </Sheet>
+          )}
+        </main>
+      );
+    }
+    render(<Removable />);
+    const opener = screen.getByRole("button", { name: "UncDap" });
+    opener.focus();
+    fireEvent.click(opener);
+    fireEvent.click(screen.getByRole("button", { name: "Leave roster" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close panel" }));
+    expect(screen.getByRole("heading", { name: "Live players" })).toHaveFocus();
+  });
+
+  it("hands its opener to a review that replaces it in the same update", () => {
+    // Bans "+ Ban player" then a pick, or More then Sign out with unsaved drafts.
+    function Picker() {
+      const [picking, setPicking] = useState(false);
+      const [review, setReview] = useState(false);
+      return (
+        <AdminContext.Provider value={admin}>
+          <main id="main-content" tabIndex={-1}>
+            <h1 tabIndex={-1}>Bans</h1>
+            <button type="button" onClick={() => setPicking(true)}>
+              Ban player
+            </button>
+          </main>
+          {picking && (
+            <Sheet title="Pick a player" onClose={() => setPicking(false)}>
+              <button
+                type="button"
+                onClick={() => {
+                  setPicking(false);
+                  setReview(true);
+                }}
+              >
+                UncDap
+              </button>
+            </Sheet>
+          )}
+          {review && (
+            <Modal title="Ban UncDap" onClose={() => setReview(false)}>
+              <button type="button" onClick={() => setReview(false)}>
+                Cancel
+              </button>
+            </Modal>
+          )}
+        </AdminContext.Provider>
+      );
+    }
+    render(<Picker />);
+    const opener = screen.getByRole("button", { name: "Ban player" });
+    opener.focus();
+    fireEvent.click(opener);
+    const pick = screen.getByRole("button", { name: "UncDap" });
+    pick.focus();
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    fireEvent.click(pick);
+    expect(screen.queryByRole("dialog", { name: "Pick a player" })).not.toBeInTheDocument();
+    // The sheet's focus fallback must not move focus off the review's own controls onto the review itself.
+    expect(focus.mock.contexts).not.toContain(screen.getByRole("dialog", { name: "Ban UncDap" }));
+    const cancel = screen.getByRole("button", { name: "Cancel" });
+    cancel.focus();
+    fireEvent.click(cancel);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(opener).toHaveFocus();
+  });
+
+  it("leaves focus in a review that stays open when the sheet behind it closes", () => {
+    function Panel() {
+      const [sheet, setSheet] = useState(false);
+      const [review, setReview] = useState(false);
+      return (
+        <AdminContext.Provider value={admin}>
+          <main id="main-content" tabIndex={-1}>
+            <h1 tabIndex={-1}>Live players</h1>
+            <button type="button" onClick={() => setSheet(true)}>
+              UncDap
+            </button>
+          </main>
+          {sheet && (
+            <Sheet title="Player" onClose={() => setSheet(false)}>
+              <button type="button" onClick={() => setReview(true)}>
+                Kick
+              </button>
+            </Sheet>
+          )}
+          {review && (
+            <Modal title="Kick UncDap" onClose={() => setReview(false)}>
+              <button type="button" onClick={() => setSheet(false)}>
+                Close the panel behind
+              </button>
+            </Modal>
+          )}
+        </AdminContext.Provider>
+      );
+    }
+    render(<Panel />);
+    const opener = screen.getByRole("button", { name: "UncDap" });
+    opener.focus();
+    fireEvent.click(opener);
+    fireEvent.click(screen.getByRole("button", { name: "Kick" }));
+    const review = screen.getByRole("dialog", { name: "Kick UncDap" });
+    const control = screen.getByRole("button", { name: "Close the panel behind" });
+    control.focus();
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    fireEvent.click(control);
+    expect(screen.queryByRole("dialog", { name: "Player" })).not.toBeInTheDocument();
+    expect(focus.mock.contexts).not.toContain(review);
+    expect(control).toHaveFocus();
   });
 });

@@ -35,7 +35,7 @@ Fixed in code (`src/weekly-leaderboard/`):
 - **Week:** from the previous slot up to the slot, measured on receipt time like the website's rolling periods. A week spanning a DST change is 167 or 169 hours. Both queries use `since` = previous slot and `until` = slot − 1 ms (the store treats `until` as inclusive), so totals and shout-outs always agree.
 - **Week key:** the ISO year and week of the slot's New York date, for example `2026-W40` for Sunday, October 4, 2026. The posted check only reads the channel from the current slot onward, so change `WEEKLY_LEADERBOARD_DAY` right after a post; moving the day earlier within a week that was already posted can post that week again.
 - **First possible post:** Sunday, October 4, 2026, 20:00 EDT, covering from 2026-09-28 00:00 UTC.
-- **Worker:** checks shortly after startup (60 seconds) and then every five minutes, for each configured server. It acts only within six hours after the slot. Turning the feature on midweek or deploying on a Wednesday never causes a surprise post; that week is recorded as `missed posting window`, and an administrator can still post it.
+- **Worker:** checks shortly after startup (60 seconds) and then every five minutes, for each configured server. It acts only within six hours after the slot. Turning the feature on midweek or deploying on a Wednesday never causes a surprise post; that week is recorded as `missed posting window`, and an administrator can still post it. Turning it on within six hours after a slot does post the week that slot closed; see [Before turning it on](#before-turning-it-on).
 
 ## Skipping silently
 
@@ -112,7 +112,7 @@ Remaining risks:
 - Two long-running instances could each post outside Discord's nonce window.
 - Changing a server's `id` during a week defeats the marker match for that week. Renaming its display name does not.
 - Deleting the bot's post by hand and restarting Gramps inside the window posts it again.
-- After a `failed` or `unknown` send, that process never tries the week again, including post-now. After a restart the channel scan decides: within the window the worker posts only if no earlier post is found; after it, an administrator can post-now.
+- The schedule never retries a `failed` or `unknown` send in that process. After `failed` nothing was posted, so an administrator can post-now in the same process once the cause is fixed; no restart is needed. After `unknown`, post-now is refused until a restart. Then the channel scan decides: within the window the worker posts only if no earlier post is found; after it, an administrator can post-now.
 
 ## Staff routes
 
@@ -131,4 +131,6 @@ The dashboard has no page for these routes yet.
 3. The first real batch is checked for `cause` and `mapName` values, distance units and any team-kill tag; adjust `causeLabel()`, the distance cap or add a team-kill exclusion.
 4. The owner approves the labels and copy above.
 
-Then set `WEEKLY_LEADERBOARD_CHANNEL_ID` and `WEEKLY_LEADERBOARD_ENABLED=true`, restart, and run a preview before the first slot.
+Then set `WEEKLY_LEADERBOARD_CHANNEL_ID`, leave `WEEKLY_LEADERBOARD_ENABLED=false`, and restart. Preview the week that will post next and check the rendered board, `eligible` and `reason`; preview does not need the feature on, and `postable` stays false until it is. Before the first slot, or when turning it on outside the catch-up window below, that is `preview?week=current`: the week so far, which posts at the next slot, so `eligible` can still change before then. Run `preview?week=last` only when turning it on inside the window, where it is the week that posts about a minute after the restart. When the preview looks right, set `WEEKLY_LEADERBOARD_ENABLED=true` and restart.
+
+**Mind the six-hour catch-up window.** The worker checks about a minute after startup and acts on a slot for six hours after it. Turning the feature on in that window (with the defaults, Sunday 20:00 to Monday 02:00 ET) posts the week that just closed about a minute after the restart, as long as it clears the thresholds and the channel has no earlier post for it. Preview first, or turn it on outside that window.

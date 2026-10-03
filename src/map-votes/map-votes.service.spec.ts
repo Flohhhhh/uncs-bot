@@ -1147,12 +1147,70 @@ describe("score-based voting controls and reminders", () => {
     expect(f.store.finish).toHaveBeenCalledWith(f.record.id, "cancelled", expect.any(String));
     expect(f.discord.remind).not.toHaveBeenCalled();
   });
-  it.each(["ended", "reset", "staff-override", "disabled", "stale", "missing-scores", "permission"])(
+  it.each([
+    ["ended", 20, 100],
+    ["moved backwards", 90, 85],
+  ])("cancels without claiming the ballot once the score has %s", async (_case, highest, score) => {
+    const f = scored();
+    f.record.automation!.highestScore = highest;
+    f.score(score);
+    // The real store moves a claimed ballot to closing, so a missed guard would reach the queue.
+    f.store.claimClose.mockImplementation(async () => {
+      f.record.state = "closing";
+      return f.record;
+    });
+    await f.service.tick();
+    expect(f.store.cancel).toHaveBeenCalledWith(
+      f.record.id,
+      expect.any(String),
+      expect.objectContaining({ name: "Gramps" }),
+      "The score reached 100 or moved backwards. The rotation was left unchanged.",
+      expect.any(String),
+    );
+    expect(f.store.claimClose).not.toHaveBeenCalled();
+    expect(f.admin.act).not.toHaveBeenCalled();
+    expect(f.discord.remind).not.toHaveBeenCalled();
+  });
+  it.each(["shows 100 points", "is too old"])(
+    "closes a claimed ballot without queueing when the winner's own game read %s",
+    async (failure) => {
+      const f = scored();
+      f.score(95);
+      const observed = await f.game.overview();
+      // Only close()'s own read changes, so its score re-check is the one guard in the way.
+      f.game.overview.mockResolvedValueOnce(observed).mockResolvedValueOnce(
+        failure === "is too old"
+          ? {
+              ...observed,
+              observedAt: new Date(now.getTime() - 40_000).toISOString(),
+              status: { ...observed.status, matchSeconds: 560 },
+            }
+          : {
+              ...observed,
+              status: {
+                ...observed.status,
+                factionScores: [
+                  { name: "Lonestar", score: 100 },
+                  { name: "Manticore", score: 20 },
+                  { name: "Valkyra", score: 10 },
+                ],
+              },
+            },
+      );
+      f.store.claimClose.mockImplementation(async () => {
+        f.record.state = "closing";
+        return f.record;
+      });
+      await f.service.tick();
+      expect(f.store.claimClose).toHaveBeenCalledWith(f.record.id, true);
+      expect(f.admin.act).not.toHaveBeenCalled();
+      expect(f.store.finish).toHaveBeenCalledWith(f.record.id, "cancelled", expect.any(String));
+    },
+  );
+  it.each(["staff-override", "disabled", "stale", "missing-scores", "permission"])(
     "does not send messages or queue a winner after %s",
     async (failure) => {
       const f = scored();
-      if (failure === "ended") f.score(100);
-      if (failure === "reset") f.score(0);
       if (failure === "disabled") f.saved.policy.enabled = false;
       if (failure === "permission") f.auth.role.mockResolvedValue("viewer");
       if (failure === "staff-override") {

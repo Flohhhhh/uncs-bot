@@ -802,6 +802,48 @@ describe("existing Discord status message", () => {
     },
   );
 
+  it.each([
+    ["ADMIN_GUILD_ID is unset", "Set ADMIN_GUILD_ID"],
+    ["the channel is in another server", "not a text channel in the ADMIN_GUILD_ID server"],
+    ["the channel has no messages", "not a text channel in the ADMIN_GUILD_ID server"],
+    ["another account posted the message", "not posted by Gramps"],
+  ])("warns once and reports why the card is not updated when %s", async (scenario, problem) => {
+    const { service, look, channel, message, discord } = fixture({
+      SERVER_COMMUNITY_DISCORD_STATUS_ENABLED: true,
+      ...(scenario === "ADMIN_GUILD_ID is unset" ? { ADMIN_GUILD_ID: undefined } : {}),
+    });
+    if (scenario === "the channel is in another server") channel.guildId = "wrong";
+    if (scenario === "the channel has no messages") delete (channel as Partial<typeof channel>).messages;
+    if (scenario === "another account posted the message") message.author.id = "someone else";
+    const warn = jest.spyOn(Logger.prototype, "warn");
+    await service.tick();
+    await settle();
+    await look([firstId], "Europe", 60_000);
+    await settle();
+    expect(discord.channels.fetch).toHaveBeenCalledTimes(scenario === "ADMIN_GUILD_ID is unset" ? 0 : 2);
+    expect(warn.mock.calls.filter(([text]) => String(text).startsWith("Discord status card"))).toEqual([
+      [expect.stringContaining(problem)],
+    ]);
+    expect(service.statusCardProblem()).toContain(problem);
+    expect(service.statusCardProblem()).not.toMatch(/\d{6,}|guild|wrong|bot/);
+    expect(message.edit).not.toHaveBeenCalled();
+  });
+
+  it("reports a failed edit until the next successful one", async () => {
+    const { service, look, message } = fixture({ SERVER_COMMUNITY_DISCORD_STATUS_ENABLED: true });
+    expect(service.statusCardProblem()).toBeNull();
+    message.edit.mockRejectedValueOnce(new Error("Missing Permissions"));
+    await service.tick();
+    await settle();
+    expect(service.statusCardProblem()).toBe(
+      "Discord status card could not be updated. Check the configured existing message and channel permissions.",
+    );
+    await look([firstId], "Europe", 60_000);
+    await settle();
+    expect(message.edit).toHaveBeenCalledTimes(2);
+    expect(service.statusCardProblem()).toBeNull();
+  });
+
   it("requires both existing IDs and never polls for an incomplete status-only setup", async () => {
     const { service, game } = fixture({
       SERVER_COMMUNITY_WELCOME_ENABLED: false,

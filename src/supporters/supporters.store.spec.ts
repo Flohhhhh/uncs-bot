@@ -216,6 +216,21 @@ describe("supporter persistence and founder eligibility", () => {
     );
     expect(query.mock.calls.some(([config]) => config.text.startsWith('insert into "supporter_payments"'))).toBe(false);
   });
+  it("records a dated charge as payment evidence only when Patreon reports it paid", async () => {
+    const paid = fixture();
+    await paid.store.ingest(observation);
+    expect(paid.query.mock.calls.some(([config]) => config.text.startsWith('insert into "supporter_payments"'))).toBe(
+      true,
+    );
+    // A declined first charge would otherwise count as an earlier payment against the receipt staff record later.
+    for (const lastChargeStatus of ["Declined", "Pending", "Refunded"]) {
+      const { store, query } = fixture();
+      await store.ingest({ ...observation, lastChargeStatus });
+      expect(query.mock.calls.some(([config]) => config.text.startsWith('insert into "supporter_payments"'))).toBe(
+        false,
+      );
+    }
+  });
   it.each(["low", "end", "before", "signed", "not-first", "unlinked", "invalid-steam", "earlier"])(
     "rejects founder award for %s evidence",
     async (caseName) => {

@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../../api/client";
 import { AdminContext, type AdminContextValue } from "../../app/context";
 import { PlayersPage } from "./players-page";
@@ -9,7 +9,11 @@ import { alice, bob, context, overview } from "./test-fixtures";
 
 vi.mock("../../api/client", () => ({ api: vi.fn() }));
 const request = vi.mocked(api);
-beforeEach(() => request.mockReset());
+// A block body: a function returned from beforeEach runs as a cleanup, and mockReset returns the mock itself.
+beforeEach(() => {
+  request.mockReset();
+});
+afterEach(() => vi.useRealTimers());
 
 function tree(admin: AdminContextValue, children: ReactNode = <PlayersPage />) {
   return (
@@ -27,6 +31,12 @@ function teamChip(name: RegExp) {
 function openPanel(name: string) {
   fireEvent.click(screen.getByRole("button", { name }));
   return screen.getByRole("dialog");
+}
+/** The panel's always-present notice region; the SteamID copy button has its own status line. */
+function availability(panel: HTMLElement) {
+  return within(panel)
+    .getAllByRole("status")
+    .find((region) => !region.closest(".copy-value"))!;
 }
 
 describe("live player controls", () => {
@@ -228,6 +238,105 @@ describe("live player controls", () => {
     expect(within(panel).getByRole("link", { name: "Actions on this player →" })).toHaveAttribute(
       "href",
       `/activity?server=primary&view=actions&player=${alice.steamId}`,
+    );
+  });
+  it.each(["unmatched", "refused"])(
+    "keeps a player skipped as %s selected after the batch because no move was sent",
+    async (state) => {
+      vi.useFakeTimers();
+      const live = overview();
+      // Bob changes team during the batch: the dialog's own roster read sees it, or the server refuses the move.
+      if (state === "unmatched") live.players[1] = { ...bob, faction: "GRN" };
+      request.mockImplementation(async (path, options) =>
+        path === "overview"
+          ? live
+          : JSON.parse(String(options?.body)).steamId === bob.steamId
+            ? {
+                state: "failed",
+                changed: false,
+                message: "The player's team changed before this move. No move was sent.",
+              }
+            : { state: "applied", changed: true, message: "Confirmed" },
+      );
+      show();
+      fireEvent.click(screen.getByLabelText("Select UNC Alice"));
+      fireEvent.click(screen.getByLabelText("Select Bob"));
+      fireEvent.change(screen.getByLabelText("Destination team for selected players"), {
+        target: { value: "Lonestar" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Review move" }));
+      const dialog = screen.getByRole("dialog");
+      fireEvent.submit(
+        within(dialog)
+          .getByRole("button", { name: /^Move 2 players/ })
+          .closest("form")!,
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2200);
+      });
+      expect(within(dialog).getByRole("heading", { name: "Team requests complete" })).toBeInTheDocument();
+      expect(within(dialog).getByRole("row", { name: /^Bob/ })).toHaveTextContent("Skipped · roster changed");
+      expect(dialog).toHaveTextContent("1 not sent.");
+      expect(screen.getByLabelText("Select Bob")).toBeChecked();
+      expect(screen.getByLabelText("Select UNC Alice")).not.toBeChecked();
+      expect(screen.getByText("1 selected")).toBeInTheDocument();
+    },
+  );
+  it("says why every player action is disabled when the snapshot expires with the panel open", () => {
+    const admin = context();
+    const view = (stale: boolean) => tree({ ...admin, stale });
+    const { rerender } = render(view(false));
+    const panel = openPanel(alice.name);
+    // A live region inserted with its text already in it may not be announced, so it waits in the panel empty.
+    const status = availability(panel);
+    expect(status).toBeEmptyDOMElement();
+    rerender(view(true));
+    const message = within(panel).getByRole("button", { name: "Message player" });
+    expect(message).toBeDisabled();
+    expect(availability(panel)).toBe(status);
+    expect(status).toHaveTextContent(
+      "Server details need a fresh check. Close this panel and refresh before choosing an action.",
+    );
+    expect(message).toHaveAccessibleDescription(/fresh check/);
+    expect(within(panel).getByRole("button", { name: "Move to Blue · Lonestar" })).toHaveAccessibleDescription(
+      /fresh check/,
+    );
+  });
+  it.each([
+    ["the staff role", "Add whitelist access", () => context({ me: { ...context().me!, role: "moderator" } })],
+    [
+      "the server build",
+      "Force player respawn",
+      () => {
+        const admin = context();
+        const { capabilities } = admin.overview!;
+        capabilities.routes = capabilities.routes.filter((route) => !route.endsWith("/kill"));
+        return admin;
+      },
+    ],
+  ])("says why a player action is off for %s", (_cause, label, setup) => {
+    show(setup());
+    const panel = openPanel(alice.name);
+    const off = within(panel).getByRole("button", { name: label, hidden: true });
+    const message = within(panel).getByRole("button", { name: "Message player" });
+    expect(off).toBeDisabled();
+    expect(availability(panel)).toHaveTextContent(
+      "Some actions are unavailable for your role, connection, or server build.",
+    );
+    expect(off).toHaveAccessibleDescription(/your role, connection, or server build/);
+    expect(message).toBeEnabled();
+    expect(message).not.toHaveAccessibleDescription();
+  });
+  it("says why every player action is off for a viewer", () => {
+    const admin = context();
+    admin.me.role = "viewer";
+    show(admin);
+    const panel = openPanel(alice.name);
+    expect(availability(panel)).toHaveTextContent(
+      "Unavailable for your role, connection, or server build. Refresh the dashboard before trying again.",
+    );
+    expect(within(panel).getByRole("button", { name: "Message player" })).toHaveAccessibleDescription(
+      /your role, connection, or server build/,
     );
   });
   it("removes player actions if the selected player leaves while the panel is open", () => {
