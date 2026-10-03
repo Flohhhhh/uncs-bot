@@ -199,3 +199,102 @@ describe("Discord dashboard access", () => {
     expect(res.clearCookie).toHaveBeenCalled();
   });
 });
+
+describe("verified sessions for the dashboard traffic limit", () => {
+  afterEach(() => jest.restoreAllMocks());
+  const roles = (...ids: string[]) =>
+    jest.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ roles: ids })));
+  const withCookie = (token: string) =>
+    ({ method: "GET", headers: { cookie: `__Host-uncs_admin_session=${token}` } }) as unknown as Request;
+
+  it("trusts a session only after it passes the staff check, and only by its token hash", async () => {
+    const { auth, req } = fixture();
+    const read = { ...req, method: "GET" } as Request;
+    roles("admin-role");
+    expect(auth.verifiedSession(read)).toBeUndefined();
+    await auth.authenticate(read);
+    expect(auth.verifiedSession(read)).toBe(hash("b".repeat(64)));
+    // A well-formed cookie that never passed the check gets nothing, even while another session is trusted.
+    expect(auth.verifiedSession(withCookie("d".repeat(64)))).toBeUndefined();
+    expect(auth.verifiedSession(withCookie("not-a-token"))).toBeUndefined();
+  });
+
+  it.each<[string, (context: ReturnType<typeof fixture>) => Promise<unknown>]>([
+    ["signed out", ({ auth, req }) => auth.logout(req, { clearCookie: jest.fn() } as unknown as Response)],
+    [
+      "replaced by a new sign-in",
+      ({ auth, session }) => {
+        const { req, res } = loginCallback(auth, `__Host-uncs_admin_session=${"b".repeat(64)}`);
+        jest
+          .mocked(fetch)
+          .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "private-oauth-token" })))
+          .mockResolvedValueOnce(
+            new Response(JSON.stringify({ id: session.userId, username: "Staff", mfa_enabled: true })),
+          );
+        return auth.callback(req, res as unknown as Response);
+      },
+    ],
+    [
+      "missing from storage",
+      ({ auth, store, req }) => {
+        store.session.mockResolvedValue(undefined);
+        return expect(auth.authenticate(req)).rejects.toThrow("Your session expired");
+      },
+    ],
+    [
+      "expired",
+      ({ auth, req, session }) => {
+        session.expiresAt = new Date(Date.now() - 1);
+        return expect(auth.authenticate(req)).rejects.toThrow("Your session expired");
+      },
+    ],
+    [
+      "refused staff access by Discord",
+      ({ auth, req }) => {
+        roles();
+        return expect(auth.authenticate(req)).rejects.toThrow("does not have dashboard access");
+      },
+    ],
+  ])("stops trusting a session once it is %s", async (_case, end) => {
+    const context = fixture();
+    const read = { ...context.req, method: "GET" } as Request;
+    roles("admin-role");
+    await context.auth.authenticate(read);
+    expect(context.auth.verifiedSession(read)).toBe(hash("b".repeat(64)));
+    await end(context);
+    expect(context.auth.verifiedSession(read)).toBeUndefined();
+  });
+
+  it("ends trust five minutes after the last check, or sooner when the session itself expires", async () => {
+    const { auth, req, session } = fixture();
+    const read = { ...req, method: "GET" } as Request;
+    roles("admin-role");
+    const start = Date.now();
+    await auth.authenticate(read);
+    jest.spyOn(Date, "now").mockReturnValue(start + 61_000);
+    // The fixture's session expires after one minute.
+    expect(auth.verifiedSession(read)).toBeUndefined();
+    jest.mocked(Date.now).mockReturnValue(start);
+    session.expiresAt = new Date(start + 8 * 3_600_000);
+    await auth.authenticate(read);
+    jest.mocked(Date.now).mockReturnValue(start + 5 * 60_000 - 1);
+    expect(auth.verifiedSession(read)).toBe(hash("b".repeat(64)));
+    jest.mocked(Date.now).mockReturnValue(start + 5 * 60_000);
+    expect(auth.verifiedSession(read)).toBeUndefined();
+  });
+
+  it("keeps at most 1000 trusted sessions, dropping the least recently verified", async () => {
+    const { auth, store, session } = fixture();
+    roles("admin-role");
+    const tokens = Array.from({ length: 1001 }, (_, index) => index.toString(16).padStart(64, "0"));
+    const users = new Map(tokens.map((token, index) => [hash(token), `12345678901234560${index % 10}`]));
+    // Spread the sessions over ten users so the per-user request limit is not what stops them.
+    store.session.mockImplementation(async (key: string) => ({ ...session, userId: users.get(key) }));
+    for (const token of tokens.slice(0, 1000)) await auth.authenticate(withCookie(token));
+    await auth.authenticate(withCookie(tokens[0]));
+    await auth.authenticate(withCookie(tokens[1000]));
+    expect(auth.verifiedSession(withCookie(tokens[1]))).toBeUndefined();
+    for (const token of [tokens[0], tokens[2], tokens[1000]])
+      expect(auth.verifiedSession(withCookie(token))).toBe(hash(token));
+  });
+});

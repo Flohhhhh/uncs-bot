@@ -1,6 +1,6 @@
 # Staff dashboard security
 
-Updated October 2, 2026. The controls below are implemented and covered by isolated tests. Dated production observations establish only the behavior inspected; the [release audit](ADMIN_RELEASE_AUDIT.md) records deployment evidence and remaining acceptance gaps.
+Updated October 3, 2026. The controls below are implemented and covered by isolated tests. Dated production observations establish only the behavior inspected; the [release audit](ADMIN_RELEASE_AUDIT.md) records deployment evidence and remaining acceptance gaps.
 
 ## Authentication and permissions
 
@@ -19,7 +19,11 @@ Host-only cookies keep public and staff browser sessions separate. Never widen c
 
 The dashboard sets a restrictive Content Security Policy (including same-origin self-hosted fonts), frame denial, `nosniff`, no-referrer, same-origin resource policy, HTTPS HSTS, and `no-store` on `Cache-Control`, `CDN-Cache-Control`, and `Vercel-CDN-Cache-Control`. The deployment proxy must also disable caching for every `/admin` route, including authenticated JSON and OAuth responses. Verify that response headers and `Set-Cookie` survive the complete production proxy chain.
 
-The application limits each authenticated user to 240 reads and 30 mutations per minute. Mutations also have the service's one-second spacing limit. Before authentication it limits each socket peer to 600 API requests and 60 OAuth requests per minute. Both counters have bounded memory and expire after one minute. These are per-process limits; they reset on restart and are not a distributed denial-of-service defense. Caller-supplied `X-Forwarded-For` is deliberately ignored. Behind Vercel/Railway, peer limits are shared across clients arriving through the same proxy, so configure client IP rate limits at the trusted edge too.
+The application limits each authenticated user to 240 reads and 30 mutations per minute. Mutations also have the service's one-second spacing limit. Before authentication it limits each socket peer to 600 API requests and 60 sign-in and OAuth callback requests per minute. Caller-supplied `X-Forwarded-For` is deliberately ignored, so behind Vercel/Railway every client arriving through the same proxy shares one peer bucket.
+
+A signed-in staff session therefore gets its own bucket of 600 API requests per minute, keyed by its SHA-256 token hash, once that session has passed the full staff check: it exists, has not expired, and Discord confirms staff access. The process remembers at most 1,000 verified hashes, each for five minutes after its last successful check and never past the session's expiry. Signing out, signing in again, a missing or expired session, or Discord refusing staff access removes it at once. Every other cookie, including an unknown, forged, signed-out or revoked one, counts against the peer bucket, so anonymous traffic can neither use up a staff session's allowance nor get a fresh bucket by sending random cookies. Sign-in and the OAuth callback always count by peer. A session with no successful request for five minutes, and every session after a restart, counts against the peer bucket again until its next request is verified, as all requests did before.
+
+All of these counters have bounded memory and expire after one minute. They are per-process limits; they reset on restart and are not a distributed denial-of-service defense. Configure client IP rate limits at the trusted edge too.
 
 The game endpoint and bearer password exist only in server configuration. Requests use a fixed server endpoint and an explicit action allowlist; the browser cannot supply an arbitrary RCON path or configuration document. Strict payload schemas reject unknown fields. Audit recording must succeed before an action is sent. An uncertain request result is recorded as unknown rather than automatically retried.
 
@@ -47,7 +51,7 @@ On October 2 at 09:05 EDT, anonymous reads returned 401 for staff identity, staf
 
 Use `ADMIN_ENABLED=false` to disable all authenticated dashboard access during an incident. Revoking a staff role blocks their next mutation and subsequent uncached reads. To invalidate every session, a database operator must remove the dashboard session records; rotating `ADMIN_SESSION_SECRET` alone only invalidates outstanding OAuth state cookies, not already-issued sessions. RCON, Discord client, and bot credentials need their own rotation if compromised. Keep secrets, cookie headers, raw configuration documents, and OAuth callback query strings out of request logging at every proxy and host.
 
-The local auth, HTTP-boundary, and settings suites cover missing/expired sessions, forged/expired OAuth state, MFA-required sign-in, session rotation, hashed lookup, role removal, Discord outage, CSRF/origin rejection, role enforcement, traffic limits, secret-safe errors, and response headers. They use mocked external services and an isolated test store; no production credentials, live bans, whitelist changes, or database migrations are used.
+The local auth, HTTP-boundary, and settings suites cover missing/expired sessions, forged/expired OAuth state, MFA-required sign-in, session rotation, hashed lookup, role removal, Discord outage, CSRF/origin rejection, role enforcement, traffic limits including verified-session buckets, secret-safe errors, and response headers. They use mocked external services and an isolated test store; no production credentials, live bans, whitelist changes, or database migrations are used.
 
 ## Database recovery — owner verification required
 

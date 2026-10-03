@@ -31,11 +31,17 @@ function cookie(req: Request, name: string) {
       ?.slice(name.length + 1) ?? ""
   );
 }
+/** How long a session that passed the staff check keeps its own /admin traffic bucket before it must pass again. */
+const verifiedSessionTtl = 5 * 60_000;
+const verifiedSessionLimit = 1000;
 
 @Injectable()
 export class AdminAuth {
   private readonly memberCache = new Map<string, { expires: number; role: StaffRole; roles: string[] }>();
   private readonly requestCounts = new Map<string, { until: number; reads: number; writes: number }>();
+  // Session token hashes (never the token) that recently passed authenticate(), with when that trust ends, in
+  // least-recently-verified order. Only the /admin traffic limiter reads it; it grants no access.
+  private readonly verifiedSessions = new Map<string, number>();
   constructor(
     private readonly settings: AdminSettings,
     private readonly store: AdminStore,
@@ -66,6 +72,38 @@ export class AdminAuth {
     const field = mutation ? "writes" : "reads";
     if (++counter[field] > (mutation ? 30 : 240))
       throw new HttpException("Too many dashboard requests. Wait a minute before trying again.", 429);
+  }
+
+  /**
+   * The stored hash of this request's session token if that session passed the staff check in the last few
+   * minutes and has not since been signed out, replaced, found missing or expired, or refused staff access.
+   * The /admin traffic limiter counts such a session in its own bucket. Any other cookie, including a forged
+   * one, returns undefined and is counted by address. This only reads memory; it never queries storage.
+   */
+  verifiedSession(req: Request): string | undefined {
+    if (this.verifiedSessions.size === 0) return undefined;
+    const token = cookie(req, this.cookieName("session"));
+    if (!/^[a-f0-9]{64}$/.test(token)) return undefined;
+    const tokenHash = hash(token);
+    const until = this.verifiedSessions.get(tokenHash);
+    if (until === undefined) return undefined;
+    if (until > Date.now()) return tokenHash;
+    this.verifiedSessions.delete(tokenHash);
+    return undefined;
+  }
+
+  private trustSession(tokenHash: string, expiresAt: Date) {
+    const now = Date.now();
+    // Re-inserting moves the session to the end, so the first entry is always the least recently verified.
+    this.verifiedSessions.delete(tokenHash);
+    if (this.verifiedSessions.size >= verifiedSessionLimit) {
+      for (const [key, until] of this.verifiedSessions) if (until <= now) this.verifiedSessions.delete(key);
+      for (const key of this.verifiedSessions.keys()) {
+        if (this.verifiedSessions.size < verifiedSessionLimit) break;
+        this.verifiedSessions.delete(key);
+      }
+    }
+    this.verifiedSessions.set(tokenHash, Math.min(now + verifiedSessionTtl, expiresAt.getTime()));
   }
 
   login(res: Response) {
@@ -201,7 +239,11 @@ export class AdminAuth {
       );
     await this.role(identity.id, true);
     const previousToken = cookie(req, this.cookieName("session"));
-    if (/^[a-f0-9]{64}$/.test(previousToken)) await this.store.deleteSession(hash(previousToken));
+    if (/^[a-f0-9]{64}$/.test(previousToken)) {
+      const previousHash = hash(previousToken);
+      this.verifiedSessions.delete(previousHash);
+      await this.store.deleteSession(previousHash);
+    }
     const token = randomBytes(32).toString("hex");
     await this.store.createSession({
       tokenHash: hash(token),
@@ -218,9 +260,12 @@ export class AdminAuth {
     const config = this.settings.get();
     const token = cookie(req, this.cookieName("session"));
     if (!/^[a-f0-9]{64}$/.test(token)) throw new UnauthorizedException("Sign in with Discord to continue.");
-    const session = await this.store.session(hash(token));
-    if (!session || !(session.expiresAt instanceof Date) || session.expiresAt.getTime() <= Date.now())
+    const tokenHash = hash(token);
+    const session = await this.store.session(tokenHash);
+    if (!session || !(session.expiresAt instanceof Date) || session.expiresAt.getTime() <= Date.now()) {
+      this.verifiedSessions.delete(tokenHash);
       throw new UnauthorizedException("Your session expired. Sign in again.");
+    }
     const mutation = req.method !== "GET" && req.method !== "HEAD";
     if (
       mutation &&
@@ -230,27 +275,32 @@ export class AdminAuth {
     ) {
       throw new ForbiddenException("This request did not come from your dashboard session.");
     }
-    return session;
+    return { session, tokenHash };
   }
 
   async authenticate(req: Request): Promise<Staff> {
-    const session = await this.readSession(req);
+    const { session, tokenHash } = await this.readSession(req);
     const mutation = req.method !== "GET" && req.method !== "HEAD";
     this.limit(session.userId, mutation);
-    return {
-      id: session.userId,
-      name: session.displayName,
-      csrf: session.csrf,
-      role: await this.role(session.userId, mutation),
-    };
+    let role: StaffRole;
+    try {
+      role = await this.role(session.userId, mutation);
+    } catch (error) {
+      // Discord says this member no longer has staff access. A Discord outage does not end the trust.
+      if (error instanceof ForbiddenException) this.verifiedSessions.delete(tokenHash);
+      throw error;
+    }
+    this.trustSession(tokenHash, session.expiresAt);
+    return { id: session.userId, name: session.displayName, csrf: session.csrf, role };
   }
 
   async logout(req: Request, res: Response) {
     if (req.method !== "POST") throw new ForbiddenException("Use the sign-out button to end this staff session.");
     // Revoking this browser's session must work after role removal or while
     // Discord is unavailable. Keep the same session, origin and CSRF checks.
-    await this.readSession(req);
-    await this.store.deleteSession(hash(cookie(req, this.cookieName("session"))));
+    const { tokenHash } = await this.readSession(req);
+    this.verifiedSessions.delete(tokenHash);
+    await this.store.deleteSession(tokenHash);
     res.clearCookie(this.cookieName("session"), this.cookieOptions());
     res.clearCookie(this.cookieName("oauth"), this.cookieOptions());
     return { ok: true };
