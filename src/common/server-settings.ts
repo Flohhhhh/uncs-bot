@@ -192,7 +192,15 @@ export type SettingsSnapshot = {
     mode: string;
   };
 };
-export function settingValue(field: SettingField, value: unknown): SettingValue {
+// The config readers (assertEditable, editWhitelist) treat any whole value like this as host redaction
+// and then lock every edit, so the dashboard must never write one.
+const reservedValue = /^(?:\*{3,}|<redacted>|\[redacted\]|redacted)(?:\s*(?:[;#]|\/\/).*)?$/i;
+/**
+ * `stored` reads a value the host already saved: it skips the write-only checks (reserved value, empty server
+ * name, length) and matches a choice's option case-insensitively, as the game does, returning the option's own
+ * spelling. The value then displays and can be corrected here; writes stay strict.
+ */
+export function settingValue(field: SettingField, value: unknown, stored = false): SettingValue {
   if (field.type === "boolean") {
     if (typeof value !== "boolean") throw new Error(`Choose on or off for ${field.label}.`);
     return value;
@@ -205,16 +213,24 @@ export function settingValue(field: SettingField, value: unknown): SettingValue 
   }
   if (
     typeof value !== "string" ||
+    // The readers' multiline patterns also break lines at U+2028 and U+2029, so they could forge a redacted line.
+    /[\u2028\u2029]/.test(value) ||
     [...value].some(
       (character) =>
         character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127 || character === '"' || character === "\\",
     ) ||
-    value.length > (field.max ?? 200)
+    (!stored && value.length > (field.max ?? 200))
   )
     throw new Error(`Enter a valid value for ${field.label}.`);
-  if (field.id === "serverName" && !value.trim()) throw new Error("Enter a server name.");
-  if (field.options && !field.options.includes(value))
-    throw new Error(`Choose an available ${field.label.toLowerCase()}.`);
+  if (!stored && field.id === "serverName" && !value.trim()) throw new Error("Enter a server name.");
+  if (field.options) {
+    const option = field.options.find(
+      (entry) => entry === value || (stored && entry.toLowerCase() === value.toLowerCase()),
+    );
+    if (option === undefined) throw new Error(`Choose an available ${field.label.toLowerCase()}.`);
+    // An option is never a URL or a reserved value.
+    return option;
+  }
   if (field.type === "url" && value) {
     let url: URL;
     try {
@@ -225,5 +241,7 @@ export function settingValue(field: SettingField, value: unknown): SettingValue 
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password)
       throw new Error("Use an HTTP or HTTPS banner URL without credentials.");
   }
+  if (!stored && reservedValue.test(value))
+    throw new Error(`That ${field.label.toLowerCase()} is reserved; choose another.`);
   return value;
 }

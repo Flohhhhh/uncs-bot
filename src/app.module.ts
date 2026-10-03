@@ -17,6 +17,8 @@ import { TelemModule } from "./telemetry/telemetry.module";
 import { SupportersModule } from "./supporters/supporters.module";
 import { ServerCommunityModule } from "./server-community/server-community.module";
 import { ServerEventsModule } from "./server-events/server-events.module";
+import { WeeklyLeaderboardModule } from "./weekly-leaderboard/weekly-leaderboard.module";
+import { StaffAlertsMonitorModule } from "./staff-alerts/staff-alerts-monitor.module";
 
 @Module({
   imports: [
@@ -34,6 +36,8 @@ import { ServerEventsModule } from "./server-events/server-events.module";
     SupportersModule,
     ServerCommunityModule,
     ServerEventsModule,
+    WeeklyLeaderboardModule,
+    StaffAlertsMonitorModule,
   ],
   providers: [AppService, { provide: APP_FILTER, useClass: AppExceptionFilter }],
   controllers: [AppController],

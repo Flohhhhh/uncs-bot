@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
+import { HttpException } from "@nestjs/common";
 import { MapVotesService } from "./map-votes.service";
 import { MapVotesStore } from "./map-votes.store";
 import { MapVotesDiscord } from "./map-votes.discord";
 import { fixtureServers } from "../admin/game-server-fixture";
 import { AdminService } from "../admin/admin.service";
+import type { AdminStore } from "../admin/admin.store";
 import { AdminAuth } from "../admin/admin.auth";
 import { EnvService } from "../env/env.service";
 import type { Staff } from "../admin/admin.types";
@@ -401,7 +403,7 @@ describe("durable Discord map voting", () => {
     expect(auth.serverStaff).toHaveBeenCalledWith(expect.objectContaining({ id: staff.id }), "primary", true);
     expect(admin.act).toHaveBeenCalledTimes(1);
     expect(admin.act).toHaveBeenCalledWith(
-      expect.objectContaining({ id: staff.id, role: "admin" }),
+      expect.objectContaining({ id: `system:map-vote:${input.id}`, name: staff.name, role: "admin" }),
       expect.objectContaining({
         id: input.id,
         action: "map-next",
@@ -412,6 +414,43 @@ describe("durable Discord map voting", () => {
       }),
     );
     expect(store.finish).toHaveBeenCalledWith(input.id, "queued", expect.any(String));
+  });
+  it("closes under its own audit actor, so the creator's last dashboard action cannot throttle it", async () => {
+    const f = fixture();
+    const servers = fixtureServers({
+      ...f.game,
+      execute: jest.fn().mockResolvedValue({ state: "pending", message: "Saved" }),
+    });
+    const adminStore = { begin: jest.fn().mockResolvedValue({ created: true }), finish: jest.fn() };
+    const admin = new AdminService(servers, adminStore as unknown as AdminStore);
+    const service = new MapVotesService(
+      f.store as unknown as MapVotesStore,
+      servers,
+      admin,
+      f.auth as unknown as AdminAuth,
+      f.discord as unknown as MapVotesDiscord,
+      { get: (key: string) => f.environment[key] } as EnvService,
+    );
+    await admin.act(
+      { ...staff, serverId: "primary" },
+      { id: randomUUID(), action: "broadcast", reason: "Staff notice", message: "Hello" },
+    );
+    f.closing();
+    await service.tick();
+    expect(adminStore.begin).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: `system:map-vote:${f.record.id}`, name: staff.name }),
+      expect.objectContaining({ id: f.record.id, action: "map-next" }),
+      expect.any(String),
+    );
+    expect(f.store.finish).toHaveBeenCalledWith(f.record.id, "queued", expect.any(String));
+  });
+  it("closes as cancelled when the audited action path refuses the queue change before sending it", async () => {
+    const { service, closing, store, admin, input } = fixture();
+    closing();
+    admin.act.mockRejectedValue(new HttpException("Wait a moment before sending another action.", 429));
+    await service.tick();
+    expect(admin.act).toHaveBeenCalledTimes(1);
+    expect(store.finish).toHaveBeenCalledWith(input.id, "cancelled", expect.stringContaining("without sending"));
   });
   it("retains the rotation without game or role reads when nobody voted", async () => {
     const { service, store, record, admin, game, auth } = fixture();
@@ -1010,6 +1049,22 @@ describe("score-based voting controls and reminders", () => {
     }
     expect(f.store.claimClose).not.toHaveBeenCalled();
   });
+  it("broadcasts reminders as the ballot's audit actor and records a refused broadcast as not sent", async () => {
+    const f = scored();
+    f.admin.act.mockRejectedValue(new HttpException("Wait a moment before sending another action.", 429));
+    await f.service.tick();
+    expect(f.discord.remind).toHaveBeenCalledTimes(1);
+    expect(f.admin.act).toHaveBeenCalledWith(
+      expect.objectContaining({ id: `system:map-vote:${f.record.id}`, name: staff.name }),
+      expect.objectContaining({ action: "broadcast" }),
+    );
+    expect(f.store.finishReminder).toHaveBeenCalledWith(
+      f.record.id,
+      "midpoint",
+      "failed",
+      expect.stringContaining("not sent"),
+    );
+  });
   it("skips the earlier reminder when scores jump to the final milestone", async () => {
     const f = scored();
     f.score(90);
@@ -1092,12 +1147,70 @@ describe("score-based voting controls and reminders", () => {
     expect(f.store.finish).toHaveBeenCalledWith(f.record.id, "cancelled", expect.any(String));
     expect(f.discord.remind).not.toHaveBeenCalled();
   });
-  it.each(["ended", "reset", "staff-override", "disabled", "stale", "missing-scores", "permission"])(
+  it.each([
+    ["ended", 20, 100],
+    ["moved backwards", 90, 85],
+  ])("cancels without claiming the ballot once the score has %s", async (_case, highest, score) => {
+    const f = scored();
+    f.record.automation!.highestScore = highest;
+    f.score(score);
+    // The real store moves a claimed ballot to closing, so a missed guard would reach the queue.
+    f.store.claimClose.mockImplementation(async () => {
+      f.record.state = "closing";
+      return f.record;
+    });
+    await f.service.tick();
+    expect(f.store.cancel).toHaveBeenCalledWith(
+      f.record.id,
+      expect.any(String),
+      expect.objectContaining({ name: "Gramps" }),
+      "The score reached 100 or moved backwards. The rotation was left unchanged.",
+      expect.any(String),
+    );
+    expect(f.store.claimClose).not.toHaveBeenCalled();
+    expect(f.admin.act).not.toHaveBeenCalled();
+    expect(f.discord.remind).not.toHaveBeenCalled();
+  });
+  it.each(["shows 100 points", "is too old"])(
+    "closes a claimed ballot without queueing when the winner's own game read %s",
+    async (failure) => {
+      const f = scored();
+      f.score(95);
+      const observed = await f.game.overview();
+      // Only close()'s own read changes, so its score re-check is the one guard in the way.
+      f.game.overview.mockResolvedValueOnce(observed).mockResolvedValueOnce(
+        failure === "is too old"
+          ? {
+              ...observed,
+              observedAt: new Date(now.getTime() - 40_000).toISOString(),
+              status: { ...observed.status, matchSeconds: 560 },
+            }
+          : {
+              ...observed,
+              status: {
+                ...observed.status,
+                factionScores: [
+                  { name: "Lonestar", score: 100 },
+                  { name: "Manticore", score: 20 },
+                  { name: "Valkyra", score: 10 },
+                ],
+              },
+            },
+      );
+      f.store.claimClose.mockImplementation(async () => {
+        f.record.state = "closing";
+        return f.record;
+      });
+      await f.service.tick();
+      expect(f.store.claimClose).toHaveBeenCalledWith(f.record.id, true);
+      expect(f.admin.act).not.toHaveBeenCalled();
+      expect(f.store.finish).toHaveBeenCalledWith(f.record.id, "cancelled", expect.any(String));
+    },
+  );
+  it.each(["staff-override", "disabled", "stale", "missing-scores", "permission"])(
     "does not send messages or queue a winner after %s",
     async (failure) => {
       const f = scored();
-      if (failure === "ended") f.score(100);
-      if (failure === "reset") f.score(0);
       if (failure === "disabled") f.saved.policy.enabled = false;
       if (failure === "permission") f.auth.role.mockResolvedValue("viewer");
       if (failure === "staff-override") {

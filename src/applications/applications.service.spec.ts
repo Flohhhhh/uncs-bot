@@ -221,12 +221,14 @@ describe("private website whitelist requests", () => {
       message: expect.stringContaining("check back on this website"),
     });
     await expect(service.submit(applicant, input)).rejects.toMatchObject({ status: 503 });
-    await expect(service.list(staff)).rejects.toMatchObject({ status: 503 });
+    await expect(service.list(staff)).resolves.toEqual({ enabled: false, serverId: "primary", applications: [] });
+    await expect(service.list({ ...staff, role: "moderator" })).rejects.toMatchObject({ status: 403 });
     await expect(
       service.review(staff, applicationId, "approve", { id: randomUUID(), reason: "Reviewed" }),
     ).rejects.toMatchObject({ status: 503 });
     expect(store.own).not.toHaveBeenCalled();
     expect(store.create).not.toHaveBeenCalled();
+    expect(store.list).not.toHaveBeenCalled();
     expect(store.claim).not.toHaveBeenCalled();
     expect(admin.act).not.toHaveBeenCalled();
   });

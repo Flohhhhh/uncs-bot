@@ -20,7 +20,12 @@ export function RoundTimingNotice({
   return (
     <div className="notice warning" role="alert">
       <p>{resource.error || message}</p>
-      <button type="button" className="button secondary" disabled={busy} onClick={resource.refresh}>
+      <button
+        type="button"
+        className="button secondary"
+        disabled={busy || resource.refreshing}
+        onClick={resource.refresh}
+      >
         Check round timing
       </button>
     </div>

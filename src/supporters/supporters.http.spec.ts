@@ -1,5 +1,7 @@
-import { Global, Module, type INestApplication } from "@nestjs/common";
+import { Global, Logger, Module, type INestApplication, type MiddlewareConsumer } from "@nestjs/common";
+import { APP_FILTER } from "@nestjs/core";
 import { Test } from "@nestjs/testing";
+import type { NextFunction, Request, Response } from "express";
 import { createHmac, randomUUID } from "node:crypto";
 import request from "supertest";
 import { EnvService } from "../env/env.service";
@@ -10,6 +12,7 @@ import { hash } from "../admin/admin.auth";
 import { SupportersModule } from "./supporters.module";
 import { SupportersStore } from "./supporters.store";
 import { PatreonSyncService } from "./patreon-sync.service";
+import { AppExceptionFilter } from "../common/filters/app-exception.filter";
 
 const secret = "separate-patreon-webhook-secret";
 const values: Record<string, unknown> = {
@@ -58,7 +61,12 @@ describe("private supporters HTTP boundary", () => {
         : undefined,
     );
     jest.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ roles: ["staff"] })));
-    const module = await Test.createTestingModule({ imports: [TestEnvModule, SupportersModule] })
+    jest.spyOn(Logger.prototype, "error").mockImplementation();
+    // Production registers this filter globally, so status assertions here go through it.
+    const module = await Test.createTestingModule({
+      imports: [TestEnvModule, SupportersModule],
+      providers: [{ provide: APP_FILTER, useClass: AppExceptionFilter }],
+    })
       .overrideProvider(SupportersStore)
       .useValue(store)
       .overrideProvider(AdminSettings)
@@ -136,6 +144,63 @@ describe("private supporters HTTP boundary", () => {
       .set("X-Patreon-Event", "members:update")
       .send(raw.trim())
       .expect(401);
+  });
+  describe("webhook rate limits", () => {
+    const raw = JSON.stringify({
+      data: {
+        id: "member-123",
+        type: "member",
+        attributes: { patron_status: "active_patron" },
+        relationships: { campaign: { data: { id: "123", type: "campaign" } } },
+      },
+    });
+    const signature = createHmac("md5", secret).update(raw).digest("hex");
+    const webhook = (sign?: string) => {
+      const post = request(app.getHttpServer())
+        .post("/supporters/webhooks/patreon")
+        .set("Content-Type", "application/json")
+        .set("X-Patreon-Event", "members:update");
+      return (sign ? post.set("X-Patreon-Signature", sign) : post).send(raw);
+    };
+    it("keeps signed Patreon webhooks flowing while unsigned traffic is rate limited", async () => {
+      for (let count = 0; count < 180; count++) await webhook().expect(401);
+      await webhook().expect(429);
+      // A well-formed but wrong signature still counts as unsigned.
+      await webhook("0".repeat(32)).expect(429);
+      await webhook(signature).expect(201);
+      expect(store.ingest).toHaveBeenCalledTimes(1);
+    });
+    it("limits signed webhooks in their own bucket, leaving unsigned traffic its own allowance", async () => {
+      for (let count = 0; count < 180; count++) await webhook(signature).expect(201);
+      await webhook(signature).expect(429);
+      expect(store.ingest).toHaveBeenCalledTimes(180);
+      await webhook().expect(401);
+    });
+    it("never refuses signed webhooks because unsigned addresses filled the limiter", () => {
+      let limit!: (req: Request, res: Response, next: NextFunction) => void;
+      app.get(SupportersModule).configure({
+        apply: (middleware: typeof limit) => {
+          limit = middleware;
+          return { forRoutes: () => undefined };
+        },
+      } as unknown as MiddlewareConsumer);
+      const deliver = (remoteAddress: string, sign?: string) => {
+        let status: number | "passed" = 0;
+        const res = {} as Response;
+        Object.assign(res, { set: () => res, json: () => res, status: (code: number) => ((status = code), res) });
+        const req = {
+          originalUrl: "/supporters/webhooks/patreon",
+          socket: { remoteAddress },
+          headers: sign ? { "x-patreon-signature": sign } : {},
+          rawBody: Buffer.from(raw),
+        };
+        limit(req as unknown as Request, res, () => (status = "passed"));
+        return status;
+      };
+      for (let index = 0; index < 5000; index++) expect(deliver(`2001:db8::${index.toString(16)}`)).toBe("passed");
+      expect(deliver("2001:db8::ffff")).toBe(429);
+      expect(deliver("2001:db8::ffff", signature)).toBe("passed");
+    });
   });
   it("requires same-origin CSRF, fresh admin role, and explicit confirmation for manual linking", async () => {
     const endpoint = `/admin/api/supporters/${randomUUID()}/link`;

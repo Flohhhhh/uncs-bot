@@ -7,7 +7,7 @@ import { useGameApi } from "../../api/server-client";
 import type { ActionName, ActionResult, Catalog } from "../../api/types";
 import { useResource } from "../../api/use-resource";
 import { useGameAdmin as useAdmin } from "../../app/context";
-import { Modal, ReasonField } from "../../components/ui";
+import { CountedTextarea, Modal, ReasonField } from "../../components/ui";
 import { ActionReceipt } from "./action-receipt";
 import { TeamMoveDialog } from "../players/team-move";
 import { MapPicker } from "./map-picker";
@@ -70,7 +70,8 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
   const catalog = useResource<Catalog>(
     needsCatalog && allowed(action, admin.me, admin.overview, admin.stale, false) ? "catalog" : null,
   );
-  const catalogReady = !needsCatalog || Boolean(catalog.data && !catalog.loading && !catalog.error);
+  const catalogReady =
+    !needsCatalog || Boolean(catalog.data && !catalog.loading && !catalog.refreshing && !catalog.error);
   const player = admin.overview?.players.find((entry) => entry.steamId === steamId);
   const [title, description] = actionDefinitions[action];
   const requiresPlayer = playerActions.includes(action);
@@ -253,10 +254,17 @@ function ActionForm({ action, steamId, onClose }: { action: ActionName; steamId?
                   </label>
                 ))}
               {(action === "message" || action === "broadcast") && (
-                <label>
-                  In-game message <span className="muted">(up to 200 characters)</span>
-                  <textarea name="message" maxLength={200} required rows={4} placeholder="Write your message…" />
-                </label>
+                <CountedTextarea
+                  label={
+                    <>
+                      In-game message <span className="muted">(up to 200 characters)</span>
+                    </>
+                  }
+                  name="message"
+                  required
+                  rows={4}
+                  placeholder="Write your message…"
+                />
               )}
               {needsCatalog && !catalogReady && (
                 <p role="status">

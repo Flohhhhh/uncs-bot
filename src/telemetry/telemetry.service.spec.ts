@@ -2,7 +2,7 @@ import { Logger } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import type { EnvService } from "../env/env.service";
 import { TelemetryDeliveries } from "./telemetry.deliveries";
-import { TelemetryService, UNNAMED_PLAYER } from "./telemetry.service";
+import { TelemetryService, UNNAMED_PLAYER, publicName } from "./telemetry.service";
 import type { TelemetryStore } from "./telemetry.store";
 import { emptyTotals, periodMilliseconds } from "./telemetry.types";
 import { fixtureServers } from "../admin/game-server-fixture";
@@ -83,7 +83,7 @@ describe("telemetry authorization and reporting", () => {
       { id: "east", name: "East", joinId: "11111111-1111-4111-8111-111111111111" },
       { id: "event", name: "Events" },
     ]);
-    await expect(service.ingest(`Bearer ${token}`, f.payload)).rejects.toMatchObject({ status: 400 });
+    await expect(service.ingest(`Bearer ${token}x`, f.payload)).rejects.toMatchObject({ status: 400 });
     await expect(service.ingest(`Bearer ${token}`, f.payload, "event")).rejects.toMatchObject({ status: 401 });
     expect(f.store.ingest).not.toHaveBeenCalled();
     await service.leaderboard("week", "east");
@@ -103,6 +103,71 @@ describe("telemetry authorization and reporting", () => {
   afterEach(() => {
     jest.useRealTimers();
     jest.restoreAllMocks();
+  });
+  it("delivers the game's unscoped route to the registry server whose feed token it carries", async () => {
+    const f = fixture();
+    const values: Record<string, unknown> = {
+      WARDOGS_FEED_ENABLED: true,
+      // Ignored once WARDOGS_SERVERS is set; primary's token lives in its registry entry.
+      WARDOGS_FEED_TOKEN: `${token}-legacy`,
+      WARDOGS_SERVERS: [
+        { id: "primary", name: "Main", rconUrl: "https://main.example.test", password: "main-rcon", feedToken: token },
+        { id: "event", name: "Events", rconUrl: "https://events.example.test", password: "event-rcon" },
+        {
+          id: "east",
+          name: "East",
+          rconUrl: "https://east.example.test",
+          password: "east-rcon",
+          feedToken: `${token}e`,
+        },
+      ],
+    };
+    const env = { get: (key: string) => values[key] } as EnvService;
+    const servers = new GameServers(new AdminSettings(env));
+    const deliveries = new TelemetryDeliveries(servers);
+    const service = new TelemetryService(f.store as unknown as TelemetryStore, env, servers, deliveries);
+    await service.ingest(`Bearer ${token}`, f.payload);
+    await service.ingest(`Bearer ${token}e`, f.payload);
+    expect(f.store.ingest.mock.calls.map((call) => call[2])).toEqual(["primary", "east"]);
+    expect(deliveries.status("primary").lastBatch).toMatchObject({ accepted: 1 });
+    expect(deliveries.status("east").lastBatch).toMatchObject({ accepted: 1 });
+    // No exact match, including the ignored legacy token, is refused as before and filed under no server.
+    for (const authorization of [undefined, "Bearer guess", `Bearer ${token}-legacy`, `Bearer ${token}ee`])
+      await expect(service.ingest(authorization, f.payload)).rejects.toMatchObject({ status: 400 });
+    // A matched delivery's own refusal is filed as that server's.
+    await expect(service.ingest(`Bearer ${token}`, { ...f.payload, events: "bad" })).rejects.toMatchObject({
+      status: 400,
+    });
+    expect(f.store.ingest).toHaveBeenCalledTimes(2);
+    expect(deliveries.status("primary")).toMatchObject({ rejectedCount: 1, rejectedWithoutTokenCount: 0 });
+    for (const id of ["event", "east"])
+      expect(deliveries.status(id)).toMatchObject({ rejectedCount: 0, rejectedWithoutTokenCount: 0 });
+  });
+  it("keeps legacy single-server feed routing unchanged", async () => {
+    const { service, store, payload } = fixture();
+    const servers = fixtureServers({});
+    servers.feedToken = () => token;
+    const deliveries = new TelemetryDeliveries(servers);
+    const legacy = new TelemetryService(
+      store as unknown as TelemetryStore,
+      { get: (key: string) => (key === "WARDOGS_FEED_ENABLED" ? true : undefined) } as EnvService,
+      servers,
+      deliveries,
+    );
+    await legacy.ingest(`Bearer ${token}`, payload);
+    await service.ingest(`Bearer ${token}`, payload, "primary");
+    expect(store.ingest.mock.calls.map((call) => call[2])).toEqual(["primary", "primary"]);
+    // A wrong token on the unscoped route is still primary's refusal without the token, not "server not selected".
+    await expect(legacy.ingest("Bearer guess", payload)).rejects.toMatchObject({ status: 401 });
+    await expect(legacy.ingest(`Bearer ${token}`, payload, "other")).rejects.toMatchObject({ status: 404 });
+    expect(deliveries.status("primary")).toMatchObject({
+      lastBatch: { accepted: 1 },
+      rejectedCount: 0,
+      lastRejectedWithoutToken: { status: 401, reason: "token mismatch" },
+      rejectedWithoutTokenCount: 1,
+    });
+    expect(deliveries.tokenServer("/api/ingest/events", `Bearer ${token}`)).toBe("primary");
+    expect(deliveries.tokenServer("/api/ingest/events", "Bearer guess")).toBeNull();
   });
   it("stays disconnected with no database reads when disabled", async () => {
     const { service, store, payload } = fixture(false);
@@ -467,5 +532,19 @@ describe("telemetry authorization and reporting", () => {
       lastBatch: null,
       lastRejected: { status: 503, reason: "storage unavailable" },
     });
+  });
+  it("reports whether the feed is usable for the weekly board without a reason or token", () => {
+    expect(fixture().service.feedAvailable("primary")).toBe(true);
+    expect(fixture(false).service.feedAvailable("primary")).toBe(false);
+    expect(fixture(true, "too-short-token").service.feedAvailable("primary")).toBe(false);
+  });
+  it("shares the public name rule with the weekly board unchanged", () => {
+    expect(publicName(steamId, " Player ")).toBe(" Player ");
+    expect(publicName(steamId, `Tag ${steamId}`)).toBe(UNNAMED_PLAYER);
+    expect(publicName(null, "76561198000000009")).toBe(UNNAMED_PLAYER);
+    expect(publicName(steamId, "   ")).toBe(UNNAMED_PLAYER);
+    expect(publicName(steamId, 5)).toBe(UNNAMED_PLAYER);
+    // The website's stricter rule (any 17-digit run) is applied by the Discord renderer, not here.
+    expect(publicName(steamId, "x76561198000000009x")).toBe("x76561198000000009x");
   });
 });

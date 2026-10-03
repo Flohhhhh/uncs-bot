@@ -113,6 +113,33 @@ export type CombatTotals = { events: number; kills: number; deaths: number; head
 export type CombatAggregate = { leaderboard: CombatStats[]; totals: CombatTotals };
 export type TrackingRecord = { firstReceivedAt: Date; lastReceivedAt: Date } | null;
 export const emptyTotals = (): CombatTotals => ({ events: 0, kills: 0, deaths: 0, headshotKills: 0, players: 0 });
+/** Weekly shout-out inputs. Names fall back to the SteamID, so callers must apply public name rules. */
+export type WeeklyHighlights = {
+  bestKd: { steamId: string; name: string; kills: number; deaths: number } | null;
+  mostHeadshots: { steamId: string; name: string; headshotKills: number } | null;
+  longestKill: {
+    steamId: string;
+    name: string;
+    distanceCentimeters: number;
+    cause: string | null;
+    mapName: string | null;
+  } | null;
+  /** Non-suicide kills with a linked killer. */
+  kills: number;
+  killsWithCause: number;
+  topCause: { cause: string; kills: number } | null;
+  /** Kills per stored map name, most first, at most 50. */
+  maps: Array<{ mapName: string; kills: number }>;
+};
+export const emptyHighlights = (): WeeklyHighlights => ({
+  bestKd: null,
+  mostHeadshots: null,
+  longestKill: null,
+  kills: 0,
+  killsWithCause: 0,
+  topCause: null,
+  maps: [],
+});
 
 export function parseFeed(input: unknown): ParsedFeed {
   let bytes: number;

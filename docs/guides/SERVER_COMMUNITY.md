@@ -4,11 +4,11 @@ These optional workers provide welcome whispers, round-transition broadcasts and
 
 ## Multiple servers
 
-Omit `WARDOGS_SERVERS` to retain the original `primary` connection. To expand, configure its JSON array with permanent `id`, public `name`, private `rconUrl` and `password` entries. Preserve the original server as `primary`; never reuse an ID for a different game. A registry requires explicit staff selection and rejects legacy unscoped game routes. Optional per-server `staffRoles` narrow community permissions: absent lists inherit the community role, empty lists deny non-owners, and no list can promote a community viewer or moderator. Configured owners retain administrator access.
+Omit `WARDOGS_SERVERS` to retain the original `primary` connection. To expand, configure its JSON array with permanent `id`, public `name`, private `rconUrl` and `password` entries. Preserve the original server as `primary`; never reuse an ID for a different game. A registry requires explicit staff selection and rejects legacy unscoped game routes, except the game feed's `/api/ingest/events`, which is routed by its feed token. Optional per-server `staffRoles` narrow community permissions: absent lists inherit the community role, empty lists deny non-owners, and no list can promote a community viewer or moderator. Configured owners retain administrator access.
 
 Welcomes and round messages share wording and feature flags, but each server has its own baseline, bounded queue, timer and backoff. Configure a distinct `communityStatus` object with `channelId` and bot-owned `messageId` for each desired card. Registry mode never copies the legacy shared message to every server; absent IDs mean no card output. Destinations must belong to `ADMIN_GUILD_ID`.
 
-Each server may have a unique `feedToken`, separate from every game password. Deliver to `/api/ingest/servers/ID/events`. The receiver derives the stable identity from that authenticated route, never the payload's per-boot UUID or display name. Public labels use `/community/api/servers`; rankings use `/community/api/servers/ID/leaderboard`. Staff routes use `/admin/api/servers/ID/...` with ordinary session/role checks; mutations also require the endpoint version from the staff server list. Registry credentials never belong in website files.
+Each server may have a unique `feedToken`, separate from every game password; `WARDOGS_FEED_TOKEN` is ignored with a registry. Deliver to `/api/ingest/servers/ID/events`, or to the game's fixed `/api/ingest/events`, which goes to the server whose `feedToken` the request carries. The receiver derives the stable identity from that authenticated route or feed token, never the payload's per-boot UUID or display name. Public labels use `/community/api/servers`; rankings use `/community/api/servers/ID/leaderboard`. Staff routes use `/admin/api/servers/ID/...` with ordinary session/role checks; mutations also require the endpoint version from the staff server list. Registry credentials never belong in website files.
 
 The [release audit](ADMIN_RELEASE_AUDIT.md) records the current deployed state and earlier migration/cutover evidence. Applications, combat and website selectors use the server-aware schema. An application approval is scoped to its server; supporter status grants no game access. A new deployment must apply the checked-in migrations before use. No additional live server has been configured.
 
@@ -139,12 +139,12 @@ Recommended for The UNCs server, where whitelisted players go to the front of th
 
 ### Recommended whitelisted welcome copy
 
-Four two-message variants for `SERVER_COMMUNITY_WHITELISTED_WELCOME_VARIANTS`, for use with either standard set above. They welcome regulars back without asking them to get whitelisted, and promise no queue priority, rewards or points. They are not live until the variable is set in the deployment. Before setting it, confirm that the Steam group is still named `UNCs Wardogs` and that theuncsgaming.com still links the Discord.
+Four two-message variants for `SERVER_COMMUNITY_WHITELISTED_WELCOME_VARIANTS`, for use with either standard set above. They welcome regulars back without asking them to get whitelisted, and promise no queue priority, rewards or points. They are not live until the variable is set in the deployment. Regulars are already in the game, so these lines skip directions to the Discord or the Steam group.
 
 | #   | First message                                           | Second message                                                    |
 | --- | ------------------------------------------------------- | ----------------------------------------------------------------- |
-| 1   | `Welcome back, unc. Knees warmed up?`                   | `Find the regulars in our Steam group: UNCs Wardogs`              |
-| 2   | `Look who is back. Grab a squad and take the hill.`     | `Lost your squad? Discord: theuncsgaming.com`                     |
+| 1   | `Welcome back, unc. Knees warmed up?`                   | `The crew missed you. Your knees did not.`                        |
+| 2   | `Look who is back. Grab a squad and take the hill.`     | `Go show the rookies how it is done.`                             |
 | 3   | `Welcome back. Hydrate, use comms, play the objective.` | `Thanks for being part of the crew. Your knees are proud of you.` |
 | 4   | `The UNCs salute you. Reading glasses on, soldier.`     | `Server quiet? Bring a friend and help seed.`                     |
 
@@ -153,7 +153,7 @@ Paste this exact single-line value into the deployment, without surrounding quot
 `SERVER_COMMUNITY_WHITELISTED_WELCOME_VARIANTS`
 
 ```text
-[["Welcome back, unc. Knees warmed up?","Find the regulars in our Steam group: UNCs Wardogs"],["Look who is back. Grab a squad and take the hill.","Lost your squad? Discord: theuncsgaming.com"],["Welcome back. Hydrate, use comms, play the objective.","Thanks for being part of the crew. Your knees are proud of you."],["The UNCs salute you. Reading glasses on, soldier.","Server quiet? Bring a friend and help seed."]]
+[["Welcome back, unc. Knees warmed up?","The crew missed you. Your knees did not."],["Look who is back. Grab a squad and take the hill.","Go show the rookies how it is done."],["Welcome back. Hydrate, use comms, play the objective.","Thanks for being part of the crew. Your knees are proud of you."],["The UNCs salute you. Reading glasses on, soldier.","Server quiet? Bring a friend and help seed."]]
 ```
 
 `src/server-community/recommended-copy.spec.ts` also checks that this table, the paste value and `.env.example` agree, pass startup validation and keep every message under 200 characters; that no message mentions the whitelist, queues, priority, rewards, points, bonuses or "free"; and that no variant repeats one from the standard sets.
@@ -202,6 +202,10 @@ Same-map rounds can be missed when there is no clock and polling misses the all-
 ## Discord status card
 
 The worker only edits the configured message after verifying its guild and bot author. It never creates or replaces messages, even if the configured message was deleted. Gramps must be able to view the channel, read its message history, and edit its own message. Prepare the message separately before enabling this feature.
+
+Gramps has no command that posts a placeholder card, so use one of its own replies. In the target channel, run `/server info` without the optional user; the reply is public and posted by Gramps. With Discord's Developer Mode on, right-click that reply, choose **Copy Message ID**, and set it as `SERVER_COMMUNITY_DISCORD_MESSAGE_ID` (or that server's `communityStatus.messageId`), with the channel's ID as the channel setting. The first edit replaces the reply's join embed with the card; Discord may keep its small "used /server info" line above it. A message posted by a person or by another bot cannot be used. That includes the old third-party bot's status card, which the [cutover steps](#cutover-and-operating-limits) retire: Discord lets a bot edit only its own messages, so Gramps leaves that card alone.
+
+When the card is switched on but cannot be edited, Gramps logs one warning per cause and keeps checking each minute. The causes are an unset `ADMIN_GUILD_ID`, a channel that is not a text channel in `ADMIN_GUILD_ID`, and a message not posted by Gramps. Other failures, such as a deleted message or a missing permission, log the existing "could not be updated" warning on each attempt. The staff status response gives the latest cause as `discordStatus.problem`: fixed text with no IDs, null before the first attempt and after a successful edit. The dashboard's **Automatic community messages** card then shows the status card as **Not updating**, with that text, instead of **Enabled**.
 
 The card shows server/map labels, player count, faction scores, optional reported match minutes, and the last observation time. Game-controlled labels are normalized to plain text; player names and SteamIDs are not included. Discord mentions are explicitly disabled. Existing embeds on the selected message are cleared, so select a message dedicated to this card.
 

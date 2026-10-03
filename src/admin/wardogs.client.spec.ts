@@ -690,6 +690,8 @@ describe("live faction assignment", () => {
       disconnectAfter?: boolean;
       failReadback?: boolean;
       refusal?: boolean;
+      /** Everyone else in the player list; by default one unlinked player. */
+      roster?: { steamId: string | null; faction: string | null }[];
     } = {},
   ) {
     const client = new WardogsClient(settings);
@@ -702,7 +704,7 @@ describe("live faction assignment", () => {
         if (sent && options.failReadback) throw new RconError("Connection unavailable");
         return {
           players: [
-            { steamId: null, faction: "RED" },
+            ...(options.roster ?? [{ steamId: null, faction: "RED" }]),
             ...(options.targetPresent === false || (sent && options.disconnectAfter)
               ? []
               : [{ steamId: id, faction: sent ? (options.after ?? "BLU") : (options.before ?? "RED") }]),
@@ -811,9 +813,13 @@ describe("live faction assignment", () => {
     await expect(client.execute({ ...teamAction, faction: "BLU" })).rejects.toThrow("currently reported");
     expect(request.mock.calls.every(([method]) => method === "GET")).toBe(true);
   });
-  it("refuses a disconnected player before any move", async () => {
+  it("refuses a disconnected player before any move as a precondition that changed nothing", async () => {
     const { client, request } = mockTeamChange({ targetPresent: false });
-    await expect(client.execute(teamAction)).rejects.toThrow("no longer connected");
+    await expect(client.execute(teamAction)).resolves.toEqual({
+      state: "failed",
+      changed: false,
+      message: expect.stringContaining("no longer connected"),
+    });
     expect(request.mock.calls.every(([method]) => method === "GET")).toBe(true);
   });
   it("does not label an accepted but unchanged assignment as applied", async () => {
@@ -860,5 +866,89 @@ describe("live faction assignment", () => {
   it("can confirm a future server returning the exact faction name instead of a known player code", async () => {
     const { client } = mockTeamChange({ after: "Lonestar" });
     await expect(client.execute(teamAction)).resolves.toMatchObject({ state: "applied" });
+  });
+  it("refuses a move when the game lists the player's SteamID twice", async () => {
+    const { client, request } = mockTeamChange({ roster: [{ steamId: id, faction: "GRN" }] });
+    await expect(client.execute(teamAction)).rejects.toThrow("ambiguous player identity");
+    expect(request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+  });
+  const linked = (count: number, faction: string | null, first = 0) =>
+    Array.from({ length: count }, (_, index) => ({
+      steamId: `7656119800${String(first + index).padStart(7, "0")}`,
+      faction,
+    }));
+  const capped = { ...teamAction, maximumTargetPlayers: 50 };
+  it("moves a player onto a capped team from a complete roster below the cap", async () => {
+    const { client, request } = mockTeamChange({ roster: [...linked(49, "BLU"), ...linked(40, "RED", 100)] });
+    await expect(client.execute(capped)).resolves.toMatchObject({ state: "applied", changed: true });
+    expect(request.mock.calls.filter(([method]) => method === "PATCH")).toEqual([
+      ["PATCH", `/v1/players/${id}`, { faction: "Lonestar" }],
+    ]);
+  });
+  it.each([
+    ["the target team is full", linked(50, "BLU")],
+    ["a player has no SteamID", [...linked(10, "BLU"), { steamId: null, faction: "RED" }]],
+    ["a SteamID is listed twice", [...linked(10, "BLU"), ...linked(1, "RED", 5)]],
+    ["a player has no team", [...linked(10, "BLU"), ...linked(1, null, 20)]],
+  ])("refuses a capped move without sending it when %s", async (_case, roster) => {
+    const { client, request } = mockTeamChange({ roster });
+    await expect(client.execute(capped)).resolves.toEqual({
+      state: "failed",
+      changed: false,
+      message: "The target team is full or the roster is incomplete. No move was sent.",
+    });
+    expect(request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+  });
+});
+
+describe("read failure classification for staff alerts", () => {
+  afterEach(() => jest.restoreAllMocks());
+  const fail = async (client: WardogsClient) => {
+    try {
+      await client.request("GET", "/v1/status");
+    } catch (error) {
+      return error as RconError;
+    }
+    throw new Error("The request unexpectedly succeeded.");
+  };
+  it("labels an unanswered request unreachable without forwarding the transport error", async () => {
+    jest.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED with Authorization: secret"));
+    const error = await fail(new WardogsClient(settings));
+    expect(error).toBeInstanceOf(RconError);
+    expect(error).toMatchObject({ kind: "unreachable", unknownResult: false });
+    expect(error.message).not.toContain("secret");
+  });
+  it.each([
+    [429, "paused"],
+    [401, "rejected"],
+    [403, "rejected"],
+    [404, "error"],
+    [500, "error"],
+  ] as const)("labels HTTP %i as %s", async (status, kind) => {
+    jest
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify({ error: { message: "password=secret" } }), { status }));
+    const error = await fail(new WardogsClient(settings));
+    expect(error.kind).toBe(kind);
+    expect(error.message).not.toContain("secret");
+  });
+  it("labels a held request paused without contacting the game again", async () => {
+    const transport = jest
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("{}", { status: 429, headers: { "Retry-After": "30" } }));
+    const client = new WardogsClient(settings);
+    await fail(client);
+    expect((await fail(client)).kind).toBe("paused");
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it("labels an answer that is not JSON unreadable", async () => {
+    jest.spyOn(globalThis, "fetch").mockResolvedValue(new Response("<html>secret</html>", { status: 200 }));
+    const error = await fail(new WardogsClient(settings));
+    expect(error.kind).toBe("unreadable");
+    expect(error.message).not.toContain("secret");
+  });
+  it("keeps the kind optional for callers that construct their own errors", () => {
+    expect(new RconError("Refused").kind).toBeUndefined();
+    expect(new RconError("Lost", true).unknownResult).toBe(true);
   });
 });

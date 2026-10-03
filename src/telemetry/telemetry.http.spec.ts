@@ -1,5 +1,7 @@
-import { Global, Logger, Module, type INestApplication } from "@nestjs/common";
+import { Global, Logger, Module, type INestApplication, type MiddlewareConsumer } from "@nestjs/common";
+import { APP_FILTER } from "@nestjs/core";
 import { Test } from "@nestjs/testing";
+import type { NextFunction, Request, Response } from "express";
 import { randomUUID } from "node:crypto";
 import request from "supertest";
 import { EnvService } from "../env/env.service";
@@ -8,9 +10,11 @@ import { AdminStore } from "../admin/admin.store";
 import { WardogsClient } from "../admin/wardogs.client";
 import { hash } from "../admin/admin.auth";
 import { legacyServerSettings } from "../admin/game-server-fixture";
+import { TelemetryDeliveries } from "./telemetry.deliveries";
 import { TelemModule } from "./telemetry.module";
 import { TelemetryStore } from "./telemetry.store";
 import { emptyTotals } from "./telemetry.types";
+import { AppExceptionFilter } from "../common/filters/app-exception.filter";
 
 const feedToken = "dedicated-test-feed-token-".repeat(2);
 const deliveryKeys = [
@@ -80,7 +84,11 @@ describe("telemetry HTTP boundaries", () => {
     jest.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ roles: ["viewer"] })));
     jest.spyOn(Logger.prototype, "warn").mockImplementation();
     jest.spyOn(Logger.prototype, "error").mockImplementation();
-    const module = await Test.createTestingModule({ imports: [TestEnvModule, TelemModule] })
+    // Production registers this filter globally, so status assertions here go through it.
+    const module = await Test.createTestingModule({
+      imports: [TestEnvModule, TelemModule],
+      providers: [{ provide: APP_FILTER, useClass: AppExceptionFilter }],
+    })
       .overrideProvider(TelemetryStore)
       .useValue(store)
       .overrideProvider(AdminSettings)
@@ -273,23 +281,92 @@ describe("telemetry HTTP boundaries", () => {
     const publicView = await request(app.getHttpServer()).get("/community/api/leaderboard").expect(200);
     expect(publicView.body).not.toHaveProperty("lastBatch");
   });
-  it("records rate-limited feed deliveries against the server they targeted", async () => {
+  it("keeps the game's deliveries flowing while traffic without the token is rate limited", async () => {
     for (let count = 0; count < 300; count++)
       await request(app.getHttpServer()).post("/api/ingest/servers/primary/events").send(batch()).expect(401);
+    await request(app.getHttpServer()).post("/api/ingest/servers/primary/events").send(batch()).expect(429);
+    await request(app.getHttpServer())
+      .post("/api/ingest/servers/primary/events")
+      .set("Authorization", `Bearer ${feedToken}`)
+      .send(batch())
+      .expect(201);
+    expect(store.ingest).toHaveBeenCalledTimes(1);
+    // The 300 refusals without the token neither replaced nor counted as the game's refusal.
+    await expect(staffCombat()).resolves.toMatchObject({
+      lastRejected: null,
+      rejectedCount: 0,
+      lastRejectedWithoutToken: { status: 429, reason: "rate limited" },
+      rejectedWithoutTokenCount: 301,
+    });
+  });
+  it("rate limits the game's own deliveries per server and records the refusal as the game's", async () => {
+    for (let count = 0; count < 300; count++)
+      await request(app.getHttpServer())
+        .post("/api/ingest/events")
+        .set("Authorization", `Bearer ${feedToken}`)
+        .send(batch())
+        .expect(201);
     await request(app.getHttpServer())
       .post("/api/ingest/servers/primary/events")
       .set("Authorization", `Bearer ${feedToken}`)
       .send(batch())
       .expect(429);
-    await request(app.getHttpServer()).post("/api/ingest/servers/primary/events").send(batch()).expect(429);
-    expect(store.ingest).not.toHaveBeenCalled();
-    // The 300 refusals without the token neither replaced nor counted as the game's refusal.
+    expect(store.ingest).toHaveBeenCalledTimes(300);
+    // Requests without the token still have their own allowance from the same address.
+    await request(app.getHttpServer()).post("/api/ingest/servers/primary/events").send(batch()).expect(401);
     await expect(staffCombat()).resolves.toMatchObject({
       lastRejected: { status: 429, reason: "rate limited" },
       rejectedCount: 1,
-      lastRejectedWithoutToken: { status: 429, reason: "rate limited" },
-      rejectedWithoutTokenCount: 301,
+      lastRejectedWithoutToken: { status: 401, reason: "missing credentials" },
+      rejectedWithoutTokenCount: 1,
     });
+  });
+  it("never refuses the game's deliveries because addresses without the token filled the limiter", () => {
+    let limit!: (req: Request, res: Response, next: NextFunction) => void;
+    app.get(TelemModule).configure({
+      apply: (middleware: typeof limit) => {
+        limit = middleware;
+        return { forRoutes: () => undefined };
+      },
+    } as unknown as MiddlewareConsumer);
+    const deliver = (remoteAddress: string, authorization?: string) => {
+      let status: number | "passed" = 0;
+      const res = {} as Response;
+      Object.assign(res, { set: () => res, json: () => res, status: (code: number) => ((status = code), res) });
+      const req = { originalUrl: "/api/ingest/events", socket: { remoteAddress }, headers: { authorization } };
+      limit(req as unknown as Request, res, () => (status = "passed"));
+      return status;
+    };
+    for (let index = 0; index < 5000; index++) expect(deliver(`2001:db8::${index.toString(16)}`)).toBe("passed");
+    expect(deliver("2001:db8::ffff")).toBe(429);
+    expect(deliver("2001:db8::ffff", `Bearer ${feedToken}`)).toBe("passed");
+  });
+  it("keeps staff combat reads out of the public leaderboard's bucket", () => {
+    const rejected = jest.spyOn(app.get(TelemetryDeliveries), "rejectedRequest");
+    let limit!: (req: Request, res: Response, next: NextFunction) => void;
+    app.get(TelemModule).configure({
+      apply: (middleware: typeof limit) => {
+        limit = middleware;
+        return { forRoutes: () => undefined };
+      },
+    } as unknown as MiddlewareConsumer);
+    const read = (originalUrl: string) => {
+      let status: number | "passed" = 0;
+      const res = {} as Response;
+      Object.assign(res, { set: () => res, json: () => res, status: (code: number) => ((status = code), res) });
+      const req = { originalUrl, socket: { remoteAddress: "10.0.0.1" }, headers: {} };
+      limit(req as unknown as Request, res, () => (status = "passed"));
+      return status;
+    };
+    // One proxy address: anonymous public reads use up their own allowance only.
+    for (let count = 0; count < 300; count++) expect(read("/community/api/leaderboard")).toBe("passed");
+    expect(read("/community/api/leaderboard")).toBe(429);
+    expect(read("/admin/api/combat?period=week")).toBe("passed");
+    expect(read("/admin/api/servers/primary/combat")).toBe("passed");
+    for (let count = 2; count < 300; count++) read("/admin/api/combat");
+    expect(read("/ADMIN/API/COMBAT")).toBe(429);
+    // Read refusals are never filed as feed refusals.
+    expect(rejected).not.toHaveBeenCalled();
   });
   it("returns safe errors when the database is unavailable", async () => {
     store.snapshot.mockRejectedValueOnce(new Error("postgres://user:password@private-db applications.email"));

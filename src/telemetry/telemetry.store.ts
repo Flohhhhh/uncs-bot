@@ -2,7 +2,14 @@ import { Inject, Injectable } from "@nestjs/common";
 import { and, desc, eq, gte, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { DATABASE, type Database } from "../database/database.types";
 import { combatEvents, combatTracking } from "../database/telemetry.schema";
-import { type CombatAggregate, type ParsedFeed, type TrackingRecord, emptyTotals } from "./telemetry.types";
+import {
+  type CombatAggregate,
+  type ParsedFeed,
+  type TrackingRecord,
+  type WeeklyHighlights,
+  emptyHighlights,
+  emptyTotals,
+} from "./telemetry.types";
 
 @Injectable()
 export class TelemetryStore {
@@ -107,6 +114,107 @@ export class TelemetryStore {
         'players', (SELECT count(*) FROM stats)) AS totals
     `);
     return rows.rows[0] ?? { leaderboard: [], totals: emptyTotals() };
+  }
+
+  /**
+   * Read-only weekly shout-out inputs over the same bounds as snapshot(). A kill is a non-suicide
+   * event with a linked killer; names use snapshot()'s latest non-empty name, else the SteamID.
+   * bestKd only ranks players with at least minKdKills kills.
+   */
+  async weeklyHighlights(since: Date, until: Date, serverId = "primary", minKdKills = 10): Promise<WeeklyHighlights> {
+    const rows = await this.db.execute<WeeklyHighlights>(sql`
+      WITH scoped AS (
+        SELECT * FROM combat_events WHERE server_id = ${serverId} AND received_at >= ${since} AND received_at <= ${until}
+      ), kills AS (
+        SELECT * FROM scoped WHERE NOT suicide AND killer_steam_id IS NOT NULL
+      ), actors AS (
+        SELECT killer_steam_id AS steam_id, killer_name AS name, received_at, event_id
+        FROM scoped WHERE killer_steam_id IS NOT NULL
+        UNION ALL
+        SELECT victim_steam_id, victim_name, received_at, event_id
+        FROM scoped WHERE victim_steam_id IS NOT NULL
+      ), names AS (
+        SELECT DISTINCT ON (steam_id) steam_id, name FROM actors WHERE name IS NOT NULL AND name <> ''
+        ORDER BY steam_id, received_at DESC, event_id DESC
+      ), killers AS (
+        SELECT killer_steam_id AS steam_id, count(*)::int AS kills,
+          (count(*) FILTER (WHERE headshot))::int AS headshot_kills
+        FROM kills GROUP BY killer_steam_id
+      ), victims AS (
+        SELECT victim_steam_id AS steam_id, count(*)::int AS deaths
+        FROM scoped WHERE victim_steam_id IS NOT NULL GROUP BY victim_steam_id
+      ), players AS (
+        SELECT killers.steam_id, coalesce(names.name, killers.steam_id) AS name, killers.kills,
+          killers.headshot_kills, coalesce(victims.deaths, 0)::int AS deaths
+        FROM killers LEFT JOIN victims USING (steam_id) LEFT JOIN names USING (steam_id)
+      )
+      SELECT
+        (SELECT row_to_json(r) FROM (
+          SELECT steam_id AS "steamId", name, kills, deaths FROM players WHERE kills >= ${minKdKills}
+          ORDER BY kills::numeric / greatest(deaths, 1) DESC, kills DESC, steam_id LIMIT 1
+        ) r) AS "bestKd",
+        (SELECT row_to_json(r) FROM (
+          SELECT steam_id AS "steamId", name, headshot_kills AS "headshotKills" FROM players WHERE headshot_kills > 0
+          ORDER BY headshot_kills DESC, kills DESC, steam_id LIMIT 1
+        ) r) AS "mostHeadshots",
+        (SELECT row_to_json(r) FROM (
+          SELECT kills.killer_steam_id AS "steamId", coalesce(names.name, kills.killer_steam_id) AS name,
+            kills.distance_centimeters AS "distanceCentimeters", kills.cause, kills.map_name AS "mapName"
+          FROM kills LEFT JOIN names ON names.steam_id = kills.killer_steam_id
+          WHERE kills.distance_centimeters IS NOT NULL
+          ORDER BY kills.distance_centimeters DESC, kills.received_at, kills.event_time, kills.event_id LIMIT 1
+        ) r) AS "longestKill",
+        (SELECT count(*)::int FROM kills) AS kills,
+        (SELECT count(*)::int FROM kills WHERE cause IS NOT NULL AND cause <> '') AS "killsWithCause",
+        (SELECT row_to_json(r) FROM (
+          SELECT cause, count(*)::int AS kills FROM kills WHERE cause IS NOT NULL AND cause <> ''
+          GROUP BY cause ORDER BY count(*) DESC, cause LIMIT 1
+        ) r) AS "topCause",
+        COALESCE((SELECT json_agg(row_to_json(r)) FROM (
+          SELECT map_name AS "mapName", count(*)::int AS kills FROM kills WHERE map_name IS NOT NULL AND map_name <> ''
+          GROUP BY map_name ORDER BY count(*) DESC, map_name LIMIT 50
+        ) r), '[]'::json) AS maps
+    `);
+    return rows.rows[0] ?? emptyHighlights();
+  }
+
+  /**
+   * Supporting context for a staff review prompt: this player's most recent kills (at most 500,
+   * suicides excluded) between since and until. Never used to decide anything.
+   */
+  async killContext(serverId: string, steamId: string, since: Date, windowSince: Date, until: Date) {
+    const rows = await this.db.execute<{
+      kills: number;
+      windowKills: number;
+      headshotKills: number;
+      maxDistanceMeters: number | null;
+      topCauses: string[] | null;
+    }>(sql`
+      WITH recent AS (
+        SELECT received_at, cause, headshot, distance_centimeters FROM combat_events
+        WHERE server_id = ${serverId} AND killer_steam_id = ${steamId} AND NOT suicide
+          AND received_at >= ${since} AND received_at <= ${until}
+        ORDER BY received_at DESC LIMIT 500
+      )
+      SELECT count(*)::int AS kills,
+        (count(*) FILTER (WHERE received_at >= ${windowSince}))::int AS "windowKills",
+        (count(*) FILTER (WHERE headshot))::int AS "headshotKills",
+        max(distance_centimeters) / 100.0 AS "maxDistanceMeters",
+        (SELECT json_agg(cause) FROM (
+          SELECT cause FROM recent WHERE cause IS NOT NULL AND cause <> ''
+          GROUP BY cause ORDER BY count(*) DESC, cause LIMIT 2
+        ) top) AS "topCauses"
+      FROM recent
+    `);
+    const row = rows.rows[0];
+    return {
+      kills: Number(row?.kills ?? 0),
+      windowKills: Number(row?.windowKills ?? 0),
+      headshotKills: Number(row?.headshotKills ?? 0),
+      maxDistanceMeters:
+        row?.maxDistanceMeters === null || row?.maxDistanceMeters === undefined ? null : Number(row.maxDistanceMeters),
+      topCauses: Array.isArray(row?.topCauses) ? row.topCauses.filter((cause) => typeof cause === "string") : [],
+    };
   }
 
   async events(since: Date, until: Date, playerId?: string, serverId = "primary") {

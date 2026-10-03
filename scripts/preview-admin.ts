@@ -39,6 +39,12 @@ import { ServerCommunityService } from "../src/server-community/server-community
 import type { CommunityMessagesStatus } from "../src/common/community-messages";
 import { ServerEventsStore } from "../src/server-events/server-events.store";
 import type { EventRecord, EventOperation, EventProgress, EventStop } from "../src/server-events/server-events.types";
+import { ChannelType, PermissionFlagsBits, type Client, type MessageCreateOptions } from "discord.js";
+import { StaffAlertsController } from "../src/staff-alerts/staff-alerts.controller";
+import { StaffAlerts } from "../src/staff-alerts/staff-alerts.service";
+import { StaffAlertsMonitor } from "../src/staff-alerts/staff-alerts.monitor";
+import { settingsView, staffAlertsOptions } from "../src/staff-alerts/staff-alerts.config";
+import type { StaffAlertsStatus } from "../src/common/staff-alerts";
 import type {
   FounderPolicy,
   ManualMemberInput,
@@ -818,6 +824,196 @@ const previewEnvironment: Record<string, unknown> = {
   PATREON_WEBHOOK_SECRET: "local-preview-only-patreon-placeholder",
   PATREON_FOUNDER_START_AT: "2026-09-30T00:00:00-04:00",
   PATREON_FOUNDER_END_AT: "2026-10-15T00:00:00-04:00",
+  // Staff alerts post to a simulated private channel; nothing reaches Discord.
+  STAFF_ALERTS_CHANNEL_ID: "444444444444444444",
+  STAFF_ALERTS_ENABLED: true,
+  STAFF_ALERTS_TIME_ZONE: "America/New_York",
+  STAFF_ALERTS_HEALTH_ENABLED: true,
+  STAFF_ALERTS_SEEDING_ENABLED: true,
+  STAFF_ALERTS_SEEDING_PRIME_HOURS: "17:00-23:00",
+  STAFF_ALERTS_PERFORMANCE_ENABLED: "observe",
+  STAFF_ALERTS_PERFORMANCE_KNOWN_GOOD: ["76561198066952872"],
+  STAFF_ALERTS_WATCHLIST_ENABLED: true,
+  STAFF_ALERTS_WATCHLIST: [{ steamId: "76561198123456781", reason: "Aimbot (preview sample)", communities: 4 }],
+};
+const previewEnv = { get: (key: string) => previewEnvironment[key] } as EnvService;
+/** A private channel double that passes every staff-channel check; posts only print to the console. */
+const previewStaffChannel = {
+  id: "444444444444444444",
+  type: ChannelType.GuildText,
+  guildId: "111111111111111111",
+  guild: { members: { me: { id: "bot" } }, roles: { everyone: { id: "everyone" }, cache: new Map() } },
+  permissionsFor: (target: { id: string }) => ({
+    has: (wanted: bigint | bigint[]) =>
+      target.id !== "everyone" ||
+      !(Array.isArray(wanted) ? wanted : [wanted]).includes(PermissionFlagsBits.ViewChannel),
+  }),
+  send: async (options: MessageCreateOptions) => {
+    const embed = options.embeds?.[0];
+    console.info(`Preview staff alert: ${embed && "title" in embed ? embed.title : options.content}`);
+    return { id: "555555555555555555" };
+  },
+  messages: { edit: async () => ({}) },
+};
+const previewStaffAlerts = new StaffAlerts(
+  { isReady: () => true, channels: { fetch: async () => previewStaffChannel } } as unknown as Client,
+  previewEnv,
+);
+const NO_ACTION = "Gramps took no action.";
+/** Sample alerts for rehearsing the Staff alerts tab: each category, delivery state and a review. */
+async function seedPreviewStaffAlerts() {
+  const hour = 3_600_000;
+  const at = (offset: number) => new Date(Date.now() - offset).toISOString();
+  const server = { serverId: "primary", serverName: "UNCs Primary" };
+  await previewStaffAlerts.raise({
+    ...server,
+    kind: "game-restart",
+    severity: "info",
+    key: "preview:restart",
+    title: "Likely restart",
+    lines: [
+      "Map Bakurani to Ozeti, players 6 to 2, connection lost 3 min (unscheduled).",
+      "Around 04:00 ET. Gramps cannot see uptime or a boot ID; this is inferred from RCON reads.",
+      NO_ACTION,
+    ],
+    facts: { at: at(10 * hour), playersBefore: 6, scheduled: "no" },
+    deliver: true,
+  });
+  await previewStaffAlerts.raise({
+    ...server,
+    kind: "seeding-after-restart",
+    severity: "warning",
+    key: "preview:seeding",
+    title: "Still empty 30 min after the 04:00 ET restart",
+    lines: [
+      "0 players on; below 1 since 04:37 ET.",
+      "Gramps reads the player count over RCON. It cannot see whether the server is listed in the browser. Check the in-game browser and consider a seed call.",
+      NO_ACTION,
+    ],
+    facts: { players: 0, lowSince: at(9 * hour), restartAt: at(10 * hour) },
+    deliver: true,
+  });
+  await previewStaffAlerts.raise({
+    ...server,
+    kind: "seeding-recovered",
+    severity: "info",
+    key: "preview:seeding-ok",
+    title: "Players are back",
+    lines: ["12 players on after 10 h 23 min below 1.", NO_ACTION],
+    deliver: true,
+  });
+  await previewStaffAlerts.raise({
+    ...server,
+    kind: "performance-window",
+    severity: "warning",
+    key: "preview:perf-online",
+    title: "Review: unusual kill rate",
+    lines: [
+      "MossyBoots had 31 kills in 5 min (6.2/min).",
+      "Round on Bakurani: 44 kills, 3 deaths (K/D 14.7).",
+      `From game counters only. Not proof of cheating. ${NO_ACTION}`,
+    ],
+    player: { steamId: "76561198123456789", name: "MossyBoots" },
+    facts: { rules: "window", windowKills: 31, windowMinutes: 5, killsPerMinute: 6.2, roundKills: 44, kd: 14.7 },
+    feed: {
+      kills: 40,
+      windowKills: 29,
+      headshotShare: 0.35,
+      topCauses: ["Rifle", "Grenade"],
+      maxDistanceMeters: 212,
+      since: at(hour / 2),
+    },
+    deliver: false,
+  });
+  const offline = await previewStaffAlerts.raise({
+    ...server,
+    kind: "performance-match",
+    severity: "warning",
+    key: "preview:perf-offline",
+    title: "Review: unusual round K/D",
+    lines: [
+      "OfflineAce has 44 kills and 2 deaths this round on Ozeti (K/D 22).",
+      `From game counters only. Not proof of cheating. ${NO_ACTION}`,
+    ],
+    player: { steamId: "76561198000000077", name: "OfflineAce" },
+    facts: { rules: "match", roundKills: 44, roundDeaths: 2, kd: 22 },
+    deliver: false,
+    suppressed: "player cooldown",
+  });
+  await previewStaffAlerts.raise({
+    ...server,
+    kind: "watchlist-join",
+    severity: "high",
+    key: "preview:watch",
+    title: "Watch list: player joined",
+    lines: [
+      "TeaAndTanks joined.",
+      "Banned in 4 communities (as recorded 2026-10-02). Reason: Aimbot (preview sample).",
+      `Monitoring only. ${NO_ACTION} A ban works only while the player is online.`,
+    ],
+    player: { steamId: "76561198123456781", name: "TeaAndTanks" },
+    facts: { source: "Staff watch list", communities: 4, recordedAt: "2026-10-02" },
+    links: ["https://example.com/preview-clip"],
+    network: {
+      source: "wardogs-network",
+      sourceName: "Staff watch list",
+      communities: 4,
+      reasons: ["Aimbot (preview sample)"],
+      evidenceUrls: ["https://example.com/preview-clip"],
+      recordedAt: "2026-10-02",
+      addedBy: "Preview owner",
+      knownGood: false,
+      presentAtStart: false,
+    },
+    deliver: true,
+  });
+  if (offline) await previewStaffAlerts.review("primary", offline.id, "legit", { name: "Preview moderator" });
+  previewStaffAlerts.snooze("event", "seeding", 240, "Preview moderator");
+}
+const previewStaffMonitor = {
+  status: async (id = "primary"): Promise<StaffAlertsStatus> => {
+    const options = staffAlertsOptions(previewEnv);
+    const game = id === "primary" ? primaryPreview : eventPreview;
+    return {
+      serverId: id,
+      enabled: options.enabled,
+      features: {
+        health: options.health.enabled,
+        seeding: options.seeding.enabled,
+        performance: options.performance.mode,
+        watchlist: options.watchlist.enabled,
+      },
+      channel: await previewStaffAlerts.channelStatus(),
+      settings: settingsView(options, previewStaffAlerts.sessionNever().size),
+      worker: {
+        state: "running",
+        lastReadAt: new Date().toISOString(),
+        reachable: true,
+        failingSince: null,
+        failureKind: null,
+        players: game.players.length,
+        round: { id: "clock:preview", map: "Bakurani", phase: "live" },
+        build: "CL-507060",
+        lastRestartAt: new Date(Date.now() - 10 * 3_600_000).toISOString(),
+        seeding: { lowSince: null, alerted: [] },
+        counters: "available",
+        trackedPlayers: game.players.length,
+        unlinkedPlayers: 1,
+        sources: [{ name: "Staff watch list", error: null, at: null }],
+      },
+      snoozes: previewStaffAlerts.activeSnoozes(id),
+      alerts: previewStaffAlerts.list(id),
+      peaks: [
+        {
+          roundKey: "clock:preview#0",
+          map: "Bakurani",
+          startedAt: new Date(Date.now() - 600_000).toISOString(),
+          window: { steamId: "76561198123456789", name: "MossyBoots", kills: 31, minutes: 5 },
+          kd: { steamId: "76561198123456780", name: "[UNC] OldManRiver", kills: 16, deaths: 9, kd: 1.8 },
+        },
+      ],
+    };
+  },
 };
 @Global()
 @Module({
@@ -1119,9 +1315,12 @@ async function main() {
   const adapter = new ExpressAdapter();
   const adapterHost = new HttpAdapterHost();
   adapterHost.httpAdapter = adapter;
+  await seedPreviewStaffAlerts();
   const module = await Test.createTestingModule({
-    controllers: [ServerCommunityController],
+    controllers: [ServerCommunityController, StaffAlertsController],
     providers: [
+      { provide: StaffAlerts, useValue: previewStaffAlerts },
+      { provide: StaffAlertsMonitor, useValue: previewStaffMonitor },
       {
         provide: ServerCommunityService,
         useValue: {
@@ -1144,7 +1343,7 @@ async function main() {
               enabled: false,
               message: "GG! Get whitelisted at theuncsgaming.com/whitelist. Thanks for playing on The UNCs.",
             },
-            discordStatus: { enabled: false, configured: false },
+            discordStatus: { enabled: false, configured: false, problem: null },
           }),
         },
       },

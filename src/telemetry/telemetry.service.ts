@@ -8,7 +8,7 @@ import {
 import { EnvService } from "../env/env.service";
 import { GameServers } from "../admin/game-servers";
 import { publicGameServer } from "../common/game-server";
-import { feedCredentials, usableFeedToken } from "./telemetry.credentials";
+import { feedCredentials, feedServer, usableFeedToken } from "./telemetry.credentials";
 import { TelemetryDeliveries } from "./telemetry.deliveries";
 import { TelemetryStore } from "./telemetry.store";
 import {
@@ -28,12 +28,16 @@ import {
 
 export const UNNAMED_PLAYER = "Unnamed player";
 
-// Storage falls back to the SteamID when no display name was observed, so a public row
-// replaces any name that is, or contains, a SteamID with a neutral label.
-export function publicStats({ steamId, name, kills, deaths, headshotKills, kd }: CombatStats): PublicCombatStats {
+// Storage falls back to the SteamID when no display name was observed, so a public name
+// replaces any name that is empty, is a SteamID or contains this player's SteamID with a neutral label.
+export function publicName(steamId: string | null | undefined, name: unknown): string {
   const label = typeof name === "string" ? name.trim() : "";
   const identifying = !label || /^\d{17}$/.test(label) || (!!steamId && label.includes(steamId));
-  return { name: identifying ? UNNAMED_PLAYER : name, kills, deaths, headshotKills, kd };
+  return identifying ? UNNAMED_PLAYER : (name as string);
+}
+
+export function publicStats({ steamId, name, kills, deaths, headshotKills, kd }: CombatStats): PublicCombatStats {
+  return { name: publicName(steamId, name), kills, deaths, headshotKills, kd };
 }
 
 @Injectable()
@@ -62,6 +66,11 @@ export class TelemetryService {
     return this.unavailable(serverId) === null;
   }
 
+  /** Whether the game feed can accept deliveries for this server: enabled and a usable token. */
+  feedAvailable(serverId: string) {
+    return this.configured(serverId);
+  }
+
   // Records a refused delivery for staff (category and status only) and returns the error to throw.
   // withToken: the request carried the server's feed token, so it is the game's own delivery.
   private refuse(serverId: string | undefined, reason: string, error: unknown, withToken: boolean) {
@@ -72,7 +81,7 @@ export class TelemetryService {
   async ingest(authorization: unknown, body: unknown, id?: string) {
     let serverId: string;
     try {
-      serverId = this.servers.resolve(id);
+      serverId = feedServer(this.servers, id, authorization);
     } catch (error) {
       const reason = error instanceof BadRequestException ? "server not selected" : "unknown server";
       throw this.refuse(id, reason, error, false);

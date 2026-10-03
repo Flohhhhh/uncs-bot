@@ -74,9 +74,25 @@ describe("Patreon signed observations", () => {
       expect(parsePatreon(raw, signature, "members:update", secret, campaign).displayName).toBeNull();
     },
   );
-  it.each(["a".repeat(121), "Hidden\u0000name", {}])("still rejects invalid member names: %p", (full_name) => {
+  it.each(["a".repeat(121), "Jane\tDoe", "Hidden\u0000name", {}])(
+    "drops an unusable member name like the API import and keeps the rest of the observation: %p",
+    (full_name) => {
+      const { raw, signature } = signed(payload({ full_name }));
+      expect(parsePatreon(raw, signature, "members:update", secret, campaign)).toMatchObject({
+        patreonMemberId: "member-123",
+        displayName: null,
+        patronStatus: "active_patron",
+        lastChargeStatus: "Paid",
+        lastChargeAt: new Date("2026-09-29T12:00:00Z"),
+      });
+    },
+  );
+  it.each([
+    ["  Jane Doe  ", "Jane Doe"],
+    ["a".repeat(120), "a".repeat(120)],
+  ])("trims usable member names like the API import: %p", (full_name, expected) => {
     const { raw, signature } = signed(payload({ full_name }));
-    expect(() => parsePatreon(raw, signature, "members:update", secret, campaign)).toThrow("Invalid Patreon member");
+    expect(parsePatreon(raw, signature, "members:update", secret, campaign).displayName).toBe(expected);
   });
   it("verifies original bytes and persists only the selected private ledger fields", () => {
     const { raw, signature } = signed();
@@ -220,12 +236,24 @@ describe("supporter reviews", () => {
       { WARDOGS_RCON_PASSWORD: secret },
       { WARDOGS_FEED_TOKEN: secret },
       { ADMIN_SESSION_SECRET: secret },
+      { WARDOGS_SERVERS: [{ id: "event", password: "other-password", feedToken: secret }] },
+      { DISCORD_BOT_TOKEN: secret },
+      { ADMIN_DISCORD_CLIENT_SECRET: secret },
+      { DATABASE_URL: secret },
     ]) {
       const { service, store } = fixture(overrides);
       const { raw, signature } = signed();
       await expect(service.webhook(raw, signature, "members:update")).rejects.toMatchObject({ status: 503 });
       expect(store.ingest).not.toHaveBeenCalled();
     }
+  });
+  it("refuses a webhook secret that is the creator token, as the setup guide promises", async () => {
+    const { service, store } = fixture({ PATREON_CREATOR_ACCESS_TOKEN: secret });
+    const { raw, signature } = signed();
+    await expect(service.list(admin)).resolves.toMatchObject({ webhookConfigured: false });
+    await expect(service.webhook(raw, signature, "members:update")).rejects.toMatchObject({ status: 503 });
+    expect(service.signedWebhook(raw, signature)).toBe(false);
+    expect(store.ingest).not.toHaveBeenCalled();
   });
   it.each(["viewer", "moderator"] as const)("denies %s private records and all mutations", async (role) => {
     const { service, store } = fixture();

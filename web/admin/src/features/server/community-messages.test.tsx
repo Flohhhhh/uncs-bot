@@ -22,7 +22,7 @@ const configured: CommunityMessagesStatus = {
     spacingSeconds: 20,
   },
   round: { enabled: false, message: "GG everyone" },
-  discordStatus: { enabled: true, configured: false },
+  discordStatus: { enabled: true, configured: false, problem: null },
 };
 function page(id = "primary") {
   return (
@@ -54,6 +54,14 @@ it("shows configured welcome timing and a missing Discord target without claimin
   );
 });
 
+it("says why an enabled Discord status card is not being updated", async () => {
+  const problem = "Discord status card is not being updated. Set ADMIN_GUILD_ID to the server that holds its channel.";
+  request.mockResolvedValue({ ...configured, discordStatus: { enabled: true, configured: true, problem } });
+  render(page());
+  expect(await screen.findByText(problem)).toBeInTheDocument();
+  expect(screen.getByText("Discord status card").closest(".info-row")).toHaveTextContent("Not updating");
+});
+
 it("does not show an on or off state before the first response", async () => {
   let resolve!: (data: CommunityMessagesStatus) => void;
   request.mockReturnValue(
@@ -70,7 +78,7 @@ it("does not show an on or off state before the first response", async () => {
       enabled: false,
       workerStarted: false,
       welcome: { ...configured.welcome, enabled: false },
-      discordStatus: { enabled: false, configured: false },
+      discordStatus: { enabled: false, configured: false, problem: null },
     }),
   );
   expect(screen.getByText("OFF")).toBeInTheDocument();
@@ -86,6 +94,7 @@ it("stops displaying old activation states when refresh fails and permits retry"
   await screen.findByText("Needs channel and message");
   fireEvent.click(screen.getByRole("button", { name: "Refresh message status" }));
   await screen.findByText("STATUS UNAVAILABLE");
+  expect(screen.getByRole("alert")).toHaveTextContent("Message status could not be loaded");
   expect(screen.queryByText("Enabled")).not.toBeInTheDocument();
   expect(screen.getByText(/No activation state has been assumed/)).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Refresh message status" }));

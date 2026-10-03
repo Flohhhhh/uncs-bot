@@ -258,20 +258,27 @@ export class SupportersStore {
         })
         .onConflictDoNothing()
         .returning({ hash: supporterObservations.hash });
+      // An already-seen snapshot still corrects fields a late webhook overwrote, within the older-charge guard.
+      const fields = observedPatch(member, snapshot);
+      const stale = Object.entries(fields).some(([key, value]) => {
+        const current = member[key as keyof MemberRow];
+        return current instanceof Date && value instanceof Date
+          ? current.getTime() !== value.getTime()
+          : current !== value;
+      });
       const result: ApiImportResult = {
         memberId: member.id,
         patreonMemberId: member.patreonMemberId,
         created: !!created,
-        updated: !!observed && !created,
+        updated: (!!observed || stale) && !created,
         payments: 0,
         revoked: 0,
         discordLinked: false,
         conflict: null,
       };
-      // An unchanged snapshot keeps the member's review state; a changed one needs review like a webhook.
-      const patch: Partial<typeof supporterMembers.$inferInsert> = observed
-        ? { ...observedPatch(member, snapshot), observedAt: receivedAt, reviewState: "pending" }
-        : {};
+      // An unchanged snapshot keeps the member's review state; a changed or corrected one needs review like a webhook.
+      const patch: Partial<typeof supporterMembers.$inferInsert> =
+        observed || stale ? { ...fields, observedAt: receivedAt, reviewState: "pending" } : {};
       const actions: (typeof supporterActions.$inferInsert)[] = [];
       let paymentsChanged = false;
       const existing = new Map(
@@ -373,7 +380,7 @@ export class SupportersStore {
           }
         }
       }
-      if (observed || result.payments || paymentsChanged || result.discordLinked)
+      if (observed || stale || result.payments || paymentsChanged || result.discordLinked)
         await tx
           .update(supporterMembers)
           .set({ ...patch, version: member.version + 1 })

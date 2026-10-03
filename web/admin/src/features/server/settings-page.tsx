@@ -146,7 +146,13 @@ export function RotationEditor({
   initialView?: "next" | "rotation";
 }) {
   const [view, setView] = useState(initialView);
-  const { data: catalog, error, loading, refresh: refreshCatalog } = useResource<Catalog>(active ? "catalog" : null);
+  const {
+    data: catalog,
+    error,
+    loading,
+    refreshing,
+    refresh: refreshCatalog,
+  } = useResource<Catalog>(active ? "catalog" : null);
   const savedRows = useMemo(
     () => snapshot.rotation.entries.map((entry, index) => ({ id: snapshot.revision + ":" + index, entry })),
     [snapshot],
@@ -266,7 +272,7 @@ export function RotationEditor({
             <button
               type="button"
               className="button secondary small"
-              disabled={disabled || loading}
+              disabled={disabled || loading || refreshing}
               onClick={refreshCatalog}
             >
               Retry map choices
@@ -445,7 +451,7 @@ export function SettingsPage() {
   useEffect(() => setUnsavedChanges(!!draft || rotationUnsaved), [draft, rotationUnsaved, setUnsavedChanges]);
   useEffect(() => () => setUnsavedChanges(false), [setUnsavedChanges]);
   if (admin.me.role !== "admin") return <Empty title="Administrator access required" />;
-  if (!resource.data) return <Empty title={resource.error || "Loading server settings…"} />;
+  if (!resource.data) return <Empty title={resource.error || "Loading server settings…"} alert={!!resource.error} />;
   const snapshot = draft?.snapshot ?? resource.data;
   const disabled = admin.busy || !!resource.error || document.hidden;
   const outdated = !!draft && draft.snapshot.revision !== resource.data.revision;
