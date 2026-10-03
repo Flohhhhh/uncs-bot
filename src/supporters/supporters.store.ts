@@ -25,6 +25,7 @@ import {
   qualifyingSources,
   RECEIPT_COPY_TOLERANCE,
   receiptCopy,
+  supporterSteamKeys,
 } from "./founder-rules";
 import {
   applicationSteamMatch,
@@ -684,6 +685,8 @@ export class SupportersStore {
           steamSource = steamChanged || steamRestated ? "staff" : member.steamSource,
           steamApplicationId = steamChanged || steamRestated ? null : member.steamApplicationId;
         if (discordChanged || steamChanged) {
+          // A new SteamID is locked before any founder lock, as automatic matching does, so its fill sees this link.
+          if (steamChanged) await lockKeys(tx, supporterSteamKeys(steamId));
           // A founder moved onto an identity another founder already holds would make one person a founder twice.
           const [founder] = await tx
             .select({ memberId: supporterFounders.memberId })
@@ -872,6 +875,8 @@ export class SupportersStore {
           "This PayPal supporter is linked to a different Discord account or SteamID. Use Link to change it.",
         );
       const created = !member;
+      // A SteamID this payment links is locked before it is written, like a staff Link, so automatic matching sees it.
+      if (input.steamId && !member?.steamId) await lockKeys(tx, supporterSteamKeys(input.steamId));
       if (!member) {
         [member] = await tx
           .insert(supporterMembers)

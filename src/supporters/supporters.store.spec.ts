@@ -449,20 +449,40 @@ describe("supporter persistence and founder eligibility", () => {
       status: 409,
       response: { blockedReason: "already_founder" },
     });
-    const lock = query.mock.calls.findIndex(([config]) => config.text.includes("pg_advisory_xact_lock"));
+    const locks = query.mock.calls.flatMap(([config, params], index) =>
+      config.text.includes("pg_advisory_xact_lock") ? [{ index, key: params[0] }] : [],
+    );
     const check = query.mock.calls.findIndex(([config]) =>
       config.text.includes('from "supporter_founders" inner join'),
     );
-    expect(query.mock.calls[lock][1]).toEqual(["founder:steam:76561198000000002"]);
-    expect(lock).toBeLessThan(check);
+    // The new SteamID is locked before the founder lock, the order automatic matching uses.
+    expect(locks.map((lock) => lock.key)).toEqual([
+      "supporter:steam:76561198000000002",
+      "founder:steam:76561198000000002",
+    ]);
+    expect(locks[1].index).toBeLessThan(check);
     expect(query.mock.calls.at(-1)![0].text).toBe("rollback");
-    // A record that is not a founder takes no founder lock.
+    // A record that is not a founder takes no founder lock, only the SteamID lock.
     const plain = fixture();
     plain.state.otherFounder = true;
     await expect(
       plain.store.mutate(id, link({ steamId: "76561198000000002" }), staff, "123", policy),
     ).resolves.toMatchObject({ ok: true });
-    expect(plain.query.mock.calls.some(([config]) => config.text.includes("pg_advisory_xact_lock"))).toBe(false);
+    expect(
+      plain.query.mock.calls.filter(([config]) => config.text.includes("pg_advisory_xact_lock")).map(([, p]) => p[0]),
+    ).toEqual(["supporter:steam:76561198000000002"]);
+  });
+  it("locks a SteamID a staff Link writes, before the write, and nothing for a Discord-only change", async () => {
+    const steam = fixture();
+    await steam.store.mutate(id, link({ steamId: "76561198000000002" }), staff, "123", policy);
+    const all = steam.query.mock.calls.map(([config]) => config.text);
+    const lock = all.findIndex((text) => text.includes("pg_advisory_xact_lock"));
+    expect(steam.query.mock.calls[lock][1]).toEqual(["supporter:steam:76561198000000002"]);
+    expect(lock).toBeGreaterThan(all.findIndex((text) => text.endsWith("for update")));
+    expect(lock).toBeLessThan(all.findIndex((text) => text.startsWith('update "supporter_members" set "discord_id"')));
+    const discord = fixture();
+    await discord.store.mutate(id, link({ discordId: "234567890123456789" }), staff, "123", policy);
+    expect(discord.query.mock.calls.some(([config]) => config.text.includes("pg_advisory_xact_lock"))).toBe(false);
   });
   it("names an existing founder record instead of failing on its key", async () => {
     const { store, query, payment, state } = fixture();
@@ -846,6 +866,27 @@ describe("PayPal supporter ledger", () => {
     // Only the SteamID this payment fills in becomes a staff link; the existing Discord link keeps its source.
     expect(statement.text).toContain('"steam_source" =');
     expect(statement.text).not.toContain('"discord_source" =');
+    // That SteamID is locked after the member row and before it is written, as a staff Link and automatic matching do.
+    const all = texts(query);
+    const lock = query.mock.calls.findIndex(([, params]) => params?.[0] === "supporter:steam:76561198000000009");
+    expect(lock).toBeGreaterThan(all.findIndex((text) => text.endsWith("for update")));
+    expect(lock).toBeLessThan(all.findIndex((text) => text.startsWith('update "supporter_members"')));
+  });
+  it("locks a SteamID a new PayPal supporter is created with, and none when no SteamID is entered", async () => {
+    const withSteam = paypalFixture();
+    await withSteam.store.recordPaypal({ ...withSteam.input, steamId: "76561198000000009" }, staff, null, policy);
+    const lock = withSteam.query.mock.calls.findIndex(
+      ([, params]) => params?.[0] === "supporter:steam:76561198000000009",
+    );
+    expect(lock).toBeGreaterThan(-1);
+    expect(lock).toBeLessThan(
+      texts(withSteam.query).findIndex((text) => text.startsWith('insert into "supporter_members"')),
+    );
+    const without = paypalFixture();
+    await without.store.recordPaypal(without.input, staff, null, policy);
+    expect(
+      without.query.mock.calls.some(([, params]) => String(params?.[0] ?? "").startsWith("supporter:steam:")),
+    ).toBe(false);
   });
   it("refuses an identity that conflicts with the matched supporter", async () => {
     const { store, query, state, input, member } = paypalFixture();

@@ -59,6 +59,8 @@ function fixture() {
     earlier: false,
     // A staff link of the same SteamID committed first, so the conditional fill matches no row.
     lost: false,
+    // Another supporter record committed the SteamID after the facts were read.
+    holder: false,
     facts: {
       applications: [applicationFixture()],
       automatic: { payment: paymentFixture(), earlier: false, earlierOtherRecord: false },
@@ -78,6 +80,7 @@ function fixture() {
       return { rows: state.founder ? [[memberId]] : [] };
     if (text.includes('from "supporter_founders" inner join'))
       return { rows: state.otherFounder ? [[randomUUID()]] : [] };
+    if (text.startsWith('select "id" from "supporter_members"')) return { rows: state.holder ? [[randomUUID()]] : [] };
     if (text.startsWith('select "id" from "supporter_payments"'))
       return { rows: state.earlier ? [[randomUUID()]] : [] };
     if (text.startsWith('update "supporter_members" set "steam_id"')) {
@@ -150,6 +153,35 @@ describe("automatic SteamID fill", () => {
     expect(await run()).toMatchObject({ steamFilled: false, blocked: [] });
     expect(writes(texts())).toEqual([]);
   });
+  it("locks the SteamID and checks its holders again before copying it", async () => {
+    const { run, query, texts } = fixture();
+    expect(await run()).toMatchObject({ steamFilled: true });
+    const all = texts();
+    const share = all.findIndex((text) => text.startsWith("SELECT id FROM whitelist_applications"));
+    const lock = all.findIndex((text) => text.includes("pg_advisory_xact_lock"));
+    const holders = all.findIndex((text) => text.startsWith('select "id" from "supporter_members"'));
+    const fill = all.findIndex((text) => text.startsWith('update "supporter_members" set "steam_id"'));
+    expect(query.mock.calls[lock][1]).toEqual([`supporter:steam:${steamId}`]);
+    expect([share < lock, lock < holders, holders < fill]).toEqual([true, true, true]);
+    expect(all[holders]).toContain('"supporter_members"."id" <> $1');
+    expect(all[holders]).toContain('"supporter_members"."steam_id" = $2');
+    expect(all[holders]).toContain(
+      '("supporter_members"."provider" = $3 or ("supporter_members"."provider" = $4 and "supporter_members"."campaign_id" = $5))',
+    );
+    expect(query.mock.calls[holders][1]).toEqual(
+      expect.arrayContaining([memberId, steamId, "paypal", "patreon", campaign]),
+    );
+  });
+  it("refuses a SteamID another record linked while the facts were read, writing nothing", async () => {
+    const { run, state, texts } = fixture();
+    state.holder = true;
+    expect(await run({ recordFounder: true })).toMatchObject({
+      steamFilled: false,
+      founderRecorded: false,
+      blocked: ["steam_on_another_record", "no_steam"],
+    });
+    expect(writes(texts())).toEqual([]);
+  });
   it("writes nothing when the conditional fill lost a race with a staff link", async () => {
     const { run, state, texts } = fixture();
     state.lost = true;
@@ -190,8 +222,9 @@ describe("automatic SteamID fill", () => {
     state.founder = true;
     state.otherFounder = true;
     expect(await run({ recordFounder: true })).toMatchObject({ steamFilled: false, blocked: ["already_founder"] });
-    const lock = query.mock.calls.find(([config]) => config.text.includes("pg_advisory_xact_lock"))!;
-    expect(lock[1]).toEqual([`founder:steam:${steamId}`]);
+    const locks = query.mock.calls.filter(([config]) => config.text.includes("pg_advisory_xact_lock"));
+    // The SteamID lock comes before the founder lock, the order staff links use.
+    expect(locks.map(([, params]) => params[0])).toEqual([`supporter:steam:${steamId}`, `founder:steam:${steamId}`]);
     expect(writes(texts())).toEqual([]);
     const allowed = fixture();
     allowed.state.founder = true;

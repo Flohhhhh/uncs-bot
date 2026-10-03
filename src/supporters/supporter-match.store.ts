@@ -1,9 +1,17 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, isNull, ne, or, sql } from "drizzle-orm";
 import { createHash, randomUUID } from "node:crypto";
 import { DATABASE, type Database } from "../database/database.types";
 import { supporterActions, supporterFounders, supporterMembers } from "../database/supporters.schema";
-import { type Executor, founderCheck, identityKeys, lockKeys, matchFactsSql, otherFounder } from "./founder-rules";
+import {
+  type Executor,
+  founderCheck,
+  identityKeys,
+  lockKeys,
+  matchFactsSql,
+  otherFounder,
+  supporterSteamKeys,
+} from "./founder-rules";
 import {
   applicationSteamMatch,
   AUTO_FOUNDER_HOLD_HOURS_DEFAULT,
@@ -41,8 +49,8 @@ const sha256 = (value: unknown) => createHash("sha256").update(JSON.stringify(va
 /**
  * Automatic supporter matching's database work. Every write is conditional on the state it changes, made under the
  * member's row lock, and audited in the same transaction, so a repeated run writes nothing. Lock order: the member
- * row, then that Discord account's applications (FOR SHARE), then the sorted founder advisory locks, the same order
- * staff founder awards use.
+ * row, then that Discord account's applications (FOR SHARE), then the SteamID being copied, then the sorted founder
+ * advisory locks, the same order staff links and founder awards use.
  */
 @Injectable()
 export class SupporterMatchStore {
@@ -60,6 +68,25 @@ export class SupporterMatchStore {
       patreonDiscordElsewhere: Boolean(facts?.patreonDiscordElsewhere),
       linkedSteamShared: Boolean(facts?.linkedSteamShared),
     } satisfies MatchFacts;
+  }
+
+  /** Another supporter record (any PayPal record, or a Patreon record of the campaign) holds this SteamID. */
+  private async otherHolder(tx: Executor, memberId: string, steamId: string, campaignId: string) {
+    const [holder] = await tx
+      .select({ id: supporterMembers.id })
+      .from(supporterMembers)
+      .where(
+        and(
+          ne(supporterMembers.id, memberId),
+          eq(supporterMembers.steamId, steamId),
+          or(
+            eq(supporterMembers.provider, "paypal"),
+            and(eq(supporterMembers.provider, "patreon"), eq(supporterMembers.campaignId, campaignId)),
+          ),
+        ),
+      )
+      .limit(1);
+    return Boolean(holder);
   }
 
   async autoMatch(memberId: string, options: AutoMatchOptions): Promise<AutoMatchResult> {
@@ -92,6 +119,13 @@ export class SupporterMatchStore {
         const steam = applicationSteamMatch(facts.applications);
         const application = facts.applications.find((item) => item.id === steam.applicationId);
         let refused: AutomaticFounderBlockedReason | null = steam.reason;
+        // The facts were read before any lock on the SteamID. A staff Link or PayPal record of it takes the same lock,
+        // so once it is held, every committed holder is visible here.
+        if (!refused) {
+          await lockKeys(tx, supporterSteamKeys(steam.steamId));
+          if (await this.otherHolder(tx, memberId, steam.steamId!, options.campaignId))
+            refused = "steam_on_another_record";
+        }
         // A founder's new SteamID must not be one another founder already holds.
         if (!refused && founder) {
           const added = { id: memberId, discordId: null, steamId: steam.steamId };

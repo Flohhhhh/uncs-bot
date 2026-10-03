@@ -2011,6 +2011,29 @@ describe("launch storage on isolated PostgreSQL", () => {
       await expect(claim).resolves.toMatchObject({ claimed: true });
     });
 
+    it("refuses to copy a SteamID that another record links while the copy waits for its lock", async () => {
+      const record = await importPatron();
+      await approve((await application()).id, "primary");
+      const holder = await client.connect();
+      let fill: Promise<unknown> | undefined;
+      try {
+        await holder.query("BEGIN");
+        // The lock a staff Link or a PayPal record takes before it writes this SteamID.
+        await holder.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`supporter:steam:${patronSteam}`]);
+        fill = workers[0].match.autoMatch(record.id, options({ recordFounder: false }));
+        await waitForBlockedWorkers(1);
+        await holder.query(
+          "INSERT INTO supporter_members (id, provider, observed_at, steam_id, steam_source) VALUES ($1, 'paypal', now(), $2, 'staff')",
+          [randomUUID(), patronSteam],
+        );
+      } finally {
+        await holder.query("COMMIT");
+        holder.release();
+      }
+      await expect(fill).resolves.toMatchObject({ steamFilled: false, blocked: ["steam_on_another_record"] });
+      expect((await supporters.get(record.id, campaign, automaticPolicy))?.steamId).toBeNull();
+    });
+
     it("fills the SteamID and records the founder once when two matches overlap", async () => {
       const record = await importPatron();
       await approve((await application()).id, "primary");

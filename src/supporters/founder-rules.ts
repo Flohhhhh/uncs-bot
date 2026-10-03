@@ -106,6 +106,15 @@ export async function lockKeys(tx: Executor, keys: string[]) {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
 }
 
+/**
+ * The lock every write that links a SteamID to a supporter record takes first: the automatic fill, a staff Link and a
+ * PayPal record. It comes after the member row lock and before any founder lock, the same order everywhere, so the
+ * fill's check of other holders, made after it, sees every committed link of that SteamID.
+ */
+export function supporterSteamKeys(steamId: string | null | undefined) {
+  return steamId ? [`supporter:steam:${steamId}`] : [];
+}
+
 export function identityKeys(prefix: string, identity: { discordId?: string | null; steamId?: string | null }) {
   return [
     ...(identity.discordId ? [`${prefix}:discord:${identity.discordId}`] : []),
