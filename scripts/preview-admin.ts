@@ -844,6 +844,8 @@ const supporterStore = {
 };
 const previewEnvironment: Record<string, unknown> = {
   MAP_VOTES_ENABLED: process.env.PREVIEW_MAP_VOTES_ENABLED !== "false",
+  // Voted 50v50 stays held for the owner's review unless a rehearsal asks for it.
+  MAP_VOTES_FIFTY_ENABLED: process.env.PREVIEW_MAP_VOTES_FIFTY_ENABLED === "true",
   SERVER_EVENTS_ENABLED: true,
   WARDOGS_RCON_URL: "https://game.example.test",
   ADMIN_GUILD_ID: "111111111111111111",

@@ -19,9 +19,9 @@ import {
 import { ballotChoiceSchema, startMapVoteSchema } from "./map-votes.types";
 
 const on: VotingPolicy = { ...defaultVotingPolicy, enabled: true };
-function issue(policy: Partial<VotingPolicy>, settings: object) {
+function issue(policy: Partial<VotingPolicy>, settings: object, rules: { fiftyHeld?: boolean } = {}) {
   try {
-    validateVotingDocument({ ...on, ...policy }, mergeSettings(defaultVotingSettings, settings));
+    validateVotingDocument({ ...on, ...policy }, mergeSettings(defaultVotingSettings, settings), rules);
     return null;
   } catch (error) {
     if (!(error instanceof VotingSettingsError)) throw error;
@@ -151,6 +151,23 @@ describe("customizable voting settings", () => {
     expect(issue({ mapChoices: false, modeChoices: false }, { fiftyFifty: { offered: true } })).toBeNull();
     expect(issue({ enabled: false }, { source: "pool" })).toBeNull();
     expect(issue({}, { openScoreCeiling: 90, closeAtScore: 95 })).toBeNull();
+  });
+  it("refuses 50v50 as offered, or as the only choice, while it is held for the owner's review", () => {
+    const held = { fiftyHeld: true };
+    expect(issue({}, { fiftyFifty: { offered: true } }, held)).toEqual({
+      path: ["settings", "fiftyFifty", "offered"],
+      message: "Leave the 50v50 option off: voted 50v50 is held for the owner's in-person review.",
+    });
+    expect(issue({ mapChoices: false, modeChoices: false }, { fiftyFifty: { offered: false } }, held)).toEqual({
+      path: ["policy", "mapChoices"],
+      message: "Choose maps, rule variants or both before enabling voting.",
+    });
+    expect(issue({}, { fiftyFifty: { offered: false, minPlayers: 60 } }, held)).toBeNull();
+    // Reading a stored row never applies the hold, so an older offer cannot stop ordinary voting.
+    expect(
+      readStoredPolicy({ ...on, mapChoices: true, settings: { fiftyFifty: { offered: true } } }).settings.fiftyFifty
+        .offered,
+    ).toBe(true);
   });
   it("accepts any subset of settings in a save, strictly", () => {
     expect(votingSettingsPatchSchema.safeParse({ reminders: { final: { score: 80 } } }).success).toBe(true);

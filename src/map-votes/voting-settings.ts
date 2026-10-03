@@ -2,6 +2,7 @@ import { z } from "zod";
 import { mapSelectionSchema } from "../admin/admin.types";
 import {
   defaultVotingSettings,
+  FIFTY_HELD_REASON,
   voteChoiceKey,
   votingSettingLimits as limits,
   type DeepPartial,
@@ -96,10 +97,14 @@ export const saveVotingControlsSchema = z
   .strict();
 
 export type VotingIssue = { path: (string | number)[]; message: string };
+/** `fiftyHeld`: the owner has not switched voted 50v50 on (MAP_VOTES_FIFTY_ENABLED), so it cannot be saved as offered. */
+export type VotingRules = { fiftyHeld?: boolean };
 /** Cross-field rules, with paths relative to the saved document `{ policy, settings }`. */
-export function votingIssues(policy: VotingPolicy, settings: VotingSettings): VotingIssue[] {
+export function votingIssues(policy: VotingPolicy, settings: VotingSettings, rules: VotingRules = {}): VotingIssue[] {
   const issues: VotingIssue[] = [];
   const add = (path: (string | number)[], message: string) => issues.push({ path, message });
+  if (rules.fiftyHeld && settings.fiftyFifty.offered)
+    add(["settings", "fiftyFifty", "offered"], `Leave the 50v50 option off: ${FIFTY_HELD_REASON}.`);
   if (settings.openScoreCeiling > settings.closeAtScore - 5)
     add(["settings", "openScoreCeiling"], "Close score must be at least 5 points above the opening ceiling.");
   const names = { midpoint: "update", final: "last-chance" } as const;
@@ -124,8 +129,13 @@ export function votingIssues(policy: VotingPolicy, settings: VotingSettings): Vo
     add(["settings", "pool"], "Each map pool entry must be a different map, mode or layout.");
   if (policy.enabled && settings.source === "pool" && settings.pool.length < 2)
     add(["settings", "pool"], "Add at least two map pool entries, or offer options from the saved rotation.");
-  if (policy.enabled && !policy.mapChoices && !policy.modeChoices && !settings.fiftyFifty.offered)
-    add(["policy", "mapChoices"], "Choose maps, rule variants, 50v50 or a combination before enabling voting.");
+  if (policy.enabled && !policy.mapChoices && !policy.modeChoices && (rules.fiftyHeld || !settings.fiftyFifty.offered))
+    add(
+      ["policy", "mapChoices"],
+      rules.fiftyHeld
+        ? "Choose maps, rule variants or both before enabling voting."
+        : "Choose maps, rule variants, 50v50 or a combination before enabling voting.",
+    );
   return issues;
 }
 export class VotingSettingsError extends Error {
@@ -137,8 +147,11 @@ function firstIssue(error: z.ZodError): VotingIssue {
   const [issue] = error.issues;
   return { path: issue.path.map((part) => (typeof part === "number" ? part : String(part))), message: issue.message };
 }
-/** Fully validates a merged document. Throws VotingSettingsError naming the first problem. */
-export function validateVotingDocument(policy: unknown, settings: unknown) {
+/**
+ * Fully validates a merged document. Throws VotingSettingsError naming the first problem. Saves pass
+ * `fiftyHeld`; reading a stored row does not, so an older offered 50v50 never stops ordinary voting.
+ */
+export function validateVotingDocument(policy: unknown, settings: unknown, rules: VotingRules = {}) {
   const parsedPolicy = votingPolicyShape.safeParse(policy);
   if (!parsedPolicy.success) {
     const issue = firstIssue(parsedPolicy.error);
@@ -149,7 +162,7 @@ export function validateVotingDocument(policy: unknown, settings: unknown) {
     const issue = firstIssue(parsedSettings.error);
     throw new VotingSettingsError({ ...issue, path: ["settings", ...issue.path] });
   }
-  const [issue] = votingIssues(parsedPolicy.data, parsedSettings.data);
+  const [issue] = votingIssues(parsedPolicy.data, parsedSettings.data, rules);
   if (issue) throw new VotingSettingsError(issue);
   return { policy: parsedPolicy.data, settings: parsedSettings.data };
 }

@@ -112,6 +112,11 @@ export const votingSettingLimits = {
   },
 } as const;
 export type VotingSettingLimits = typeof votingSettingLimits;
+/**
+ * Why ballots never offer 50v50 while the owner-only MAP_VOTES_FIFTY_ENABLED flag is off (the default).
+ * A short phrase for "50v50 not offered: …".
+ */
+export const FIFTY_HELD_REASON = "voted 50v50 is held for the owner's in-person review";
 export type VotingContext = {
   /** The game's "Players to start a match", or 20 when unreadable. */
   startThreshold: number;

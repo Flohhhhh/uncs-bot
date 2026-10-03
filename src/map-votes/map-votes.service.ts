@@ -25,6 +25,7 @@ import {
   closeThreshold,
   defaultVotingPolicy,
   defaultVotingSettings,
+  FIFTY_HELD_REASON,
   voteChoiceKey,
   voteChoiceTitle,
   votingProgress,
@@ -187,6 +188,10 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
       channelId = this.env.get("MAP_VOTES_CHANNEL_ID");
     return { enabled: this.env.get("MAP_VOTES_ENABLED") === true && !!guildId && !!channelId, guildId, channelId };
   }
+  /** Voted 50v50 stays off every ballot until the owner sets MAP_VOTES_FIFTY_ENABLED after reviewing it. */
+  private fiftyHeld() {
+    return this.env.get("MAP_VOTES_FIFTY_ENABLED") !== true;
+  }
   private requireStaff(staff: Staff) {
     if (staff.role !== "admin") throw new ForbiddenException("Only administrators can manage map votes.");
   }
@@ -251,6 +256,7 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
       const [config, overview] = await Promise.all([game.configuration(), game.overview()]);
       const capabilities = overview.capabilities ?? (await game.capabilities());
       const eventsEnabled = this.env.get("SERVER_EVENTS_ENABLED") === true;
+      const held = this.fiftyHeld();
       const controls =
         serves(capabilities, "PATCH", "/v1/players/{id}") && serves(capabilities, "POST", "/v1/broadcast");
       return {
@@ -262,12 +268,14 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
           message: serves(capabilities, "POST", "/v1/players/{id}/message"),
         },
         fifty: {
-          available: eventsEnabled && controls,
-          message: !eventsEnabled
-            ? "Optional events are off in Gramps, so ballots never offer 50v50. These settings can still be prepared."
-            : !controls
-              ? "This game build does not advertise team moves and broadcasts, so ballots cannot offer 50v50."
-              : "Ballots offer 50v50 as the last option whenever every readiness check passes; the voting status explains any check that fails.",
+          available: !held && eventsEnabled && controls,
+          message: held
+            ? "Voted 50v50 is held for the owner's in-person review, so ballots never offer it and it cannot be switched on. Its other settings can still be prepared."
+            : !eventsEnabled
+              ? "Optional events are off in Gramps, so ballots never offer 50v50. These settings can still be prepared."
+              : !controls
+                ? "This game build does not advertise team moves and broadcasts, so ballots cannot offer 50v50."
+                : "Ballots offer 50v50 as the last option whenever every readiness check passes; the voting status explains any check that fails.",
         },
       };
     } catch {
@@ -340,6 +348,7 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
     if (!parsed.success || parsed.data.serverId !== serverId)
       throw new BadRequestException("Review the voting controls for the selected server.");
     const request = parsed.data;
+    const fiftyHeld = this.fiftyHeld();
     if (request.policy.enabled) {
       const saved = await this.store.policy(serverId);
       if (saved && saved.connectionHash !== this.servers.connectionHash(serverId))
@@ -357,7 +366,13 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
         (previous) => {
           // A save without settings (the original dashboard) keeps every stored setting.
           const base = mergeSettings(defaultVotingSettings, previous?.settings);
-          const { policy, settings } = validateVotingDocument(request.policy, mergeSettings(base, request.settings));
+          const merged = mergeSettings(base, request.settings);
+          // While 50v50 is held, a save that does not ask for it switches a stored offer off, so voting can
+          // always be switched off; a save that asks for it is refused by the validation.
+          const draft = fiftyHeld
+            ? mergeSettings(merged, { fiftyFifty: { offered: request.settings?.fiftyFifty?.offered ?? false } })
+            : merged;
+          const { policy, settings } = validateVotingDocument(request.policy, draft, { fiftyHeld });
           return { ...policy, settings };
         },
         staff,
@@ -487,6 +502,16 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
         "50v50 option",
         async () => {
           const settings = await savedSettings();
+          if (this.fiftyHeld())
+            return settings.fiftyFifty.offered
+              ? {
+                  status: "review",
+                  message: `Saved as offered, but ${FIFTY_HELD_REASON}. Ballots never offer it.`,
+                }
+              : {
+                  status: "ok",
+                  message: `Off. Ballots offer maps and rule variants only; ${FIFTY_HELD_REASON}.`,
+                };
           if (!settings.fiftyFifty.offered)
             return { status: "ok", message: "Off. Ballots offer maps and rule variants only." };
           const game = this.servers.get(serverId);
@@ -597,9 +622,11 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
       })),
       fifty: evaluation.plan?.fifty ?? {
         offered: false,
-        reason: draft.data.fiftyFifty.offered
-          ? "50v50 is checked once the round and rotation allow a ballot."
-          : "The 50v50 option is off.",
+        reason: !draft.data.fiftyFifty.offered
+          ? "The 50v50 option is off."
+          : this.fiftyHeld()
+            ? `50v50 not offered: ${FIFTY_HELD_REASON}.`
+            : "50v50 is checked once the round and rotation allow a ballot.",
       },
       blocked,
     };
@@ -1194,7 +1221,9 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
     if (checked.revision !== config.revision || checked.issues.some((issue) => !issue.unavailable))
       throw new Error("Rotation options could not be checked.");
     let fifty: { ready: boolean; reason: string } | undefined;
-    if (settings.fiftyFifty.offered)
+    // Held for the owner: the event checks are not even read, whatever SERVER_EVENTS_ENABLED says.
+    if (settings.fiftyFifty.offered && this.fiftyHeld()) fifty = { ready: false, reason: FIFTY_HELD_REASON };
+    else if (settings.fiftyFifty.offered)
       try {
         const readiness = await this.events.voteEventReadiness(
           serverId,
@@ -1653,6 +1682,8 @@ export class MapVotesService implements OnApplicationBootstrap, OnModuleDestroy 
       state: "cancelled",
       message: `50v50 won but ${reason}. The rotation continues with normal teams.`,
     });
+    // A ballot that opened before the owner's flag was switched off never starts its event.
+    if (this.fiftyHeld()) return normal(FIFTY_HELD_REASON);
     if (votes < fifty.minVotes) return normal(`it needed ${fifty.minVotes} votes and had ${votes}`);
     const floor = Math.max(0, fifty.minPlayers - FIFTY_CLOSE_ALLOWANCE);
     if (players < floor) return normal(`only ${players} players are online (${floor} needed)`);

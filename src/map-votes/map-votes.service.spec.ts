@@ -2287,6 +2287,55 @@ describe("customizable voting controls", () => {
     expect((error as HttpException).getStatus()).toBe(400);
     expect((error as HttpException).getResponse()).toMatchObject({ message, path });
   });
+  it("refuses to save 50v50 as offered while it is held, and switches a stored offer off", async () => {
+    const f = saving();
+    const error = await f.service
+      .saveControls(staff, {
+        serverId: "primary",
+        version: 3,
+        policy: defaultVotingPolicy,
+        settings: { fiftyFifty: { offered: true } },
+      })
+      .catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(HttpException);
+    expect((error as HttpException).getResponse()).toMatchObject({
+      statusCode: 400,
+      path: ["settings", "fiftyFifty", "offered"],
+      message: "Leave the 50v50 option off: voted 50v50 is held for the owner's in-person review.",
+    });
+    // An offer saved earlier never blocks a save of the switches, such as switching voting off.
+    const earlier = {
+      ...stored,
+      settings: { ...stored.settings, fiftyFifty: { offered: true, minPlayers: 60 } },
+    } as StoredVotingPolicy;
+    f.store.savePolicy.mockImplementation(
+      async (_server: string, _version: number, next: (previous: StoredVotingPolicy) => StoredVotingPolicy) => ({
+        saved: next(earlier),
+        closed: [],
+      }),
+    );
+    await f.service.saveControls(staff, { serverId: "primary", version: 3, policy: defaultVotingPolicy });
+    const [[, , next]] = f.store.savePolicy.mock.calls.slice(-1) as [
+      string,
+      number,
+      (previous: StoredVotingPolicy) => StoredVotingPolicy,
+    ][];
+    expect(next(earlier).settings?.fiftyFifty).toMatchObject({ offered: false, minPlayers: 60 });
+    // Once the owner has reviewed it, the offer can be saved.
+    f.environment.MAP_VOTES_FIFTY_ENABLED = true;
+    await f.service.saveControls(staff, {
+      serverId: "primary",
+      version: 3,
+      policy: defaultVotingPolicy,
+      settings: { fiftyFifty: { offered: true } },
+    });
+    const [[, , owned]] = f.store.savePolicy.mock.calls.slice(-1) as [
+      string,
+      number,
+      (previous: StoredVotingPolicy) => StoredVotingPolicy,
+    ][];
+    expect(owned(stored).settings?.fiftyFifty).toMatchObject({ offered: true });
+  });
   it("enforces the request shape and reports a concurrent save", async () => {
     const f = saving();
     await expect(
@@ -2371,8 +2420,39 @@ describe("a 50v50 option on automatic ballots", () => {
   beforeEach(() => jest.useFakeTimers().setSystemTime(now));
   afterEach(() => jest.useRealTimers());
   const offered = { fiftyFifty: { offered: true, minPlayers: 40, minVotes: 3 } };
+  /** The owner has reviewed voted 50v50 and switched MAP_VOTES_FIFTY_ENABLED on. */
+  const reviewed = <T extends { environment: Record<string, unknown> }>(f: T) => {
+    f.environment.MAP_VOTES_FIFTY_ENABLED = true;
+    return f;
+  };
+  it("never offers or checks 50v50 while it is held for the owner's review, even with events on and every check passing", async () => {
+    const f = automatic("primary", offered);
+    f.environment.SERVER_EVENTS_ENABLED = true;
+    f.events.voteEventReadiness.mockResolvedValue({ ok: true });
+    f.game.capabilities.mockResolvedValue({ routes: ["PATCH /v1/players/{id}", "POST /v1/broadcast"] });
+    await observeForWindow(f);
+    expect(f.store.create.mock.calls[0][0].choices).toEqual([
+      { map: "Europe", experiences: [] },
+      { map: "Islands", experiences: [] },
+    ]);
+    expect(f.events.voteEventReadiness).not.toHaveBeenCalled();
+    const held = { offered: false, reason: "50v50 not offered: voted 50v50 is held for the owner's in-person review." };
+    expect((await f.service.list(staff)).automatic?.fifty).toEqual(held);
+    const preview = await f.service.preview(staff, { serverId: "primary", settings: offered });
+    expect(preview.fifty).toEqual(held);
+    expect((await f.service.setup(staff)).checks.find((check) => check.label === "50v50 option")).toEqual({
+      label: "50v50 option",
+      status: "review",
+      message: "Saved as offered, but voted 50v50 is held for the owner's in-person review. Ballots never offer it.",
+    });
+    expect((await f.service.controls(staff)).context?.fifty).toEqual({
+      available: false,
+      message: expect.stringContaining("Voted 50v50 is held for the owner's in-person review"),
+    });
+    expect(f.events.voteEventReadiness).not.toHaveBeenCalled();
+  });
   it("offers 50v50 on the next entry as the last option only when every readiness check passes", async () => {
-    const waiting = automatic("primary", offered);
+    const waiting = reviewed(automatic("primary", offered));
     waiting.events.voteEventReadiness.mockResolvedValue({ ok: false, reason: "64 of 80 players online" });
     await observeForWindow(waiting);
     expect(waiting.store.create.mock.calls[0][0].choices).toEqual([
@@ -2383,7 +2463,7 @@ describe("a 50v50 option on automatic ballots", () => {
       offered: false,
       reason: "50v50 not offered: 64 of 80 players online.",
     });
-    const ready = automatic("primary", offered);
+    const ready = reviewed(automatic("primary", offered));
     ready.events.voteEventReadiness.mockResolvedValue({ ok: true });
     await observeForWindow(ready);
     expect(ready.store.create.mock.calls[0][0].choices).toEqual([
@@ -2410,7 +2490,7 @@ describe("a 50v50 option on automatic ballots", () => {
   });
   /** An open ballot whose 50v50 option won outright with 8 of 10 votes. */
   async function fiftyWon(settings: DeepPartial<VotingSettings> = offered) {
-    const f = await openBallot({ settings: settings as DeepPartial<VotingSettings> });
+    const f = reviewed(await openBallot({ settings: settings as DeepPartial<VotingSettings> }));
     f.record.choices = [
       { map: "Europe", experiences: [] },
       { map: "Europe", experiences: [], event: "50v50" },
@@ -2478,6 +2558,18 @@ describe("a 50v50 option on automatic ballots", () => {
     expect(f.events.startFromVote).not.toHaveBeenCalled();
     expect(f.admin.act).not.toHaveBeenCalled();
     expect(f.store.finish).toHaveBeenCalledWith(f.record.id, "cancelled", message);
+  });
+  it("keeps normal teams when 50v50 wins a ballot that opened before the owner's flag was switched off", async () => {
+    const f = await fiftyWon();
+    f.environment.MAP_VOTES_FIFTY_ENABLED = false;
+    await f.service.tick();
+    expect(f.events.startFromVote).not.toHaveBeenCalled();
+    expect(f.admin.act).not.toHaveBeenCalled();
+    expect(f.store.finish).toHaveBeenCalledWith(
+      f.record.id,
+      "cancelled",
+      "50v50 won but voted 50v50 is held for the owner's in-person review. The rotation continues with normal teams.",
+    );
   });
   it("keeps normal teams when the event refuses cleanly", async () => {
     const f = await fiftyWon();
@@ -2569,7 +2661,7 @@ describe("a 50v50 option on automatic ballots", () => {
     expect((await f.service.list(staff)).automatic?.alert).toBeFalsy();
   });
   it("reports 50v50 readiness in setup and the controls context", async () => {
-    const f = automatic("primary", offered);
+    const f = reviewed(automatic("primary", offered));
     f.environment.SERVER_EVENTS_ENABLED = true;
     f.events.voteEventReadiness.mockResolvedValue({ ok: false, reason: "the server is waiting for players" });
     const setup = await f.service.setup(staff);

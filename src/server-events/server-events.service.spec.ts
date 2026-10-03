@@ -646,6 +646,8 @@ describe("a 50v50 started by a community vote", () => {
   const voteActor = { ...eventStaff, serverId: "primary" };
   function voting() {
     const f = fixture("primary", voteEventFixture);
+    // The owner has reviewed voted 50v50.
+    f.environment.MAP_VOTES_FIFTY_ENABLED = true;
     f.set(null);
     f.game.overview.mockImplementation(async () => fullServerSnapshot(Date.now()));
     f.game.configuration.mockResolvedValue({ revision: "r7", fields: [lockField(true)] });
@@ -745,6 +747,11 @@ describe("a 50v50 started by a community vote", () => {
       (f: ReturnType<typeof voting>) => f.game.overview.mockImplementation(async () => preRoundSnapshot(Date.now())),
       ConflictException,
     ],
+    [
+      "voted 50v50 is held for the owner's review",
+      (f: ReturnType<typeof voting>) => (f.environment.MAP_VOTES_FIFTY_ENABLED = false),
+      ServiceUnavailableException,
+    ],
   ] as const)("refuses cleanly when %s", async (_, change, type) => {
     const f = voting();
     const existing = f.current();
@@ -808,6 +815,13 @@ describe("a 50v50 started by a community vote", () => {
     const rounds = new GameRounds(fixtureServers(f.game));
     const track = rounds.observe("primary", overview).track;
     expect(await f.service.voteEventReadiness("primary", fifty, config, overview, track)).toEqual({ ok: true });
+    // Staff-run events being on never readies a voted 50v50 the owner has not reviewed.
+    f.environment.MAP_VOTES_FIFTY_ENABLED = false;
+    expect(await f.service.voteEventReadiness("primary", fifty, config, overview, track)).toEqual({
+      ok: false,
+      reason: "voted 50v50 is held for the owner's in-person review",
+    });
+    f.environment.MAP_VOTES_FIFTY_ENABLED = true;
     const waiting = new GameRounds(fixtureServers(f.game)).observe("primary", preRoundSnapshot()).track;
     expect(await f.service.voteEventReadiness("primary", fifty, config, overview, waiting)).toEqual({
       ok: false,

@@ -20,7 +20,7 @@ import type { WardogsClient } from "../admin/wardogs.client";
 import { serves } from "../common/admin-policy";
 import type { RoundTrack } from "../common/round-tracker";
 import type { SettingsSnapshot } from "../common/server-settings";
-import type { FiftyFiftySettings } from "../common/voting-policy";
+import { FIFTY_HELD_REASON, type FiftyFiftySettings } from "../common/voting-policy";
 import { EnvService } from "../env/env.service";
 import { plainLabel } from "../server-community/community-state";
 import { StaffAlerts } from "../staff-alerts/staff-alerts.service";
@@ -136,6 +136,10 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
   ) {}
   private enabled() {
     return this.env.get("SERVER_EVENTS_ENABLED") === true;
+  }
+  /** Voted 50v50 has its own owner-only flag; SERVER_EVENTS_ENABLED alone only allows staff-run events. */
+  private voteEventsHeld() {
+    return this.env.get("MAP_VOTES_FIFTY_ENABLED") !== true;
   }
   private staff(staff: Staff) {
     if (staff.role !== "admin") throw new ForbiddenException("Only administrators can manage optional events.");
@@ -303,6 +307,7 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
     close: ReadinessAtClose = {},
   ): Promise<VoteEventReadiness> {
     const no = (reason: string): VoteEventReadiness => ({ ok: false, reason });
+    if (this.voteEventsHeld()) return no(FIFTY_HELD_REASON);
     if (!this.enabled()) return no("optional events are off in Gramps");
     if (!this.env.get("ADMIN_GUILD_ID")) return no("the staff community is not configured");
     if (await this.store.current(serverId)) return no("another optional event is active or needs review");
@@ -366,6 +371,7 @@ export class ServerEventsService implements OnApplicationBootstrap, OnModuleDest
    * before anything is recorded.
    */
   async startFromVote(input: VoteEventStart) {
+    if (this.voteEventsHeld()) throw new ServiceUnavailableException(sentence(FIFTY_HELD_REASON));
     if (!this.enabled()) throw new ServiceUnavailableException("Optional events are off in Gramps.");
     const previous = await this.store.get(input.voteId);
     if (previous) {
