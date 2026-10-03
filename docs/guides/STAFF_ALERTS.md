@@ -101,7 +101,7 @@ Caveats: without headshot data these are conservative starting points, and explo
 
 Both are JSON env values. Adding or removing an entry means a redeploy. The staff API shows only how many entries there are.
 
-The watch list is checked only while `STAFF_ALERTS_ENABLED=true` and `STAFF_ALERTS_WATCHLIST_ENABLED=true` (section 2). With either flag off, the entries below are still validated at boot but never looked up, and `features.watchlist` in the staff status is `false`.
+The watch list is checked only while `STAFF_ALERTS_ENABLED=true` and `STAFF_ALERTS_WATCHLIST_ENABLED=true` (section 2). With either flag off, the `STAFF_ALERTS_WATCHLIST` entries are still validated at boot but never looked up, and `features.watchlist` in the staff status is `false`.
 
 ```
 STAFF_ALERTS_PERFORMANCE_KNOWN_GOOD='["76561198000000001",{"steamId":"76561198000000002","note":"owner"}]'
