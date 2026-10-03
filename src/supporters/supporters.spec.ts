@@ -2,6 +2,7 @@ import { createHmac, randomUUID } from "node:crypto";
 import type { Staff } from "../admin/admin.types";
 import type { EnvService } from "../env/env.service";
 import type { DiscordRolesService } from "../discord-roles/discord-roles.service";
+import { supporterFixture } from "./supporter-fixtures";
 import { SupportersService } from "./supporters.service";
 import type { SupportersStore } from "./supporters.store";
 import type { PatreonSyncService } from "./patreon-sync.service";
@@ -217,6 +218,36 @@ describe("supporter reviews", () => {
     sync.configured.mockReturnValue(false);
     await expect(service.syncNow(admin)).rejects.toMatchObject({ status: 503 });
     expect(sync.staffSync).toHaveBeenCalledTimes(1);
+  });
+  it("adds the steps still needed to every record, following which automatic matching is switched on", async () => {
+    const ready = supporterFixture({
+      discordId: "123456789012345678",
+      discordSource: "patreon",
+      patreonDiscordId: "123456789012345678",
+      steamId: "76561198000000001",
+      steamSource: "staff",
+      founderBlockedReason: null,
+      automaticBlockedReason: null,
+    });
+    const off = fixture();
+    off.store.list.mockResolvedValue([ready]);
+    expect((await off.service.list(admin)).supporters[0].nextSteps).toEqual([
+      expect.objectContaining({ code: "founder_ready_automatic_off", area: "founder" }),
+    ]);
+    const on = fixture({ SUPPORTER_AUTO_FOUNDER_ENABLED: true });
+    on.store.list.mockResolvedValue([ready]);
+    expect((await on.service.list(admin)).supporters[0].nextSteps).toEqual([
+      expect.objectContaining({ code: "founder_ready_automatic" }),
+    ]);
+    on.store.mutate.mockResolvedValueOnce({ ok: true, replayed: false, supporter: ready });
+    await expect(
+      on.service.mutate(admin, randomUUID(), "review", {
+        id: randomUUID(),
+        version: 1,
+        confirm: "member-1",
+        reason: "Reviewed",
+      }),
+    ).resolves.toMatchObject({ supporter: { nextSteps: [{ code: "founder_ready_automatic" }] } });
   });
   it("allows audited manual tracking before webhook setup without enabling webhook ingestion", async () => {
     const { service, store } = fixture({ PATREON_WEBHOOK_SECRET: undefined });
@@ -459,7 +490,7 @@ describe("PayPal supporter records", () => {
   };
   it("lists PayPal records and accepts PayPal entries while Patreon is not configured", async () => {
     const { service, store } = fixture({ PATREON_ENABLED: false, PATREON_CAMPAIGN_ID: undefined });
-    store.list.mockResolvedValue([{ id: "paypal-record" }]);
+    store.list.mockResolvedValue([supporterFixture({ id: "paypal-record", provider: "paypal" })]);
     await expect(service.list(admin)).resolves.toMatchObject({
       configured: false,
       paypal: { available: true },
@@ -621,7 +652,11 @@ describe("Supporter role notifications", () => {
     store.ingest.mockResolvedValueOnce({ duplicate: true });
     await expect(service.webhook(raw, signature, "members:update")).resolves.toEqual({ ok: true, duplicate: true });
     expect(roles.supporterChanged).toHaveBeenCalledTimes(1);
-    store.mutate.mockResolvedValueOnce({ ok: true, replayed: false, supporter: { discordId: "123456789012345678" } });
+    store.mutate.mockResolvedValueOnce({
+      ok: true,
+      replayed: false,
+      supporter: supporterFixture({ discordId: "123456789012345678" }),
+    });
     await service.mutate(admin, randomUUID(), "payment", {
       id: randomUUID(),
       version: 1,
@@ -638,7 +673,7 @@ describe("Supporter role notifications", () => {
 });
 
 describe("Founder role notifications", () => {
-  const supporter = { discordId: "123456789012345678" };
+  const supporter = supporterFixture({ discordId: "123456789012345678" });
   const review = { id: randomUUID(), version: 1, confirm: "member-123", reason: "Checked" };
   const founder = { ...review, paymentId: randomUUID() };
   it("asks for a role check after a founder award, a Discord link or a new PayPal record, never on a replay", async () => {

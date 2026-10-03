@@ -497,6 +497,121 @@ describe("supporter persistence and founder eligibility", () => {
     expect(statement.text).toContain("WHEN m.discord_source = 'patreon' THEN 'patreon_linked' ELSE 'staff_linked'");
     expect(statement.text).toContain("'automatic', f.awarded_by LIKE 'system:%'");
   });
+  it("reads every application of the Discord account for matching, never contact details", async () => {
+    const { store, query } = fixture();
+    await store.list("123", policy);
+    const [statement, values] = query.mock.calls[0];
+    expect(statement.text).toContain("'matchFacts', json_build_object(");
+    expect(statement.text).toContain("FROM whitelist_applications a WHERE a.discord_user_id = m.discord_id");
+    expect(statement.text).toContain("claim.status NOT IN ('declined', 'revoked')");
+    expect(statement.text).toContain("rejected.status IN ('declined', 'revoked')");
+    // Another supporter record of any provider counts: every PayPal record and the campaign's Patreon records.
+    expect(statement.text).toContain(
+      "AND (holder.provider = 'paypal' OR (holder.provider = 'patreon' AND holder.campaign_id = $",
+    );
+    expect(statement.text).toContain("p.source = 'patreon_api' AND p.verification_state = 'verified'");
+    expect(statement.text).toContain("other_payment.paid_at < p.paid_at");
+    expect(statement.text).toContain("reporter.patreon_discord_id = m.discord_id");
+    expect(values.filter((value: unknown) => value === "123").length).toBeGreaterThanOrEqual(2);
+    expect(statement.text).not.toMatch(/email|contact_consent|review_reason|reviewed_by|discord_display_name/);
+  });
+  it("shows what automatic matching would do, using the founder rule on its own payment", async () => {
+    const payment = {
+      id: randomUUID(),
+      paidAt: "2026-09-02T00:00:00.000Z",
+      amountCents: 500,
+      currency: "USD",
+      source: "patreon_api",
+      reference: "pledge_start:1",
+      verificationState: "verified",
+      firstSuccessfulPaymentVerified: true,
+      minimumConfirmed: false,
+      recordedBy: "system:patreon-sync",
+    };
+    const applicationId = randomUUID();
+    const stored = (change: Record<string, unknown> = {}, facts: Record<string, unknown> = {}) => ({
+      id,
+      provider: "patreon",
+      patreonMemberId: "member-123",
+      confirmKey: "member-123",
+      lastChargeStatus: "Paid",
+      lastChargeAt: payment.paidAt,
+      discordId: staff.id,
+      discordSource: "patreon",
+      patreonDiscordId: staff.id,
+      steamId: "76561198000000001",
+      steamSource: "application",
+      steamApplicationId: applicationId,
+      payments: [payment],
+      founderEligiblePayment: payment,
+      founderCandidate: null,
+      otherFounder: false,
+      founder: null,
+      matchFacts: {
+        applications: [
+          {
+            id: applicationId,
+            serverId: "primary",
+            steamId: "76561198000000001",
+            status: "approved",
+            accessIntent: "grant",
+            whitelistGrant: "granted",
+            revokedAt: null,
+            reviewedAt: "2026-09-02T01:00:00.000Z",
+            otherDiscordClaim: false,
+            rejectedBefore: false,
+            otherSupporter: false,
+          },
+        ],
+        automatic: { payment, earlier: false, earlierOtherRecord: false },
+        discordReportedForOtherPatron: false,
+        patreonDiscordElsewhere: false,
+        ...facts,
+      },
+      ...change,
+    });
+    const read = async (row: Record<string, unknown>) => {
+      const query = jest.fn(async () => ({ rows: [{ supporter: row }] }));
+      return (await new SupportersStore(drizzle({ query } as unknown as Client) as Database).list("123", policy))[0];
+    };
+    const view = await read(stored());
+    expect(view).toMatchObject({
+      automaticBlockedReason: null,
+      automaticPayment: { id: payment.id },
+      match: {
+        steam: { reason: null, steamId: "76561198000000001", applicationId },
+        sourceApplication: { id: applicationId, serverId: "primary", status: "approved" },
+        sourceApplicationRevoked: false,
+      },
+    });
+    expect(view).not.toHaveProperty("matchFacts");
+    expect(view).not.toHaveProperty("otherFounder");
+    // The staff rule runs on the automatic payment after the automatic rules.
+    expect(await read(stored({}, { automatic: { payment, earlier: true, earlierOtherRecord: false } }))).toMatchObject({
+      automaticBlockedReason: "earlier_payment",
+    });
+    expect(await read(stored({ otherFounder: true }))).toMatchObject({ automaticBlockedReason: "already_founder" });
+    expect(await read(stored({ discordSource: "staff" }))).toMatchObject({
+      automaticBlockedReason: "discord_not_from_patreon",
+      automaticBlockedMessage: expect.stringContaining("entered by staff"),
+    });
+    expect(await read(stored({}, { applications: [] }))).toMatchObject({
+      automaticBlockedReason: "source_application_revoked",
+      match: { steam: { reason: "no_application" }, sourceApplicationRevoked: true, sourceApplication: null },
+    });
+    // A founder needs no automatic verdict, and a record without a Discord account has no SteamID match.
+    expect(
+      await read(
+        stored({
+          founder: { awardedAt: payment.paidAt, paymentId: payment.id, source: "patreon_api", automatic: true },
+        }),
+      ),
+    ).toMatchObject({ automaticBlockedReason: null, automaticBlockedMessage: null });
+    expect(await read(stored({ discordId: null, discordSource: null }))).toMatchObject({
+      automaticBlockedReason: "no_discord",
+      match: { steam: null },
+    });
+  });
   it("links one identity at a time and keeps the other", async () => {
     const { store, query } = fixture();
     await store.mutate(

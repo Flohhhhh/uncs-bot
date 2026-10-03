@@ -279,6 +279,22 @@ export const Env = z.object({
   /** Provider-neutral founder window (Patreon and PayPal). A complete pair wins over PATREON_FOUNDER_*. */
   SUPPORTER_FOUNDER_START_AT: z.iso.datetime({ offset: true }).optional(),
   SUPPORTER_FOUNDER_END_AT: z.iso.datetime({ offset: true }).optional(),
+  /**
+   * Automatic supporter matching, for Patreon supporters only. Both switches are off by default. The SteamID fill
+   * copies an empty SteamID from the supporter's approved whitelist application. Automatic founders record founder
+   * promises under a stricter rule than staff awards; a founder promise cannot be undone yet, so leave it off until
+   * staff can void one (see the Patreon supporters guide).
+   */
+  SUPPORTER_AUTO_STEAM_FILL_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  SUPPORTER_AUTO_FOUNDER_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  /** Hours an imported first payment must stand (Patreon's refund window) before an automatic founder promise. */
+  SUPPORTER_AUTO_FOUNDER_HOLD_HOURS: z.coerce.number().int().min(0).max(720).default(72),
 
   /**
    * Automatic UNC member, Founder and Supporter roles in ADMIN_GUILD_ID. Off by default; the status page

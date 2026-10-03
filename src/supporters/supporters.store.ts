@@ -19,11 +19,21 @@ import {
   type FounderIdentity,
   identityKeys,
   lockKeys,
+  matchFactsSql,
   otherFounder,
+  paymentJson,
   qualifyingSources,
   RECEIPT_COPY_TOLERANCE,
   receiptCopy,
 } from "./founder-rules";
+import {
+  applicationSteamMatch,
+  AUTO_FOUNDER_HOLD_HOURS_DEFAULT,
+  automaticBlockedMessages,
+  automaticFounderBlocker,
+  type MatchFacts,
+  sourceApplicationRevoked,
+} from "./supporter-match.rules";
 import {
   founderBlockedMessages,
   founderBlocker,
@@ -67,9 +77,19 @@ export type FounderReview = {
 type MemberRow = typeof supporterMembers.$inferSelect;
 type PaymentRow = typeof supporterPayments.$inferSelect;
 // Internal columns used to explain founder readiness; removed before a view leaves the store.
-type StoredSupporter = Omit<SupporterView, "founderBlockedReason" | "founderBlockedMessage" | "needsDiscordLink"> & {
+type StoredSupporter = Omit<
+  SupporterView,
+  | "founderBlockedReason"
+  | "founderBlockedMessage"
+  | "needsDiscordLink"
+  | "match"
+  | "automaticPayment"
+  | "automaticBlockedReason"
+  | "automaticBlockedMessage"
+> & {
   founderCandidate: { payment: PaymentView; earlier: boolean; copyUnverified: boolean } | null;
   otherFounder: boolean;
+  matchFacts: MatchFacts;
 };
 type ObservedFields = Pick<PatreonObservation, "displayName" | "patronStatus" | "lastChargeStatus" | "lastChargeAt">;
 
@@ -484,10 +504,7 @@ export class SupportersStore {
     search = "",
     provider?: SupporterProvider,
   ): Promise<SupporterView[]> {
-    const payment = (alias: string) =>
-      sql.raw(
-        `json_build_object('id', ${alias}.id, 'paidAt', ${alias}.paid_at, 'amountCents', ${alias}.amount_cents, 'currency', ${alias}.currency, 'source', ${alias}.source, 'reference', ${alias}.reference, 'verificationState', ${alias}.verification_state, 'firstSuccessfulPaymentVerified', ${alias}.first_successful_payment_verified, 'minimumConfirmed', ${alias}.minimum_confirmed, 'recordedBy', ${alias}.recorded_by)`,
-      );
+    const payment = paymentJson;
     // The founder-eligible payment prefers a staff receipt over the imported copy of the same charge, because the
     // current dashboard awards only on a receipt.
     const result = await this.db.execute<{ supporter: StoredSupporter }>(sql`
@@ -526,6 +543,7 @@ export class SupportersStore {
           JOIN supporter_members other_member ON other_member.id = other_founder.member_id
           WHERE other_member.id <> m.id AND ((m.discord_id IS NOT NULL AND other_member.discord_id = m.discord_id)
             OR (m.steam_id IS NOT NULL AND other_member.steam_id = m.steam_id))),
+        'matchFacts', ${matchFactsSql(campaignId)},
         'founder', (SELECT json_build_object('awardedAt', f.awarded_at, 'paymentId', f.payment_id, 'source', founder_payment.source,
             'automatic', f.awarded_by LIKE 'system:%')
           FROM supporter_founders f LEFT JOIN supporter_payments founder_payment ON founder_payment.id = f.payment_id
@@ -548,11 +566,18 @@ export class SupportersStore {
       }
       ORDER BY m.observed_at DESC, m.id LIMIT 100
     `);
-    return result.rows.map((row) => this.view(row.supporter, policy));
+    const now = Date.now();
+    return result.rows.map((row) => this.view(row.supporter, policy, now));
   }
 
-  private view(stored: StoredSupporter, policy: FounderPolicy): SupporterView {
-    const { founderCandidate, otherFounder, ...supporter } = stored;
+  private view(stored: StoredSupporter, policy: FounderPolicy, now: number): SupporterView {
+    const { founderCandidate, otherFounder, matchFacts, ...supporter } = stored;
+    const facts: MatchFacts = {
+      applications: matchFacts?.applications ?? [],
+      automatic: matchFacts?.automatic ?? null,
+      discordReportedForOtherPatron: Boolean(matchFacts?.discordReportedForOtherPatron),
+      patreonDiscordElsewhere: Boolean(matchFacts?.patreonDiscordElsewhere),
+    };
     let founderBlockedReason: SupporterView["founderBlockedReason"] = null;
     if (!supporter.founder) {
       const eligible = supporter.founderEligiblePayment;
@@ -568,12 +593,37 @@ export class SupportersStore {
               otherFounder,
             });
     }
+    // The same verdict automatic matching reaches: its own rules, then the staff founder rule on its payment.
+    const automaticBlockedReason = supporter.founder
+      ? null
+      : (automaticFounderBlocker(supporter, facts, {
+          now,
+          holdHours: policy.automaticHoldHours ?? AUTO_FOUNDER_HOLD_HOURS_DEFAULT,
+        }) ??
+        founderBlocker(facts.automatic!.payment, policy, {
+          earlierPayment: facts.automatic!.earlier,
+          hasIdentity: founderIdentity(supporter),
+          otherFounder,
+        }));
+    const source = supporter.steamApplicationId
+      ? facts.applications.find((application) => application.id === supporter.steamApplicationId)
+      : undefined;
     return {
       ...supporter,
       payments: supporter.payments ?? [],
       founderBlockedReason,
       founderBlockedMessage: founderBlockedReason ? founderBlockedMessages[founderBlockedReason] : null,
       needsDiscordLink: Boolean(supporter.founder) && !supporter.discordId,
+      match: {
+        steam: supporter.discordId ? applicationSteamMatch(facts.applications) : null,
+        sourceApplication: source ? { id: source.id, serverId: source.serverId, status: source.status } : null,
+        sourceApplicationRevoked: sourceApplicationRevoked(supporter, facts),
+        patreonDiscordElsewhere: facts.patreonDiscordElsewhere,
+        discordReportedForOtherPatron: facts.discordReportedForOtherPatron,
+      },
+      automaticPayment: facts.automatic?.payment ?? null,
+      automaticBlockedReason,
+      automaticBlockedMessage: automaticBlockedReason ? automaticBlockedMessages[automaticBlockedReason] : null,
     };
   }
 

@@ -47,6 +47,7 @@ import { StaffAlerts } from "../src/staff-alerts/staff-alerts.service";
 import { StaffAlertsMonitor } from "../src/staff-alerts/staff-alerts.monitor";
 import { settingsView, staffAlertsOptions } from "../src/staff-alerts/staff-alerts.config";
 import type { StaffAlertsStatus } from "../src/common/staff-alerts";
+import { automaticBlockedMessages } from "../src/supporters/supporter-match.rules";
 import {
   founderBlockedMessages,
   type FounderPolicy,
@@ -718,6 +719,30 @@ const telemetryStore = {
 };
 // Fictional supporter evidence stays in memory. No Patreon credentials or calls.
 const demoSupporters = new Map<string, SupporterView>();
+/** No whitelist applications exist in the preview, so automatic matching never has anything to copy. */
+function previewMatch(record: Pick<SupporterView, "discordId" | "discordSource" | "steamId">, founder: boolean) {
+  const automaticBlockedReason = founder
+    ? null
+    : !record.discordId
+      ? ("no_discord" as const)
+      : record.discordSource !== "patreon"
+        ? ("discord_not_from_patreon" as const)
+        : ("no_patreon_payment" as const);
+  return {
+    match: {
+      steam: record.discordId
+        ? { reason: "no_application" as const, steamId: null, applicationId: null, serverId: null }
+        : null,
+      sourceApplication: null,
+      sourceApplicationRevoked: false,
+      patreonDiscordElsewhere: false,
+      discordReportedForOtherPatron: false,
+    },
+    automaticPayment: null,
+    automaticBlockedReason,
+    automaticBlockedMessage: automaticBlockedReason ? automaticBlockedMessages[automaticBlockedReason] : null,
+  };
+}
 const demoSupporterActions = new Map<string, string>();
 const demoPaymentReferences = new Set<string>();
 for (const [index, displayName] of ["Demo · Steady Supporter", "Demo · Founding Crew", "Demo · New Backer"].entries()) {
@@ -763,6 +788,14 @@ for (const [index, displayName] of ["Demo · Steady Supporter", "Demo · Foundin
     founderBlockedReason: null,
     founderBlockedMessage: null,
     needsDiscordLink: false,
+    ...previewMatch(
+      {
+        discordId: index === 2 ? null : `88888888888888888${index + 1}`,
+        discordSource: index === 2 ? null : "staff",
+        steamId: index === 2 ? null : `7656119800000000${index + 1}`,
+      },
+      index === 1,
+    ),
   });
 }
 const supporterStore = {
@@ -804,6 +837,7 @@ const supporterStore = {
       founderBlockedReason: "no_payment",
       founderBlockedMessage: founderBlockedMessages.no_payment,
       needsDiscordLink: false,
+      ...previewMatch({ discordId: null, discordSource: null, steamId: null }, false),
     };
     demoSupporters.set(record.id, record);
     demoSupporterActions.set(input.id, fingerprint);
@@ -878,6 +912,7 @@ const supporterStore = {
         source: view.founderEligiblePayment.source,
         automatic: false,
       };
+      Object.assign(record, previewMatch(record, true));
     }
     if (input.kind === "link") {
       if (
@@ -898,6 +933,7 @@ const supporterStore = {
           : record.discordId || record.steamId
             ? "partial"
             : "unlinked";
+      Object.assign(record, previewMatch(record, Boolean(record.founder)));
     }
     if (input.kind === "payment") {
       const reference = input.reference.toLowerCase();

@@ -12,6 +12,7 @@ import type { Staff } from "../admin/admin.types";
 import { deploymentSecrets, PatreonSyncService } from "./patreon-sync.service";
 import { SupportersStore } from "./supporters.store";
 import { founderPolicy, patreonCampaign } from "./founder-policy";
+import { supporterNextSteps, type NextStepContext } from "./supporter-match.rules";
 import {
   founderSchema,
   linkSchema,
@@ -23,7 +24,9 @@ import {
   reviewSchema,
   signedByPatreon,
   type FounderPolicy,
+  type SupporterListItem,
   type SupporterMutation,
+  type SupporterView,
 } from "./supporters.types";
 
 @Injectable()
@@ -63,6 +66,21 @@ export class SupportersService {
   policy(): FounderPolicy {
     return founderPolicy(this.env);
   }
+  /** What the next-step text may promise: which automatic matching is on, and whether the import runs. */
+  private automation(): NextStepContext {
+    return {
+      steamFill: this.env.get("SUPPORTER_AUTO_STEAM_FILL_ENABLED") === true,
+      founderAuto: this.env.get("SUPPORTER_AUTO_FOUNDER_ENABLED") === true,
+      importConfigured: this.patreonSync.configured(),
+    };
+  }
+  /** Adds the steps still needed to a record before it leaves the service. */
+  private withSteps<T extends { supporter?: SupporterView | null }>(result: T, context = this.automation()) {
+    const supporter = result.supporter;
+    return (
+      supporter ? { ...result, supporter: { ...supporter, nextSteps: supporterNextSteps(supporter, context) } } : result
+    ) as Omit<T, "supporter"> & { supporter?: SupporterListItem | null };
+  }
   private admin(staff: Staff) {
     if (staff.role !== "admin") throw new ForbiddenException("Only administrators can access supporter records.");
   }
@@ -91,7 +109,8 @@ export class SupportersService {
     const parsedProvider = providerFilter.safeParse(provider === "" ? undefined : provider);
     if (!parsedProvider.success) throw new BadRequestException("Filter by the patreon or paypal provider.");
     const configured = this.configured(),
-      founderPolicy = this.policy();
+      founderPolicy = this.policy(),
+      automation = this.automation();
     return {
       enabled: this.env.get("PATREON_ENABLED"),
       configured,
@@ -99,13 +118,9 @@ export class SupportersService {
       founderPolicy,
       // The PayPal ledger needs no provider connection and stays available when Patreon is not configured.
       paypal: { available: true },
-      supporters: await this.store.list(
-        this.campaign(),
-        founderPolicy,
-        undefined,
-        parsedSearch.data,
-        parsedProvider.data,
-      ),
+      supporters: (
+        await this.store.list(this.campaign(), founderPolicy, undefined, parsedSearch.data, parsedProvider.data)
+      ).map((supporter): SupporterListItem => ({ ...supporter, nextSteps: supporterNextSteps(supporter, automation) })),
       search: parsedSearch.data,
       provider: parsedProvider.data ?? null,
       limit: 100,
@@ -128,7 +143,9 @@ export class SupportersService {
     const parsed = manualMemberSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException("Check the Patreon membership ID, confirmation and reason.");
     try {
-      return await this.store.register(parsed.data, staff, this.env.get("PATREON_CAMPAIGN_ID")!, this.policy());
+      return this.withSteps(
+        await this.store.register(parsed.data, staff, this.env.get("PATREON_CAMPAIGN_ID")!, this.policy()),
+      );
     } catch (error) {
       this.translateConflict(error);
     }
@@ -152,7 +169,7 @@ export class SupportersService {
       // Supporter role.
       if (!result.replayed && (input.kind === "founder" || input.kind === "link" || input.kind === "payment"))
         this.notifyRoles(result.supporter?.discordId);
-      return result;
+      return this.withSteps(result);
     } catch (error) {
       this.translateConflict(error);
     }
@@ -169,7 +186,7 @@ export class SupportersService {
     try {
       const result = await this.store.recordPaypal(parsed.data, staff, this.campaign(), this.policy());
       if (!result.replayed) this.notifyRoles(result.supporter?.discordId);
-      return result;
+      return this.withSteps(result);
     } catch (error) {
       this.translateConflict(error);
     }

@@ -44,6 +44,57 @@ export const earlierPayment = sql.raw(`EXISTS (SELECT 1 FROM supporter_payments 
             WHERE earlier.member_id = p.member_id AND earlier.paid_at < p.paid_at AND earlier.id IS DISTINCT FROM dup.id
             AND (p.source <> 'patreon_api' OR earlier.source <> 'signed_status'))`);
 
+/** A payment as the Supporters page shows it, for the payment row aliased `alias`. */
+export const paymentJson = (alias: string) =>
+  sql.raw(
+    `json_build_object('id', ${alias}.id, 'paidAt', ${alias}.paid_at, 'amountCents', ${alias}.amount_cents, 'currency', ${alias}.currency, 'source', ${alias}.source, 'reference', ${alias}.reference, 'verificationState', ${alias}.verification_state, 'firstSuccessfulPaymentVerified', ${alias}.first_successful_payment_verified, 'minimumConfirmed', ${alias}.minimum_confirmed, 'recordedBy', ${alias}.recorded_by)`,
+  );
+
+/**
+ * The facts automatic supporter matching reads for the supporter row aliased `m` (see MatchFacts). The Supporters page
+ * and the automatic writes both select this one expression, so the page shows exactly what automation would do.
+ *
+ * - applications: every whitelist application of the record's Discord account on any server, with whether another
+ *   Discord account claims its SteamID, whether any application for that SteamID was declined or revoked, and whether
+ *   another supporter record (any PayPal record, or a Patreon record of `campaignId`) holds it. Email, consent and
+ *   reviewer notes are never selected.
+ * - automatic: the earliest verified first Patreon API payment, with the founder rule's own earlier-payment test and
+ *   whether another record with the same Discord account or SteamID has an earlier payment of any kind.
+ * - whether Patreon reports this record's Discord account for another patron, and whether the account Patreon reports
+ *   for this record is linked to another record.
+ */
+export function matchFactsSql(campaignId: string | null) {
+  return sql`json_build_object(
+    'applications', (SELECT coalesce(json_agg(json_build_object('id', a.id, 'serverId', a.server_id,
+        'steamId', a.steam_id, 'status', a.status, 'accessIntent', a.access_intent,
+        'whitelistGrant', a.whitelist_grant, 'revokedAt', a.revoked_at, 'reviewedAt', a.reviewed_at,
+        'otherDiscordClaim', EXISTS (SELECT 1 FROM whitelist_applications claim WHERE claim.steam_id = a.steam_id
+          AND claim.discord_user_id <> a.discord_user_id AND claim.status NOT IN ('declined', 'revoked')),
+        'rejectedBefore', EXISTS (SELECT 1 FROM whitelist_applications rejected WHERE rejected.steam_id = a.steam_id
+          AND rejected.status IN ('declined', 'revoked')),
+        'otherSupporter', EXISTS (SELECT 1 FROM supporter_members holder WHERE holder.id <> m.id
+          AND holder.steam_id = a.steam_id
+          AND (holder.provider = 'paypal' OR (holder.provider = 'patreon' AND holder.campaign_id = ${campaignId}))))
+        ORDER BY a.reviewed_at NULLS LAST, a.id), '[]'::json)
+      FROM whitelist_applications a WHERE a.discord_user_id = m.discord_id),
+    'automatic', (SELECT json_build_object('payment', ${paymentJson("p")}, 'earlier', ${earlierPayment},
+        'earlierOtherRecord', EXISTS (SELECT 1 FROM supporter_members other_record
+          JOIN supporter_payments other_payment ON other_payment.member_id = other_record.id
+          WHERE other_record.id <> m.id AND other_payment.paid_at < p.paid_at
+          AND ((m.discord_id IS NOT NULL AND other_record.discord_id = m.discord_id)
+            OR (m.steam_id IS NOT NULL AND other_record.steam_id = m.steam_id))))
+      FROM supporter_payments p LEFT JOIN LATERAL ${receiptCopy("p")} dup ON true
+      WHERE p.member_id = m.id AND p.source = 'patreon_api' AND p.verification_state = 'verified'
+        AND p.first_successful_payment_verified
+      ORDER BY p.paid_at, p.id LIMIT 1),
+    'discordReportedForOtherPatron', EXISTS (SELECT 1 FROM supporter_members reporter WHERE reporter.id <> m.id
+      AND reporter.provider = 'patreon' AND reporter.campaign_id = m.campaign_id
+      AND reporter.patreon_discord_id = m.discord_id),
+    'patreonDiscordElsewhere', m.patreon_discord_id IS NOT NULL AND m.patreon_discord_id IS DISTINCT FROM m.discord_id
+      AND EXISTS (SELECT 1 FROM supporter_members linked WHERE linked.id <> m.id AND linked.provider = 'patreon'
+        AND linked.campaign_id = m.campaign_id AND linked.discord_id = m.patreon_discord_id))`;
+}
+
 /** Founder awards for one person serialize on each identity before the cross-record check. */
 export async function lockKeys(tx: Executor, keys: string[]) {
   for (const key of [...new Set(keys)].sort())

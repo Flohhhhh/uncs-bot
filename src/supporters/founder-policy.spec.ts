@@ -14,8 +14,10 @@ describe("shared founder window and campaign", () => {
       endsAt: "2026-10-15T04:00:00.000Z",
       configured: true,
       source: "SUPPORTER_FOUNDER",
+      automaticHoldHours: 72,
     });
     expect(founderPolicy(env({ SUPPORTER_FOUNDER_START_AT: start })).configured).toBe(false);
+    expect(founderPolicy(env({ SUPPORTER_AUTO_FOUNDER_HOLD_HOURS: 0 })).automaticHoldHours).toBe(0);
   });
   it("names the Patreon campaign only while Patreon is switched on", () => {
     expect(patreonCampaign(env({ PATREON_ENABLED: true, PATREON_CAMPAIGN_ID: "123" }))).toBe("123");

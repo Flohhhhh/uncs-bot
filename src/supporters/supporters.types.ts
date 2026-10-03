@@ -9,6 +9,7 @@ import type {
   SupporterSteamSource,
 } from "../database/supporters.schema";
 import { PATREON_REVERSED_CHARGE_STATUSES } from "./patreon.client";
+import type { AutomaticFounderBlockedReason, NextStep, SteamMatch } from "./supporter-match.rules";
 
 export const MAX_PATREON_BYTES = 65_536;
 const line = (maximum: number) =>
@@ -190,6 +191,8 @@ export type FounderPolicy = {
   configured: boolean;
   /** The environment pair that supplied the window; null while it is not configured. */
   source: "SUPPORTER_FOUNDER" | "PATREON_FOUNDER" | null;
+  /** Hours an imported first payment must stand before automatic matching records a founder promise (default 72). */
+  automaticHoldHours?: number;
 };
 export const policyDays = 15;
 /** The founder minimum. The Supporter Discord role uses the same minimum. */
@@ -371,4 +374,22 @@ export type SupporterView = {
   founderBlockedMessage: string | null;
   /** A founder without a linked Discord account cannot receive the Founder role. */
   needsDiscordLink: boolean;
+  /** What automatic matching found for this record. */
+  match: {
+    /** The SteamID this Discord account's approved application offers, and why it may not be copied; null without a Discord account. */
+    steam: SteamMatch | null;
+    /** The application the SteamID was copied from, when automatic matching copied it and it is still on record. */
+    sourceApplication: { id: string; serverId: string; status: string } | null;
+    /** The SteamID was copied from an application, and no approved application for it remains. */
+    sourceApplicationRevoked: boolean;
+    patreonDiscordElsewhere: boolean;
+    discordReportedForOtherPatron: boolean;
+  };
+  /** The payment automatic matching would record a founder promise on: the earliest verified first Patreon API payment. */
+  automaticPayment: PaymentView | null;
+  /** Why automatic matching would not record a founder promise; null for a founder or one it would record. */
+  automaticBlockedReason: AutomaticFounderBlockedReason | null;
+  automaticBlockedMessage: string | null;
 };
+/** A supporter record as the dashboard receives it, with the steps still needed. */
+export type SupporterListItem = SupporterView & { nextSteps: NextStep[] };

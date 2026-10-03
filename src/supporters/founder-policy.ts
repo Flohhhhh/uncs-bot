@@ -1,4 +1,5 @@
 import type { EnvService } from "../env/env.service";
+import { AUTO_FOUNDER_HOLD_HOURS_DEFAULT } from "./supporter-match.rules";
 import { FOUNDER_MINIMUM, policyDays, type FounderPolicy } from "./supporters.types";
 
 type EnvReader = Pick<EnvService, "get">;
@@ -9,6 +10,7 @@ type EnvReader = Pick<EnvService, "get">;
  * instants, leaves the window unconfigured rather than guessing.
  */
 export function founderPolicy(env: EnvReader): FounderPolicy {
+  const hold = Number(env.get("SUPPORTER_AUTO_FOUNDER_HOLD_HOURS"));
   const unconfigured: FounderPolicy = {
     amountCents: FOUNDER_MINIMUM.amountCents,
     currency: FOUNDER_MINIMUM.currency,
@@ -16,6 +18,7 @@ export function founderPolicy(env: EnvReader): FounderPolicy {
     endsAt: null,
     configured: false,
     source: null,
+    automaticHoldHours: Number.isInteger(hold) && hold >= 0 && hold <= 720 ? hold : AUTO_FOUNDER_HOLD_HOURS_DEFAULT,
   };
   const pairs = [
     {
