@@ -12,6 +12,7 @@ const context: AdminContextValue = {
   me: { id: "12345678901234567", name: "Admin", role: "admin", csrf: "fixture" },
   overview: null,
   stale: true,
+  checking: false,
   busy: false,
   dialogOpen: false,
   refreshVersion: 0,
@@ -21,6 +22,7 @@ const context: AdminContextValue = {
   refresh: vi.fn(),
   invalidateOverview: vi.fn(),
   openAction: vi.fn(),
+  watchRoster: vi.fn(),
 };
 function page(value = context) {
   return (
