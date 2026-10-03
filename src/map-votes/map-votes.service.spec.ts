@@ -143,6 +143,7 @@ function fixture(enabled = true, serverId = "primary") {
     act: jest.fn().mockResolvedValue({ state: "pending", message: "Saved" }),
     receipt: jest.fn().mockResolvedValue({ record: null }),
     onUnchangedQueue: jest.fn(),
+    staffQueuedSince: jest.fn().mockResolvedValue(false),
   };
   const role = jest.fn().mockResolvedValue("admin");
   const auth = {
@@ -1715,6 +1716,59 @@ describe("automatic ballots that follow the round, not the clock", () => {
     off.environment.MAP_VOTES_ENABLED = false;
     expect(await registeredQueueListener(off)(staff, "primary")).toBeNull();
     expect(off.store.automaticOpen).not.toHaveBeenCalled();
+  });
+  it("tells staff about a ballot opening or closing when they queue the entry already next", async () => {
+    const f = await openBallot();
+    const staffQueued = registeredQueueListener(f);
+    f.record.state = "closing";
+    expect(await staffQueued(staff, "primary")).toBe(
+      "A community vote on this server is closing now and may still change the next map. Check Map votes.",
+    );
+    f.record.state = "publishing";
+    expect(await staffQueued(staff, "primary")).toBe(
+      "A community vote on this server is opening now. Close it in Map votes to keep this choice.",
+    );
+    expect(f.store.cancel).not.toHaveBeenCalled();
+    // A manual ballot keeps its original revision rule and is not mentioned.
+    f.record.state = "closing";
+    f.record.automation = null;
+    expect(await staffQueued(staff, "primary")).toBeNull();
+  });
+  it("finishes a closing ballot without its winner when staff queued the entry already next", async () => {
+    const f = await openBallot();
+    const staffQueued = registeredQueueListener(f);
+    const queuer: Staff = { ...staff, id: "987654321098765432", name: "Queuing admin", serverId: "primary" };
+    await f.service.tick();
+    later();
+    f.score(95);
+    // The staff queue lands after Gramps claimed the close and before it sends the winner.
+    const verify = f.auth.serverStaff.getMockImplementation()!;
+    let note: string | null | undefined;
+    f.auth.serverStaff.mockImplementation(async (actor: Staff, serverId: string) => {
+      if (f.record.state === "closing" && note === undefined) {
+        note = await staffQueued(queuer, "primary");
+        f.admin.staffQueuedSince.mockResolvedValue(true);
+      }
+      return verify(actor, serverId);
+    });
+    await f.service.tick();
+    expect(f.store.claimClose).toHaveBeenCalledWith(f.record.id, true);
+    expect(note).toBe(
+      "A community vote on this server is closing now and may still change the next map. Check Map votes.",
+    );
+    expect(f.admin.staffQueuedSince).toHaveBeenCalledWith("primary", f.record.createdAt);
+    expect(f.store.patchAutomation).not.toHaveBeenCalled();
+    expect(f.admin.act).not.toHaveBeenCalled();
+    expect(f.store.finish).toHaveBeenCalledWith(
+      f.record.id,
+      "cancelled",
+      "Staff queued the next map. Votes were not applied.",
+    );
+    // The existing ballot message is edited; nothing new is posted.
+    expect(f.discord.update).toHaveBeenCalledWith(
+      expect.objectContaining({ state: "cancelled", message: "Staff queued the next map. Votes were not applied." }),
+    );
+    expect(f.discord.publish).not.toHaveBeenCalled();
   });
   it.each([
     ["the score reaches 100", { factionScores: leadingScores(100) }, 60],

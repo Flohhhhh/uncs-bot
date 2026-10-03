@@ -424,6 +424,16 @@ const store = {
       .reverse()
       .slice(0, 100);
   },
+  async staffQueuedSince(serverId: string, since: Date) {
+    return [...records.values()].some(
+      (record) =>
+        record.action === "map-next" &&
+        (record.details.serverId ?? "primary") === serverId &&
+        record.createdAt >= since &&
+        !record.actorId.startsWith("system:") &&
+        record.state !== "failed",
+    );
+  },
   async receipt(id: string, serverId: string) {
     const record = records.get(id);
     if (!record || (record.details.serverId ?? "primary") !== serverId) return null;

@@ -184,6 +184,14 @@ export class AdminService {
     return { id: action.id, ...result };
   }
 
+  /**
+   * Whether a person queued a map on this server since `since`, including the entry already next, which
+   * leaves the rotation unchanged. An automatic ballot checks this before it sends its winner.
+   */
+  staffQueuedSince(serverId: string, since: Date) {
+    return this.store.staffQueuedSince(serverId, since);
+  }
+
   async receipt(id: string, serverId?: string) {
     const parsed = z.uuid().safeParse(id);
     if (!parsed.success) throw new BadRequestException("Enter a valid action ID.");

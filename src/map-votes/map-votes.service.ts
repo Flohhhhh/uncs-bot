@@ -813,7 +813,8 @@ export class MapVotesService implements OnModuleInit, OnApplicationBootstrap, On
   /**
    * A person queued the entry that is already next. The rotation, and so the ballot's fingerprint, did not
    * change, so the open automatic ballot on that server is closed here; its result would replace the choice.
-   * Returns a note for the staff member's result, or null when no ballot was open.
+   * A ballot already closing cannot be closed: its close checks for this queue before sending a winner.
+   * Returns a note for the staff member's result, or null when no automatic ballot is active.
    */
   private async staffQueuedNext(staff: Staff, serverId: string): Promise<string | null> {
     if (!this.options().enabled) return null;
@@ -827,6 +828,13 @@ export class MapVotesService implements OnModuleInit, OnApplicationBootstrap, On
         this.logger.warn(`Automatic map vote ${vote.id} could not be closed after staff queued the next map.`);
       }
     if (closed) return "The open community vote was closed, so it cannot replace this choice.";
+    // Read again: a ballot read as open may have started closing before it could be closed.
+    const busy = (await this.store.history(serverId)).find(
+      (vote) => vote.automation && (vote.state === "publishing" || vote.state === "closing"),
+    );
+    if (busy?.state === "closing")
+      return "A community vote on this server is closing now and may still change the next map. Check Map votes.";
+    if (busy) return "A community vote on this server is opening now. Close it in Map votes to keep this choice.";
     return open.length
       ? "The open community vote could not be closed. Close it in Map votes to keep this choice."
       : null;
@@ -1632,7 +1640,12 @@ export class MapVotesService implements OnModuleInit, OnApplicationBootstrap, On
         if ((await this.store.get(vote.id))?.state !== "closing" || this.stopped) return;
         const winner = vote.choices[vote.winner];
         const entry = stripEvent(winner);
-        if (winner.event === "50v50") {
+        // A person's queue since the ballot opened wins. Queuing the entry already next leaves the rotation,
+        // and so every check above, unchanged, and a ballot already closing cannot be closed by it.
+        if (automation && (await this.admin.staffQueuedSince(vote.serverId, vote.createdAt))) {
+          state = "cancelled";
+          message = STAFF_QUEUED;
+        } else if (winner.event === "50v50") {
           if (!current) throw new Error("Only automatic ballots can start a 50v50.");
           // No queue change: the next rotation entry plays as 50v50.
           ({ state, message, patch } = await this.startFifty(
