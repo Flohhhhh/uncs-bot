@@ -55,7 +55,7 @@ export interface PassSummary {
   deferred: number;
   error: string | null;
   attention: AttentionItem[];
-  /** Only on a dry run: at most 100 entries. */
+  /** Only on a dry run: about 100 entries at most (see MAX_PLAN_LENGTH). */
   plan?: PlanEntry[];
 }
 /** A discord_role_actions row. */
@@ -114,6 +114,11 @@ export interface ReconcileResponse {
   summary: PassSummary;
 }
 export const MAX_PLAN_ENTRIES = 100;
+/**
+ * The server stops taking new people once the plan holds 100 entries, but it plans each person's roles together,
+ * so the last person can add one entry per role and a plan can hold up to 102.
+ */
+export const MAX_PLAN_LENGTH = MAX_PLAN_ENTRIES + ROLE_KINDS.length - 1;
 
 const record = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
@@ -143,7 +148,8 @@ function roleCheck(value: unknown) {
     bool(value.assignable) &&
     nullableText(value.problem) &&
     (value.candidates === undefined ||
-      list(value.candidates, 50, (entry) => record(entry) && text(entry.id) && text(entry.name)))
+      // Discord allows 250 roles in a server.
+      list(value.candidates, 250, (entry) => record(entry) && text(entry.id) && text(entry.name)))
   );
 }
 function attentionItem(value: unknown) {
@@ -190,7 +196,7 @@ function passSummary(value: unknown) {
     ].every(count) &&
     nullableText(value.error) &&
     list(value.attention, 500, attentionItem) &&
-    (value.plan === undefined || list(value.plan, MAX_PLAN_ENTRIES, planEntry))
+    (value.plan === undefined || list(value.plan, MAX_PLAN_LENGTH, planEntry))
   );
 }
 function ledgerRow(value: unknown) {

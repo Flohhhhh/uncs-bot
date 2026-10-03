@@ -1,4 +1,12 @@
-import type { DiscordRolesStatus, PassSummary, PlanEntry, ReconcileResponse, RoleCheck, RoleLedgerRow } from "./types";
+import type {
+  DiscordRolesStatus,
+  PassSummary,
+  PlanEntry,
+  ReconcileResponse,
+  RoleCheck,
+  RoleKind,
+  RoleLedgerRow,
+} from "./types";
 
 /** Sample Discord user IDs; none belongs to a real account. */
 export const members = {
@@ -107,6 +115,32 @@ export function rolesStatus(overrides: Partial<DiscordRolesStatus> = {}): Discor
     ],
     recent: [ledgerRow(1), ledgerRow(2, { operation: "note", changed: false, message: "Already present." })],
     note: "Gramps adds and removes only the roles it manages.",
+    ...overrides,
+  };
+}
+/**
+ * What the server reports when it could not read Discord (not connected, ADMIN_GUILD_ID unset or unreadable): no bot
+ * facts, and every role, configured or not, carries that same reason as its problem.
+ */
+export function unreadStatus(problem: string, overrides: Partial<DiscordRolesStatus> = {}): DiscordRolesStatus {
+  const status = rolesStatus();
+  const unread = (kind: RoleKind): RoleCheck => ({
+    id: kind === "supporter" ? null : status.roles[kind].id,
+    name: null,
+    exists: false,
+    position: null,
+    managed: false,
+    privileged: false,
+    staffRole: false,
+    assignable: false,
+    problem,
+  });
+  return {
+    ...status,
+    discordReady: false,
+    ready: false,
+    bot: { manageRoles: null, highestRolePosition: null },
+    roles: { member: unread("member"), founder: unread("founder"), supporter: unread("supporter") },
     ...overrides,
   };
 }

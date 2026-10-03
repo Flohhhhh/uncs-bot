@@ -58,11 +58,15 @@ export function attentionText(item: AttentionItem) {
     case "founder_without_discord":
       return "Founder without a linked Discord account. Link their Discord account on the Supporters page so the Founder role can be added.";
     case "not_in_server":
-      return "Not in the Discord server. Gramps adds their roles when they join.";
+      // Joining queues a check, which may add or remove a role, so this promises only the check.
+      return "Not in the Discord server. Gramps checks them again when they join.";
     case "removed_in_discord":
       return `Staff removed the ${role || "community"} role in Discord. Gramps won’t add it back during this membership.`;
     case "failed":
-      return `A ${role ? `${role} role ` : "role "}change failed. Check the setup above; Gramps checks this person again later.`;
+      // Without a role, the server could not read the member, so it never tried a change.
+      return role
+        ? `A ${role} role change failed. Check the setup above; Gramps checks this person again later.`
+        : "Gramps could not read this member from Discord, so it changed none of their roles. It checks them again later.";
     default:
       return "Needs a look.";
   }

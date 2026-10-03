@@ -31,13 +31,18 @@ function featureState(data: DiscordRolesStatus) {
   return data.enabled ? "On" : data.ready ? "Ready to switch on" : "Off";
 }
 
+/** Null bot facts mean the status could not read the Discord server, so no role was checked. */
+const checkedDiscord = (data: DiscordRolesStatus) => data.bot.manageRoles !== null;
+
 export function StatusHeader({ data }: { data: DiscordRolesStatus }) {
   const state = featureState(data);
   const tone = data.ready && data.discordReady ? "good" : "attention";
   const explanation = data.enabled
     ? data.ready
       ? "Gramps keeps the configured roles in step with applications and supporter records, and checks everyone every six hours."
-      : "Switched on, but a role fails its setup checks below. Gramps skips that role until it is fixed."
+      : checkedDiscord(data)
+        ? "Switched on, but a role fails its setup checks below. Gramps skips that role until it is fixed."
+        : "Switched on, but Gramps can’t read the Discord server yet, so it changes no roles until it can. See the setup checks below."
     : data.ready
       ? "Switched off in Railway (DISCORD_ROLES_ENABLED=false). Every configured role passes its checks: preview the changes, then set DISCORD_ROLES_ENABLED=true in Railway and restart Gramps. Its first start adds the roles people have already earned."
       : "Switched off in Railway (DISCORD_ROLES_ENABLED=false). Gramps changes no roles. You can still check the setup and preview what would change.";
@@ -82,17 +87,30 @@ function RoleRow({ data, kind }: { data: DiscordRolesStatus; kind: RoleKind }) {
   const configured = data.configured[configuredKey[kind]];
   const label = roleLabels[kind];
   const optionalOff = kind === "supporter" && !configured;
+  // Without a read of the server, the role facts are placeholders, not answers from Discord.
+  const checked = checkedDiscord(data);
+  const fact = (value: boolean) => (checked ? yesNo(value) : "Not checked");
   const badge = role.assignable ? (
     <Badge kind="good">Ready</Badge>
   ) : optionalOff ? (
     <Badge>Optional · not set up</Badge>
+  ) : !checked ? (
+    <Badge kind="warn">Not checked</Badge>
   ) : (
     <Badge kind="bad">Needs a fix</Badge>
   );
   return (
     <CheckRow title={`${label} role${kind === "supporter" ? " (optional)" : ""}`} badge={badge}>
       <p className="roles-check-name">
-        {role.name ? <>Discord role “{role.name}”</> : "No Discord role found"}
+        {role.name ? (
+          <>Discord role “{role.name}”</>
+        ) : !configured ? (
+          "No role ID set"
+        ) : checked ? (
+          "No Discord role found"
+        ) : (
+          "Not read from Discord yet"
+        )}
         {role.id && (
           <>
             {" · "}
@@ -107,11 +125,17 @@ function RoleRow({ data, kind }: { data: DiscordRolesStatus; kind: RoleKind }) {
         </div>
         <div>
           <dt>Exists in Discord</dt>
-          <dd>{yesNo(role.exists)}</dd>
+          <dd>{fact(role.exists)}</dd>
         </div>
+        {role.position !== null && (
+          <div>
+            <dt>Position</dt>
+            <dd>{role.position}</dd>
+          </div>
+        )}
         <div>
           <dt>Gramps can assign it</dt>
-          <dd>{yesNo(role.assignable)}</dd>
+          <dd>{fact(role.assignable)}</dd>
         </div>
       </dl>
       {optionalOff && (
@@ -120,7 +144,8 @@ function RoleRow({ data, kind }: { data: DiscordRolesStatus; kind: RoleKind }) {
           only and changes nothing in game.
         </p>
       )}
-      {role.problem && (
+      {/* Unread, every role carries the same server-level problem; the bot row above shows it once. */}
+      {checked && role.problem && (
         <p className={`roles-fix${optionalOff ? " optional" : ""}`}>
           <strong>{optionalOff ? "To add it:" : "Fix:"}</strong> {role.problem}
         </p>
@@ -151,6 +176,10 @@ function RoleRow({ data, kind }: { data: DiscordRolesStatus; kind: RoleKind }) {
 
 export function SetupChecks({ data }: { data: DiscordRolesStatus }) {
   const manage = data.bot.manageRoles;
+  // The server gives every role the same reason when it could not read Discord.
+  const unread =
+    data.roles.member.problem ??
+    (data.discordReady ? "The Discord server could not be read." : "Discord is not connected yet.");
   return (
     <Card
       title="Setup checks"
@@ -187,14 +216,13 @@ export function SetupChecks({ data }: { data: DiscordRolesStatus }) {
           )}
           {manage === null && (
             <p className="roles-fix">
-              {data.discordReady
-                ? "The Discord server could not be read. Check that the bot is in ADMIN_GUILD_ID."
-                : "Discord is not connected yet, so Gramps can’t read the roles."}
+              <strong>Not checked:</strong> {unread}
             </p>
           )}
           {data.bot.highestRolePosition !== null && (
             <p className="muted">
-              The bot’s highest role is at position {data.bot.highestRolePosition}. Each role below must sit lower.
+              The bot’s highest role is at position {data.bot.highestRolePosition}. Each role below must have a lower
+              position.
             </p>
           )}
         </CheckRow>

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../../api/client";
 import { AdminContext, type AdminContextValue } from "../../app/context";
 import { DiscordRolesPage } from "./index";
-import { adds, dryRun, ledgerRow, members, notes, pass, removal, rolesStatus } from "./test-fixtures";
+import { adds, dryRun, ledgerRow, members, notes, pass, removal, rolesStatus, unreadStatus } from "./test-fixtures";
 import type { DiscordRolesStatus, ReconcileResponse } from "./types";
 
 vi.mock("../../api/client", () => ({ api: vi.fn() }));
@@ -48,6 +48,18 @@ const statusLine = () => document.querySelector(".status-line");
 const runButton = () => screen.getByRole("button", { name: "Run role check now" });
 const previewButton = () => screen.getByRole("button", { name: "Preview changes" });
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const setupRow = (title: string) =>
+  ([...screen.getByRole("list", { name: "Setup checks" }).children] as HTMLElement[]).find(
+    (item) => item.querySelector("strong")?.textContent === title,
+  )!;
+/** Opens the run confirmation from a fresh preview and fills in a reason. */
+async function openRun(reason = "Monthly role check") {
+  await preview();
+  fireEvent.click(runButton());
+  const dialog = within(screen.getByRole("dialog", { name: "Run role check now" }));
+  fireEvent.change(dialog.getByRole("textbox", { name: "Reason" }), { target: { value: reason } });
+  return dialog;
+}
 /** Runs a preview from its button and waits for the plan. */
 async function preview() {
   fireEvent.click(await screen.findByRole("button", { name: "Preview changes" }));
@@ -83,25 +95,41 @@ describe("feature state", () => {
 
   it("says when Discord is not connected and a check is running or queued", async () => {
     serve(
-      rolesStatus({
-        enabled: true,
-        ready: false,
-        discordReady: false,
-        running: true,
-        queued: 3,
-        fullPassQueued: true,
-        bot: { manageRoles: null, highestRolePosition: null },
-      }),
+      unreadStatus("Discord is not connected yet.", { enabled: true, running: true, queued: 3, fullPassQueued: true }),
     );
     render(page());
     await waitFor(() => expect(statusLine()).toHaveTextContent("Automatic Discord roles: On"));
     expect(statusLine()).toHaveTextContent("Discord not connected");
     expect(statusLine()).toHaveTextContent("A role check is running now");
     expect(statusLine()).toHaveTextContent("3 people waiting for a check");
-    expect(screen.getByText(/a role fails its setup checks below/)).toBeInTheDocument();
-    expect(screen.getByText("Discord is not connected yet, so Gramps can’t read the roles.")).toBeInTheDocument();
+    // No role was checked, so none is said to fail.
+    expect(screen.getByText(/Gramps can’t read the Discord server yet, so it changes no roles/)).toBeInTheDocument();
+    expect(screen.queryByText(/a role fails its setup checks/)).not.toBeInTheDocument();
+    expect(setupRow("Bot can manage roles")).toHaveTextContent("Not checked: Discord is not connected yet.");
     expect(previewButton()).toBeDisabled();
     expect(previewButton()).toHaveAccessibleDescription(/Discord is not connected yet/);
+  });
+
+  it("says a role is not checked, rather than missing, while the server could not read Discord", async () => {
+    serve(unreadStatus("The Discord server could not be read. Check that the bot is in ADMIN_GUILD_ID."));
+    render(page());
+    await screen.findByRole("list", { name: "Setup checks" });
+    const unc = within(setupRow("UNC role"));
+    expect(setupRow("UNC role")).toHaveTextContent("Not read from Discord yet");
+    expect(setupRow("UNC role")).not.toHaveTextContent("No Discord role found");
+    expect(unc.getByText("Exists in Discord").nextElementSibling).toHaveTextContent("Not checked");
+    expect(unc.getByText("Gramps can assign it").nextElementSibling).toHaveTextContent("Not checked");
+    expect(unc.queryByText("Needs a fix")).not.toBeInTheDocument();
+    // The shared reason is shown once, on the bot row, not as a fix for each role.
+    expect(setupRow("UNC role")).not.toHaveTextContent("Fix:");
+    expect(setupRow("Bot can manage roles")).toHaveTextContent(
+      "Not checked: The Discord server could not be read. Check that the bot is in ADMIN_GUILD_ID.",
+    );
+    const supporter = setupRow("Supporter role (optional)");
+    expect(within(supporter).getByText("Optional · not set up")).toBeInTheDocument();
+    expect(supporter).toHaveTextContent("No role ID set");
+    expect(supporter).not.toHaveTextContent("To add it: The Discord server could not be read");
+    expect(supporter).toHaveTextContent("Without DISCORD_SUPPORTER_ROLE_ID, Gramps skips the Supporter role");
   });
 });
 
@@ -119,6 +147,7 @@ it("lists each setup check with its fix, the Supporter candidates and the bot's 
   expect(within(row("UNC role")).getByText("Ready")).toBeInTheDocument();
   expect(row("UNC role")).toHaveTextContent("Discord role “UNC”");
   expect(within(row("UNC role")).getByRole("button", { name: "Copy UNC role ID 600000000000000001" })).toBeVisible();
+  expect(within(row("UNC role")).getByText("Position").nextElementSibling).toHaveTextContent("9");
   expect(row("Founder role")).toHaveTextContent('Fix: Drag the bot\'s role above "Founder"');
   expect(within(row("Founder role")).getByText("Needs a fix")).toBeInTheDocument();
   const supporter = row("Supporter role (optional)");
@@ -160,10 +189,23 @@ it("shows the counts, the last checks, the attention list and the latest 25 ledg
   expect(attention.getByRole("button", { name: `Copy Discord user ID ${members.away}` })).toBeVisible();
   expect(attention.getByText(/Not in the Discord server/)).toBeInTheDocument();
   expect(attention.getByText(/A UNC role change failed/)).toBeInTheDocument();
+  expect(attention.getByText(/Not in the Discord server. Gramps checks them again when they join./)).toBeVisible();
   const ledger = within(screen.getByRole("table", { name: "Recent role changes" }));
   expect(ledger.getAllByRole("row")).toHaveLength(26);
   expect(ledger.getByRole("button", { name: `Copy Discord user ID ${ledgerRow(1).discordUserId}` })).toBeVisible();
   expect(ledger.queryByText(ledgerRow(26).discordUserId)).not.toBeInTheDocument();
+});
+
+it("says a failed member read changed no roles, rather than calling it a failed role change", async () => {
+  serve(
+    rolesStatus({ attention: [{ kind: "failed", discordUserId: members.refused, at: "2026-10-03T09:00:00.000Z" }] }),
+  );
+  render(page());
+  const attention = within(await screen.findByRole("list", { name: "Needs attention" }));
+  expect(
+    attention.getByText(/could not read this member from Discord, so it changed none of their roles/),
+  ).toBeVisible();
+  expect(attention.queryByText(/role change failed/)).not.toBeInTheDocument();
 });
 
 describe("preview", () => {
@@ -200,9 +242,49 @@ describe("preview", () => {
     render(page());
     await preview();
     const shown = within(screen.getByRole("region", { name: "Preview of role changes" }));
-    expect(shown.getByText("This preview stopped at 100 entries.")).toBeInTheDocument();
+    expect(shown.getByText("This preview stopped after 100 entries, its limit.")).toBeInTheDocument();
     expect(shown.getByText(/The real run may change more people than are listed here/)).toBeInTheDocument();
     expect(shown.queryByText(/would be removed/)).not.toBeInTheDocument();
+  });
+
+  it("shows a preview that ends with one person's three roles, past 100 entries", async () => {
+    // The server plans each person's roles together, so the last person can take the plan to 102 entries.
+    const plan = [
+      ...Array.from({ length: 99 }, (_, index) => ({
+        ...adds[0],
+        discordUserId: `3300000000000${String(index).padStart(5, "0")}`,
+      })),
+      { discordUserId: members.founder, roleKind: "member" as const, op: "add", why: "desired" },
+      { discordUserId: members.founder, roleKind: "founder" as const, op: "add", why: "desired" },
+      { discordUserId: members.founder, roleKind: "supporter" as const, op: "add", why: "desired" },
+    ];
+    serve(rolesStatus(), () => dryRun(plan));
+    render(page());
+    await preview();
+    const shown = within(screen.getByRole("region", { name: "Preview of role changes" }));
+    expect(shown.getByText("Add", { selector: "dt" }).nextElementSibling).toHaveTextContent("102");
+    expect(shown.getByText("This preview stopped after 102 entries, its limit.")).toBeInTheDocument();
+    expect(screen.queryByText(/The preview could not be read/)).not.toBeInTheDocument();
+  });
+
+  it("announces a finished preview while focus stays on its button", async () => {
+    serve(rolesStatus(), () => dryRun([...adds, removal, ...notes]));
+    render(page());
+    await preview();
+    expect(screen.getByText("Preview ready: 2 roles to add and 1 role to remove.")).toHaveAttribute("role", "status");
+  });
+
+  it("sends one preview for a double click", async () => {
+    serve(rolesStatus(), () => dryRun(adds));
+    render(page());
+    const button = await screen.findByRole("button", { name: "Preview changes" });
+    // Both clicks land before React re-renders the button as disabled.
+    act(() => {
+      button.click();
+      button.click();
+    });
+    await screen.findByRole("region", { name: "Preview of role changes" });
+    expect(posts()).toHaveLength(1);
   });
 
   it("says when nothing would change and when the preview could not finish", async () => {
@@ -324,6 +406,60 @@ describe("run role check", () => {
     expect(runButton()).toBeDisabled();
   });
 
+  it("refuses to send a run from a dialog left open past the 10-minute preview limit", async () => {
+    const now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    serve(rolesStatus({ enabled: true }), () => dryRun(adds));
+    render(page());
+    const dialog = await openRun();
+    clock.mockReturnValue(now + 11 * 60_000);
+    fireEvent.click(dialog.getByRole("button", { name: "Run role check" }));
+    expect(dialog.getByRole("alert")).toHaveTextContent("This preview is more than 10 minutes old.");
+    expect(posts()).toHaveLength(1);
+  });
+
+  it("sends one run for a double click on Run role check", async () => {
+    let finish!: (value: ReconcileResponse) => void;
+    serve(rolesStatus({ enabled: true }), (body) =>
+      body.dryRun ? dryRun(adds) : new Promise<ReconcileResponse>((resolve) => (finish = resolve)),
+    );
+    render(page());
+    const dialog = await openRun();
+    const submit = dialog.getByRole("button", { name: "Run role check" });
+    // Both clicks land before React re-renders, while the reason field and the button are still enabled.
+    act(() => {
+      submit.click();
+      submit.click();
+    });
+    expect(posts().filter((post) => !post.body.dryRun)).toHaveLength(1);
+    await act(async () => finish({ ok: true, replayed: false, summary: pass({ trigger: "admin" }) }));
+    await screen.findByRole("dialog", { name: "Role check finished" });
+    expect(posts().filter((post) => !post.body.dryRun)).toHaveLength(1);
+  });
+
+  it("refuses a reason with the DEL character, as the server does", async () => {
+    serve(rolesStatus({ enabled: true }), () => dryRun(adds));
+    render(page());
+    const dialog = await openRun("Monthly\u007f check");
+    fireEvent.click(dialog.getByRole("button", { name: "Run role check" }));
+    expect(dialog.getByRole("alert")).toHaveTextContent("Enter a single-line reason");
+    expect(posts()).toHaveLength(1);
+  });
+
+  it("says a run stopped early instead of finished when its summary carries an error", async () => {
+    const error = "The role pass stopped early because Discord or the database was unavailable.";
+    serve(rolesStatus({ enabled: true }), (body) =>
+      body.dryRun ? dryRun(adds) : { ok: true, replayed: false, summary: pass({ trigger: "admin", error }) },
+    );
+    render(page());
+    const dialog = await openRun();
+    fireEvent.click(dialog.getByRole("button", { name: "Run role check" }));
+    const result = await screen.findByRole("dialog", { name: "Role check stopped early" });
+    expect(result).toHaveTextContent(error);
+    expect(result).toHaveTextContent("Any change it made before stopping is kept");
+    expect(result).not.toHaveTextContent("Gramps finished checking everyone");
+  });
+
   it("keeps the form open when the server refuses the run, so it can be sent again", async () => {
     let refuse = true;
     serve(rolesStatus({ enabled: true }), (body) => {
@@ -430,5 +566,18 @@ describe("errors", () => {
     expect(await dialog.findByRole("alert")).toHaveTextContent(
       "Discord roles are switched off (DISCORD_ROLES_ENABLED=false). No role change was sent.",
     );
+  });
+
+  it("treats a 403 from a real run as refused, not as a run that may have happened", async () => {
+    serve(rolesStatus({ enabled: true }), (body) => {
+      if (body.dryRun) return dryRun(adds);
+      throw failure(403, "Your staff session or access could not be verified. Sign in again.");
+    });
+    render(page());
+    const dialog = await openRun();
+    await act(async () => fireEvent.click(dialog.getByRole("button", { name: "Run role check" })));
+    expect(await dialog.findByRole("alert")).toHaveTextContent("Only administrators can manage Discord roles.");
+    expect(screen.getByRole("dialog", { name: "Run role check now" })).toBeInTheDocument();
+    expect(screen.queryByText(/may still have run/)).not.toBeInTheDocument();
   });
 });

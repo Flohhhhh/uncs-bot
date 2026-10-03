@@ -23,6 +23,14 @@ function groupPlan(plan: PlanEntry[]) {
   };
 }
 
+function previewAnnouncement({ summary }: Preview) {
+  if (summary.error) return `Preview stopped early. ${summary.error}`;
+  const { adds, removes, capped } = groupPlan(summary.plan ?? []);
+  return `Preview ready: ${plural(adds.length, "role")} to add and ${plural(removes.length, "role")} to remove${
+    capped ? ". The real run may change more than the preview lists" : ""
+  }.`;
+}
+
 /** Sends one preview or real run. A fresh ID per request; the server returns the same result for a repeated ID. */
 export function reconcile(id: string, reason: string, dryRun: boolean) {
   return api<unknown>("discord-roles/reconcile", {
@@ -93,8 +101,10 @@ export function PreviewResult({ preview }: { preview: Preview }) {
       )}
       {capped && (
         <p className="notice warning">
-          <strong>This preview stopped at {MAX_PLAN_ENTRIES} entries.</strong> The real run may change more people than
-          are listed here.
+          <strong>
+            This preview stopped after {plural(summary.plan?.length ?? 0, "entry", "entries")}, its limit.
+          </strong>{" "}
+          The real run may change more people than are listed here.
         </p>
       )}
       <dl className="sync-counts roles-plan-counts" aria-label="Preview counts">
@@ -169,8 +179,14 @@ export function RunDialog({
     event.preventDefault();
     if (busy || submitted.current) return;
     const reason = String(new FormData(event.currentTarget).get("reason") ?? "").trim();
-    if (!singleLine(reason, 3)) {
+    // The server also refuses the DEL character, which singleLine allows.
+    if (!singleLine(reason, 3) || reason.includes("\u007f")) {
       setValidation("Enter a single-line reason between 3 and 200 characters.");
+      return;
+    }
+    // The dialog can stay open for a long time; what it shows must still describe what the run would change.
+    if (Date.now() - preview.at > PREVIEW_MAX_AGE_MS) {
+      setValidation("This preview is more than 10 minutes old. Cancel, preview again, then run the role check.");
       return;
     }
     submitted.current = true;
@@ -187,7 +203,8 @@ export function RunDialog({
     } catch (error) {
       if (!mounted.current) return;
       const status = errorStatus(error);
-      if (status !== null && [400, 404, 409, 429, 503].includes(status)) {
+      // Sign-in, CSRF and administrator checks also run before the role check starts.
+      if (status !== null && [400, 401, 403, 404, 409, 429, 503].includes(status)) {
         // Refused before any role changed. Staff can send it again; a new ID keeps it a new request.
         submitted.current = false;
         setId(crypto.randomUUID());
@@ -212,12 +229,22 @@ export function RunDialog({
       busy={sending}
       onClose={onClose}
       eyebrow={result ? null : undefined}
-      title={result ? (result.done ? "Role check finished" : "Role check result not confirmed") : "Run role check now"}
+      title={
+        result
+          ? !result.done
+            ? "Role check result not confirmed"
+            : result.summary.error
+              ? "Role check stopped early"
+              : "Role check finished"
+          : "Run role check now"
+      }
       description={
         result
-          ? result.done
-            ? "Gramps finished checking everyone. The page behind this dialog now shows the updated status."
-            : "Refresh the page and check Recent role changes before running another role check."
+          ? !result.done
+            ? "Refresh the page and check Recent role changes before running another role check."
+            : result.summary.error
+              ? "Gramps stopped before it finished checking everyone. Any change it made before stopping is kept; the page behind this dialog shows the updated status."
+              : "Gramps finished checking everyone. The page behind this dialog shows the updated status."
           : "Gramps checks everyone now and changes roles in Discord to match. Nothing is posted in Discord and nobody is pinged."
       }
     >
@@ -240,7 +267,8 @@ export function RunDialog({
             )}
             {capped && (
               <p className="notice warning">
-                The preview stopped at {MAX_PLAN_ENTRIES} entries, so this run may change more than it showed.
+                The preview stopped after {plural(preview.summary.plan?.length ?? 0, "entry", "entries")}, its limit, so
+                this run may change more than it showed.
               </p>
             )}
             <p className="muted">
@@ -315,6 +343,10 @@ export function PreviewCard({
           </p>
         )}
         {previewing && !preview && <p className="muted">Asking Gramps what would change…</p>}
+        {/* Always present, so a finished preview is announced while focus stays on its button. */}
+        <p className="sr-only" role="status">
+          {preview && !previewing && !error ? previewAnnouncement(preview) : ""}
+        </p>
         {preview && <PreviewResult preview={preview} />}
       </div>
     </Card>

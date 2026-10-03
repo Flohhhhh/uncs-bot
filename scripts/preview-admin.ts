@@ -1624,12 +1624,18 @@ const previewReconcileSchema = z
 @UseFilters(AdminExceptionFilter)
 @UseGuards(AdminGuard)
 class PreviewDiscordRolesController {
+  // Like draft #117, the guard admits every staff member and the roles API itself requires an administrator.
+  private requireAdmin(req: StaffRequest) {
+    if (req.staff.role !== "admin") throw new ForbiddenException("Only administrators can manage Discord roles.");
+  }
   @Get()
-  status() {
+  status(@Req() req: StaffRequest) {
+    this.requireAdmin(req);
     return previewRolesStatus();
   }
   @Post("reconcile")
   async reconcile(@Req() req: StaffRequest, @Body() body: unknown) {
+    this.requireAdmin(req);
     const parsed = previewReconcileSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException("Send an action ID, a reason and an optional Discord user ID.");
     const input = parsed.data;
