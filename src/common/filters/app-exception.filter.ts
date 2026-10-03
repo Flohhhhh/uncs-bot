@@ -62,10 +62,12 @@ export class AppExceptionFilter implements ExceptionFilter {
       const status =
         typeof exception?.getStatus === "function" ? exception.getStatus() : HttpStatus.INTERNAL_SERVER_ERROR;
 
+      // Only an HttpException's response is written for the client. Any other error's message can hold
+      // internals such as a filesystem path, so it stays in the log above.
       const body =
         typeof exception?.getResponse === "function"
           ? exception.getResponse()
-          : { statusCode: status, message: exception?.message || String(exception) };
+          : { statusCode: status, message: "Internal server error." };
 
       return res.status(status).json(body);
     }

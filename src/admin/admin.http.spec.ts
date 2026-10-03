@@ -150,6 +150,17 @@ describe("admin HTTP boundaries", () => {
     await request(app.getHttpServer()).get("/admin/assets/constructor").expect(404);
     const traversal = await request(app.getHttpServer()).get("/admin/assets/..%2F..%2Fadmin.settings.ts").expect(403);
     expect(traversal.text).not.toContain("clientSecret");
+    expect(traversal.body).toEqual({ message: "Forbidden." });
+  });
+  it("answers a missing or unreadable asset without the server's filesystem path", async () => {
+    for (const path of ["missing.js", "package.json", "uncs-mascot.png/missing", `${"a".repeat(300)}.js`]) {
+      const response = await request(app.getHttpServer()).get(`/admin/assets/${path}`).expect(404);
+      expect(response.body).toEqual({ message: "Not found." });
+      expect(response.text).not.toMatch(/ENOENT|ENOTDIR|ENAMETOOLONG|dist|public/);
+      expect(response.headers["content-security-policy"]).toContain("default-src 'none'");
+    }
+    const hidden = await request(app.getHttpServer()).get("/admin/assets/.env").expect(403);
+    expect(hidden.body).toEqual({ message: "Forbidden." });
   });
   it("supports dashboard deep links without swallowing API, auth, or missing-file errors", async () => {
     for (const path of ["players", "applications", "supporters", "combat", "match", "votes"]) {
