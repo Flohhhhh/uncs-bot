@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { assignedFaction } from "../../../../../src/common/faction-colors";
 import { roundStamp, sameRound } from "../../../../../src/common/game-round";
 import { useGameApi } from "../../api/server-client";
@@ -123,7 +123,9 @@ export function TeamMoveDialog({
   const destination = teams.find((team) => team.name === faction);
   const count = items.filter((item) => item.from !== faction).length;
   const remainingMoves = items.filter((item) => item.state === "queued" && item.from !== faction).length;
-  const ready = allowed("team", admin.me, admin.overview, admin.stale, admin.busy) && Boolean(destination) && count > 0;
+  const permitted = allowed("team", admin.me, admin.overview, admin.stale, admin.busy);
+  const ready = permitted && Boolean(destination) && count > 0;
+  const unavailable = useId();
 
   useEffect(() => {
     mounted.current = true;
@@ -336,6 +338,14 @@ export function TeamMoveDialog({
             </ul>
           </>
         )}
+        {/* The open dialog pauses polling, so the snapshot can expire during the review. Say why Move is off. */}
+        {!submitted.current && !permitted && (
+          <p className="notice warning" role="status" id={unavailable}>
+            {admin.stale
+              ? "Server details need a fresh check. Close this dialog and refresh before moving players."
+              : "Unavailable for your role, connection, or server build. Refresh the dashboard before trying again."}
+          </p>
+        )}
         {error && (
           <div className="notice warning" role="alert">
             {error}
@@ -361,7 +371,12 @@ export function TeamMoveDialog({
             </button>
           )}
           {!submitted.current && (
-            <button type="submit" className="button primary" disabled={!ready}>
+            <button
+              type="submit"
+              className="button primary"
+              disabled={!ready}
+              aria-describedby={permitted ? undefined : unavailable}
+            >
               Move {count} player{count === 1 ? "" : "s"}
               {destination ? ` to ${destination.label}` : ""}
             </button>

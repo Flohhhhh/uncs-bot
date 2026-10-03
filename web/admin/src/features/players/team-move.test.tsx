@@ -91,6 +91,24 @@ describe("reviewed team moves", () => {
     expect(screen.getByRole("heading", { name: "Team move stopped" })).toBeInTheDocument();
     expect(sent()).toHaveLength(1);
   });
+  it("says why Move is disabled when the paused snapshot expires during the review", () => {
+    const admin = context();
+    const tree = (stale: boolean) => (
+      <AdminContext.Provider value={{ ...admin, stale }}>
+        <TeamMoveDialog players={[alice, bob]} initialFaction="Lonestar" onClose={vi.fn()} />
+      </AdminContext.Provider>
+    );
+    const { rerender } = render(tree(false));
+    const move = screen.getByRole("button", { name: /^Move 2 players/ });
+    expect(move).toBeEnabled();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    rerender(tree(true));
+    expect(move).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Server details need a fresh check. Close this dialog and refresh before moving players.",
+    );
+    expect(move).toHaveAccessibleDescription(/fresh check/);
+  });
   it("stops during the gap between requests without sending another move", async () => {
     vi.useFakeTimers();
     answer(() => ({ state: "applied", message: "Confirmed" }));

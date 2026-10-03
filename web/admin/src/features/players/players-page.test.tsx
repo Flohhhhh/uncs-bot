@@ -226,6 +226,25 @@ describe("live player controls", () => {
       expect(screen.getByText("1 selected")).toBeInTheDocument();
     },
   );
+  it("says why every player action is disabled when the paused snapshot expires", () => {
+    const admin = context();
+    const tree = (stale: boolean) => (
+      <AdminContext.Provider value={{ ...admin, stale }}>
+        <PlayersPage />
+      </AdminContext.Provider>
+    );
+    const { rerender } = render(tree(false));
+    fireEvent.click(screen.getAllByRole("button", { name: "More" })[0]);
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).queryByRole("status")).not.toBeInTheDocument();
+    rerender(tree(true));
+    const message = within(dialog).getByRole("button", { name: "Message player" });
+    expect(message).toBeDisabled();
+    expect(within(dialog).getByRole("status")).toHaveTextContent(
+      "Server details need a fresh check. Close this dialog and refresh before choosing an action.",
+    );
+    expect(message).toHaveAccessibleDescription(/fresh check/);
+  });
   it("removes player actions if the selected player leaves while the menu is open", () => {
     const admin = context();
     const tree = (present: boolean) => (
