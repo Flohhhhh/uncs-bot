@@ -8,7 +8,7 @@ import {
 import { z } from "zod";
 import { EnvService } from "../env/env.service";
 import type { Staff } from "../admin/admin.types";
-import { PatreonSyncService } from "./patreon-sync.service";
+import { deploymentSecrets, PatreonSyncService } from "./patreon-sync.service";
 import { SupportersStore } from "./supporters.store";
 import {
   founderSchema,
@@ -33,16 +33,14 @@ export class SupportersService {
   private configured() {
     return Boolean(this.env.get("PATREON_ENABLED") && this.env.get("PATREON_CAMPAIGN_ID"));
   }
+  /** The signing secret must be separate from the creator token and every other deployment secret. */
   private webhookConfigured() {
     const secret = this.env.get("PATREON_WEBHOOK_SECRET");
     return Boolean(
       this.configured() &&
       typeof secret === "string" &&
       secret.length >= 16 &&
-      secret !== this.env.get("WARDOGS_RCON_PASSWORD") &&
-      secret !== this.env.get("WARDOGS_FEED_TOKEN") &&
-      !this.env.get("WARDOGS_SERVERS")?.some((server) => secret === server.password || secret === server.feedToken) &&
-      secret !== this.env.get("ADMIN_SESSION_SECRET"),
+      ![this.env.get("PATREON_CREATOR_ACCESS_TOKEN"), ...deploymentSecrets(this.env)].includes(secret),
     );
   }
   policy(): FounderPolicy {
