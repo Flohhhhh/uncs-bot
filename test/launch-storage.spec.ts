@@ -370,7 +370,14 @@ describe("launch storage on isolated PostgreSQL", () => {
       const deadline = Date.now() + 5_000;
       while (first.lease("primary") !== null && Date.now() < deadline) await delay(20);
       expect([first.lease("primary"), first.lease("east")]).toEqual([null, null]);
+      // A terminated backend reports its end before it has released its locks, so the waiting process may need
+      // another check, as it would take one five seconds later in production.
+      const takeover = Date.now() + 5_000;
       await second.check();
+      while ((second.lease("primary") === null || second.lease("east") === null) && Date.now() < takeover) {
+        await delay(20);
+        await second.check();
+      }
       expect([second.lease("primary"), second.lease("east")]).toEqual([expect.any(Number), expect.any(Number)]);
       // Shutdown closes the session, so the next process takes over at its first check.
       await second.stop();

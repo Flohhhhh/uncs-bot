@@ -710,6 +710,21 @@ describe("sender lease across overlapping processes", () => {
     expect(game.execute.mock.calls.map(([action]) => action.steamId)).toEqual([fourthId]);
   });
 
+  it("does not broadcast a round change first seen on the observation that takes over", async () => {
+    const sender = lease(null);
+    const { service, look, game } = fixture({}, "primary", undefined, sender);
+    await service.tick();
+    await look([firstId, secondId]);
+    sender.set(1);
+    // The previous holder may already have broadcast this round's message.
+    await look([firstId, secondId], "Europe");
+    for (let i = 0; i < 12; i++) await look([firstId, secondId], "Europe");
+    expect(game.execute).not.toHaveBeenCalled();
+    // A later round change, seen while holding the lease, is broadcast as usual.
+    await look([firstId, secondId], "Kavkazi");
+    expect(game.execute.mock.calls.map(([action]) => action.action)).toEqual(["broadcast"]);
+  });
+
   it.each([
     ["lost", null],
     ["lost and regained between observations", 2],

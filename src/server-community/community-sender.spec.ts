@@ -135,6 +135,37 @@ describe("community sender lock", () => {
     await lock.stop();
   });
 
+  it("never trusts a lock granted on a session that ended before the answer was read", async () => {
+    const db = new FakeDatabase();
+    // The lock is granted and the session ends together, as when the server's answer and its termination
+    // notice arrive in one read. PostgreSQL released the lock with that session.
+    const connect = jest.fn(async () => {
+      const connection = await db.connect();
+      if (db.connections.length === 1) {
+        const answer = connection.query.getMockImplementation()!;
+        connection.query.mockImplementation(async (text, values) => {
+          const rows = await answer(text, values);
+          if (text !== "SELECT 1") connection.drop();
+          return rows;
+        });
+      }
+      return connection;
+    });
+    const lock = new CommunitySenderLock(["primary"], connect);
+    const other = new CommunitySenderLock(["primary"], db.connect);
+    lock.start();
+    await settle();
+    other.start();
+    await settle();
+    expect(other.lease("primary")).toEqual(expect.any(Number));
+    // After reconnecting, this process must ask its new session again rather than reuse the stale answer.
+    await jest.advanceTimersByTimeAsync(SENDER_CHECK_MS);
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(lock.lease("primary")).toBeNull();
+    expect(other.lease("primary")).toEqual(expect.any(Number));
+    await Promise.all([lock.stop(), other.stop()]);
+  });
+
   it("treats a failed check as a lost connection and closes it", async () => {
     const db = new FakeDatabase();
     const lock = new CommunitySenderLock(["primary"], db.connect);
@@ -212,6 +243,24 @@ describe("community sender lock", () => {
     expect(db.connections[0].end).toHaveBeenCalled();
     expect(db.owners.size).toBe(0);
     expect(lock.lease("primary")).toBeNull();
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  it("finishes shutting down within two seconds when its connection does not close", async () => {
+    const db = new FakeDatabase();
+    const lock = new CommunitySenderLock(["primary"], db.connect);
+    lock.start();
+    await settle();
+    db.connections[0].end.mockImplementation(() => new Promise<void>(() => undefined));
+    let stopped = false;
+    void lock.stop().then(() => {
+      stopped = true;
+    });
+    expect(lock.lease("primary")).toBeNull();
+    await jest.advanceTimersByTimeAsync(1_999);
+    expect(stopped).toBe(false);
+    await jest.advanceTimersByTimeAsync(1);
+    expect(stopped).toBe(true);
   });
 });
 
