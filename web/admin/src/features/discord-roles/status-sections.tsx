@@ -248,7 +248,7 @@ export function SummaryCounts({ data }: { data: DiscordRolesStatus }) {
     [
       "Supporters now",
       summary.supporterEligible,
-      summary.supporterEligible === null ? "Supporter role not set up" : "Support The UNCs right now",
+      summary.supporterEligible === null ? "Supporter role not set up" : "Support right now, with Discord linked",
     ],
   ];
   return (

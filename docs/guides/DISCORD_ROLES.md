@@ -75,7 +75,7 @@ A role that is not configured is simply skipped. Founder awards also need the fo
 - `roles.member`, `roles.founder` and `roles.supporter`: `{id, name, exists, position, managed, privileged, staffRole, assignable, problem, candidates?}`, where `problem` is a plain-English fix;
 - `ready`: every configured role passes its checks;
 - `lastPass` (trigger, times, `added`, `removed`, `noted`, `confirmed`, `failed`, `blocked`, `deferred`, `attention`), `lastFullPass` (the same for the last check of everyone: startup, the safety pass or an untargeted staff run), `running`, `queued`, `fullPassQueued` and `nextRetryAt`. An event check that found nothing to do does not replace `lastPass`;
-- `summary: {memberEligible, founders, foundersWithoutDiscord, supporterEligible}`, where `supporterEligible` counts people who support right now and is `null` while `DISCORD_SUPPORTER_ROLE_ID` is unset;
+- `summary: {memberEligible, founders, foundersWithoutDiscord, supporterEligible}`, where `supporterEligible` counts people with a linked Discord account who support right now and is `null` while `DISCORD_SUPPORTER_ROLE_ID` is unset;
 - `attention`: founders without a linked Discord account, people who are not in the server (except someone whose only reason is the Supporter role: joining the server queues a check that adds it), roles removed in Discord, and failed changes. Items stay listed across checks until that person (and role) is checked again, so a later check of someone else never hides them;
 - `recent`: the latest 25 role ledger rows.
 
