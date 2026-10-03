@@ -24,7 +24,7 @@ const configured: CommunityMessagesStatus = {
     spacingSeconds: 20,
   },
   round: { enabled: false, message: "GG everyone" },
-  discordStatus: { enabled: true, configured: false },
+  discordStatus: { enabled: true, configured: false, problem: null },
 };
 function page(id = "primary", refreshVersion = 0, children: ReactNode = <CommunityMessages key={id} />) {
   return (
@@ -70,6 +70,16 @@ it("shows configured welcome timing and a missing Discord target without claimin
   );
 });
 
+it("says why an enabled Discord status card is not being updated", async () => {
+  const problem = "Discord status card is not being updated. Set ADMIN_GUILD_ID to the server that holds its channel.";
+  request.mockResolvedValue({ ...configured, discordStatus: { enabled: true, configured: true, problem } });
+  render(page());
+  expect(await screen.findByText(problem)).toBeInTheDocument();
+  expect(status("Discord card")).toBe("Not updating");
+  // The reason sits with the Discord card row, not with the other automatic messages.
+  expect(screen.getByText("Discord card", { selector: ".message-name" }).closest("li")).toHaveTextContent(problem);
+});
+
 it("does not show an on or off state before the first response", async () => {
   let resolve!: (data: CommunityMessagesStatus) => void;
   request.mockReturnValue(
@@ -87,7 +97,7 @@ it("does not show an on or off state before the first response", async () => {
       enabled: false,
       workerStarted: false,
       welcome: { ...configured.welcome, enabled: false },
-      discordStatus: { enabled: false, configured: false },
+      discordStatus: { enabled: false, configured: false, problem: null },
     }),
   );
   expect(screen.getAllByText("Off")).toHaveLength(3);

@@ -96,13 +96,20 @@ export function CommunityMessages() {
                   <State
                     on={data.discordStatus.enabled}
                     label={
-                      data.discordStatus.enabled && !data.discordStatus.configured
-                        ? "Needs channel and message"
-                        : undefined
+                      !data.discordStatus.enabled
+                        ? undefined
+                        : !data.discordStatus.configured
+                          ? "Needs channel and message"
+                          : data.discordStatus.problem
+                            ? "Not updating"
+                            : undefined
                     }
                   />
                   <span className="message-meta">Server status in Discord</span>
                 </div>
+                {data.discordStatus.enabled && data.discordStatus.configured && data.discordStatus.problem && (
+                  <p className="notice warning">{data.discordStatus.problem}</p>
+                )}
               </li>
             </ul>
             <details className="message-observations">

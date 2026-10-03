@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
   type CSSProperties,
@@ -341,6 +342,21 @@ export function ReasonField({ defaultValue = "" }: { defaultValue?: string }) {
     />
   );
 }
+/**
+ * Where focus goes when the control that opened a dialog cannot take it back. A review opened from the
+ * player panel returns to the panel, which stays open behind it and keeps the page inert; otherwise the
+ * page heading takes focus rather than leave keyboard users at the end of the page.
+ */
+function focusPageHeading() {
+  const open = document.querySelectorAll<HTMLDialogElement>("dialog[open]");
+  const panel = open[open.length - 1];
+  if (panel) {
+    panel.focus();
+    return;
+  }
+  const heading = document.querySelector<HTMLElement>("#main-content h1[tabindex]");
+  (heading ?? document.getElementById("main-content"))?.focus();
+}
 export function Modal({
   title,
   description,
@@ -363,19 +379,49 @@ export function Modal({
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const titleId = useId();
+  const latest = useRef({ busy, onClose });
+  latest.current = { busy, onClose };
   const { setDialogOpen, server } = useAdmin();
-  useEffect(() => {
+  useLayoutEffect(() => {
     setDialogOpen(true);
     const element = dialog.current;
-    // React removes the dialog before this cleanup runs, so the browser cannot restore focus itself.
-    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const opener = document.activeElement;
+    // Some close requests close the dialog natively whatever the cancel handler does, such as the Android back
+    // gesture. Reopen a busy dialog so its progress and Stop control stay reachable; otherwise let the parent
+    // remove it. The listener goes before this cleanup's own close().
+    const closed = () => {
+      if (!element?.isConnected || element.open) return;
+      if (latest.current.busy) element.showModal();
+      else latest.current.onClose();
+    };
+    element?.addEventListener("close", closed);
     element?.showModal();
     return () => {
+      element?.removeEventListener("close", closed);
+      // A layout cleanup runs before React removes the dialog, so close() still returns focus to the control
+      // that opened it. When that control is gone or disabled by now (a removed row, a deselected bulk move),
+      // focus the page heading rather than leave keyboard users at the end of the page.
       element?.close();
       setDialogOpen(false);
-      if (previous?.isConnected) previous.focus();
+      if (document.activeElement !== opener) focusPageHeading();
     };
   }, [setDialogOpen]);
+  useEffect(() => {
+    const element = dialog.current;
+    if (!busy || !element) return;
+    // Chrome lets a page cancel only the first Escape after a click; the next one closes the dialog anyway.
+    // While busy, stop the key before it becomes a close request. Focus can be on the page body here, once
+    // the button that started the work is gone, so listen on the document.
+    const escape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") event.preventDefault();
+    };
+    document.addEventListener("keydown", escape, true);
+    element.setAttribute("closedby", "none");
+    return () => {
+      document.removeEventListener("keydown", escape, true);
+      element.removeAttribute("closedby");
+    };
+  }, [busy]);
   return (
     <dialog
       ref={dialog}
@@ -423,14 +469,25 @@ export function Sheet({
   const sheet = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   const descriptionId = useId();
+  const latestClose = useRef(onClose);
+  latestClose.current = onClose;
   useEffect(() => {
     const element = sheet.current;
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    // Some close requests close the sheet natively whatever the cancel handler does, such as the Android back
+    // gesture. Let the parent remove it too, so the panel is not left closed but still mounted.
+    const closed = () => {
+      if (element?.isConnected && !element.open) latestClose.current();
+    };
+    element?.addEventListener("close", closed);
     element?.showModal();
     if (element && !element.contains(document.activeElement)) element.focus();
     return () => {
+      element?.removeEventListener("close", closed);
       if (element?.open) element.close();
       if (previous?.isConnected) previous.focus();
+      // The control that opened the panel can be gone by now, such as a player who left the roster.
+      if (!previous || document.activeElement !== previous) focusPageHeading();
     };
   }, []);
   return (

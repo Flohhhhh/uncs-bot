@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 import type { ActionName, Player } from "../../api/types";
@@ -47,6 +47,9 @@ export function PlayerButton({
   );
 }
 
+/** Every action the panel offers; "team" covers the per-team move buttons. */
+const panelActions: ActionName[] = ["message", "team", "kick", "ban", "whitelist-add", "kill"];
+
 const stat = (value: number | undefined) =>
   typeof value === "number" && Number.isFinite(value) ? value.toLocaleString() : "—";
 
@@ -71,11 +74,26 @@ export function PlayerSheet({
   const teams = liveFactions(admin.overview);
   const current = player ? playerFaction(player, teams) : undefined;
   const can = (action: ActionName) => allowed(action, admin.me, admin.overview, admin.stale, admin.busy);
+  const notice = useId();
+  const off = panelActions.filter((action) => !can(action)).length;
+  // The snapshot can expire while the panel is open and turn every action off; the page's own refresh is
+  // behind the panel. Otherwise an action is off for the staff role or the server build. Say why next to the
+  // disabled buttons.
+  let reason = "";
+  if (player && admin.stale)
+    reason = "Server details need a fresh check. Close this panel and refresh before choosing an action.";
+  else if (player && off && !admin.busy)
+    reason =
+      off < panelActions.length
+        ? "Some actions are unavailable for your role, connection, or server build."
+        : "Unavailable for your role, connection, or server build. Refresh the dashboard before trying again.";
+  const describedBy = (action: ActionName) => (!can(action) && reason ? notice : undefined);
   const button = (action: ActionName, kind = "secondary") => (
     <button
       type="button"
       className={`button ${kind} small`}
       disabled={!can(action)}
+      aria-describedby={describedBy(action)}
       onClick={() => admin.openAction(action, steamId)}
     >
       {actionDefinitions[action][0]}
@@ -136,6 +154,10 @@ export function PlayerSheet({
             </Link>
           </p>
         )}
+        {/* Always present, so screen readers announce the reason when it is filled in. */}
+        <div role="status" id={notice}>
+          {reason && <p className="notice warning">{reason}</p>}
+        </div>
         {player && (
           <div className="player-sheet-actions">
             <section aria-label="Message">
@@ -154,6 +176,7 @@ export function PlayerSheet({
                       className="button secondary small"
                       aria-label={`Move to ${team.label}`}
                       disabled={!can("team")}
+                      aria-describedby={describedBy("team")}
                       onClick={() => setMove({ players: [player], faction: team.name, key: crypto.randomUUID() })}
                     >
                       <FactionChip team={team} />

@@ -866,6 +866,45 @@ describe("launch storage on isolated PostgreSQL", () => {
     });
   });
 
+  it("keeps a declined first webhook charge from blocking the later staff receipt", async () => {
+    const created = await linked("declined-member", "76561198000000004");
+    // Patreon signed the pledge after the first card attempt failed; the supporter paid the next day.
+    expect(
+      await supporters.ingest({
+        hash: "e".repeat(64),
+        campaignId: campaign,
+        patreonMemberId: "declined-member",
+        displayName: "Sample supporter",
+        patronStatus: "active_patron",
+        lastChargeStatus: "Declined",
+        lastChargeAt: new Date("2026-09-30T12:00:00.000Z"),
+        receivedAt: new Date("2026-09-30T12:00:05.000Z"),
+        trigger: "members:pledge:create",
+      }),
+    ).toEqual({ duplicate: false });
+    let record = await payment(
+      (await supporters.get(created.id, campaign, policy))!,
+      "2026-10-01T12:00:00.000Z",
+      "receipt-3001",
+    );
+    expect(
+      (await client.query("SELECT count(*)::int AS count FROM supporter_payments WHERE member_id = $1", [record.id]))
+        .rows,
+    ).toEqual([{ count: 1 }]);
+    const receipt = record.founderEligiblePayment!;
+    expect(receipt).toMatchObject({ source: "manual_receipt", reference: "receipt-3001" });
+    record = (
+      await supporters.mutate(
+        record.id,
+        { ...review(record), kind: "founder", paymentId: receipt.id },
+        staff,
+        campaign,
+        policy,
+      )
+    ).supporter!;
+    expect(record.founder).toMatchObject({ paymentId: receipt.id });
+  });
+
   it("imports Patreon API members idempotently and qualifies a first payment despite an earlier webhook row", async () => {
     // A webhook status row for the same charge, recorded a minute earlier, must not block the API payment.
     await supporters.ingest({

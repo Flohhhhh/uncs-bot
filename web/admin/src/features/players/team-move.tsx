@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { assignedFaction } from "../../../../../src/common/faction-colors";
 import { roundStamp, sameRound } from "../../../../../src/common/game-round";
 import { useGameApi } from "../../api/server-client";
@@ -38,6 +38,10 @@ function ItemOutcome({ state }: { state: ItemState }) {
   ) : (
     <OutcomeBadge state={state} />
   );
+}
+/** No move reached the game for this player: the batch stopped first, or their roster entry changed. */
+export function notSent(item: TeamItem) {
+  return item.state === "queued" || item.state === "unmatched" || item.state === "refused";
 }
 
 /**
@@ -138,7 +142,9 @@ export function TeamMoveDialog({
   const destination = teams.find((team) => team.name === faction);
   const count = items.filter((item) => item.from !== faction).length;
   const remainingMoves = items.filter((item) => item.state === "queued" && item.from !== faction).length;
-  const ready = allowed("team", admin.me, admin.overview, admin.stale, admin.busy) && Boolean(destination) && count > 0;
+  const permitted = allowed("team", admin.me, admin.overview, admin.stale, admin.busy);
+  const ready = permitted && Boolean(destination) && count > 0;
+  const unavailable = useId();
 
   useEffect(() => {
     mounted.current = true;
@@ -310,7 +316,7 @@ export function TeamMoveDialog({
         (done || running) && items.length === 1
           ? `${items[0].name} to ${destination?.label ?? faction}.`
           : done || running
-            ? `${destination?.label ?? faction}. Each player has their own recorded outcome. ${items.filter((item) => item.state === "queued").length} not sent.`
+            ? `${destination?.label ?? faction}. Each player has their own recorded outcome. ${items.filter(notSent).length} not sent.`
             : "Review the named players and destination. This changes team assignment without sending a forced kill; players may need to respawn."
       }
       onClose={onClose}
@@ -356,6 +362,19 @@ export function TeamMoveDialog({
             </ul>
           </>
         )}
+        {/* The open dialog pauses polling, so the snapshot can expire during the review. Say why Move is off, in
+            a region that stays in the review so screen readers announce the reason when it is filled in. */}
+        {!submitted.current && (
+          <div role="status" id={unavailable}>
+            {!permitted && (
+              <p className="notice warning">
+                {admin.stale
+                  ? "Server details need a fresh check. Close this dialog and refresh before moving players."
+                  : "Unavailable for your role, connection, or server build. Refresh the dashboard before trying again."}
+              </p>
+            )}
+          </div>
+        )}
         {error && (
           <div className="notice warning" role="alert">
             {error}
@@ -381,7 +400,12 @@ export function TeamMoveDialog({
             </button>
           )}
           {!submitted.current && (
-            <button type="submit" className="button primary" disabled={!ready}>
+            <button
+              type="submit"
+              className="button primary"
+              disabled={!ready}
+              aria-describedby={permitted ? undefined : unavailable}
+            >
               Move {count} player{count === 1 ? "" : "s"}
               {destination ? ` to ${destination.label}` : ""}
             </button>
