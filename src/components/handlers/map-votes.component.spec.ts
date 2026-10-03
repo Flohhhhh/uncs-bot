@@ -23,13 +23,14 @@ function fixture() {
 }
 it("acknowledges privately before saving the vote and privately confirms the chosen map", async () => {
   const { component, service, interaction, context } = fixture();
-  await component.vote(context, "vote", "0");
+  await component.vote(context, "vote", "1");
   expect(interaction.deferReply).toHaveBeenCalledTimes(1);
   expect(interaction.deferReply).toHaveBeenCalledWith({ flags: MessageFlags.Ephemeral });
   expect(interaction.deferReply.mock.invocationCallOrder[0]).toBeLessThan(service.cast.mock.invocationCallOrder[0]);
-  expect(service.cast).toHaveBeenCalledWith("vote", "0", interaction.user.id, "guild", "channel", "message", true);
+  expect(service.cast).toHaveBeenCalledWith("vote", "1", interaction.user.id, "guild", "channel", "message", true);
+  // The ballot button reads "2. Ozeti · King of the Hill", never the catalog ID.
   expect(interaction.editReply).toHaveBeenCalledWith({
-    content: "Your vote is now Ozeti · King of the Hill. You can choose again until it closes at 95 points.",
+    content: "Your vote is now choice 2: Ozeti · King of the Hill. You can choose again until it closes at 95 points.",
     allowedMentions: { parse: [] },
   });
 });

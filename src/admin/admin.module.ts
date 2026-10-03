@@ -1,4 +1,12 @@
-import { type MiddlewareConsumer, Module, type NestModule, RequestMethod } from "@nestjs/common";
+import {
+  HttpException,
+  type MiddlewareConsumer,
+  Module,
+  type NestModule,
+  type OnModuleInit,
+  RequestMethod,
+} from "@nestjs/common";
+import { HttpAdapterHost } from "@nestjs/core";
 import { ServeStaticModule } from "@nestjs/serve-static";
 import { join } from "node:path";
 import type { NextFunction, Request, Response } from "express";
@@ -33,7 +41,35 @@ import { GameRounds } from "./game-rounds";
   controllers: [AdminPageController, AdminApiController, AdminGameController],
   exports: [AdminSettings, AdminStore, AdminAuth, AdminGuard, AdminServerGuard, AdminService, GameServers, GameRounds],
 })
-export class AdminModule implements NestModule {
+export class AdminModule implements NestModule, OnModuleInit {
+  constructor(private readonly adapterHost: HttpAdapterHost) {}
+
+  onModuleInit() {
+    // A missing or refused asset fails inside express.static, and that error's message holds the server's
+    // filesystem path. ServeStaticModule's own error hook (registered first, as this module imports it) and
+    // Nest's handler (registered after every module's init) would both pass it to the browser, so this hook
+    // answers asset errors with a fixed body. Server-side failures still go on to the exception filter.
+    const adapter = this.adapterHost.httpAdapter;
+    if (adapter?.getType() !== "express") return;
+    adapter.use((error: unknown, req: Request, res: Response, next: NextFunction) => {
+      const failure = (error ?? {}) as { status?: unknown; statusCode?: unknown };
+      const status =
+        error instanceof HttpException
+          ? error.getStatus()
+          : typeof failure.status === "number"
+            ? failure.status
+            : typeof failure.statusCode === "number"
+              ? failure.statusCode
+              : 500;
+      if (!/^\/admin\/assets(?:\/|$)/i.test(req.originalUrl) || res.headersSent || status >= 500) {
+        next(error);
+        return;
+      }
+      if (status === 403) res.status(403).json({ message: "Forbidden." });
+      else res.status(404).json({ message: "Not found." });
+    });
+  }
+
   configure(consumer: MiddlewareConsumer) {
     const traffic = new Map<string, { until: number; count: number }>();
     consumer

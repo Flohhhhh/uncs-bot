@@ -111,6 +111,9 @@ export function PlayersPage() {
           onChange={(event) => setTeamFilter(event.target.value)}
         >
           <option value="">All teams</option>
+          {teamFilter && teamFilter !== "unassigned" && !teams.some((team) => team.name === teamFilter) && (
+            <option value={teamFilter}>{teamFilter} (not in this match)</option>
+          )}
           {teams.map((team) => (
             <option key={team.name} value={team.name}>
               {team.label}

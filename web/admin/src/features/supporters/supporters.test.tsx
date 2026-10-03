@@ -115,6 +115,44 @@ it("searches all stored supporters on explicit submit rather than filtering only
   expect(request).toHaveBeenLastCalledWith("supporters", expect.any(Object));
 });
 
+it("announces a failed search to screen readers without announcing the search while it loads", async () => {
+  request.mockImplementation(async (path) => {
+    if (String(path).includes("?search=")) throw new Error("The dashboard could not be reached.");
+    return data();
+  });
+  render(page());
+  await screen.findByRole("button", { name: "Review supporter" });
+  fireEvent.change(screen.getByRole("searchbox", { name: "Search all supporter records" }), {
+    target: { value: "Earlier donor" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Search all records" }));
+  expect(screen.getByText("Loading supporters…").closest("[role=alert], [aria-live]")).toBeNull();
+  expect(await screen.findByRole("alert")).toHaveTextContent("Supporter records could not be loaded");
+});
+
+it("keeps a failed search changeable and clearable", async () => {
+  request.mockImplementation(async (path) => {
+    if (String(path).includes("?search=")) throw new Error("The dashboard could not be reached.");
+    return data();
+  });
+  render(page());
+  await screen.findByRole("button", { name: "Review supporter" });
+  fireEvent.change(screen.getByRole("searchbox", { name: "Search all supporter records" }), {
+    target: { value: "Wait..." },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Search all records" }));
+  await screen.findByText("Supporter records could not be loaded");
+  expect(request).toHaveBeenLastCalledWith("supporters?search=Wait...", expect.any(Object));
+  expect(screen.getByRole("searchbox", { name: "Search all supporter records" })).toHaveValue("Wait...");
+  fireEvent.click(screen.getByRole("button", { name: "Search all records" }));
+  await screen.findByText("Supporter records could not be loaded");
+  expect(request.mock.calls.filter(([path]) => path === "supporters?search=Wait...")).toHaveLength(2);
+  fireEvent.click(screen.getByRole("button", { name: "Clear search" }));
+  await screen.findByRole("button", { name: "Review supporter" });
+  expect(request).toHaveBeenLastCalledWith("supporters", expect.any(Object));
+  expect(screen.getByRole("searchbox", { name: "Search all supporter records" })).toHaveValue("");
+});
+
 it("requires a checked campaign membership before creating an unverified donor record without webhook setup", async () => {
   const response = deferred<SupporterReviewResponse>();
   request.mockImplementation(async (_path, options) =>
@@ -261,6 +299,36 @@ it("founder eligibility requires first checked payment, linked identities, amoun
   expect(
     founderReady({ ...supporter, founderEligiblePayment: { ...payment, paidAt: "2026-10-15T03:59:59.999Z" } }, policy),
   ).toBe(true);
+});
+
+it("records a founder promise against a verified first payment from the Patreon import", async () => {
+  const imported: PaymentEvidence = { ...payment, source: "patreon_api", reference: "patreon-event-1" };
+  const record = { ...supporter, founderEligiblePayment: imported };
+  expect(founderReady(record, policy)).toBe(true);
+  for (const invalid of [{ verificationState: "unverified" as const }, { firstSuccessfulPaymentVerified: false }])
+    expect(founderReady({ ...record, founderEligiblePayment: { ...imported, ...invalid } }, policy)).toBe(false);
+  request.mockImplementation(async (_path, options) =>
+    options?.method === "POST"
+      ? {
+          ok: true,
+          replayed: false,
+          supporter: { ...record, version: 8, founder: { awardedAt: policy.startsAt!, paymentId: imported.id } },
+        }
+      : data(record),
+  );
+  render(page());
+  fireEvent.click(await screen.findByRole("button", { name: "Review supporter" }));
+  fireEvent.click(screen.getByRole("button", { name: "Record founder promise" }));
+  const notice = screen.getByText("Payment supporting this founder promise").parentElement!;
+  expect(notice).toHaveTextContent("5.00 USD · checked by the Patreon import · first payment history checked");
+  expect(notice).not.toHaveTextContent("provider status only");
+  fireEvent.change(screen.getByLabelText("Reason"), {
+    target: { value: "Imported first payment and matched accounts." },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save reviewed record" }));
+  await screen.findByRole("heading", { name: "Supporter record saved" });
+  expect(postCalls()[0][0]).toBe(`supporters/${supporter.id}/founder`);
+  expect(JSON.parse(String(postCalls()[0][1]?.body))).toMatchObject({ version: 7, paymentId: imported.id });
 });
 
 it("checks linked Steam account structure rather than a decimal prefix", () => {

@@ -2,6 +2,12 @@
 import type { StaffRole } from "./admin-policy";
 
 /**
+ * An https link an alert can show as an autolink (<url>): no spaces, angle brackets or backticks to break out.
+ * Startup applies it to watch-list evidence links, so a link the alert would drop is refused instead.
+ */
+export const SAFE_LINK = /^https:\/\/[^\s<>`]{1,500}$/;
+
+/**
  * Staff alerts are alert-only: Gramps never kicks, bans or changes the whitelist because of one.
  * SteamIDs and player names in these views are for the authenticated staff API and the private
  * staff channel only.

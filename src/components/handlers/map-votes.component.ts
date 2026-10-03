@@ -1,8 +1,8 @@
 import { HttpException, Injectable } from "@nestjs/common";
 import { MessageFlags } from "discord.js";
 import { Button, ComponentParam, Context, type ButtonContext } from "necord";
-import { MapVotesService } from "../../map-votes/map-votes.service";
 import { voteChoiceTitle } from "../../common/voting-policy";
+import { MapVotesService } from "../../map-votes/map-votes.service";
 
 @Injectable()
 export class MapVotesComponent {
@@ -25,7 +25,8 @@ export class MapVotesComponent {
         interaction.message.id,
         interaction.inCachedGuild() && !interaction.member.pending && !interaction.user.bot,
       );
-      message = `Your vote is now ${voteChoiceTitle(selection)}. You can choose again until ${
+      // Same number and title as the button, so a voter can see which choice was recorded.
+      message = `Your vote is now choice ${Number(choice) + 1}: ${voteChoiceTitle(selection).slice(0, 150)}. You can choose again until ${
         closeAtScore === null ? "the ballot closes" : `it closes at ${closeAtScore} points`
       }.`;
     } catch (error) {
