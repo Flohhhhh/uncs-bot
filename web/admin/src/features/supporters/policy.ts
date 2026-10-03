@@ -7,10 +7,15 @@ export function paymentDescription(payment: PaymentEvidence | null) {
     typeof payment.amountCents === "number"
       ? `${(payment.amountCents / 100).toFixed(2)} ${payment.currency || "currency not recorded"}`
       : "Amount not established";
+  const history = payment.firstSuccessfulPaymentVerified
+    ? "first payment history checked"
+    : "first payment history not confirmed";
   const evidence =
     payment.source === "manual_receipt"
-      ? `receipt checked by staff · ${payment.firstSuccessfulPaymentVerified ? "first payment history checked" : "first payment history not confirmed"}`
-      : "provider status only";
+      ? `receipt checked by staff · ${history}`
+      : payment.source === "patreon_api"
+        ? `${payment.verificationState === "verified" ? "checked by the Patreon import" : "Patreon import no longer reports this charge as paid"} · ${history}`
+        : "provider status only";
   return `${amount} · ${evidence}`;
 }
 
@@ -22,7 +27,7 @@ export function founderReady(record: Supporter, policy: FounderPolicy) {
     record.identityState === "staff_linked" &&
     record.discordId &&
     isPublicIndividualSteamId(record.steamId) &&
-    payment?.source === "manual_receipt" &&
+    (payment?.source === "manual_receipt" || payment?.source === "patreon_api") &&
     payment.verificationState === "verified" &&
     payment.firstSuccessfulPaymentVerified === true &&
     payment.currency === policy.currency &&

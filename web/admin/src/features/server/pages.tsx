@@ -182,7 +182,13 @@ export function WhitelistPage() {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("");
   if (!data)
-    return <Empty title={error ? "Whitelist could not be loaded" : "Loading whitelist…"} detail={error || ""} />;
+    return (
+      <Empty
+        title={error ? "Whitelist could not be loaded" : "Loading whitelist…"}
+        detail={error || ""}
+        alert={!!error}
+      />
+    );
   const invalidIds = [
     data.invalidEntryCount > 0 ? `${data.invalidEntryCount} in the running game` : "",
     (data.configuredInvalidEntryCount ?? 0) > 0 ? `${data.configuredInvalidEntryCount} in saved configuration` : "",
@@ -297,7 +303,8 @@ export function WhitelistPage() {
 export function BansPage() {
   const { data, error } = useResource<Ban[]>("bans");
   const [query, setQuery] = useState("");
-  if (!data) return <Empty title={error ? "Bans could not be loaded" : "Loading bans…"} detail={error} />;
+  if (!data)
+    return <Empty title={error ? "Bans could not be loaded" : "Loading bans…"} detail={error} alert={!!error} />;
   const invalidCount = data.filter((ban) => !isPublicIndividualSteamId(ban.steamId)).length;
   const rows = data.filter((ban) =>
     [ban.steamId, ban.reason, ban.bannedBy].some((value) => value?.toLowerCase().includes(query.trim().toLowerCase())),

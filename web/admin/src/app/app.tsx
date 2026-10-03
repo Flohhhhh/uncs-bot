@@ -354,7 +354,7 @@ function Dashboard({
           <label className="mobile-navigation">
             Dashboard section
             <select
-              value={visiblePages.some(([id]) => id === navigationKey) ? navigationKey : ""}
+              value={visiblePages.some(([id]) => id === key) ? key : ""}
               disabled={busy || dialogOpen}
               onChange={(event) => navigate({ pathname: `/${event.target.value}`, search: location.search })}
             >
@@ -495,7 +495,7 @@ function Dashboard({
                 {logoutError}
               </div>
             )}
-            <section id="page" aria-live="polite">
+            <section id="page">
               <Routes>
                 <Route index element={<Navigate to={{ pathname: "/overview", search: location.search }} replace />} />
                 <Route path="overview" element={<OverviewPage />} />

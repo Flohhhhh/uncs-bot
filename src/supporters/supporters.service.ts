@@ -8,7 +8,7 @@ import {
 import { z } from "zod";
 import { EnvService } from "../env/env.service";
 import type { Staff } from "../admin/admin.types";
-import { PatreonSyncService } from "./patreon-sync.service";
+import { deploymentSecrets, PatreonSyncService } from "./patreon-sync.service";
 import { SupportersStore } from "./supporters.store";
 import {
   founderSchema,
@@ -18,6 +18,7 @@ import {
   paymentSchema,
   policyDays,
   reviewSchema,
+  signedByPatreon,
   type FounderPolicy,
   type SupporterMutation,
 } from "./supporters.types";
@@ -32,16 +33,14 @@ export class SupportersService {
   private configured() {
     return Boolean(this.env.get("PATREON_ENABLED") && this.env.get("PATREON_CAMPAIGN_ID"));
   }
+  /** The signing secret must be separate from the creator token and every other deployment secret. */
   private webhookConfigured() {
     const secret = this.env.get("PATREON_WEBHOOK_SECRET");
     return Boolean(
       this.configured() &&
       typeof secret === "string" &&
       secret.length >= 16 &&
-      secret !== this.env.get("WARDOGS_RCON_PASSWORD") &&
-      secret !== this.env.get("WARDOGS_FEED_TOKEN") &&
-      !this.env.get("WARDOGS_SERVERS")?.some((server) => secret === server.password || secret === server.feedToken) &&
-      secret !== this.env.get("ADMIN_SESSION_SECRET"),
+      ![this.env.get("PATREON_CREATOR_ACCESS_TOKEN"), ...deploymentSecrets(this.env)].includes(secret),
     );
   }
   policy(): FounderPolicy {
@@ -74,6 +73,10 @@ export class SupportersService {
       this.env.get("PATREON_CAMPAIGN_ID")!,
     );
     return { ok: true, ...(await this.store.ingest(observation)) };
+  }
+  /** Whether a webhook request carries a valid Patreon signature. The body is not parsed or kept. */
+  signedWebhook(raw: unknown, signature: unknown) {
+    return this.webhookConfigured() && signedByPatreon(raw, signature, this.env.get("PATREON_WEBHOOK_SECRET")!);
   }
   async list(staff: Staff, search: unknown = "") {
     this.admin(staff);

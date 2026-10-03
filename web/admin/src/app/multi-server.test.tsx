@@ -56,6 +56,22 @@ it("retains the selected server when using the compact section picker", async ()
   expect(router.state.location.search).toBe("?server=event");
   expect(screen.getByRole("combobox", { name: "Dashboard section" })).toHaveValue("permissions");
 });
+it.each([
+  ["/audit", "activity"],
+  ["/combat", "activity"],
+  ["/events", "match"],
+])("lets the compact section picker open the parent section from %s", async (path, parent) => {
+  const { router } = mount(`${path}?server=primary`, async (url) =>
+    json(url.endsWith("/overview") ? overview("Primary") : []),
+  );
+  const sections = await screen.findByRole("combobox", { name: "Dashboard section" });
+  expect(sections).toHaveValue("");
+  expect(within(sections).getByRole("option", { name: "Choose a section" })).toHaveProperty("selected", true);
+  fireEvent.change(sections, { target: { value: parent } });
+  await waitFor(() => expect(router.state.location.pathname).toBe(`/${parent}`));
+  expect(router.state.location.search).toBe("?server=primary");
+  expect(screen.getByRole("combobox", { name: "Dashboard section" })).toHaveValue(parent);
+});
 it("cancels a previous server read and ignores its late response after a switch", async () => {
   let complete!: (response: Response) => void;
   const pending = new Promise<Response>((resolve) => {

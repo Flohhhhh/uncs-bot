@@ -4,7 +4,7 @@
  * This command demonstrates the use of non-primitive options in a slash command, specifically the Mentionable option type.
  */
 import { Injectable, Logger } from "@nestjs/common";
-import { EmbedBuilder, GatewayIntentBits, GuildMember, Role, User } from "discord.js";
+import { EmbedBuilder, GatewayIntentBits, GuildMember, Role, time, TimestampStyles, User } from "discord.js";
 import { Context, MentionableOption, Options, SlashCommand, type SlashCommandContext } from "necord";
 
 /** Discord rejects embed field values longer than this. */
@@ -57,7 +57,12 @@ export class WhatisCommand {
         .addFields(
           { name: "ID", value: thing.id, inline: true },
           { name: "Mention", value: `<@${thing.id}>`, inline: true },
-          { name: "Joined At", value: thing.joinedAt?.toDateString() ?? "Unknown", inline: true },
+          // Discord shows timestamp markup in each viewer's own time zone; the host runs in UTC.
+          {
+            name: "Joined At",
+            value: thing.joinedAt ? time(thing.joinedAt, TimestampStyles.LongDate) : "Unknown",
+            inline: true,
+          },
           {
             name: "Roles",
             value: listRoles(
@@ -90,7 +95,7 @@ export class WhatisCommand {
           { name: "ID", value: thing.id, inline: true },
           { name: "Mention", value: `<@${thing.id}>`, inline: true },
           { name: "Bot", value: thing.bot ? "Yes" : "No", inline: true },
-          { name: "Created At", value: thing.createdAt.toDateString(), inline: true },
+          { name: "Created At", value: time(thing.createdAt, TimestampStyles.LongDate), inline: true },
         );
     } else {
       embed.setDescription("Unknown mentionable type.");

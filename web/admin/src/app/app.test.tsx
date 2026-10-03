@@ -105,6 +105,16 @@ describe("React staff shell", () => {
     expect(document.title).toBe("Action history · The UNCs Admin");
     expect(screen.getByRole("heading", { level: 1 })).toHaveFocus();
   });
+  it("announces a new page by focusing its heading instead of reading refreshed content aloud", async () => {
+    mount("/players");
+    await screen.findByText("Simulated UNCs");
+    expect(screen.getByRole("heading", { level: 1 })).toHaveFocus();
+    expect(document.getElementById("page")?.closest("[aria-live]")).toBeNull();
+    fireEvent.click(screen.getByRole("link", { name: /Server activity/ }));
+    await waitFor(() => expect(document.title).toBe("Server activity · The UNCs Admin"));
+    expect(screen.getByRole("heading", { level: 1 })).toHaveFocus();
+    expect(document.getElementById("page")?.closest("[aria-live]")).toBeNull();
+  });
   it("requires a fresh server check after returning from a records page", async () => {
     const fetcher = mount();
     await screen.findByText("Simulated UNCs");

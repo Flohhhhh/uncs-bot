@@ -86,6 +86,34 @@ describe("live player controls", () => {
     fireEvent.click(screen.getByRole("button", { name: "Reset filters" }));
     expect(screen.getByLabelText("Select Bob")).toBeChecked();
   });
+  it("shows a filtered team that left the match so All teams can clear it", () => {
+    const view = render(
+      <AdminContext.Provider value={context()}>
+        <PlayersPage />
+      </AdminContext.Provider>,
+    );
+    const filter = screen.getByRole("combobox", { name: "Filter players by team" });
+    fireEvent.change(filter, { target: { value: "Lonestar" } });
+    expect(screen.getByRole("heading", { name: "1 player shown" })).toBeInTheDocument();
+    const next = context();
+    next.overview!.status.factionScores = next.overview!.status.factionScores.filter(
+      (team) => team.name !== "Lonestar",
+    );
+    view.rerender(
+      <AdminContext.Provider value={next}>
+        <PlayersPage />
+      </AdminContext.Provider>,
+    );
+    expect(filter).toHaveValue("Lonestar");
+    expect(within(filter).getByRole("option", { name: "Lonestar (not in this match)" })).toHaveProperty(
+      "selected",
+      true,
+    );
+    expect(screen.getByRole("heading", { name: "0 players shown" })).toBeInTheDocument();
+    fireEvent.change(filter, { target: { value: "" } });
+    expect(within(filter).queryByRole("option", { name: /not in this match/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "3 players shown" })).toBeInTheDocument();
+  });
   it("limits the UNC shortcut to player names while keeping hidden selections visible", () => {
     const admin = context();
     admin.overview!.status.factionScores[0].name = "UNC faction";

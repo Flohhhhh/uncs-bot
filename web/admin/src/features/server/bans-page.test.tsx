@@ -7,7 +7,10 @@ import { BansPage } from "./pages";
 
 vi.mock("../../api/client", () => ({ api: vi.fn() }));
 const request = vi.mocked(api);
-beforeEach(() => request.mockReset());
+// Braces keep the hook from returning the mock, which Vitest would then call as a teardown.
+beforeEach(() => {
+  request.mockReset();
+});
 
 it("keeps every ban visible, filters and sorts locally, and disables removal only for invalid IDs", async () => {
   const valid = "76561198000000001",
@@ -37,4 +40,15 @@ it("keeps every ban visible, filters and sorts locally, and disables removal onl
   expect(admin.openAction).toHaveBeenCalledWith("unban", valid);
   expect(request).toHaveBeenCalledTimes(1);
   expect(request.mock.calls[0][1]?.method).toBeUndefined();
+});
+
+it("announces a failed ban read without announcing the read while it loads", async () => {
+  request.mockRejectedValue(new Error("The game server did not respond."));
+  render(
+    <AdminContext.Provider value={context()}>
+      <BansPage />
+    </AdminContext.Provider>,
+  );
+  expect(screen.getByText("Loading bans…").closest("[role=alert]")).toBeNull();
+  expect(await screen.findByRole("alert")).toHaveTextContent("Bans could not be loaded");
 });
