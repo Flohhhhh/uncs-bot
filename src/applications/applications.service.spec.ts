@@ -643,6 +643,33 @@ describe("existing whitelist members", () => {
     expect(admin.act).toHaveBeenCalledTimes(1);
     expect(roles.applicationChanged).toHaveBeenCalledWith(applicant.userId);
   });
+  it.each([
+    ["saved in the configuration but not running yet", true, "no grant", null],
+    ["neither running nor saved", false, "the grant", "granted"],
+  ] as const)("sends the normal grant for a SteamID %s, recording %s", async (_name, configured, _recorded, grant) => {
+    const { service, admin, game, store } = fixture();
+    game.whitelist.mockResolvedValueOnce({
+      entries: [{ steamId: input.steamId, active: false, configured }],
+      configurationAvailable: true,
+    });
+    const review = { id: randomUUID(), reason: "Approve" };
+    const result = await service.review(staff, applicationId, "approve", review);
+    expect(admin.act).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "whitelist-add" }));
+    expect(store.finishApproval).toHaveBeenCalledWith(applicationId, review.id, expect.any(Object), grant);
+    expect(result.application).toMatchObject({ status: "approved", whitelistGrant: grant });
+  });
+  it("records the grant when the saved configuration could not be read but the SteamID is not running", async () => {
+    // A build that edits the saved configuration reads it again to grant, and an entry already saved there is not
+    // running, so the grant reports pending rather than applied and records nothing. Only the running list matters.
+    const { service, game, store } = fixture();
+    game.whitelist.mockResolvedValueOnce({
+      entries: [{ steamId: input.steamId, active: false, configured: null }],
+      configurationAvailable: false,
+    });
+    const review = { id: randomUUID(), reason: "Approve" };
+    await service.review(staff, applicationId, "approve", review);
+    expect(store.finishApproval).toHaveBeenCalledWith(applicationId, review.id, expect.any(Object), "granted");
+  });
   it("falls back to the normal grant when the running whitelist cannot be read, recording no grant", async () => {
     // A configuration-edit build reports an entry that was already saved as applied, so "granted" would claim a
     // grant that may not have changed anything.

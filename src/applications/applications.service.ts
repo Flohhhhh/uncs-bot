@@ -204,6 +204,7 @@ export class ApplicationsService implements OnModuleInit, OnModuleDestroy {
     // staff confirm this Discord member owns it. Requiring that confirmation is a setting, off by default,
     // so a dashboard that cannot send it keeps the normal grant. Nothing is ever approved automatically.
     let alreadyLive = false;
+    let alreadySaved = false;
     let liveUnknown = false;
     let existing = false;
     if (kind === "approve") {
@@ -211,7 +212,11 @@ export class ApplicationsService implements OnModuleInit, OnModuleDestroy {
       if (current?.status === "pending") {
         try {
           const list = await this.servers.get(serverId).whitelist();
-          alreadyLive = list.entries.some((entry) => entry.steamId === current.steamId && entry.active);
+          const entry = list.entries.find((item) => item.steamId === current.steamId);
+          alreadyLive = Boolean(entry?.active);
+          // Saved in the configuration but not running yet: the grant can report it as applied without having
+          // added it, so it is not recorded as a grant either. It still gets the normal grant.
+          alreadySaved = !alreadyLive && entry?.configured === true;
         } catch {
           // An unreadable whitelist falls back to the normal grant, which confirms its own result. Whether the
           // SteamID was already live is then unknown, so the approval records no grant.
@@ -280,14 +285,14 @@ export class ApplicationsService implements OnModuleInit, OnModuleDestroy {
     }
     let application: WhitelistApplication;
     try {
-      // A grant for an entry that was already live changed nothing, so it is not recorded as a grant. Neither is
-      // one whose earlier whitelist read failed: a build that edits the saved configuration reports an existing
-      // entry as applied.
+      // A grant for an entry that was already live, or already in the saved configuration, may have changed nothing,
+      // so it is not recorded as a grant. Neither is one whose earlier whitelist read failed: a build that edits the
+      // saved configuration reports an existing entry as applied.
       application = await this.store.finishApproval(
         applicationId,
         request.id,
         outcome,
-        alreadyLive || liveUnknown ? null : "granted",
+        alreadyLive || alreadySaved || liveUnknown ? null : "granted",
       );
     } catch {
       return {

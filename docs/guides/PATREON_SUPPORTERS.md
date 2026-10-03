@@ -85,7 +85,7 @@ The SteamID of a Patreon record with a Discord account and no SteamID is copied 
 
 - no application is being approved, reviewed or revoked (`processing`, `needs_review` or `revoking`);
 - at least one application is `approved` with a grant intent and no revocation, and every approved application names the same, valid player SteamID64;
-- one of them recorded `whitelistGrant` `granted` (Gramps sent a real grant) or `existing` (staff confirmed this Discord member owns an entry that was already live). An approval with no recorded grant is left for staff: every approval from before grants were recorded, an approval of an already-live SteamID while confirmation is not required, an approval whose whitelist read failed, and every approval completed by a recheck;
+- one of them recorded `whitelistGrant` `granted` (Gramps sent a real grant) or `existing` (staff confirmed this Discord member owns an entry that was already live). An approval with no recorded grant is left for staff: every approval from before grants were recorded, an approval of an already-live SteamID while confirmation is not required, an approval of a SteamID already in the saved configuration, an approval whose whitelist read failed, and every approval completed by a recheck;
 - no other Discord account has an application for that SteamID that was not declined or revoked;
 - no application for that SteamID, from any Discord account on any server, was ever declined or revoked;
 - no other supporter record (any PayPal record, or a Patreon record of the campaign) holds that SteamID;
