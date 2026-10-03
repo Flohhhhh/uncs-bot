@@ -140,3 +140,54 @@ describe("whitelist removal notifications", () => {
     expect(events).toEqual([]);
   });
 });
+
+describe("a person queuing the entry that is already next", () => {
+  const queue = () => ({
+    id: randomUUID(),
+    action: "map-next",
+    reason: "Keep the next map",
+    revision: "r1",
+    currentIndex: 0,
+    currentMap: "Kavkazi",
+    entry: { map: "Europe", experiences: [] },
+  });
+  const alreadyNext = {
+    state: "applied",
+    changed: false,
+    message: "This entry is already next in the rotation. No change was sent.",
+  };
+  function queued() {
+    const f = fixture();
+    f.game.execute.mockResolvedValue(alreadyNext);
+    const listener = jest.fn(async (_staff: Staff, _serverId: string): Promise<string | null> => "Ballot closed.");
+    f.service.onUnchangedQueue(listener);
+    return { ...f, listener };
+  }
+  it("lets map votes close the open ballot and tells the staff member", async () => {
+    const f = queued();
+    const result = await f.service.act(staff, queue());
+    expect(f.listener).toHaveBeenCalledWith(staff, "primary");
+    expect(result).toMatchObject({
+      state: "applied",
+      changed: false,
+      message: "This entry is already next in the rotation. No change was sent. Ballot closed.",
+    });
+    // The audit keeps the game's own result.
+    expect(f.store.finish).toHaveBeenCalledWith(expect.any(String), alreadyNext);
+  });
+  it("keeps the game result when the listener fails", async () => {
+    const f = queued();
+    f.listener.mockRejectedValue(new Error("DB offline"));
+    expect(await f.service.act(staff, queue())).toMatchObject(alreadyNext);
+  });
+  it("leaves ballots alone for Gramps' own queue changes, changed rotations and other actions", async () => {
+    const own = queued();
+    await own.service.act({ ...staff, id: "system:map-vote:primary" }, queue());
+    const changed = queued();
+    changed.game.execute.mockResolvedValue({ state: "pending", message: "Saved" });
+    await changed.service.act(staff, queue());
+    const other = queued();
+    await other.service.act(staff, input());
+    for (const f of [own, changed, other]) expect(f.listener).not.toHaveBeenCalled();
+  });
+});

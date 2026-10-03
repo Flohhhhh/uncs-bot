@@ -1,9 +1,10 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { beforeEach, expect, it, vi } from "vitest";
 import { AdminContext } from "../../app/context";
 import { api } from "../../api/client";
 import { context } from "../players/test-fixtures";
-import { AuditPage } from "./pages";
+import { ActivityPage } from "./activity-page";
 
 vi.mock("../../api/client", () => ({ api: vi.fn() }));
 const request = vi.mocked(api);
@@ -30,16 +31,18 @@ function show(role: "admin" | "viewer" = "admin") {
   const state = context();
   state.me.role = role;
   return render(
-    <AdminContext.Provider value={state}>
-      <AuditPage />
-    </AdminContext.Provider>,
+    <MemoryRouter initialEntries={["/activity?server=primary&view=actions"]}>
+      <AdminContext.Provider value={state}>
+        <ActivityPage />
+      </AdminContext.Provider>
+    </MemoryRouter>,
   );
 }
 it("reads the game log only when selected and separates commands from connections", async () => {
   show();
   await screen.findByText("No recorded staff actions");
   expect(request.mock.calls.some(([path]) => path === "game-log")).toBe(false);
-  fireEvent.click(screen.getByRole("button", { name: "Game command log" }));
+  fireEvent.click(screen.getByRole("tab", { name: "Game command log" }));
   await screen.findByText("POST /v1/broadcast");
   expect(screen.queryByText("AUTH_OK")).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("checkbox", { name: "Include reads and connections" }));
@@ -50,7 +53,7 @@ it("reads the game log only when selected and separates commands from connection
 it("does not expose or read the game log for viewers", async () => {
   show("viewer");
   await waitFor(() => expect(request).toHaveBeenCalled());
-  expect(screen.queryByRole("button", { name: "Game command log" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("tab", { name: "Game command log" })).not.toBeInTheDocument();
   expect(request.mock.calls.some(([path]) => path === "game-log")).toBe(false);
 });
 it("distinguishes an unsupported log from a failed request", async () => {
@@ -58,7 +61,7 @@ it("distinguishes an unsupported log from a failed request", async () => {
   // Start with the component's normal empty dashboard history.
   request.mockResolvedValueOnce([] as never);
   show();
-  fireEvent.click(screen.getByRole("button", { name: "Game command log" }));
+  fireEvent.click(screen.getByRole("tab", { name: "Game command log" }));
   await screen.findByText("This game build does not provide the command log");
   request.mockRejectedValueOnce(new Error("Game connection unavailable"));
   fireEvent.click(screen.getByRole("button", { name: "Refresh game log" }));

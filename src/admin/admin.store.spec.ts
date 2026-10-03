@@ -65,6 +65,20 @@ describe("stored action receipt lookup", () => {
       'not ("admin_actions"."actor_id" = $3 and "admin_actions"."action" in ($4, $5) and "admin_actions"."state" in ($6, $7))',
     );
   });
+  it("finds a person's map queue for the server since a time, ignoring Gramps and refused queues", async () => {
+    const query = jest.fn(async (_config: { text: string }, _params: unknown[]) => ({ rows: [] as unknown[][] }));
+    const store = new AdminStore(drizzle({ query } as unknown as Client) as Database);
+    const since = new Date("2026-10-03T12:00:00Z");
+    await expect(store.staffQueuedSince("east", since)).resolves.toBe(false);
+    query.mockResolvedValueOnce({ rows: [[randomUUID()]] });
+    await expect(store.staffQueuedSince("east", since)).resolves.toBe(true);
+    const [lookup, params] = query.mock.calls[0];
+    expect(lookup.text.startsWith("select ")).toBe(true);
+    expect(lookup.text.split(" where ")[1]).toBe(
+      `("admin_actions"."action" = $1 and coalesce("admin_actions"."details"->>'serverId', $2) = $3 and "admin_actions"."created_at" >= $4 and not "admin_actions"."actor_id" like $5 and "admin_actions"."state" <> $6) limit $7`,
+    );
+    expect(params).toEqual(["map-next", "primary", "east", since.toISOString(), "system:%", "failed", 1]);
+  });
   it("returns null when no stored receipt exists", async () => {
     const query = jest.fn(async () => ({ rows: [] }));
     const store = new AdminStore(drizzle({ query } as unknown as Client) as Database);

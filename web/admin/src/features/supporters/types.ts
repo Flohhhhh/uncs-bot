@@ -84,6 +84,49 @@ export interface AutomationStatus {
   lastRunAt?: string | null;
   lastError?: string | null;
 }
+/** Mirrors PatreonSyncStatus in src/supporters/patreon-sync.service.ts. It never carries the token. */
+export interface PatreonSyncStatus {
+  configured: boolean;
+  running: boolean;
+  lastAttemptAt: string | null;
+  lastSuccessAt: string | null;
+  /** Fixed, safe text from the server. */
+  lastError: string | null;
+  tokenRejected: boolean;
+  /** Counts from the last successful sync. */
+  members: number;
+  newMembers: number;
+  updated: number;
+  payments: number;
+  discordLinks: number;
+  conflicts: number;
+  truncated: number;
+  revokedPayments: number;
+  memberListComplete: boolean;
+  intervalMinutes: number;
+  nextAttemptAt: string | null;
+  conflictDetails: {
+    supporterId: string;
+    patreonMemberId: string;
+    reason: "discord-in-use" | "discord-differs";
+  }[];
+  founderReviews: {
+    supporterId: string;
+    patreonMemberId: string;
+    paymentId: string;
+    paymentSource: string;
+    reference: string;
+    unverifiedPaymentId: string;
+    unverifiedReference: string;
+  }[];
+}
+/** POST supporters/sync: joins a running sync, or reuses one that finished moments ago. */
+export interface PatreonSyncResponse {
+  ok: boolean;
+  joined: boolean;
+  recent?: boolean;
+  sync: PatreonSyncStatus;
+}
 export interface SupportersResponse {
   enabled: boolean;
   configured: boolean;
@@ -91,6 +134,7 @@ export interface SupportersResponse {
   webhookConfigured: boolean;
   supporters: Supporter[];
   note: string;
+  sync: PatreonSyncStatus;
   automation?: AutomationStatus;
 }
 export interface SupporterReviewResponse {

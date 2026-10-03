@@ -1,4 +1,11 @@
-import type { NextStep, PaymentEvidence, Supporter, SupporterDecision, SupporterReviewInput } from "./types";
+import type {
+  FounderPolicy,
+  NextStep,
+  PaymentEvidence,
+  Supporter,
+  SupporterDecision,
+  SupporterReviewInput,
+} from "./types";
 import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 
 export function paymentDescription(payment: PaymentEvidence | null) {
@@ -172,4 +179,40 @@ export function reviewInput(
     return { ...base, paymentId: record.founderEligiblePayment.id };
   }
   return base;
+}
+
+/** Founder dates are set and shown in New York time. */
+export const newYork = "America/New_York";
+/** Hour, minute and zone abbreviation of an instant in New York. */
+function newYorkParts(time: number) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: newYork,
+    hourCycle: "h23",
+    hour: "numeric",
+    minute: "numeric",
+    timeZoneName: "short",
+  }).formatToParts(time);
+  const part = (type: string) => parts.find((entry) => entry.type === type)?.value ?? "";
+  return { midnight: Number(part("hour")) === 0 && Number(part("minute")) === 0, zone: part("timeZoneName") };
+}
+/** "Founder window Sep 30–Oct 14 (EDT)". The end is exclusive, so a midnight end shows the day before. */
+export function founderWindowLabel(policy: FounderPolicy) {
+  const start = Date.parse(policy.startsAt ?? "");
+  const end = Date.parse(policy.endsAt ?? "");
+  if (!policy.configured || !Number.isFinite(start) || !Number.isFinite(end) || end <= start)
+    return "Founder window · dates not set";
+  const day = (time: number) =>
+    new Date(time).toLocaleDateString(undefined, { timeZone: newYork, month: "short", day: "numeric" });
+  const moment = (time: number) =>
+    new Date(time).toLocaleString(undefined, {
+      timeZone: newYork,
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  const from = newYorkParts(start);
+  const to = newYorkParts(end);
+  const zone = from.zone === to.zone ? from.zone : "New York time";
+  return `Founder window ${from.midnight ? day(start) : moment(start)}${to.midnight ? `–${day(end - 1)}` : ` until ${moment(end)}`} (${zone})`;
 }

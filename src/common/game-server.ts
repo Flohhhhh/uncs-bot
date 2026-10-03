@@ -2,6 +2,8 @@ import { z } from "zod";
 import type { StaffRole } from "./admin-policy";
 
 export const LEGACY_SERVER_ID = "primary";
+/** The name of the single server configured by the legacy WARDOGS_RCON_* settings. */
+export const LEGACY_SERVER_NAME = "The UNCs";
 export const gameServerId = z.string().regex(/^[a-z][a-z0-9-]{0,39}$/, "Use a stable lowercase server ID.");
 export const gameServerJoinId = z.string().uuid("Use the public Wardogs Join by ID code.");
 export type GameServerSummary = { id: string; name: string; version: string; joinId?: string };

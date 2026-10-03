@@ -136,26 +136,26 @@ export function VotingControlsPanel({ onDirty }: { onDirty: (value: boolean) => 
         </p>
       )}
       {message && <p role="status">{message}</p>}
-      <div className="dialog-actions">
-        {draft && (
-          <button
-            className="button primary"
-            disabled={
-              busy ||
-              resource.loading ||
-              resource.refreshing ||
-              !data.available ||
-              changed ||
-              uncertain ||
-              !!resource.error ||
-              (policy.enabled && !policy.mapChoices && !policy.modeChoices)
-            }
-            onClick={() => void save()}
-          >
-            {review ? "Confirm enable voting" : "Save voting controls"}
-          </button>
-        )}
-        {(draft || uncertain || resource.error) && (
+      {(draft || uncertain || resource.error) && (
+        <div className="dialog-actions">
+          {draft && (
+            <button
+              className="button primary"
+              disabled={
+                busy ||
+                resource.loading ||
+                resource.refreshing ||
+                !data.available ||
+                changed ||
+                uncertain ||
+                !!resource.error ||
+                (policy.enabled && !policy.mapChoices && !policy.modeChoices)
+              }
+              onClick={() => void save()}
+            >
+              {review ? "Confirm enable voting" : "Save voting controls"}
+            </button>
+          )}
           <button
             className="button secondary"
             disabled={busy || resource.loading || resource.refreshing}
@@ -170,8 +170,8 @@ export function VotingControlsPanel({ onDirty }: { onDirty: (value: boolean) => 
           >
             Reload saved controls
           </button>
-        )}
-      </div>
+        </div>
+      )}
     </>
   );
 }

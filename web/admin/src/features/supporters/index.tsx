@@ -10,8 +10,10 @@ import {
   automaticPreview,
   discordDescription,
   founderReady,
+  founderWindowLabel,
   identityLabels,
   matchSummary,
+  newYork,
   paymentDescription,
   readyForStaff,
   reviewInput,
@@ -19,9 +21,9 @@ import {
   stepGroups,
 } from "./policy";
 import { ManualMember } from "./manual-member";
+import { PatreonImport } from "./patreon-sync";
 import type {
   AutomationStatus,
-  FounderPolicy,
   Supporter,
   SupporterDecision,
   SupporterReviewResponse,
@@ -286,6 +288,7 @@ function SupporterReview({
       className="supporter-dialog"
       busy={sending}
       onClose={onClose}
+      eyebrow={result ? null : undefined}
       title={
         result
           ? result.saved
@@ -472,7 +475,7 @@ function SupporterReview({
           </p>
         )}
         {result && (
-          <p className={`notice ${result.saved ? "" : "warning"}`} role="status">
+          <p className={`notice ${result.saved ? "success" : "warning"}`} role="status">
             {result.message}
           </p>
         )}
@@ -491,27 +494,46 @@ function SupporterReview({
   );
 }
 
-function AutomationNotice({ automation }: { automation: AutomationStatus | undefined }) {
+/** Which automatic matching is switched on, as one status line. Both switches are off by default. */
+function AutomationStatusLine({ automation }: { automation: AutomationStatus | undefined }) {
   const steamFill = Boolean(automation?.steamFill),
     founderAuto = Boolean(automation?.founderAuto);
   return (
-    <div className="notice info supporter-automation">
-      <strong>Automatic matching.</strong>{" "}
-      <Badge kind={steamFill ? "good" : "neutral"}>SteamID fill {steamFill ? "on" : "off"}</Badge>{" "}
-      <Badge kind={founderAuto ? "good" : "neutral"}>Automatic founders {founderAuto ? "on" : "off"}</Badge>{" "}
-      {founderAuto
-        ? "Gramps records a founder promise itself when the Discord account came from Patreon, a SteamID is linked and the first Patreon payment qualifies. Staff can always record one."
-        : "Automatic founder recording is off. Records marked “Would be recorded automatically” show what it would record; staff record founder promises."}
-      {!steamFill && " SteamIDs are linked by staff; an approved application’s SteamID is shown for checking."}
+    <div className="status-row supporter-automation">
+      <p className={`status-line ${steamFill || founderAuto ? "good" : "quiet"}`}>
+        <span>
+          Automatic matching:{" "}
+          <strong>{steamFill && founderAuto ? "on" : steamFill || founderAuto ? "partly on" : "off"}</strong>
+        </span>
+        <span>SteamID fill {steamFill ? "on" : "off"}</span>
+        <span>Automatic founders {founderAuto ? "on" : "off"}</span>
+      </p>
+      <p className="muted">
+        {founderAuto
+          ? "Gramps records a founder promise itself when the Discord account came from Patreon, a SteamID is linked and the first Patreon payment qualifies. Staff can always record one."
+          : "Automatic founder recording is off. Records marked “Would be recorded automatically” show what it would record; staff record founder promises."}
+        {!steamFill && " SteamIDs are linked by staff; an approved application’s SteamID is shown for checking."}
+      </p>
     </div>
   );
 }
+
+type SupporterFilter = "" | "review" | "unlinked" | "staff" | "preview" | "automatic" | "founder";
+const supporterFilters: { id: SupporterFilter; label: string; matches: (record: Supporter) => boolean }[] = [
+  { id: "", label: "All", matches: () => true },
+  { id: "review", label: "Awaiting review", matches: (record) => record.reviewState !== "verified" },
+  { id: "unlinked", label: "Accounts to match", matches: accountsToMatch },
+  { id: "staff", label: "Ready for staff", matches: readyForStaff },
+  { id: "preview", label: "Would be recorded automatically", matches: automaticPreview },
+  { id: "automatic", label: "Recorded automatically", matches: (record) => Boolean(record.founder?.automatic) },
+  { id: "founder", label: "Founder promises", matches: (record) => !!record.founder },
+];
 
 function AdminSupporters() {
   const { busy } = useAdmin();
   const [query, setQuery] = useState("");
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState("");
+  const [filter, setFilter] = useState<SupporterFilter>("");
   const resource = useResource<SupportersResponse>(
     search ? `supporters?search=${encodeURIComponent(search)}` : "supporters",
   );
@@ -520,6 +542,7 @@ function AdminSupporters() {
   const data = resource.data;
   const searchForm = (
     <form
+      className="supporter-search"
       onSubmit={(event) => {
         event.preventDefault();
         if (busy || resource.loading || resource.refreshing || query.trim().length > 100) return;
@@ -527,41 +550,39 @@ function AdminSupporters() {
         else setSearch(query.trim());
       }}
     >
-      <div className="toolbar">
-        <label className="search">
-          <input
-            type="search"
-            maxLength={100}
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            aria-label="Search all supporter records"
-            placeholder="Patreon name, membership ID, Discord ID, or SteamID"
-          />
-        </label>
-        <button className="button secondary" disabled={busy || resource.loading || resource.refreshing}>
-          Search all records
+      <label className="search">
+        <input
+          type="search"
+          maxLength={100}
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          aria-label="Search all supporter records"
+          placeholder="Name, Patreon member ID, PayPal transaction ID, Discord ID or SteamID"
+        />
+      </label>
+      <button className="button secondary" disabled={busy || resource.loading || resource.refreshing}>
+        Search all records
+      </button>
+      {search && (
+        <button
+          type="button"
+          className="button secondary"
+          disabled={busy || resource.loading || resource.refreshing}
+          onClick={() => {
+            setQuery("");
+            setSearch("");
+          }}
+        >
+          Clear search
         </button>
-        {search && (
-          <button
-            type="button"
-            className="button secondary"
-            disabled={busy || resource.loading || resource.refreshing}
-            onClick={() => {
-              setQuery("");
-              setSearch("");
-            }}
-          >
-            Clear search
-          </button>
-        )}
-      </div>
+      )}
     </form>
   );
   // A failed search keeps its form, so it can still be changed or cleared.
   if (!data)
     return (
       <>
-        {search && searchForm}
+        {search && <div className="toolbar">{searchForm}</div>}
         <Empty
           title={resource.error ? "Supporter records could not be loaded" : "Loading supporters…"}
           detail={resource.error ? "Refresh to try again. No empty list has been assumed." : undefined}
@@ -570,129 +591,85 @@ function AdminSupporters() {
       </>
     );
   const records = data.supporters;
-  const rows = records.filter(
-    (record) =>
-      !filter ||
-      (filter === "review" && record.reviewState !== "verified") ||
-      (filter === "unlinked" && accountsToMatch(record)) ||
-      (filter === "staff" && readyForStaff(record)) ||
-      (filter === "preview" && automaticPreview(record)) ||
-      (filter === "automatic" && record.founder?.automatic) ||
-      (filter === "founder" && record.founder),
-  );
-  const policy: FounderPolicy = data.founderPolicy;
-  const windowDate = (value: string | null) =>
-    value
-      ? new Date(value).toLocaleString(undefined, { timeZone: "America/New_York", timeZoneName: "short" })
-      : "Not set";
-  const founderWindow = policy.configured
-    ? `${windowDate(policy.startsAt)} → ${windowDate(policy.endsAt)} (end exclusive)`
-    : "15 days from launch · dates not set";
+  const rows = records.filter((supporterFilters.find((entry) => entry.id === filter) ?? supporterFilters[0]).matches);
+  const policy = data.founderPolicy;
+  const exactWindow = (value: string | null) =>
+    value ? new Date(value).toLocaleString(undefined, { timeZone: newYork, timeZoneName: "short" }) : "Not set";
+  // Patreon must be configured for Patreon records; PayPal records stay reviewable without it.
   const patreonReady = data.enabled && data.configured;
-  const reviewUnavailable = (record: Supporter) =>
-    (record.provider === "patreon" && !patreonReady) ||
-    Boolean(resource.error) ||
-    resource.loading ||
-    resource.refreshing;
+  const pageUnavailable = Boolean(resource.error) || resource.loading || resource.refreshing;
+  const reviewUnavailable = (record: Supporter) => (record.provider === "patreon" && !patreonReady) || pageUnavailable;
   return (
     <>
-      <div className="supporter-intro">
-        <div>
-          <p className="eyebrow">PATREON AND PAYPAL / PRIVATE STAFF RECORDS</p>
-          <h2>
-            THANK THE CREW.
-            <br />
-            <span>KEEP THE PROMISE.</span>
-          </h2>
-          <p>
-            Monthly support and permanent founder recognition have separate records. A founder promise does not expire
-            when a membership ends.
-          </p>
-        </div>
-        <div className="supporter-launch">
-          <span className="eyebrow">FOUNDER WINDOW</span>
-          <strong>{founderWindow}</strong>
-          <small>
-            {policy.configured
-              ? "Use the completed payment date, not the date a membership appeared here."
-              : "The launch dates must be set before any founder promise can be recorded."}
-          </small>
-          <Badge kind={patreonReady ? "neutral" : "warn"}>
-            {patreonReady ? "SUPPORTER RECORDS READY" : "NOT CONFIGURED"}
-          </Badge>
-          <small>
-            {data.webhookConfigured
-              ? "Patreon webhook configured; check delivery in Patreon."
-              : "Automatic Patreon updates are not connected. Verified member details can be entered manually when records are ready."}
-          </small>
-        </div>
+      <div className="supporter-summary">
+        <p>Records only. Grants no game or Discord access. A membership is not a verified payment.</p>
+        <span
+          className={`pill ${policy.configured ? "neutral" : "warn"}`}
+          title={
+            policy.configured
+              ? `${exactWindow(policy.startsAt)} until ${exactWindow(policy.endsAt)}, end not included. Use the completed payment date, not the date a membership appeared here.`
+              : "Set the launch dates before any founder promise can be recorded."
+          }
+        >
+          {founderWindowLabel(policy)}
+        </span>
+        {!patreonReady && <Badge kind="warn">Patreon not configured</Badge>}
+        <span
+          className="muted"
+          title={
+            data.webhookConfigured
+              ? "Check delivery in Patreon."
+              : "Verified member details can be entered by hand when records are ready."
+          }
+        >
+          Patreon webhook {data.webhookConfigured ? "connected" : "not connected"}
+        </span>
       </div>
-      <div className="notice info">
-        <strong>Future benefit only.</strong> Founder recognition records lifetime standard whitelist access for when
-        Wardogs queue tiers launch. No whitelist, priority tier, or Discord role is granted from this page. Current free
-        whitelist access stays in place.
-      </div>
-      <AutomationNotice automation={data.automation} />
-      {data.note && <p className="supporter-note">{data.note}</p>}
+      {data.sync && (
+        <PatreonImport
+          sync={data.sync}
+          unavailable={Boolean(resource.error)}
+          disabled={busy || resource.loading || resource.refreshing}
+          onSynced={resource.refresh}
+        />
+      )}
+      <AutomationStatusLine automation={data.automation} />
       {resource.error && (
         <p className="notice warning" role="alert">
           Supporter records could not be refreshed. Refresh before recording another review.
         </p>
       )}
-      <div className="application-counts supporter-counts">
-        <span>
-          <strong>{records.filter((record) => record.reviewState !== "verified").length}</strong> awaiting review
-        </span>
-        <span>
-          <strong>{records.filter(accountsToMatch).length}</strong> accounts to match
-        </span>
-        <span>
-          <strong>{records.filter(readyForStaff).length}</strong> ready for staff
-        </span>
-        <span>
-          <strong>{records.filter((record) => record.founder).length}</strong> founder promises
-        </span>
-        <span>Counts refer to loaded records</span>
+      <div className="toolbar">
+        {searchForm}
+        <button
+          className="button secondary"
+          disabled={busy || pageUnavailable || !patreonReady}
+          onClick={() => setAdding(true)}
+        >
+          Record existing Patreon member
+        </button>
       </div>
-      {searchForm}
-      <p className="muted">
+      <p className="filter-note">
         {search
           ? `Searching all records for “${search}”. Up to 100 matching records are shown.`
           : "Showing up to 100 recent records. Search all records to find earlier supporters."}
       </p>
-      <div className="toolbar">
-        <select
-          aria-label="Filter supporter records"
-          value={filter}
-          onChange={(event) => setFilter(event.target.value)}
-        >
-          <option value="">All loaded supporters</option>
-          <option value="review">Awaiting review</option>
-          <option value="unlinked">Accounts to match</option>
-          <option value="staff">Ready for staff</option>
-          <option value="preview">Would be recorded automatically</option>
-          <option value="automatic">Recorded automatically</option>
-          <option value="founder">Founder promises</option>
-        </select>
-        {filter && (
-          <button type="button" className="button secondary" onClick={() => setFilter("")}>
-            Reset filter
+      <div className="filter-chips record-filters" role="group" aria-label="Filter supporter records">
+        {supporterFilters.map((entry) => (
+          <button
+            type="button"
+            key={entry.id || "all"}
+            className="filter-chip"
+            aria-pressed={filter === entry.id}
+            onClick={() => setFilter(entry.id)}
+          >
+            {entry.label} <span className="chip-count">{records.filter(entry.matches).length}</span>
           </button>
-        )}
-        <span className="muted">
-          {rows.length} shown of {records.length} loaded
-        </span>
+        ))}
       </div>
-      <button
-        className="button secondary"
-        disabled={busy || resource.loading || resource.refreshing || Boolean(resource.error) || !patreonReady}
-        onClick={() => setAdding(true)}
-      >
-        Record existing Patreon member
-      </button>
       <Card
         title="Supporters"
-        subtitle="Membership status is not proof of a completed payment. Open a record to check evidence."
+        subtitle={`${rows.length} shown of ${records.length} loaded`}
         badge={<Badge>ADMIN ONLY</Badge>}
       >
         {rows.length ? (
@@ -720,11 +697,7 @@ function AdminSupporters() {
                   )}
                 </td>
                 <td>
-                  <Badge
-                    kind={
-                      record.identityState === "unlinked" || record.identityState === "partial" ? "warn" : "neutral"
-                    }
-                  >
+                  <Badge kind={accountsToMatch(record) ? "warn" : "neutral"}>
                     {identityLabels[record.identityState]}
                   </Badge>
                   <small>{matchSummary(record)}</small>
@@ -782,7 +755,7 @@ function AdminSupporters() {
       )}
       {adding && (
         <ManualMember
-          unavailable={!patreonReady || Boolean(resource.error) || resource.loading || resource.refreshing}
+          unavailable={!patreonReady || pageUnavailable}
           onClose={() => setAdding(false)}
           onRecorded={resource.refresh}
         />
