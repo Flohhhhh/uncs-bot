@@ -129,3 +129,12 @@ describe("Server activity help", () => {
     },
   );
 });
+
+describe("buttons", () => {
+  it("dims an aria-disabled button like a disabled one", () => {
+    // The player panel's Check again keeps focus while its check runs, so it is aria-disabled, not disabled.
+    const dimmed = 'button[aria-disabled="true"]';
+    expect(declared(dimmed, "opacity", 1024)).toBe(declared("button:disabled", "opacity", 1024));
+    expect(declared(dimmed, "cursor", 1024)).toBe("not-allowed");
+  });
+});

@@ -248,7 +248,8 @@ a {
 button {
   cursor: pointer;
 }
-button:disabled {
+button:disabled,
+button[aria-disabled="true"] {
   opacity: 0.45;
   cursor: not-allowed;
 }
@@ -795,7 +796,7 @@ main {
   background: var(--surface-2);
   color: var(--cream);
 }
-.secondary:hover:not(:disabled) {
+.secondary:hover:not(:disabled, [aria-disabled="true"]) {
   background: var(--surface-3);
   border-color: var(--line-hover);
 }

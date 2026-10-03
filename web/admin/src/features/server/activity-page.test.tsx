@@ -73,6 +73,12 @@ function lines() {
 function chip(name: RegExp) {
   return within(screen.getByRole("group", { name: "Activity types" })).getByRole("button", { name });
 }
+/** The player panel's always-present notice region; the SteamID copy button has its own status line. */
+function availability(panel: HTMLElement) {
+  return within(panel)
+    .getAllByRole("status")
+    .find((region) => !region.closest(".copy-value"))!;
+}
 
 it("combines observations and actual action outcomes while the native feed is still waiting", async () => {
   render(page(context()));
@@ -119,7 +125,8 @@ it("opens the player panel from a name in the feed", async () => {
 it("asks for the live roster and does not claim a player left while it is being read", async () => {
   const release = vi.fn();
   const watchRoster = vi.fn(() => release);
-  render(page({ ...context(), overview: null, stale: true, checking: true, watchRoster }));
+  const admin = context({ overview: null, stale: true, checking: true, watchRoster });
+  render(page(admin));
   await waitFor(() => expect(lines()).toContain("Alice joined"));
   expect(watchRoster).not.toHaveBeenCalled();
   fireEvent.click(screen.getAllByRole("button", { name: "Alice" })[0]);
@@ -128,7 +135,11 @@ it("asks for the live roster and does not claim a player left while it is being 
   expect(panel).toHaveTextContent("Checking the live roster…");
   expect(panel).not.toHaveTextContent("no longer in the current roster");
   expect(within(panel).queryByRole("button", { name: "Kick player" })).not.toBeInTheDocument();
-  expect(within(panel).queryByRole("button", { name: "Check again" })).not.toBeInTheDocument();
+  // Check again is there but waits for the read in flight, without starting another.
+  const check = within(panel).getByRole("button", { name: "Check again" });
+  expect(check).toHaveAttribute("aria-disabled", "true");
+  fireEvent.click(check);
+  expect(admin.refresh).not.toHaveBeenCalled();
   fireEvent.click(within(panel).getByRole("button", { name: "Close panel" }));
   expect(release).toHaveBeenCalledTimes(1);
 });
@@ -143,14 +154,57 @@ it("offers a check that works from the panel when an older roster needs a fresh 
   expect(within(panel).getByRole("button", { name: "Kick player" })).toBeDisabled();
   expect(panel).toHaveTextContent("Server details need a fresh check before choosing an action.");
   expect(panel).not.toHaveTextContent(/close this panel/i);
-  fireEvent.click(within(panel).getByRole("button", { name: "Check again" }));
+  const check = within(panel).getByRole("button", { name: "Check again" });
+  expect(check).toHaveAttribute("aria-disabled", "false");
+  check.focus();
+  fireEvent.click(check);
   expect(admin.refresh).toHaveBeenCalledTimes(1);
-  rendered.rerender(view({ checking: true }));
-  expect(panel).toHaveTextContent("Checking the server for current details…");
-  expect(within(panel).queryByRole("button", { name: "Check again" })).not.toBeInTheDocument();
-  rendered.rerender(view({ stale: false }));
+  // Refresh starts the next read. The button stays, and keeps focus, while it runs and after it succeeds.
+  rendered.rerender(view({ checking: true, refreshVersion: 1 }));
+  expect(availability(panel)).toHaveTextContent("Checking the server for current details…");
+  expect(check).toBeInTheDocument();
+  expect(check).toHaveFocus();
+  expect(check).toHaveAttribute("aria-disabled", "true");
+  fireEvent.click(check);
+  expect(admin.refresh).toHaveBeenCalledTimes(1);
+  rendered.rerender(view({ stale: false, refreshVersion: 1 }));
   expect(within(panel).getByRole("button", { name: "Kick player" })).toBeEnabled();
   expect(panel).not.toHaveTextContent("fresh check");
+  expect(check).toBeInTheDocument();
+  expect(check).toHaveFocus();
+  expect(check).toHaveAttribute("aria-disabled", "false");
+});
+it("leaves the panel's reason as it is while the dashboard's own reads keep failing", async () => {
+  const admin = context({ stale: true });
+  const view = (state: Partial<AdminContextValue>) => page({ ...admin, ...state });
+  const rendered = render(view({}));
+  await waitFor(() => expect(lines()).toContain("Alice joined"));
+  fireEvent.click(screen.getAllByRole("button", { name: "Alice" })[0]);
+  const panel = screen.getByRole("dialog");
+  const status = availability(panel);
+  const reason = "Server details need a fresh check before choosing an action.";
+  expect(status).toHaveTextContent(reason);
+  // Each 20-second tick starts a read that staff did not ask for; the status line must not flip and re-announce.
+  for (const version of [1, 2]) {
+    rendered.rerender(view({ checking: true, refreshVersion: version }));
+    expect(status).toHaveTextContent(reason);
+    expect(within(panel).getByRole("button", { name: "Check again" })).toHaveAttribute("aria-disabled", "true");
+    rendered.rerender(view({ refreshVersion: version }));
+    expect(status).toHaveTextContent(reason);
+  }
+  expect(admin.refresh).not.toHaveBeenCalled();
+});
+it("keeps saying the roster could not be read during a background read", async () => {
+  const admin = context({ overview: null, stale: true });
+  const view = (state: Partial<AdminContextValue>) => page({ ...admin, ...state });
+  const rendered = render(view({}));
+  await waitFor(() => expect(lines()).toContain("Alice joined"));
+  fireEvent.click(screen.getAllByRole("button", { name: "Alice" })[0]);
+  const panel = screen.getByRole("dialog");
+  expect(panel).toHaveTextContent("The live roster could not be read.");
+  rendered.rerender(view({ checking: true, refreshVersion: 1 }));
+  expect(panel).toHaveTextContent("The live roster could not be read.");
+  expect(panel).not.toHaveTextContent("Checking the live roster…");
 });
 it("says when the live roster could not be read and offers another check", async () => {
   const admin = context({ overview: null, stale: true });

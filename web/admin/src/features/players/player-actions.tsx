@@ -83,10 +83,29 @@ export function PlayerSheet({
   // The snapshot can expire while the panel is open and turn every action off; the page's own refresh is
   // behind the panel, so the panel offers its own check. Otherwise an action is off for the staff role or the
   // server build. Say why next to the disabled buttons.
-  const recheck = admin.stale && !admin.checking;
+  const needsCheck = admin.stale;
+  // Once offered, Check again stays until the panel closes: a button removed while it has focus drops keyboard
+  // and screen reader users out of the panel, and a check that succeeds would otherwise remove it.
+  const [offered, setOffered] = useState(needsCheck);
+  useEffect(() => {
+    if (needsCheck) setOffered(true);
+  }, [needsCheck]);
+  // The read this panel asked for: the one its opening starts or finds in flight, or the one Check again starts.
+  // Only that read is announced as a check; the dashboard's background reads leave the reason as it is, so a
+  // server that keeps failing does not change the status line on every tick.
+  const [askedVersion, setAskedVersion] = useState(admin.refreshVersion);
+  const askedCheck = admin.checking && admin.refreshVersion === askedVersion;
+  const waiting = admin.checking || admin.busy;
+  const checkAgain = () => {
+    // aria-disabled, not disabled, so the button keeps focus while the check runs; the press is ignored instead.
+    if (waiting) return;
+    // Refresh starts the read for the next version.
+    setAskedVersion(admin.refreshVersion + 1);
+    admin.refresh();
+  };
   let reason = "";
   if (player && admin.stale)
-    reason = admin.checking
+    reason = askedCheck
       ? "Checking the server for current details…"
       : "Server details need a fresh check before choosing an action.";
   else if (player && off && !admin.busy)
@@ -136,7 +155,7 @@ export function PlayerSheet({
         ) : !admin.overview ? (
           // Never present a roster that has not been read as the player leaving.
           <p className="notice info">
-            {admin.checking ? "Checking the live roster…" : "The live roster could not be read."}
+            {askedCheck ? "Checking the live roster…" : "The live roster could not be read."}
           </p>
         ) : (
           <p className="notice info">
@@ -160,9 +179,9 @@ export function PlayerSheet({
         <div role="status" id={notice}>
           {reason && <p className="notice warning">{reason}</p>}
         </div>
-        {recheck && (
+        {(offered || needsCheck) && (
           <p>
-            <button type="button" className="button secondary small" disabled={admin.busy} onClick={admin.refresh}>
+            <button type="button" className="button secondary small" aria-disabled={waiting} onClick={checkAgain}>
               Check again
             </button>
           </p>

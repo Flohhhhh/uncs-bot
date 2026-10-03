@@ -21,6 +21,7 @@ export type AdminContextValue = {
   setDialogOpen: (value: boolean) => void;
   setUnsavedChanges: (value: boolean) => void;
   refreshVersion: number;
+  /** Starts the next read of the page's data; `refreshVersion` goes up by one. */
   refresh: () => void;
   invalidateOverview: () => void;
   openAction: (action: ActionName, steamId?: string, options?: ActionOptions) => void;

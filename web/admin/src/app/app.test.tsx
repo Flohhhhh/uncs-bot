@@ -243,6 +243,100 @@ describe("React staff shell", () => {
     });
     expect(reads()).toBe(4);
   });
+  it("keeps focus on the panel's Check again and announces only the checks staff ask for", async () => {
+    vi.useFakeTimers();
+    const alice = { name: "UNC Alice", steamId: "76561198000000001", faction: "RED", kills: 3 };
+    const live: Overview = {
+      ...overview,
+      players: [alice],
+      capabilities: { routes: ["POST /v1/players/{steamId}/kick"] },
+    };
+    const fetcher = mount();
+    const original = fetcher.getMockImplementation()!;
+    // Overview reads wait until the test answers them, so a read in flight can be inspected.
+    let answer: ((ok: boolean) => void) | null = null;
+    fetcher.mockImplementation((url: string, init?: RequestInit) =>
+      url.endsWith("/overview")
+        ? new Promise<Response>((resolve) => {
+            answer = (ok) =>
+              resolve(
+                ok
+                  ? new Response(JSON.stringify(live))
+                  : new Response(JSON.stringify({ message: "The game did not answer." }), { status: 503 }),
+              );
+          })
+        : url.endsWith("/activity")
+          ? Promise.resolve(
+              new Response(
+                JSON.stringify({
+                  events: [
+                    {
+                      id: "join",
+                      observedAt: "2026-09-30T11:59:00Z",
+                      category: "players",
+                      message: "UNC Alice joined",
+                      steamId: alice.steamId,
+                    },
+                  ],
+                  limit: 300,
+                  connection: "available",
+                  startedAt: "2026-09-30T11:00:00Z",
+                }),
+              ),
+            )
+          : original(url, init),
+    );
+    const settle = async (ok?: boolean) => {
+      await act(async () => {
+        if (ok !== undefined) answer!(ok);
+        await vi.advanceTimersByTimeAsync(0);
+      });
+    };
+    const reads = () => fetcher.mock.calls.filter(([url]) => url.endsWith("/overview")).length;
+    await settle();
+    await settle(true);
+    expect(reads()).toBe(1);
+    fireEvent.click(screen.getByRole("link", { name: /Server activity/ }));
+    await settle();
+    fireEvent.click(screen.getAllByRole("button", { name: "UNC Alice" })[0]);
+    const panel = screen.getByRole("dialog");
+    const status = within(panel)
+      .getAllByRole("status")
+      .find((region) => !region.closest(".copy-value"))!;
+    // Opening the panel starts a read; that one is announced, and it fails.
+    await settle();
+    expect(reads()).toBe(2);
+    expect(status).toHaveTextContent("Checking the server for current details…");
+    await settle(false);
+    const reason = "Server details need a fresh check before choosing an action.";
+    expect(status).toHaveTextContent(reason);
+    // The 20-second refresh keeps reading; the status line stays as it is instead of flipping on every tick.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+    });
+    expect(reads()).toBe(3);
+    expect(status).toHaveTextContent(reason);
+    await settle(false);
+    expect(status).toHaveTextContent(reason);
+    // Check again keeps focus while its read runs, ignores another press, and stays after the read succeeds.
+    const check = within(panel).getByRole("button", { name: "Check again" });
+    check.focus();
+    fireEvent.click(check);
+    await settle();
+    expect(reads()).toBe(4);
+    expect(status).toHaveTextContent("Checking the server for current details…");
+    expect(check).toHaveFocus();
+    expect(check).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(check);
+    await settle();
+    expect(reads()).toBe(4);
+    await settle(true);
+    expect(within(panel).getByRole("button", { name: "Kick player" })).toBeEnabled();
+    expect(status).not.toHaveTextContent(/Checking|fresh check/);
+    expect(check).toBeInTheDocument();
+    expect(check).toHaveFocus();
+    expect(check).toHaveAttribute("aria-disabled", "false");
+  });
   it("expires an old confirmation snapshot while refresh is paused", async () => {
     vi.useFakeTimers();
     const fetcher = mount();
