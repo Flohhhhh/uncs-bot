@@ -202,6 +202,41 @@ describe("private supporters HTTP boundary", () => {
       expect(deliver("2001:db8::ffff", signature)).toBe("passed");
     });
   });
+  it("keeps a verified staff session's supporter requests apart from anonymous traffic at the same address", async () => {
+    const staffCookie = `__Host-uncs_admin_session=${sessionToken}`;
+    // Verify the session through the real guard, then drive a fresh copy of the limiter directly.
+    await request(app.getHttpServer()).get("/admin/api/supporters").set("Cookie", staffCookie).expect(200);
+    let limit!: (req: Request, res: Response, next: NextFunction) => void;
+    app.get(SupportersModule).configure({
+      apply: (middleware: typeof limit) => {
+        limit = middleware;
+        return { forRoutes: () => undefined };
+      },
+    } as unknown as MiddlewareConsumer);
+    const send = (cookie?: string, path = "/admin/api/supporters") => {
+      let status: number | "passed" = 0;
+      const res = {} as Response;
+      Object.assign(res, { set: () => res, json: () => res, status: (code: number) => ((status = code), res) });
+      const req = {
+        originalUrl: path,
+        socket: { remoteAddress: "10.0.0.1" },
+        headers: { cookie },
+        rawBody: Buffer.from("{}"),
+      };
+      limit(req as unknown as Request, res, () => (status = "passed"));
+      return status;
+    };
+    for (let count = 0; count < 180; count++) expect(send()).toBe("passed");
+    expect(send()).toBe(429);
+    // A well-formed cookie that was never verified gets no fresh bucket.
+    expect(send(`__Host-uncs_admin_session=${"d".repeat(64)}`)).toBe(429);
+    // Unsigned webhooks stay on the address limit even when they carry a verified staff cookie.
+    const webhook = "/supporters/webhooks/patreon";
+    for (let count = 0; count < 180; count++) expect(send(undefined, webhook)).toBe("passed");
+    expect(send(staffCookie, webhook)).toBe(429);
+    for (let count = 0; count < 180; count++) expect(send(staffCookie)).toBe("passed");
+    expect(send(staffCookie)).toBe(429);
+  });
   it("requires same-origin CSRF, fresh admin role, and explicit confirmation for manual linking", async () => {
     const endpoint = `/admin/api/supporters/${randomUUID()}/link`;
     const body = {
