@@ -283,6 +283,27 @@ describe("preview", () => {
     expect(screen.getByText("Preview ready: 2 roles to add and 1 role to remove.")).toHaveAttribute("role", "status");
   });
 
+  it("keeps focus on Preview changes while its preview runs, and ignores another press", async () => {
+    let answer!: (value: ReconcileResponse) => void;
+    serve(rolesStatus(), () => new Promise<ReconcileResponse>((resolve) => (answer = resolve)));
+    render(page());
+    const button = await screen.findByRole("button", { name: "Preview changes" });
+    button.focus();
+    fireEvent.click(button);
+    const running = await screen.findByRole("button", { name: "Previewing…" });
+    // A disabled button would drop focus to the page in a browser; aria-disabled keeps it on the button.
+    expect(running).toBe(button);
+    expect(running).not.toBeDisabled();
+    expect(running).toHaveAttribute("aria-disabled", "true");
+    expect(running).toHaveFocus();
+    fireEvent.click(running);
+    expect(posts()).toHaveLength(1);
+    await act(async () => answer(dryRun(adds)));
+    await screen.findByRole("region", { name: "Preview of role changes" });
+    expect(button).toHaveFocus();
+    expect(button).not.toHaveAttribute("aria-disabled");
+  });
+
   it("sends one preview for a double click", async () => {
     serve(rolesStatus(), () => dryRun(adds));
     render(page());
