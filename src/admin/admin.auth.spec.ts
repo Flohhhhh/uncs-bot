@@ -299,7 +299,7 @@ describe("verified sessions for the dashboard traffic limit", () => {
       "a request fails the origin or CSRF check",
       ({ auth, req }) =>
         expect(
-          auth.authenticate({ ...req, headers: { ...req.headers, "x-csrf-token": "forged" } } as Request),
+          auth.authenticate({ ...req, headers: { ...req.headers, "x-csrf-token": "forged" } } as unknown as Request),
         ).rejects.toThrow("dashboard session"),
     ],
     [
