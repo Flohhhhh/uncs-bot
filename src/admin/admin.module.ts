@@ -40,7 +40,10 @@ import { GameServers } from "./game-servers";
   exports: [AdminSettings, AdminStore, AdminAuth, AdminGuard, AdminServerGuard, AdminService, GameServers],
 })
 export class AdminModule implements NestModule, OnModuleInit {
-  constructor(private readonly adapterHost: HttpAdapterHost) {}
+  constructor(
+    private readonly adapterHost: HttpAdapterHost,
+    private readonly auth: AdminAuth,
+  ) {}
 
   onModuleInit() {
     // A missing or refused asset fails inside express.static, and that error's message holds the server's
@@ -70,6 +73,8 @@ export class AdminModule implements NestModule, OnModuleInit {
 
   configure(consumer: MiddlewareConsumer) {
     const traffic = new Map<string, { until: number; count: number }>();
+    // Only sessions AdminAuth verified get a bucket here, so anonymous callers can neither add entries nor fill it.
+    const staffTraffic = new Map<string, { until: number; count: number }>();
     consumer
       .apply((req: Request, res: Response, next: NextFunction) => {
         res.set({
@@ -89,17 +94,22 @@ export class AdminModule implements NestModule, OnModuleInit {
         const isAuth = /^\/admin\/auth\/(login|callback)\/?$/i.test(path);
         if (isAuth || /^\/admin\/api(?:\/|$)/i.test(path)) {
           const now = Date.now();
-          for (const [key, counter] of traffic) {
-            if (counter.until <= now) traffic.delete(key);
+          for (const counters of [traffic, staffTraffic]) {
+            for (const [key, counter] of counters) if (counter.until <= now) counters.delete(key);
           }
-          // Never trust caller-supplied X-Forwarded-For. When deployed behind
-          // a proxy this is an aggregate peer limit; configure client limits
-          // at that trusted edge as well.
-          const key = `${isAuth ? "auth" : "api"}:${req.socket.remoteAddress ?? "unknown"}`;
-          let counter = traffic.get(key);
-          if (!counter && traffic.size < 5000) {
+          // Never trust caller-supplied X-Forwarded-For. When deployed behind a proxy the peer address is
+          // the proxy's, so the address bucket is shared by every caller; configure client limits at that
+          // trusted edge as well. A session AdminAuth verified at sign-in or in the last few minutes is counted
+          // in its own bucket instead, keyed by its token hash, so anonymous traffic cannot use up staff capacity.
+          // Unknown, forged or signed-out cookies, revoked ones once a request has found them out, and every
+          // sign-in request count by address.
+          const session = isAuth ? undefined : this.auth.verifiedSession(req);
+          const counters = session ? staffTraffic : traffic;
+          const key = session ?? `${isAuth ? "auth" : "api"}:${req.socket.remoteAddress ?? "unknown"}`;
+          let counter = counters.get(key);
+          if (!counter && counters.size < 5000) {
             counter = { until: now + 60_000, count: 0 };
-            traffic.set(key, counter);
+            counters.set(key, counter);
           }
           if (!counter || ++counter.count > (isAuth ? 60 : 600)) {
             res

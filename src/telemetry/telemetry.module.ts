@@ -1,6 +1,7 @@
 import { type MiddlewareConsumer, Module, type NestModule, type OnModuleInit } from "@nestjs/common";
 import { HttpAdapterHost } from "@nestjs/core";
 import type { NextFunction, Request, Response } from "express";
+import { AdminAuth } from "../admin/admin.auth";
 import { AdminModule } from "../admin/admin.module";
 import {
   TelemetryAdminController,
@@ -22,6 +23,7 @@ export class TelemModule implements NestModule, OnModuleInit {
   constructor(
     private readonly deliveries: TelemetryDeliveries,
     private readonly adapterHost: HttpAdapterHost,
+    private readonly auth: AdminAuth,
   ) {}
 
   onModuleInit() {
@@ -56,10 +58,13 @@ export class TelemModule implements NestModule, OnModuleInit {
     // Feed delivery must not compete with public/staff reads behind one proxy. Requests carrying the
     // targeted server's feed token count in that server's own bucket, so traffic without the token
     // can neither use up the game's allowance nor fill the address map and lock the game out. Staff
-    // combat reads have their own bucket, so public leaderboard traffic cannot use up theirs.
+    // combat reads have their own bucket, so public leaderboard traffic cannot use up theirs. A staff
+    // session AdminAuth has verified counts in a bucket of its own, keyed by its token hash, so anonymous
+    // requests to the staff combat routes cannot lock staff out either; see the /admin limiter.
     const feeds = new Map<string, { until: number; count: number }>();
     const reads = new Map<string, { until: number; count: number }>();
     const staff = new Map<string, { until: number; count: number }>();
+    const staffSessions = new Map<string, { until: number; count: number }>();
     const tokened = new Map<string, { until: number; count: number }>();
     consumer
       .apply((req: Request, res: Response, next: NextFunction) => {
@@ -76,10 +81,12 @@ export class TelemModule implements NestModule, OnModuleInit {
         });
         const ingest = /^\/api\/ingest(?:\/|$)/i.test(req.originalUrl);
         const serverId = ingest ? this.deliveries.tokenServer(req.originalUrl, req.headers.authorization) : null;
-        const peers = serverId ? tokened : ingest ? feeds : /^\/admin\//i.test(req.originalUrl) ? staff : reads;
+        const admin = /^\/admin\//i.test(req.originalUrl);
+        const session = admin ? this.auth.verifiedSession(req) : undefined;
+        const peers = serverId ? tokened : ingest ? feeds : session ? staffSessions : admin ? staff : reads;
         const now = Date.now();
         for (const [key, value] of peers) if (value.until <= now) peers.delete(key);
-        const key = serverId ?? req.socket.remoteAddress ?? "unknown";
+        const key = serverId ?? session ?? req.socket.remoteAddress ?? "unknown";
         let peer = peers.get(key);
         // One entry per configured server at most, so a tokened bucket needs no size cap.
         if (!peer && (serverId || peers.size < 5000)) {
