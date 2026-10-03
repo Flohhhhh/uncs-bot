@@ -24,6 +24,24 @@ function multiServer() {
   const env = { get: (key: string) => values[key] } as EnvService;
   return new TelemetryDeliveries(new GameServers(new AdminSettings(env)));
 }
+function tokenedRegistry(eventToken = `${token}-event`) {
+  const values: Record<string, unknown> = {
+    WARDOGS_FEED_TOKEN: `${token}-legacy`,
+    WARDOGS_SERVERS: [
+      { id: "primary", name: "Main", rconUrl: "https://main.example.test", password: "main-rcon", feedToken: token },
+      {
+        id: "event",
+        name: "Events",
+        rconUrl: "https://events.example.test",
+        password: "event-rcon",
+        feedToken: eventToken,
+      },
+      { id: "east", name: "East", rconUrl: "https://east.example.test", password: "east-rcon" },
+    ],
+  };
+  const env = { get: (key: string) => values[key] } as EnvService;
+  return new TelemetryDeliveries(new GameServers(new AdminSettings(env)));
+}
 describe("refused feed delivery record", () => {
   let warn: jest.SpyInstance;
   beforeEach(() => {
@@ -149,6 +167,31 @@ describe("refused feed delivery record", () => {
     for (const [url, authorization] of refused) expect(deliveries.tokenServer(url, authorization)).toBeNull();
     expect(deliveries.status("primary")).toEqual(clean);
     expect(warn).not.toHaveBeenCalled();
+  });
+  it("routes the unscoped ingest URL to the one registry server whose feed token it carries", () => {
+    const deliveries = tokenedRegistry();
+    expect(deliveries.tokenServer("/api/ingest/events", `Bearer ${token}`)).toBe("primary");
+    expect(deliveries.tokenServer("/API/Ingest/Events?retry=1", `Bearer ${token}-event`)).toBe("event");
+    for (const authorization of [undefined, "Bearer guess", `Bearer ${token}-legacy`])
+      expect(deliveries.tokenServer("/api/ingest/events", authorization)).toBeNull();
+    expect(deliveries.rejectedRequest("/api/ingest/events", 413, "too large", `Bearer ${token}-event`)).toBe(true);
+    expect(deliveries.rejectedRequest("/api/ingest/events", 400, "invalid JSON", "Bearer guess")).toBe(true);
+    expect(deliveries.status("event")).toMatchObject({
+      lastRejected: { status: 413, reason: "too large" },
+      rejectedCount: 1,
+      rejectedWithoutTokenCount: 0,
+    });
+    for (const id of ["primary", "east"]) expect(deliveries.status(id)).toEqual(clean);
+    expect(warn.mock.calls.map(([message]) => message)).toEqual([
+      "Rejected a game feed delivery for server event: 413 too large.",
+      "Rejected a game feed delivery for an unconfigured server route: 400 invalid JSON.",
+    ]);
+  });
+  it("routes no unscoped request when two registry entries would match", () => {
+    // Env validation keeps feed tokens unique; a single exact match is still required here.
+    const deliveries = tokenedRegistry(token);
+    expect(deliveries.tokenServer("/api/ingest/events", `Bearer ${token}`)).toBeNull();
+    expect(deliveries.tokenServer("/api/ingest/servers/event/events", `Bearer ${token}`)).toBe("event");
   });
   it("rate-limits warnings per server and kind and reports how many were suppressed", () => {
     const deliveries = multiServer();
