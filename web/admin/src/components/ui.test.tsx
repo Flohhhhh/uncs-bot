@@ -90,14 +90,25 @@ describe("Modal", () => {
   });
   it("stays open through repeated Escape presses while busy", () => {
     const onClose = vi.fn();
-    render(dialogTree(true, onClose));
+    const { rerender } = render(dialogTree(true, onClose));
     const dialog = screen.getByRole("dialog") as HTMLDialogElement;
+    expect(dialog).toHaveAttribute("closedby", "none");
+    // The close listener would reopen a dialog that Escape closed, so check that Escape never reaches the
+    // dialog as a close request at all, not only that the dialog ends up open.
+    const requests = vi.fn();
+    dialog.addEventListener("cancel", requests);
+    dialog.addEventListener("close", requests);
     pressEscape(dialog);
     // Chrome no longer lets the page cancel a second Escape without a new click in between.
     pressEscape(dialog, { cancelable: false });
+    expect(requests).not.toHaveBeenCalled();
     expect(dialog.open).toBe(true);
     expect(screen.getByText("Review body")).toBeVisible();
     expect(onClose).not.toHaveBeenCalled();
+    rerender(dialogTree(false, onClose));
+    expect(dialog).not.toHaveAttribute("closedby");
+    pressEscape(dialog);
+    expect(onClose).toHaveBeenCalledOnce();
   });
   it("reopens a busy dialog the browser closes anyway, and reports the close once idle", () => {
     const onClose = vi.fn();

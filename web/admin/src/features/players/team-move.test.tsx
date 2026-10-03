@@ -82,13 +82,20 @@ describe("reviewed team moves", () => {
     submit();
     await waitFor(() => expect(sent()).toHaveLength(1));
     const dialog = screen.getByRole("dialog") as HTMLDialogElement;
+    expect(dialog).toHaveAttribute("closedby", "none");
+    // A dialog that closed and reopened would also end up open, with focus moved; Escape must not reach it.
+    const requests = vi.fn();
+    dialog.addEventListener("cancel", requests);
+    dialog.addEventListener("close", requests);
     pressEscape(dialog);
     pressEscape(dialog, { cancelable: false });
+    expect(requests).not.toHaveBeenCalled();
     expect(dialog.open).toBe(true);
     expect(onClose).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Stop remaining moves" }));
     await act(async () => finish({ state: "applied", message: "Confirmed" }));
     expect(screen.getByRole("heading", { name: "Team move stopped" })).toBeInTheDocument();
+    expect(dialog).not.toHaveAttribute("closedby");
     expect(sent()).toHaveLength(1);
   });
   it("says why Move is disabled when the paused snapshot expires during the review", () => {
