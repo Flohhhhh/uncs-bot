@@ -338,13 +338,18 @@ export function TeamMoveDialog({
             </ul>
           </>
         )}
-        {/* The open dialog pauses polling, so the snapshot can expire during the review. Say why Move is off. */}
-        {!submitted.current && !permitted && (
-          <p className="notice warning" role="status" id={unavailable}>
-            {admin.stale
-              ? "Server details need a fresh check. Close this dialog and refresh before moving players."
-              : "Unavailable for your role, connection, or server build. Refresh the dashboard before trying again."}
-          </p>
+        {/* The open dialog pauses polling, so the snapshot can expire during the review. Say why Move is off, in
+            a region that stays in the review so screen readers announce the reason when it is filled in. */}
+        {!submitted.current && (
+          <div role="status" id={unavailable}>
+            {!permitted && (
+              <p className="notice warning">
+                {admin.stale
+                  ? "Server details need a fresh check. Close this dialog and refresh before moving players."
+                  : "Unavailable for your role, connection, or server build. Refresh the dashboard before trying again."}
+              </p>
+            )}
+          </div>
         )}
         {error && (
           <div className="notice warning" role="alert">

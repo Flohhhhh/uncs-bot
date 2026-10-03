@@ -25,11 +25,10 @@ export function PlayerActions({ steamId, onClose }: { steamId: string; onClose: 
         : "Unavailable for your role, connection, or server build. Refresh the dashboard before trying again.";
   return (
     <Modal serverScoped title={player?.name ?? "Player unavailable"} description={steamId} onClose={onClose}>
-      {reason && (
-        <p className="notice warning" role="status" id={notice}>
-          {reason}
-        </p>
-      )}
+      {/* Always present, so screen readers announce the reason when it is filled in. */}
+      <div role="status" id={notice}>
+        {reason && <p className="notice warning">{reason}</p>}
+      </div>
       {player ? (
         <div className="action-list">
           {actions.map(({ action, permitted }) => (

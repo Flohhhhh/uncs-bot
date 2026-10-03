@@ -108,10 +108,13 @@ describe("reviewed team moves", () => {
     const { rerender } = render(tree(false));
     const move = screen.getByRole("button", { name: /^Move 2 players/ });
     expect(move).toBeEnabled();
-    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    // A live region inserted with its text already in it may not be announced, so it waits in the review empty.
+    const status = screen.getByRole("status");
+    expect(status).toBeEmptyDOMElement();
     rerender(tree(true));
     expect(move).toBeDisabled();
-    expect(screen.getByRole("status")).toHaveTextContent(
+    expect(screen.getByRole("status")).toBe(status);
+    expect(status).toHaveTextContent(
       "Server details need a fresh check. Close this dialog and refresh before moving players.",
     );
     expect(move).toHaveAccessibleDescription(/fresh check/);

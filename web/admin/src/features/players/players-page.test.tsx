@@ -236,11 +236,14 @@ describe("live player controls", () => {
     const { rerender } = render(tree(false));
     fireEvent.click(screen.getAllByRole("button", { name: "More" })[0]);
     const dialog = screen.getByRole("dialog");
-    expect(within(dialog).queryByRole("status")).not.toBeInTheDocument();
+    // A live region inserted with its text already in it may not be announced, so it waits in the dialog empty.
+    const status = within(dialog).getByRole("status");
+    expect(status).toBeEmptyDOMElement();
     rerender(tree(true));
     const message = within(dialog).getByRole("button", { name: "Message player" });
     expect(message).toBeDisabled();
-    expect(within(dialog).getByRole("status")).toHaveTextContent(
+    expect(within(dialog).getByRole("status")).toBe(status);
+    expect(status).toHaveTextContent(
       "Server details need a fresh check. Close this dialog and refresh before choosing an action.",
     );
     expect(message).toHaveAccessibleDescription(/fresh check/);
