@@ -148,7 +148,8 @@ it("drafts an announcement on the page and opens the existing review with it", a
   expect(message).toHaveValue("GG! Get whitelisted at theuncsgaming.com/whitelist. Thanks for playing on The UNCs.");
   fireEvent.change(message, { target: { value: "  Event starts\nin five minutes  " } });
   expect(message).toHaveValue("  Event starts in five minutes  ");
-  expect(screen.getByText("32 / 200")).toBeInTheDocument();
+  // The count is what will be sent: the trimmed draft.
+  expect(screen.getByText("28 / 200")).toBeInTheDocument();
   fireEvent.click(send);
   // The page never sends: it opens the broadcast review, prefilled.
   expect(admin.openAction).toHaveBeenCalledWith("broadcast", undefined, {
@@ -158,6 +159,21 @@ it("drafts an announcement on the page and opens the existing review with it", a
   await screen.findByText("Needs channel and message");
 });
 
+it("keeps every character of a pasted over-long announcement and shows the overage instead of cutting it", async () => {
+  const admin = composer();
+  const message = screen.getByRole("textbox", { name: "Message" });
+  const text = `${"Long announcement ".repeat(12)}ends here`.padEnd(230, ".");
+  fireEvent.change(message, { target: { value: text } });
+  expect(message).toHaveValue(text);
+  expect(message).not.toHaveAttribute("maxlength");
+  expect(message).toHaveAttribute("aria-invalid", "true");
+  expect(message).toHaveAccessibleDescription("230 / 200 · 30 over the limit");
+  const send = screen.getByRole("button", { name: "Send to 3 players" });
+  expect(send).toBeDisabled();
+  fireEvent.submit(send.closest("form")!);
+  expect(admin.openAction).not.toHaveBeenCalled();
+  await screen.findByText("Needs channel and message");
+});
 it("keeps the composer's send button disabled while the server needs a fresh check", async () => {
   composer({ stale: true });
   fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Hello" } });

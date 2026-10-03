@@ -23,8 +23,11 @@ import {
   FAILED_DELAY_MS,
   failureKind,
   IDLE_DELAY_MS,
+  performanceText,
   StaffAlertsMonitor,
+  watchlistText,
 } from "./staff-alerts.monitor";
+import type { PerformanceCandidate } from "./performance-state";
 import { StaffAlerts } from "./staff-alerts.service";
 
 const start = Date.parse("2026-10-02T23:00:00Z");
@@ -516,6 +519,81 @@ describe("staff alerts worker", () => {
     await pass(snapshot(players, back), 15_000);
     expect(alerts.list("primary")).toEqual([]);
     expect(worker.view().lastRestartAt).toBeNull();
+  });
+});
+
+describe("staff alert player names", () => {
+  const candidate = (name: string): PerformanceCandidate => ({
+    kind: "performance-match",
+    rules: ["match"],
+    steamId: ids[0],
+    name,
+    roundKey: "clock:1",
+    map: "Europe",
+    windowKills: null,
+    windowMinutes: null,
+    rate: null,
+    roundKills: 41,
+    roundDeaths: 3,
+    kd: 41 / 3,
+    countedSince: start,
+    amend: false,
+  });
+  const entry: NetworkBanEntry = {
+    steamId: ids[0],
+    communities: 2,
+    reasons: ["Aimbot"],
+    evidenceUrls: [],
+    recordedAt: null,
+    source: "staff",
+  };
+
+  it.each([
+    ["a right-to-left override", "Dad\u202e", "Dad"],
+    ["only zero-width spaces", "\u200b\u200b", "Unknown"],
+    ["only a Hangul filler", "\u3164", "Unknown"],
+    ["only a combining grapheme joiner", "\u034f", "Unknown"],
+    ["only variation selectors", "\ufe0f\u180b", "Unknown"],
+    ["a variation selector after visible text", "Dad\ufe0f", "Dad\ufe0f"],
+  ])("shows a name with %s as visible text in the alert line and the Player field", async (_, name, shown) => {
+    const discord = discordDouble();
+    const env = { ADMIN_GUILD_ID: guild, STAFF_ALERTS_CHANNEL_ID: channelId } as Record<string, unknown>;
+    const alerts = new StaffAlerts(discord.client, { get: (key: string) => env[key] } as EnvService);
+    const player = { steamId: ids[0], name };
+    const performance = performanceText(candidate(name), "America/New_York");
+    const watch = watchlistText(entry, name, false, false);
+    await alerts.raise({
+      serverId: "primary",
+      kind: "performance-match",
+      severity: "warning",
+      key: "perf",
+      ...performance,
+      player,
+      deliver: true,
+    });
+    await alerts.raise({
+      serverId: "primary",
+      kind: "watchlist-join",
+      severity: "warning",
+      key: "watch",
+      ...watch,
+      player,
+      deliver: true,
+    });
+    const [perf, join] = discord.channel.send.mock.calls.map(([options]) => options.embeds[0]);
+    expect(perf.description.split("\n")[0]).toBe(`${shown} has 41 kills and 3 deaths this round on Ozeti (K/D 13.7).`);
+    expect(join.description.split("\n")[0]).toBe(`${shown} joined.`);
+    for (const embed of [perf, join]) expect(embed.fields[0]).toEqual({ name: "Player", value: shown, inline: true });
+  });
+
+  it("shows a filler-only name as Unknown in the dashboard's round peaks", async () => {
+    const { pass, worker } = workerFixture({ STAFF_ALERTS_PERFORMANCE_ENABLED: "observe" });
+    await pass(snapshot([{ steamId: ids[0], name: "ㅤ", kills: 0, deaths: 0 }]), 0);
+    for (let kills = 2; kills <= 12; kills += 2)
+      await pass(snapshot([{ steamId: ids[0], name: "ㅤ", kills, deaths: 1 }]));
+    const [peak] = worker.peaks();
+    expect(peak.window).toMatchObject({ steamId: ids[0], name: "Unknown" });
+    expect(peak.kd).toMatchObject({ steamId: ids[0], name: "Unknown", kills: 12 });
   });
 });
 

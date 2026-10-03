@@ -513,6 +513,10 @@ export function AnnouncementsPage() {
   const [draft, setDraft] = useState("");
   const countId = useId();
   const connected = overview?.status.players.current;
+  // No maxLength: browsers silently cut pasted text to fit it. Count what will be sent instead; an over-long
+  // draft shows its overage and cannot open the review.
+  const length = draft.trim().length;
+  const over = length > 200;
   const ready = singleLine(draft) && allowed("broadcast", me, overview, stale, busy);
   return (
     <div className="split">
@@ -528,10 +532,10 @@ export function AnnouncementsPage() {
             Message
             <textarea
               value={draft}
-              maxLength={200}
               rows={3}
               placeholder="Write an announcement…"
               aria-describedby={countId}
+              aria-invalid={over || undefined}
               // Announcements are one line in game.
               onChange={(event) => setDraft(event.target.value.replace(/[\r\n]+/g, " "))}
             />
@@ -545,8 +549,9 @@ export function AnnouncementsPage() {
                 Clear
               </button>
             )}
-            <span id={countId} className="composer-count">
-              {draft.length} / 200
+            <span id={countId} className={`composer-count${over ? " over" : ""}`}>
+              {length} / 200
+              {over && ` · ${length - 200} over the limit`}
             </span>
           </div>
           <button type="submit" className="button primary" disabled={!ready}>

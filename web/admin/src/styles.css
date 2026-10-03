@@ -274,11 +274,12 @@ textarea:focus-visible {
   font-size: var(--text-md);
   line-height: 1.4;
 }
+/* Hover leaves an over-long or otherwise invalid field's danger border in place. */
 :where(
     input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="color"]),
     select,
     textarea
-  ):hover:not(:disabled) {
+  ):hover:not(:disabled, [aria-invalid="true"]) {
   border-color: var(--line-hover);
 }
 :where(input, select, textarea):disabled {
@@ -1867,6 +1868,21 @@ dialog select {
 }
 dialog select[multiple] {
   min-height: 95px;
+}
+/* Message and reason fields count their text instead of cutting it; resize comes from the shared field style. */
+dialog textarea[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+.character-count {
+  display: block;
+  margin-top: var(--space-1);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  text-align: right;
+}
+.character-count.over {
+  color: var(--danger);
+  font-weight: 600;
 }
 .dialog-footer,
 .dialog-actions {
@@ -3671,6 +3687,13 @@ tr.audit-more[hidden] {
   font-size: var(--text-xs);
   color: var(--muted);
   font-variant-numeric: tabular-nums;
+}
+.composer-count.over {
+  color: var(--danger);
+  font-weight: 600;
+}
+.announcement-composer textarea[aria-invalid="true"] {
+  border-color: var(--danger);
 }
 .announcement-composer > .button {
   justify-self: start;

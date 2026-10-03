@@ -17,6 +17,8 @@ function moveSummary(result: TeamMoveResult) {
     count("accepted") && `${count("accepted")} accepted, not verified`,
     count("pending") && `${count("pending")} pending`,
     count("skipped") && `${count("skipped")} already on that team`,
+    // Players who left or changed team after the review, whether the dialog or the server caught it.
+    count("unmatched") + count("refused") && `${count("unmatched") + count("refused")} skipped, roster changed`,
   ].filter(Boolean);
   return `Team move to ${result.label}: ${parts.join(", ") || "no requests sent"}.`;
 }
