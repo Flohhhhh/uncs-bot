@@ -72,12 +72,25 @@ export function TeamResults({ items }: { items: TeamItem[] }) {
   );
 }
 
-/** A single player's move reads as one line instead of a one-row table. */
-function TeamResultLine({ item }: { item: TeamItem }) {
+/**
+ * A single player's move reads as one line instead of a one-row table. While the dialog runs, a move that
+ * is still queued is waiting on the live roster read, so the line says so rather than "Not sent".
+ */
+function TeamResultLine({ item, running, stopping }: { item: TeamItem; running: boolean; stopping: boolean }) {
+  const checking = running && item.state === "queued";
   return (
     <div className="team-result-line" role="status" aria-label="Team move outcome">
       <p>
-        <ItemOutcome state={item.state} /> {item.message}
+        {checking ? (
+          <>
+            <Badge kind="neutral">Checking roster…</Badge>{" "}
+            {stopping ? "Stopping before the request is sent." : "Reading the live roster before sending the move."}
+          </>
+        ) : (
+          <>
+            <ItemOutcome state={item.state} /> {item.message}
+          </>
+        )}
       </p>
       {hasReceipt(item.state) && <ActionReceipt id={item.id} />}
     </div>
@@ -306,7 +319,7 @@ export function TeamMoveDialog({
     >
       <form onSubmit={(event) => void submit(event)}>
         {submitted.current && items.length === 1 ? (
-          <TeamResultLine item={items[0]} />
+          <TeamResultLine item={items[0]} running={running} stopping={stopped} />
         ) : submitted.current ? (
           <>
             <div className="team-progress" role="status">
