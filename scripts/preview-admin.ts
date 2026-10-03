@@ -3,11 +3,32 @@ import "reflect-metadata";
 import { Test } from "@nestjs/testing";
 import { HttpAdapterHost } from "@nestjs/core";
 import { ExpressAdapter } from "@nestjs/platform-express";
-import { ConflictException, ForbiddenException, Global, Module, UnauthorizedException } from "@nestjs/common";
+import {
+  BadRequestException,
+  Body,
+  ConflictException,
+  Controller,
+  ForbiddenException,
+  Get,
+  Global,
+  HttpException,
+  Logger,
+  Module,
+  Post,
+  Req,
+  Res,
+  ServiceUnavailableException,
+  UnauthorizedException,
+  UseFilters,
+  UseGuards,
+} from "@nestjs/common";
+import { join } from "node:path";
+import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import type { Request, Response } from "express";
 import { AdminModule } from "../src/admin/admin.module";
-import { AdminAuth } from "../src/admin/admin.auth";
+import { AdminAuth, AdminGuard, type StaffRequest } from "../src/admin/admin.auth";
+import { AdminExceptionFilter } from "../src/admin/admin.controller";
 import { AdminSettings } from "../src/admin/admin.settings";
 import { AdminStore } from "../src/admin/admin.store";
 import { WardogsClient } from "../src/admin/wardogs.client";
@@ -1368,6 +1389,328 @@ const voteStore = {
   },
 };
 
+// ----- Discord roles: a simulated GET /admin/api/discord-roles and reconcile from draft #117 -----
+// Nothing here reaches Discord. By default the feature is off (DISCORD_ROLES_ENABLED=false) with the UNC and Founder
+// roles ready and the optional Supporter role not set up, so the page reads "Ready to switch on". Set
+// PREVIEW_DISCORD_ROLES_ENABLED=true to rehearse a real run against the same sample members.
+const previewRolesEnabled = process.env.PREVIEW_DISCORD_ROLES_ENABLED === "true";
+type PreviewRoleKind = "member" | "founder" | "supporter";
+const previewRoleIds: Record<PreviewRoleKind, string> = {
+  member: "600000000000000001",
+  founder: "600000000000000002",
+  supporter: "600000000000000003",
+};
+const previewRoleMembers = {
+  newUnc: "310000000000000001",
+  regular: "310000000000000002",
+  rejoined: "310000000000000003",
+  founder: "310000000000000004",
+  retry: "310000000000000005",
+  revoked: "310000000000000006",
+  alreadyTagged: "310000000000000007",
+  away: "310000000000000008",
+  handRemoved: "310000000000000009",
+  handGiven: "310000000000000010",
+  refused: "310000000000000012",
+};
+const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+const previewRoleCheck = (kind: PreviewRoleKind, name: string, position: number) => ({
+  id: previewRoleIds[kind],
+  name,
+  exists: true,
+  position,
+  managed: false,
+  privileged: false,
+  staffRole: false,
+  assignable: true,
+  problem: null,
+});
+type PreviewPlanEntry = { discordUserId: string; roleKind: PreviewRoleKind | null; op: string; why: string };
+// Changes Gramps would make until a simulated real run applies them: adds and one removal for review.
+const previewRoleChanges: PreviewPlanEntry[] = [
+  { discordUserId: previewRoleMembers.newUnc, roleKind: "member", op: "add", why: "desired" },
+  { discordUserId: previewRoleMembers.regular, roleKind: "member", op: "add", why: "desired" },
+  { discordUserId: previewRoleMembers.rejoined, roleKind: "member", op: "add", why: "desired" },
+  { discordUserId: previewRoleMembers.founder, roleKind: "founder", op: "add", why: "desired" },
+  { discordUserId: previewRoleMembers.retry, roleKind: "member", op: "add", why: "retry-unknown-add" },
+  { discordUserId: previewRoleMembers.revoked, roleKind: "member", op: "remove", why: "application-revoked" },
+];
+// Entries that only note a role or leave it alone.
+const previewRoleNotes: PreviewPlanEntry[] = [
+  { discordUserId: previewRoleMembers.alreadyTagged, roleKind: "member", op: "note", why: "already-present" },
+  { discordUserId: previewRoleMembers.away, roleKind: null, op: "none", why: "not-in-server" },
+  { discordUserId: previewRoleMembers.handRemoved, roleKind: "member", op: "none", why: "removed-in-discord" },
+  { discordUserId: previewRoleMembers.handGiven, roleKind: "member", op: "none", why: "not-ours" },
+];
+let previewRolesApplied = false;
+let previewRolesRunning = false;
+let previewRolesLastRequestAt = 0;
+const previewRoleResults = new Map<string, { fingerprint: string; summary: Record<string, unknown> }>();
+const previewLedgerRow = (
+  discordUserId: string,
+  roleKind: PreviewRoleKind,
+  operation: string,
+  state: "applied" | "failed" | "unknown",
+  message: string,
+  createdAt: string,
+  trigger = "schedule",
+  requestedBy: string | null = null,
+) => ({
+  id: randomUUID(),
+  actorId: "system:discord-roles",
+  actorName: "Gramps Discord roles",
+  requestedBy,
+  trigger,
+  guildId: "111111111111111111",
+  discordUserId,
+  roleKind,
+  roleId: previewRoleIds[roleKind],
+  operation,
+  basisType: roleKind === "member" ? "application" : roleKind,
+  basisId: randomUUID(),
+  changed: state === "applied" && operation !== "note",
+  state,
+  message,
+  createdAt,
+  completedAt: state === "unknown" ? null : createdAt,
+});
+const previewRoleLedger = [
+  previewLedgerRow(
+    previewRoleMembers.alreadyTagged,
+    "member",
+    "note",
+    "applied",
+    "The role was already present. Gramps did not add it and will not remove it.",
+    minutesAgo(95),
+  ),
+  previewLedgerRow(
+    previewRoleMembers.handRemoved,
+    "member",
+    "note",
+    "applied",
+    "The role Gramps added was removed in Discord. Gramps will not add it back during this membership, and will not remove it if staff give it back.",
+    minutesAgo(180),
+  ),
+  previewLedgerRow(
+    previewRoleMembers.retry,
+    "member",
+    "add",
+    "unknown",
+    "Discord did not confirm the change. Gramps will check this member again later.",
+    minutesAgo(240),
+  ),
+  previewLedgerRow("310000000000000011", "founder", "add", "applied", "Role added.", minutesAgo(60 * 26), "event"),
+  previewLedgerRow(
+    previewRoleMembers.refused,
+    "member",
+    "add",
+    "failed",
+    "Discord refused: the bot cannot manage this role. Check Manage Roles and the role order.",
+    minutesAgo(60 * 27),
+  ),
+  previewLedgerRow("310000000000000013", "member", "remove", "applied", "Role removed.", minutesAgo(60 * 50), "event"),
+];
+const previewRolePass = (
+  trigger: string,
+  requestedBy: string | null,
+  dryRun: boolean,
+  startedAt: string,
+  counts: Record<string, number> = {},
+) => ({
+  trigger,
+  requestedBy,
+  dryRun,
+  startedAt,
+  finishedAt: new Date(Date.parse(startedAt) + 9_000).toISOString(),
+  users: 10,
+  added: 0,
+  removed: 0,
+  noted: 0,
+  confirmed: 0,
+  failed: 0,
+  blocked: 0,
+  deferred: 0,
+  ...counts,
+  error: null,
+  attention: [],
+});
+// While the feature is off no check runs, so there is no pass since startup. Switched on, the sample shows the
+// startup check and a later event check.
+let previewRolesLastPass: Record<string, unknown> | null = previewRolesEnabled
+  ? previewRolePass("event", null, false, minutesAgo(12), { users: 1, added: 1 })
+  : null;
+let previewRolesLastFullPass: Record<string, unknown> | null = previewRolesEnabled
+  ? previewRolePass("startup", null, false, minutesAgo(180), { added: 2, noted: 1, failed: 1 })
+  : null;
+const previewRolesStatus = () => ({
+  enabled: previewRolesEnabled,
+  configured: { guild: true, memberRole: true, founderRole: true, supporterRole: false },
+  discordReady: true,
+  bot: { manageRoles: true, highestRolePosition: 14 },
+  roles: {
+    member: previewRoleCheck("member", "UNC", 9),
+    founder: previewRoleCheck("founder", "Founder", 10),
+    supporter: {
+      id: null,
+      name: null,
+      exists: false,
+      position: null,
+      managed: false,
+      privileged: false,
+      staffRole: false,
+      assignable: false,
+      problem:
+        "Set DISCORD_SUPPORTER_ROLE_ID to the Supporter role ID (Server Settings, Roles, right-click the role, Copy Role ID).",
+      candidates: [{ id: previewRoleIds.supporter, name: "Supporter" }],
+    },
+  },
+  ready: true,
+  running: previewRolesRunning,
+  lastPass: previewRolesLastPass,
+  lastFullPass: previewRolesLastFullPass,
+  queued: 0,
+  fullPassQueued: false,
+  nextRetryAt: previewRolesEnabled && !previewRolesApplied ? new Date(Date.now() + 25 * 60_000).toISOString() : null,
+  summary: { memberEligible: 42, founders: 6, foundersWithoutDiscord: 2, supporterEligible: null },
+  // Every kind of item, so each can be reviewed. Founders come from supporter records, the rest from earlier checks.
+  attention: [
+    {
+      kind: "founder_without_discord",
+      supporterId: randomUUID(),
+      displayName: "Grandpa Joe",
+      provider: "paypal",
+      at: minutesAgo(60 * 30),
+    },
+    {
+      kind: "founder_without_discord",
+      supporterId: randomUUID(),
+      displayName: null,
+      provider: "patreon",
+      at: minutesAgo(60 * 20),
+    },
+    { kind: "not_in_server", discordUserId: previewRoleMembers.away, at: minutesAgo(180) },
+    {
+      kind: "removed_in_discord",
+      discordUserId: previewRoleMembers.handRemoved,
+      roleKind: "member",
+      basisId: randomUUID(),
+      at: minutesAgo(180),
+    },
+    {
+      kind: "failed",
+      discordUserId: previewRoleMembers.refused,
+      roleKind: "member",
+      basisId: randomUUID(),
+      at: minutesAgo(60 * 27),
+    },
+  ],
+  recent: previewRoleLedger.slice(0, 25),
+  note: "Gramps adds the UNC role for approved UNC member applications and the Founder role for founders with a linked Discord account, and removes only roles it added itself. Local preview: sample data only.",
+});
+const previewReconcileSchema = z
+  .object({
+    id: z.uuid(),
+    reason: z.string().trim().min(3).max(200),
+    discordUserId: z
+      .string()
+      .regex(/^\d{17,20}$/)
+      .optional(),
+    dryRun: z.boolean().optional(),
+  })
+  .strict();
+
+/** Simulated roles API with draft #117's switch, 30-second spacing, running and repeated-ID rules. */
+@Controller("admin/api/discord-roles")
+@UseFilters(AdminExceptionFilter)
+@UseGuards(AdminGuard)
+class PreviewDiscordRolesController {
+  @Get()
+  status() {
+    return previewRolesStatus();
+  }
+  @Post("reconcile")
+  async reconcile(@Req() req: StaffRequest, @Body() body: unknown) {
+    const parsed = previewReconcileSchema.safeParse(body);
+    if (!parsed.success) throw new BadRequestException("Send an action ID, a reason and an optional Discord user ID.");
+    const input = parsed.data;
+    const fingerprint = JSON.stringify(input);
+    const previous = previewRoleResults.get(input.id);
+    if (previous) {
+      if (previous.fingerprint !== fingerprint)
+        throw new ConflictException("This action ID was already used for another role check.");
+      return { ok: true, replayed: true, summary: previous.summary };
+    }
+    if (!input.dryRun && !previewRolesEnabled)
+      throw new ServiceUnavailableException("Discord roles are switched off (DISCORD_ROLES_ENABLED=false).");
+    if (previewRolesRunning)
+      throw new ConflictException("A role check is already running. Try again when it finishes.");
+    if (Date.now() - previewRolesLastRequestAt < 30_000)
+      throw new HttpException("Wait 30 seconds between role checks.", 429);
+    previewRolesLastRequestAt = Date.now();
+    const startedAt = new Date().toISOString();
+    const only = (entries: PreviewPlanEntry[]) =>
+      input.discordUserId ? entries.filter((entry) => entry.discordUserId === input.discordUserId) : entries;
+    const changes = previewRolesApplied ? [] : only(previewRoleChanges);
+    let summary: Record<string, unknown>;
+    if (input.dryRun) {
+      const plan = [...changes, ...only(previewRoleNotes)];
+      summary = {
+        ...previewRolePass("admin", req.staff.id, true, startedAt, { users: plan.length }),
+        reason: input.reason,
+        plan,
+      };
+    } else {
+      // A simulated real run: a short wait, then the planned changes are recorded as applied. Discord is never called.
+      previewRolesRunning = true;
+      await new Promise((done) => setTimeout(done, 1_500));
+      previewRolesRunning = false;
+      const at = new Date().toISOString();
+      for (const change of changes)
+        previewRoleLedger.unshift(
+          previewLedgerRow(
+            change.discordUserId,
+            change.roleKind!,
+            change.op,
+            "applied",
+            change.op === "add" ? "Role added." : "Role removed.",
+            at,
+            "admin",
+            req.staff.id,
+          ),
+        );
+      previewRolesApplied = true;
+      summary = {
+        ...previewRolePass("admin", req.staff.id, false, startedAt, {
+          added: changes.filter((change) => change.op === "add").length,
+          removed: changes.filter((change) => change.op === "remove").length,
+        }),
+        reason: input.reason,
+      };
+      previewRolesLastPass = summary;
+      if (!input.discordUserId) previewRolesLastFullPass = summary;
+    }
+    previewRoleResults.set(input.id, { fingerprint, summary });
+    return { ok: true, replayed: false, summary };
+  }
+}
+
+/**
+ * Serves the dashboard shell when /admin/discord-roles is reloaded in this preview. Production needs the same path
+ * in AdminPageController's list.
+ */
+@Controller("admin")
+class PreviewDiscordRolesPage {
+  private readonly logger = new Logger(PreviewDiscordRolesPage.name);
+  @Get("discord-roles")
+  page(@Res() res: Response) {
+    res.sendFile(join(process.cwd(), "dist", "src", "admin", "public", "index.html"), (error?: Error) => {
+      if (!error || res.headersSent) return;
+      this.logger.error("The preview dashboard page could not be sent.");
+      res.status(503).json({ message: "The dashboard is unavailable." });
+    });
+  }
+}
+
 async function main() {
   // ServeStaticModule selects its loader during dependency creation, so the test
   // application must provide its adapter before compiling the isolated preview.
@@ -1376,7 +1719,12 @@ async function main() {
   adapterHost.httpAdapter = adapter;
   await seedPreviewStaffAlerts();
   const module = await Test.createTestingModule({
-    controllers: [ServerCommunityController, StaffAlertsController],
+    controllers: [
+      ServerCommunityController,
+      StaffAlertsController,
+      PreviewDiscordRolesController,
+      PreviewDiscordRolesPage,
+    ],
     providers: [
       { provide: StaffAlerts, useValue: previewStaffAlerts },
       { provide: StaffAlertsMonitor, useValue: previewStaffMonitor },
