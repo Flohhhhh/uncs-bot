@@ -47,7 +47,9 @@ STAFF_ALERTS_SEEDING_ENABLED=true
 
 Then, a week later, `STAFF_ALERTS_PERFORMANCE_ENABLED=observe`, and after another week of calibration `true` (section 4). The full list with defaults is in `.env.example`; every setting is validated at boot, and JSON settings are never echoed in error messages.
 
-After deploying, open `GET /admin/api/servers/<server>/staff-alerts` (or the dashboard's Staff alerts tab once it lands) and check that `channel.state` is `ok` and `ping` is `ok` or `off`. `not-mentionable` means a ping would notify nobody (step 5); `invalid` means the role is the `@everyone` role or is not in the staff server.
+To use the watch list (section 5), also set `STAFF_ALERTS_WATCHLIST_ENABLED=true` next to `STAFF_ALERTS_ENABLED=true`. It defaults to `false`, and without both flags Gramps ignores every `STAFF_ALERTS_WATCHLIST` entry: a listed player joins with no alert, no record and no log line.
+
+After deploying, open `GET /admin/api/servers/<server>/staff-alerts` (or the dashboard's Staff alerts tab once it lands) and check that `channel.state` is `ok` and `ping` is `ok` or `off`. `not-mentionable` means a ping would notify nobody (step 5); `invalid` means the role is the `@everyone` role or is not in the staff server. If you set up the watch list, also check that `features.watchlist` is `true`.
 
 ## 3. Alert kinds
 
@@ -98,6 +100,8 @@ Caveats: without headshot data these are conservative starting points, and explo
 ## 5. Known-good list and watch list
 
 Both are JSON env values. Adding or removing an entry means a redeploy. The staff API shows only how many entries there are.
+
+The watch list is checked only while `STAFF_ALERTS_ENABLED=true` and `STAFF_ALERTS_WATCHLIST_ENABLED=true` (section 2). With either flag off, the entries below are still validated at boot but never looked up, and `features.watchlist` in the staff status is `false`.
 
 ```
 STAFF_ALERTS_PERFORMANCE_KNOWN_GOOD='["76561198000000001",{"steamId":"76561198000000002","note":"owner"}]'
@@ -160,4 +164,4 @@ These are steps in WarDogs Server Commands and Warcon, not Gramps code. They kee
 
 **Confirm delivery.** Ask in the WarDogs support Discord whether ST-06 alerts reach a community with zero linked servers (a v0.8 fix suggests they might not), then watch the channel for a few days. If no alerts arrive, staff raise it with the owner. The server stays unlinked either way.
 
-Gramps does not read those WarDogs messages. Staff copy what matters into `STAFF_ALERTS_WATCHLIST`.
+Gramps does not read those WarDogs messages. Staff copy what matters into `STAFF_ALERTS_WATCHLIST`, which Gramps checks only while `STAFF_ALERTS_WATCHLIST_ENABLED=true` (section 2).
