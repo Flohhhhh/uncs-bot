@@ -245,6 +245,37 @@ describe("live player controls", () => {
     );
     expect(message).toHaveAccessibleDescription(/fresh check/);
   });
+  it.each([
+    ["the staff role", "Add whitelist access", () => context({ me: { ...context().me!, role: "moderator" } })],
+    [
+      "the server build",
+      "Force player respawn",
+      () => {
+        const admin = context();
+        const { capabilities } = admin.overview!;
+        capabilities.routes = capabilities.routes.filter((route) => !route.endsWith("/kill"));
+        return admin;
+      },
+    ],
+  ])("says why a player action is off for %s", (_cause, label, setup) => {
+    const admin = setup();
+    render(
+      <AdminContext.Provider value={admin}>
+        <PlayersPage />
+      </AdminContext.Provider>,
+    );
+    fireEvent.click(screen.getAllByRole("button", { name: "More" })[0]);
+    const dialog = screen.getByRole("dialog");
+    const off = within(dialog).getByRole("button", { name: label });
+    const message = within(dialog).getByRole("button", { name: "Message player" });
+    expect(off).toBeDisabled();
+    expect(within(dialog).getByRole("status")).toHaveTextContent(
+      "Some actions are unavailable for your role, connection, or server build.",
+    );
+    expect(off).toHaveAccessibleDescription(/your role, connection, or server build/);
+    expect(message).toBeEnabled();
+    expect(message).not.toHaveAccessibleDescription();
+  });
   it("removes player actions if the selected player leaves while the menu is open", () => {
     const admin = context();
     const tree = (present: boolean) => (
