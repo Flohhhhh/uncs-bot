@@ -6,6 +6,7 @@ import {
   ServiceUnavailableException,
 } from "@nestjs/common";
 import { z } from "zod";
+import { AdminAuth } from "../admin/admin.auth";
 import { DiscordRolesService } from "../discord-roles/discord-roles.service";
 import { EnvService } from "../env/env.service";
 import type { Staff } from "../admin/admin.types";
@@ -13,7 +14,12 @@ import { deploymentSecrets, PatreonSyncService } from "./patreon-sync.service";
 import { SupporterMatchService } from "./supporter-match.service";
 import { SupportersStore } from "./supporters.store";
 import { founderPolicy, patreonCampaign } from "./founder-policy";
-import { AUTO_FOUNDER_HOLD_HOURS_DEFAULT, supporterNextSteps, type NextStepContext } from "./supporter-match.rules";
+import {
+  AUTO_FOUNDER_HOLD_HOURS_DEFAULT,
+  steamMatchHidden,
+  supporterNextSteps,
+  type NextStepContext,
+} from "./supporter-match.rules";
 import {
   founderSchema,
   linkSchema,
@@ -38,6 +44,7 @@ export class SupportersService {
     private readonly roles: DiscordRolesService,
     private readonly patreonSync: PatreonSyncService,
     private readonly match: SupporterMatchService,
+    private readonly auth: AdminAuth,
   ) {}
   /** Lets the role service re-check this member. Fire-and-forget: a role problem never fails the request. */
   private notifyRoles(discordId: string | null | undefined) {
@@ -77,12 +84,52 @@ export class SupportersService {
       holdHours: this.policy().automaticHoldHours ?? AUTO_FOUNDER_HOLD_HOURS_DEFAULT,
     };
   }
+  /**
+   * The game servers this administrator may open. Whitelist applications belong to a server, so a supporter record
+   * leaves out the SteamID, application and server of an application on any other server. A failed check shows no
+   * server's applications.
+   */
+  private async serverAccess(staff: Staff): Promise<(serverId: string) => boolean> {
+    try {
+      const allowed = new Set((await this.auth.serverList(staff)).servers.map((server) => server.id));
+      return (serverId) => allowed.has(serverId);
+    } catch {
+      return () => false;
+    }
+  }
+  /**
+   * Adds the steps still needed, built from the full facts so every verdict and alert stays, then removes application
+   * details from servers the viewer cannot open.
+   */
+  private present(supporter: SupporterView, context: NextStepContext): SupporterListItem {
+    const nextSteps = supporterNextSteps(supporter, context);
+    const { steam, sourceApplication } = supporter.match;
+    return {
+      ...supporter,
+      match: {
+        ...supporter.match,
+        steam:
+          steam && steamMatchHidden(steam, context)
+            ? { ...steam, steamId: null, applicationId: null, serverId: null }
+            : steam,
+        sourceApplication:
+          sourceApplication && context.serverVisible && !context.serverVisible(sourceApplication.serverId)
+            ? null
+            : sourceApplication,
+      },
+      nextSteps,
+    };
+  }
+  private async context(staff: Staff): Promise<NextStepContext> {
+    return { ...this.automation(), serverVisible: await this.serverAccess(staff) };
+  }
   /** Adds the steps still needed to a record before it leaves the service. */
-  private withSteps<T extends { supporter?: SupporterView | null }>(result: T, context = this.automation()) {
+  private async withSteps<T extends { supporter?: SupporterView | null }>(staff: Staff, result: T) {
     const supporter = result.supporter;
-    return (
-      supporter ? { ...result, supporter: { ...supporter, nextSteps: supporterNextSteps(supporter, context) } } : result
-    ) as Omit<T, "supporter"> & { supporter?: SupporterListItem | null };
+    return (supporter ? { ...result, supporter: this.present(supporter, await this.context(staff)) } : result) as Omit<
+      T,
+      "supporter"
+    > & { supporter?: SupporterListItem | null };
   }
   private admin(staff: Staff) {
     if (staff.role !== "admin") throw new ForbiddenException("Only administrators can access supporter records.");
@@ -118,7 +165,7 @@ export class SupportersService {
     if (!parsedProvider.success) throw new BadRequestException("Filter by the patreon or paypal provider.");
     const configured = this.configured(),
       founderPolicy = this.policy(),
-      automation = this.automation();
+      context = await this.context(staff);
     return {
       enabled: this.env.get("PATREON_ENABLED"),
       configured,
@@ -128,7 +175,7 @@ export class SupportersService {
       paypal: { available: true },
       supporters: (
         await this.store.list(this.campaign(), founderPolicy, undefined, parsedSearch.data, parsedProvider.data)
-      ).map((supporter): SupporterListItem => ({ ...supporter, nextSteps: supporterNextSteps(supporter, automation) })),
+      ).map((supporter) => this.present(supporter, context)),
       search: parsedSearch.data,
       provider: parsedProvider.data ?? null,
       limit: 100,
@@ -152,7 +199,8 @@ export class SupportersService {
     const parsed = manualMemberSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException("Check the Patreon membership ID, confirmation and reason.");
     try {
-      return this.withSteps(
+      return await this.withSteps(
+        staff,
         await this.store.register(parsed.data, staff, this.env.get("PATREON_CAMPAIGN_ID")!, this.policy()),
       );
     } catch (error) {
@@ -192,7 +240,7 @@ export class SupportersService {
       // Supporter role.
       if (!result.replayed && (input.kind === "founder" || input.kind === "link" || input.kind === "payment"))
         this.notifyRoles(result.supporter?.discordId);
-      return this.withSteps(result);
+      return await this.withSteps(staff, result);
     } catch (error) {
       this.translateConflict(error);
     }
@@ -209,7 +257,7 @@ export class SupportersService {
     try {
       const result = await this.store.recordPaypal(parsed.data, staff, this.campaign(), this.policy());
       if (!result.replayed) this.notifyRoles(result.supporter?.discordId);
-      return this.withSteps(result);
+      return await this.withSteps(staff, result);
     } catch (error) {
       this.translateConflict(error);
     }

@@ -1,4 +1,5 @@
 import { createHmac, randomUUID } from "node:crypto";
+import type { AdminAuth } from "../admin/admin.auth";
 import type { Staff } from "../admin/admin.types";
 import type { EnvService } from "../env/env.service";
 import type { DiscordRolesService } from "../discord-roles/discord-roles.service";
@@ -70,6 +71,15 @@ function fixture(overrides: Record<string, unknown> = {}) {
     member: jest.fn(async (..._args: unknown[]): Promise<unknown> => null),
     status: jest.fn(() => ({ steamFill: false, founderAuto: false, running: false })),
   };
+  // The administrator may open the primary server only.
+  const auth = {
+    serverList: jest.fn(
+      async (..._args: unknown[]): Promise<unknown> => ({
+        legacy: false,
+        servers: [{ id: "primary", name: "Primary", version: "v", role: "admin" }],
+      }),
+    ),
+  };
   const sync = {
     configured: jest.fn().mockReturnValue(true),
     status: jest.fn().mockReturnValue({ configured: true, running: false, members: 2 }),
@@ -86,8 +96,10 @@ function fixture(overrides: Record<string, unknown> = {}) {
       roles as unknown as DiscordRolesService,
       sync as unknown as PatreonSyncService,
       match as unknown as SupporterMatchService,
+      auth as unknown as AdminAuth,
     ),
     match,
+    auth,
   };
 }
 describe("Patreon signed observations", () => {
@@ -261,6 +273,71 @@ describe("supporter reviews", () => {
         reason: "Reviewed",
       }),
     ).resolves.toMatchObject({ supporter: { nextSteps: [{ code: "founder_ready_automatic" }] } });
+  });
+  describe("applications on a game server the administrator cannot open", () => {
+    const record = (serverId: string, steamId = "76561198000000009") =>
+      supporterFixture({
+        discordId: "123456789012345678",
+        discordSource: "patreon",
+        patreonDiscordId: "123456789012345678",
+        identityState: "partial",
+        founderBlockedReason: null,
+        automaticBlockedReason: "no_steam",
+        steamApplicationId: null,
+        match: {
+          ...supporterFixture().match,
+          steam: { reason: null, steamId, applicationId: "00000000-0000-4000-8000-0000000000b9", serverId },
+        },
+      });
+    it("leave out the SteamID, application and server but keep the step", async () => {
+      const { service, store } = fixture();
+      store.list.mockResolvedValue([record("partner")]);
+      const [hidden] = (await service.list(admin)).supporters;
+      expect(hidden.match.steam).toEqual({ reason: null, steamId: null, applicationId: null, serverId: null });
+      expect(hidden.nextSteps[0]).toMatchObject({ code: "steam_available", area: "steam" });
+      expect(hidden.nextSteps[0].message).toContain("on a server you cannot open");
+      expect(JSON.stringify(hidden)).not.toMatch(/76561198000000009|partner|0000000000b9/);
+      store.list.mockResolvedValue([record("primary")]);
+      const [shown] = (await service.list(admin)).supporters;
+      expect(shown.match.steam).toMatchObject({ steamId: "76561198000000009", serverId: "primary" });
+      expect(shown.nextSteps[0].message).toContain("SteamID 76561198000000009");
+    });
+    it("leave out the source application and keep the SteamID alert without its SteamID", async () => {
+      const { service, store } = fixture();
+      store.list.mockResolvedValue([
+        supporterFixture({
+          ...record("partner"),
+          steamId: "76561198000000001",
+          steamSource: "staff",
+          identityState: "patreon_linked",
+          match: {
+            ...record("partner").match,
+            sourceApplication: { id: "00000000-0000-4000-8000-0000000000b8", serverId: "partner", status: "approved" },
+          },
+        }),
+      ]);
+      const [hidden] = (await service.list(admin)).supporters;
+      expect(hidden.match.sourceApplication).toBeNull();
+      const alert = hidden.nextSteps.find((step) => step.code === "steam_differs_from_application")!;
+      expect(alert.message).toContain("(on a server you cannot open)");
+      expect(JSON.stringify(hidden)).not.toMatch(/76561198000000009|partner/);
+    });
+    it("hide every server's applications when the server check fails, also on a saved review", async () => {
+      const { service, store, auth } = fixture();
+      auth.serverList.mockRejectedValue(new Error("Discord is unavailable"));
+      store.list.mockResolvedValue([record("primary")]);
+      expect((await service.list(admin)).supporters[0].match.steam).toMatchObject({ steamId: null, serverId: null });
+      store.mutate.mockResolvedValueOnce({ ok: true, replayed: false, supporter: record("primary") });
+      await expect(
+        service.mutate(admin, randomUUID(), "review", {
+          id: randomUUID(),
+          version: 1,
+          confirm: "member-1",
+          reason: "Reviewed",
+        }),
+      ).resolves.toMatchObject({ supporter: { match: { steam: { steamId: null, serverId: null } } } });
+      expect(auth.serverList).toHaveBeenCalledWith(admin);
+    });
   });
   it("allows audited manual tracking before webhook setup without enabling webhook ingestion", async () => {
     const { service, store } = fixture({ PATREON_WEBHOOK_SECRET: undefined });
