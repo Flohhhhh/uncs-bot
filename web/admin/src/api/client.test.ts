@@ -51,6 +51,15 @@ describe("staff API boundary", () => {
     await expect(api("https://evil.example/test")).rejects.toMatchObject({ status: 400 });
     expect(fetcher).not.toHaveBeenCalled();
   });
+  it("allows dots in a query value but still refuses route traversal", async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ supporters: [] })));
+    vi.stubGlobal("fetch", fetcher);
+    await expect(api(`supporters?search=${encodeURIComponent("Wait...")}`)).resolves.toEqual({ supporters: [] });
+    expect(fetcher).toHaveBeenCalledWith("/admin/api/supporters?search=Wait...", expect.any(Object));
+    for (const path of ["servers/../supporters", "supporters/..?search=x"])
+      await expect(api(path)).rejects.toMatchObject({ message: "Invalid API path.", status: 400 });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
   it.each([401, 403])("invalidates immediately on %s without waiting for an error body", async (status) => {
     const body = vi.fn(() => new Promise(() => {}));
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status, json: body }));

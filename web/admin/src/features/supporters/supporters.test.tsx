@@ -115,6 +115,29 @@ it("searches all stored supporters on explicit submit rather than filtering only
   expect(request).toHaveBeenLastCalledWith("supporters", expect.any(Object));
 });
 
+it("keeps a failed search changeable and clearable", async () => {
+  request.mockImplementation(async (path) => {
+    if (String(path).includes("?search=")) throw new Error("The dashboard could not be reached.");
+    return data();
+  });
+  render(page());
+  await screen.findByRole("button", { name: "Review supporter" });
+  fireEvent.change(screen.getByRole("searchbox", { name: "Search all supporter records" }), {
+    target: { value: "Wait..." },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Search all records" }));
+  await screen.findByText("Supporter records could not be loaded");
+  expect(request).toHaveBeenLastCalledWith("supporters?search=Wait...", expect.any(Object));
+  expect(screen.getByRole("searchbox", { name: "Search all supporter records" })).toHaveValue("Wait...");
+  fireEvent.click(screen.getByRole("button", { name: "Search all records" }));
+  await screen.findByText("Supporter records could not be loaded");
+  expect(request.mock.calls.filter(([path]) => path === "supporters?search=Wait...")).toHaveLength(2);
+  fireEvent.click(screen.getByRole("button", { name: "Clear search" }));
+  await screen.findByRole("button", { name: "Review supporter" });
+  expect(request).toHaveBeenLastCalledWith("supporters", expect.any(Object));
+  expect(screen.getByRole("searchbox", { name: "Search all supporter records" })).toHaveValue("");
+});
+
 it("requires a checked campaign membership before creating an unverified donor record without webhook setup", async () => {
   const response = deferred<SupporterReviewResponse>();
   request.mockImplementation(async (_path, options) =>
