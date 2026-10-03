@@ -7,6 +7,7 @@ import {
   type MiddlewareConsumer,
   type NestModule,
 } from "@nestjs/common";
+import { HttpAdapterHost } from "@nestjs/core";
 import { Test } from "@nestjs/testing";
 import type { Request, Response } from "express";
 import request from "supertest";
@@ -224,7 +225,7 @@ describe("staff application review traffic limit", () => {
   })
   class ReviewAndApply implements NestModule {
     configure(consumer: MiddlewareConsumer) {
-      new AdminModule().configure(consumer);
+      new AdminModule(new HttpAdapterHost()).configure(consumer);
       new ApplicationsModule().configure(consumer);
     }
   }
