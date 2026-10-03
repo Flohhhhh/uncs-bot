@@ -21,6 +21,13 @@ const distinct = <T>(values: T[]) => new Set(values.map((value) => JSON.stringif
 /** 20 variants of four 200-character messages, with room for JSON escapes and formatting. */
 const WELCOME_VARIANTS_MAX_LENGTH = 32_768;
 const ROUND_MESSAGES_MAX_LENGTH = 8_192;
+/** 500 known-good entries with 80-character notes come to about 61,000 characters. Documented in STAFF_ALERTS.md. */
+const KNOWN_GOOD_MAX_LENGTH = 65_536;
+/**
+ * Documented in STAFF_ALERTS.md. 200 watch-list entries with every field at its maximum would not fit, and
+ * Linux caps one environment value at 131,072 bytes, so the guide gives the real limit instead.
+ */
+const WATCHLIST_MAX_LENGTH = 65_536;
 const welcomeVariants = jsonSetting(
   z.array(welcomeSequence).min(1).max(20).refine(distinct, "Use different welcome variants."),
   WELCOME_VARIANTS_MAX_LENGTH,
@@ -162,13 +169,13 @@ export const Env = z.object({
   /** Never flagged: SteamID64 strings or {"steamId","note"} objects. */
   STAFF_ALERTS_PERFORMANCE_KNOWN_GOOD: jsonSetting(
     z.array(knownGoodEntry).max(500).refine(uniqueSteamIds, "List each SteamID once."),
-    32_768,
+    KNOWN_GOOD_MAX_LENGTH,
   ).optional(),
   STAFF_ALERTS_WATCHLIST_ENABLED: flag(),
   /** Copied by staff from WarDogs network alerts. Monitoring only; never an automatic ban. */
   STAFF_ALERTS_WATCHLIST: jsonSetting(
     z.array(watchlistEntry).max(200).refine(uniqueSteamIds, "List each SteamID once."),
-    65_536,
+    WATCHLIST_MAX_LENGTH,
   ).optional(),
   STAFF_ALERTS_WATCHLIST_HIGHLIGHT_COMMUNITIES: count(1, 100, 3),
   STAFF_ALERTS_WATCHLIST_COOLDOWN_MINUTES: count(0, 10_080, 360),
