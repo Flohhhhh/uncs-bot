@@ -564,6 +564,32 @@ describe("admin HTTP boundaries", () => {
       expect(send("/admin/api/me", staffCookie)).toBe(429);
     });
 
+    it("count a new sign-in in its own bucket from its first request, even while anonymous traffic fills the address", async () => {
+      for (let count = 0; count < 600; count++) expect(send("/admin/api/me")).toBe("passed");
+      const login = await request(app.getHttpServer()).get("/admin/auth/login").expect(302);
+      const state = new URL(login.headers.location).searchParams.get("state");
+      jest
+        .mocked(fetch)
+        .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "discord-access-secret" })))
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ id: session.userId, username: "UNC admin", mfa_enabled: true })),
+        )
+        .mockResolvedValueOnce(new Response(JSON.stringify({ roles: ["staff"] })));
+      const callback = await request(app.getHttpServer())
+        .get("/admin/auth/callback")
+        .query({ code: "one-time-code", state })
+        .set("Cookie", login.headers["set-cookie"][0].split(";")[0])
+        .expect(302);
+      const signedIn = ([] as string[])
+        .concat(callback.headers["set-cookie"])
+        .map((cookie) => cookie.split(";")[0])
+        .find((cookie) => /^__Host-uncs_admin_session=[a-f0-9]{64}$/.test(cookie));
+      expect(signedIn).toBeDefined();
+      // Counted by address, this first request would be refused, so the session could never be verified.
+      expect(send("/admin/api/me", signedIn)).toBe("passed");
+      expect(send("/admin/api/me")).toBe(429);
+    });
+
     it("keep sign-in and its callback on the address limit", async () => {
       await verify();
       for (let count = 0; count < 60; count++) expect(send("/admin/auth/login")).toBe("passed");

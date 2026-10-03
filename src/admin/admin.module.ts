@@ -99,9 +99,10 @@ export class AdminModule implements NestModule, OnModuleInit {
           }
           // Never trust caller-supplied X-Forwarded-For. When deployed behind a proxy the peer address is
           // the proxy's, so the address bucket is shared by every caller; configure client limits at that
-          // trusted edge as well. A session AdminAuth verified in the last few minutes is counted in its own
-          // bucket instead, keyed by its token hash, so anonymous traffic cannot use up staff capacity.
-          // Unknown, forged, signed-out or revoked cookies, and every sign-in request, count by address.
+          // trusted edge as well. A session AdminAuth verified at sign-in or in the last few minutes is counted
+          // in its own bucket instead, keyed by its token hash, so anonymous traffic cannot use up staff capacity.
+          // Unknown, forged or signed-out cookies, revoked ones once a request has found them out, and every
+          // sign-in request count by address.
           const session = isAuth ? undefined : this.auth.verifiedSession(req);
           const counters = session ? staffTraffic : traffic;
           const key = session ?? `${isAuth ? "auth" : "api"}:${req.socket.remoteAddress ?? "unknown"}`;

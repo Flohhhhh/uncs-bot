@@ -39,8 +39,9 @@ const verifiedSessionLimit = 1000;
 export class AdminAuth {
   private readonly memberCache = new Map<string, { expires: number; role: StaffRole; roles: string[] }>();
   private readonly requestCounts = new Map<string, { until: number; reads: number; writes: number }>();
-  // Session token hashes (never the token) that recently passed authenticate(), with when that trust ends, in
-  // least-recently-verified order. Only the /admin traffic limiter reads it; it grants no access.
+  // Session token hashes (never the token) that recently passed the staff check at sign-in or in authenticate(),
+  // with when that trust ends, in least-recently-verified order. Only the traffic limiters read it; it grants no
+  // access.
   private readonly verifiedSessions = new Map<string, number>();
   constructor(
     private readonly settings: AdminSettings,
@@ -75,10 +76,12 @@ export class AdminAuth {
   }
 
   /**
-   * The stored hash of this request's session token if that session passed the staff check in the last few
-   * minutes and has not since been signed out, replaced, found missing or expired, or refused staff access.
-   * The /admin traffic limiter counts such a session in its own bucket. Any other cookie, including a forged
-   * one, returns undefined and is counted by address. This only reads memory; it never queries storage.
+   * The stored hash of this request's session token if that session passed the staff check (at sign-in or on a
+   * request) in the last few minutes and has not since been signed out, replaced, found missing or expired, or
+   * refused staff access. A session ended outside the dashboard stays here until one of its requests finds that
+   * out, or a few minutes pass. The /admin traffic limiter counts such a session in its own bucket. Any other
+   * cookie, including a forged one, returns undefined and is counted by address. This only reads memory; it
+   * never queries storage.
    */
   verifiedSession(req: Request): string | undefined {
     if (this.verifiedSessions.size === 0) return undefined;
@@ -245,13 +248,19 @@ export class AdminAuth {
       await this.store.deleteSession(previousHash);
     }
     const token = randomBytes(32).toString("hex");
+    const tokenHash = hash(token);
+    const expiresAt = new Date(Date.now() + 8 * 3_600_000);
     await this.store.createSession({
-      tokenHash: hash(token),
+      tokenHash,
       userId: identity.id,
       displayName: String(identity.global_name || identity.username || identity.id).slice(0, 100),
       csrf: randomBytes(32).toString("hex"),
-      expiresAt: new Date(Date.now() + 8 * 3_600_000),
+      expiresAt,
     });
+    // This sign-in has just passed the full staff check, so the new session's first request already counts in
+    // its own traffic bucket. Counted by address, that request would be refused while anonymous traffic keeps
+    // the shared bucket full, so the session could never be verified and staff could not get back in.
+    this.trustSession(tokenHash, expiresAt);
     res.cookie(this.cookieName("session"), token, { ...this.cookieOptions(), maxAge: 8 * 3_600_000 });
     res.redirect("/admin");
   }

@@ -219,6 +219,28 @@ describe("verified sessions for the dashboard traffic limit", () => {
     expect(auth.verifiedSession(withCookie("not-a-token"))).toBeUndefined();
   });
 
+  it("trusts the session a staff sign-in creates from its first request, until that session expires", async () => {
+    const { auth, store, session } = fixture();
+    roles("admin-role");
+    const { req, res } = loginCallback(auth);
+    jest
+      .mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "private-oauth-token" })))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ id: session.userId, username: "Staff", mfa_enabled: true })),
+      );
+    const start = Date.now();
+    jest.spyOn(Date, "now").mockReturnValue(start);
+    await auth.callback(req, res as unknown as Response);
+    const [, token] = res.cookie.mock.calls[1];
+    expect(store.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenHash: hash(token), expiresAt: new Date(start + 8 * 3_600_000) }),
+    );
+    expect(auth.verifiedSession(withCookie(token))).toBe(hash(token));
+    jest.mocked(Date.now).mockReturnValue(start + 5 * 60_000);
+    expect(auth.verifiedSession(withCookie(token))).toBeUndefined();
+  });
+
   it.each<[string, (context: ReturnType<typeof fixture>) => Promise<unknown>]>([
     ["signed out", ({ auth, req }) => auth.logout(req, { clearCookie: jest.fn() } as unknown as Response)],
     [
@@ -263,6 +285,37 @@ describe("verified sessions for the dashboard traffic limit", () => {
     expect(context.auth.verifiedSession(read)).toBe(hash("b".repeat(64)));
     await end(context);
     expect(context.auth.verifiedSession(read)).toBeUndefined();
+  });
+
+  it.each<[string, (context: ReturnType<typeof fixture>) => Promise<unknown>]>([
+    [
+      "Discord is unavailable",
+      ({ auth, req }) => {
+        jest.mocked(fetch).mockImplementation(async () => new Response("upstream", { status: 503 }));
+        return expect(auth.authenticate(req)).rejects.toThrow("Discord is unavailable");
+      },
+    ],
+    [
+      "a request fails the origin or CSRF check",
+      ({ auth, req }) =>
+        expect(
+          auth.authenticate({ ...req, headers: { ...req.headers, "x-csrf-token": "forged" } } as Request),
+        ).rejects.toThrow("dashboard session"),
+    ],
+    [
+      "the per-user limit refuses a request",
+      async ({ auth, req }) => {
+        for (let count = 0; count < 30; count++) await auth.authenticate(req);
+        await expect(auth.authenticate(req)).rejects.toMatchObject({ status: 429 });
+      },
+    ],
+  ])("keeps trusting a verified session when %s, since the session itself is still valid", async (_case, fail) => {
+    const context = fixture();
+    const read = { ...context.req, method: "GET" } as Request;
+    roles("admin-role");
+    await context.auth.authenticate(read);
+    await fail(context);
+    expect(context.auth.verifiedSession(read)).toBe(hash("b".repeat(64)));
   });
 
   it("ends trust five minutes after the last check, or sooner when the session itself expires", async () => {
