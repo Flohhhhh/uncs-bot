@@ -85,10 +85,8 @@ export function OverviewPage() {
       ? runningRotationSnapshot(running.data, status.map)
       : null;
   const next = nextRoundSummary(rotationRead.error ? null : snapshot);
-  const nextFailed = !!rotationRead.error || (!snapshot && !rotationRead.loading);
   const votes = voting.data && Array.isArray(voting.data.votes) ? voting.data : null;
-  const voteError = voting.error || (voting.data && !votes ? "The voting status was unreadable." : "");
-  const vote = voteSummary(votes, voteError);
+  const vote = voteSummary(votes, voting.error || (voting.data && !votes ? "The voting status was unreadable." : ""));
   const top = [...players].sort((a, b) => compareValues(a.kills, b.kills, "descending")).slice(0, 8);
   const recent = activity.entries.filter((entry) => entry.category !== "combat").slice(0, 6);
   const activityFailed = !recent.length && !activity.loading && activity.failed.length > 0;
@@ -172,9 +170,9 @@ export function OverviewPage() {
                 : undefined
           }
           title={next.note || undefined}
-          alert={nextFailed}
+          alert={!!rotationRead.error}
         />
-        {isAdmin && <NowItem label="Vote" value={vote.label} alert={!!voteError} />}
+        {isAdmin && <NowItem label="Vote" value={vote.label} alert={!!voting.error} />}
         <Link className="text-button now-link" to="/match">
           Match &amp; maps →
         </Link>
