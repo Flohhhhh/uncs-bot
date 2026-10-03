@@ -182,7 +182,8 @@ export class SupportersService {
       if (!result.replayed && input.kind === "link") {
         const automatic = await this.match.member(memberId, "link", { founder: false });
         if (automatic?.steamFilled) {
-          result.supporter = await this.store.get(memberId, campaign, policy);
+          // The link is saved either way; if the read fails, the dashboard's next action asks for a refresh.
+          result.supporter = (await this.store.get(memberId, campaign, policy).catch(() => null)) ?? result.supporter;
           result.automatic = { steamFilled: true, founderRecorded: false };
         }
       }

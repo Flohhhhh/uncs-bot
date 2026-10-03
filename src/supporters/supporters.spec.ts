@@ -183,6 +183,9 @@ describe("supporter reviews", () => {
     expect(linkSchema.safeParse(input).success).toBe(true);
     expect(linkSchema.safeParse({ ...input, discordId: undefined, steamId: "76561197960265729" }).success).toBe(true);
     expect(linkSchema.safeParse({ ...input, discordId: undefined }).success).toBe(false);
+    // Restating a SteamID copied from an application is an explicit, single-valued confirmation.
+    expect(linkSchema.safeParse({ ...input, steamConfirmed: true }).success).toBe(true);
+    expect(linkSchema.safeParse({ ...input, steamConfirmed: false }).success).toBe(false);
   });
   it("bounds all-record searches and never treats invalid query shapes as an unfiltered list", async () => {
     const { service, store } = fixture();
@@ -718,6 +721,13 @@ describe("automatic supporter matching triggers", () => {
       supporter: { version: 3, steamSource: "application", nextSteps: expect.any(Array) },
     });
     expect(store.get).toHaveBeenCalledWith(memberId, campaign, expect.any(Object));
+    // A failed read after the save keeps the saved link response instead of failing the request.
+    store.mutate.mockResolvedValueOnce({ ok: true, replayed: false, supporter: linked });
+    store.get.mockRejectedValueOnce(new Error("database unavailable"));
+    match.member.mockResolvedValueOnce({ steamFilled: true, founderRecorded: false, blocked: [] });
+    await expect(
+      service.mutate(admin, memberId, "link", { ...review, id: randomUUID(), discordId: "123456789012345678" }),
+    ).resolves.toMatchObject({ supporter: { version: 2 }, automatic: { steamFilled: true } });
   });
   it("keeps the saved link response when matching changes nothing, and never matches on a replay or other actions", async () => {
     const { service, store, match } = fixture();
