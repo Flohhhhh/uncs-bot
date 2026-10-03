@@ -436,4 +436,102 @@ describe("Sheet", () => {
     fireEvent.click(screen.getByRole("button", { name: "Close panel" }));
     expect(screen.getByRole("heading", { name: "Live players" })).toHaveFocus();
   });
+
+  it("hands its opener to a review that replaces it in the same update", () => {
+    // Bans "+ Ban player" then a pick, or More then Sign out with unsaved drafts.
+    function Picker() {
+      const [picking, setPicking] = useState(false);
+      const [review, setReview] = useState(false);
+      return (
+        <AdminContext.Provider value={admin}>
+          <main id="main-content" tabIndex={-1}>
+            <h1 tabIndex={-1}>Bans</h1>
+            <button type="button" onClick={() => setPicking(true)}>
+              Ban player
+            </button>
+          </main>
+          {picking && (
+            <Sheet title="Pick a player" onClose={() => setPicking(false)}>
+              <button
+                type="button"
+                onClick={() => {
+                  setPicking(false);
+                  setReview(true);
+                }}
+              >
+                UncDap
+              </button>
+            </Sheet>
+          )}
+          {review && (
+            <Modal title="Ban UncDap" onClose={() => setReview(false)}>
+              <button type="button" onClick={() => setReview(false)}>
+                Cancel
+              </button>
+            </Modal>
+          )}
+        </AdminContext.Provider>
+      );
+    }
+    render(<Picker />);
+    const opener = screen.getByRole("button", { name: "Ban player" });
+    opener.focus();
+    fireEvent.click(opener);
+    const pick = screen.getByRole("button", { name: "UncDap" });
+    pick.focus();
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    fireEvent.click(pick);
+    expect(screen.queryByRole("dialog", { name: "Pick a player" })).not.toBeInTheDocument();
+    // The sheet's focus fallback must not move focus off the review's own controls onto the review itself.
+    expect(focus.mock.contexts).not.toContain(screen.getByRole("dialog", { name: "Ban UncDap" }));
+    const cancel = screen.getByRole("button", { name: "Cancel" });
+    cancel.focus();
+    fireEvent.click(cancel);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(opener).toHaveFocus();
+  });
+
+  it("leaves focus in a review that stays open when the sheet behind it closes", () => {
+    function Panel() {
+      const [sheet, setSheet] = useState(false);
+      const [review, setReview] = useState(false);
+      return (
+        <AdminContext.Provider value={admin}>
+          <main id="main-content" tabIndex={-1}>
+            <h1 tabIndex={-1}>Live players</h1>
+            <button type="button" onClick={() => setSheet(true)}>
+              UncDap
+            </button>
+          </main>
+          {sheet && (
+            <Sheet title="Player" onClose={() => setSheet(false)}>
+              <button type="button" onClick={() => setReview(true)}>
+                Kick
+              </button>
+            </Sheet>
+          )}
+          {review && (
+            <Modal title="Kick UncDap" onClose={() => setReview(false)}>
+              <button type="button" onClick={() => setSheet(false)}>
+                Close the panel behind
+              </button>
+            </Modal>
+          )}
+        </AdminContext.Provider>
+      );
+    }
+    render(<Panel />);
+    const opener = screen.getByRole("button", { name: "UncDap" });
+    opener.focus();
+    fireEvent.click(opener);
+    fireEvent.click(screen.getByRole("button", { name: "Kick" }));
+    const review = screen.getByRole("dialog", { name: "Kick UncDap" });
+    const control = screen.getByRole("button", { name: "Close the panel behind" });
+    control.focus();
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    fireEvent.click(control);
+    expect(screen.queryByRole("dialog", { name: "Player" })).not.toBeInTheDocument();
+    expect(focus.mock.contexts).not.toContain(review);
+    expect(control).toHaveFocus();
+  });
 });

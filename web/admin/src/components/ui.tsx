@@ -471,7 +471,10 @@ export function Sheet({
   const descriptionId = useId();
   const latestClose = useRef(onClose);
   latestClose.current = onClose;
-  useEffect(() => {
+  // A layout effect, like Modal's. A sheet that closes as a review opens in the same update, such as a pick in the
+  // player picker or Sign out with unsaved drafts in More, then closes before React removes it and before the
+  // review calls showModal(). Focus goes back to the sheet's opener, which the review then records as its own.
+  useLayoutEffect(() => {
     const element = sheet.current;
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     // Some close requests close the sheet natively whatever the cancel handler does, such as the Android back
@@ -486,6 +489,8 @@ export function Sheet({
       element?.removeEventListener("close", closed);
       if (element?.open) element.close();
       if (previous?.isConnected) previous.focus();
+      // A review still open over the sheet keeps focus on its own controls.
+      if (document.activeElement?.closest("dialog[open]")) return;
       // The control that opened the panel can be gone by now, such as a player who left the roster.
       if (!previous || document.activeElement !== previous) focusPageHeading();
     };
