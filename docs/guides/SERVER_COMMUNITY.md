@@ -224,7 +224,7 @@ During a Railway deploy the old and new processes run side by side for up to a m
 - Unset or blank, nothing changes: no extra connection, and every running process sends as before. A value that is not a `postgres://` or `postgresql://` URL, or whose host contains `-pooler`, fails startup validation: session advisory locks belong to one database session, which Neon's transaction pooler does not keep for one client.
 - The lock is used only while `SERVER_COMMUNITY_ENABLED` and the welcome or round switch are on. The Discord status card is not covered; a second process only repeats the same edit of the same message.
 - Turning the setting on or off is itself a deploy in which one of the two processes does not take the lock, so that one overlap can still send twice.
-- It costs one direct connection per running process and a small query every five seconds.
+- It costs one direct connection per running process and a small query every five seconds. On Neon, that steady query also keeps the compute from scaling to zero while Gramps runs; check the plan's compute allowance before enabling it.
 
 ## Cutover and operating limits
 
