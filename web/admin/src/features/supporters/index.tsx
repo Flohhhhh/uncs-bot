@@ -129,7 +129,9 @@ function LinkFields({ record }: { record: Supporter }) {
   const hint = useId();
   const offered = applicationSteamId(record);
   const steamNote = record.nextSteps.find((step) => step.area === "steam")?.message;
-  const discordChanged = discordId.trim() !== (record.discordId ?? "");
+  // As on save, an empty Discord field keeps the current account; only a different ID is a new account.
+  const typedDiscordId = discordId.trim();
+  const discordChanged = typedDiscordId !== "" && typedDiscordId !== record.discordId;
   return (
     <>
       <label>

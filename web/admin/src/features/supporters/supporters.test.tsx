@@ -4,7 +4,14 @@ import { api } from "../../api/client";
 import { AdminContext, type AdminContextValue } from "../../app/context";
 import { SupportersPage } from "./index";
 import { PatreonImport, ago, ahead } from "./patreon-sync";
-import { applicationSteamId, discordDescription, founderReady, founderWindowLabel, reviewInput } from "./policy";
+import {
+  applicationSteamId,
+  discordDescription,
+  founderReady,
+  founderWindowLabel,
+  reviewInput,
+  steamDescription,
+} from "./policy";
 import type {
   FounderPolicy,
   PatreonSyncResponse,
@@ -801,6 +808,13 @@ it("offers an approved application's SteamID without filling it in, only for the
   fireEvent.change(discord, { target: { value: "34567890123456789" } });
   expect(screen.queryByRole("button", { name: `Use SteamID ${automaticSteam.steamId}` })).not.toBeInTheDocument();
   expect(screen.getByText(/not offered for a new Discord account/)).toBeInTheDocument();
+  // An emptied Discord field keeps the current account on save, so the offer stays.
+  fireEvent.change(discord, { target: { value: "  " } });
+  expect(screen.queryByText(/not offered for a new Discord account/)).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: `Use SteamID ${automaticSteam.steamId}` })).toBeInTheDocument();
+  expect(reviewInput(offered, "link", "id", form({ discordId: "", steamId: automaticSteam.steamId }))).toEqual(
+    expect.not.objectContaining({ discordId: expect.anything() }),
+  );
   fireEvent.change(discord, { target: { value: supporter.discordId } });
   fireEvent.click(screen.getByRole("button", { name: `Use SteamID ${automaticSteam.steamId}` }));
   expect(steam).toHaveValue(automaticSteam.steamId);
@@ -909,6 +923,39 @@ it.each([
     `Flagged: ${reason}. Check it before linking.`,
   );
   expect(screen.queryByRole("button", { name: /^Use SteamID/ })).not.toBeInTheDocument();
+});
+
+it("shows nothing from an application on a server the administrator cannot open, and keeps the new-account box", async () => {
+  const hiddenStep =
+    "The approved application on a server you cannot open names a SteamID. An administrator of that server can check it and link it here.";
+  // As the server sends it: only the reason is left of the application.
+  const hidden: Supporter = {
+    ...supporter,
+    steamId: null,
+    steamSource: null,
+    identityState: "partial",
+    match: {
+      ...supporter.match,
+      steam: { reason: null, steamId: null, applicationId: null, serverId: null },
+      sourceApplication: null,
+    },
+    nextSteps: [{ code: "steam_available", area: "steam", message: hiddenStep }],
+  };
+  expect(applicationSteamId(hidden)).toBeNull();
+  expect(steamDescription({ ...hidden, steamId: "76561198000000002", steamSource: "application" })).toBe(
+    "Copied from the approved whitelist application. Steam ownership is not verified.",
+  );
+  request.mockResolvedValue(data(hidden));
+  render(page());
+  fireEvent.click(await screen.findByRole("button", { name: "Review supporter" }));
+  fireEvent.click(screen.getByRole("button", { name: "Review account match" }));
+  const steam = screen.getByLabelText("SteamID64");
+  expect(steam).toHaveValue("");
+  expect(steam).toHaveAccessibleDescription(hiddenStep);
+  expect(screen.queryByRole("button", { name: /^Use SteamID/ })).not.toBeInTheDocument();
+  expect(screen.getByRole("dialog")).not.toHaveTextContent(/on server |7656119800000000[0-9]/);
+  // The server can still refuse a SteamID from that application, so the confirmation stays available.
+  expect(screen.getByRole("checkbox", { name: /belongs to the new Discord account too/ })).toBeInTheDocument();
 });
 
 it("asks staff to confirm the current Discord account's SteamID before it goes with a new account", () => {
