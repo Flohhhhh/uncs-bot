@@ -7,8 +7,6 @@ import {
   useSensors,
   pointerWithin,
   closestCenter,
-  useDraggable,
-  useDroppable,
 } from "@dnd-kit/core";
 import {
   SortableContext,
@@ -19,42 +17,22 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import type { MapSelection } from "../../../../../src/common/server-settings";
-import { mapLabel, selectionDetails, selectionLabel } from "../../../../../src/common/map-labels";
+import { mapLabel, selectionDetails } from "../../../../../src/common/map-labels";
+import { Badge } from "../../components/ui";
 
 export type RotationRow = { id: string; entry: MapSelection };
-const newEntry = "new-entry";
-const queueEnd = "queue-end";
-function DraftCard({ entry, disabled }: { entry: MapSelection; disabled: boolean }) {
-  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: newEntry, disabled });
-  return (
-    <button
-      type="button"
-      ref={setNodeRef}
-      {...attributes}
-      {...listeners}
-      disabled={disabled}
-      className="button secondary rotation-draft-card"
-      style={{ transform: CSS.Translate.toString(transform), zIndex: isDragging ? 2 : undefined }}
-      aria-label={`Drag ${entry.map ? selectionLabel(entry) : "a map"} into rotation`}
-    >
-      <span aria-hidden="true">⠿</span> {entry.map ? selectionLabel(entry) : "Choose a map above"}
-      <small>Drag into the queue</small>
-    </button>
-  );
-}
-function EndTarget({ disabled }: { disabled: boolean }) {
-  const { setNodeRef, isOver } = useDroppable({ id: queueEnd, disabled });
-  return (
-    <div ref={setNodeRef} className={`rotation-drop-end ${isOver ? "is-over" : ""}`}>
-      Drop here to add at the end
-    </div>
-  );
-}
+/** Rows the game confirms as playing now and playing next, by position. */
+export type RotationMarkers = { now: number | null; next: number | null };
+
 function QueueRow({
   row,
   index,
   count,
   disabled,
+  canEdit,
+  now,
+  next,
+  editor,
   move,
   edit,
   remove,
@@ -63,6 +41,10 @@ function QueueRow({
   index: number;
   count: number;
   disabled: boolean;
+  canEdit: boolean;
+  now: boolean;
+  next: boolean;
+  editor?: ReactNode;
   move: (to: number) => void;
   edit: () => void;
   remove: () => void;
@@ -74,82 +56,111 @@ function QueueRow({
     <li
       ref={setNodeRef}
       style={{ transform: CSS.Transform.toString(transform), transition, zIndex: isDragging ? 1 : undefined }}
-      className={`${isDragging ? "is-dragging" : ""} ${isOver ? "is-over" : ""}`}
+      className={[isDragging && "is-dragging", isOver && "is-over", now && "is-now", editor && "is-editing"]
+        .filter(Boolean)
+        .join(" ")}
     >
-      <button
-        ref={setActivatorNodeRef}
-        type="button"
-        {...attributes}
-        {...listeners}
-        disabled={disabled}
-        className="button secondary rotation-handle"
-        aria-label={`Reorder entry ${index + 1}: ${name}`}
-        title="Drag to reorder; Space to pick up, arrows to move, Escape to cancel"
-      >
-        <span aria-hidden="true">⠿</span>
-      </button>
-      <span className="rotation-position" aria-hidden="true">
-        {index + 1}
-      </span>
-      <div className="rotation-entry-label">
-        <strong>{name}</strong>
-        <small>{selectionDetails(row.entry)}</small>
-      </div>
-      <div className="row-actions">
+      <div className="rotation-row">
         <button
+          ref={setActivatorNodeRef}
           type="button"
-          className="button secondary"
-          disabled={disabled || index === 0}
-          aria-label={`Move ${name} up`}
-          onClick={() => move(index - 1)}
-        >
-          ↑
-        </button>
-        <button
-          type="button"
-          className="button secondary"
-          disabled={disabled || index === count - 1}
-          aria-label={`Move ${name} down`}
-          onClick={() => move(index + 1)}
-        >
-          ↓
-        </button>
-        <button type="button" className="button secondary" disabled={disabled} onClick={edit}>
-          Edit
-        </button>
-        <button
-          type="button"
-          className="button secondary"
+          {...attributes}
+          {...listeners}
           disabled={disabled}
-          aria-label={`Remove ${name}`}
-          onClick={remove}
+          className="button secondary rotation-handle"
+          aria-label={`Reorder entry ${index + 1}: ${name}`}
+          title="Drag to reorder; Space to pick up, arrows to move, Escape to cancel"
         >
-          Remove
+          <span aria-hidden="true">⠿</span>
         </button>
+        <span className="rotation-position" aria-hidden="true">
+          {index + 1}
+        </span>
+        <div className="rotation-entry-label">
+          <strong>{name}</strong>
+          <small>{selectionDetails(row.entry)}</small>
+        </div>
+        {(now || next) && (
+          <span className="rotation-markers">
+            {now && <Badge kind="good">Now</Badge>}
+            {next && <Badge>Next</Badge>}
+          </span>
+        )}
+        <div className="row-actions rotation-row-actions">
+          <button
+            type="button"
+            className="button secondary"
+            disabled={disabled || index === 0}
+            aria-label={`Move ${name} up`}
+            title="Move up"
+            onClick={() => move(index - 1)}
+          >
+            ↑
+          </button>
+          <button
+            type="button"
+            className="button secondary"
+            disabled={disabled || index === count - 1}
+            aria-label={`Move ${name} down`}
+            title="Move down"
+            onClick={() => move(index + 1)}
+          >
+            ↓
+          </button>
+          <button
+            type="button"
+            className="button secondary"
+            disabled={disabled || !canEdit}
+            aria-label={`Edit ${name}`}
+            title="Edit"
+            onClick={edit}
+          >
+            <span aria-hidden="true">✎</span>
+          </button>
+          <button
+            type="button"
+            className="button secondary rotation-remove"
+            disabled={disabled}
+            aria-label={`Remove ${name}`}
+            title="Remove"
+            onClick={remove}
+          >
+            <span aria-hidden="true">✕</span>
+          </button>
+        </div>
       </div>
+      {editor && <div className="rotation-row-editor">{editor}</div>}
     </li>
   );
 }
+
+/**
+ * The ordered rotation, with the entry editor opened under the row being edited. Rows reorder by
+ * dragging the handle, by keyboard, or with the arrow buttons; `children` follow the list.
+ */
 export function RotationQueue({
   rows,
   change,
   edit,
-  selection,
-  canAdd,
-  add,
   disabled,
+  canEdit = !disabled,
+  markers,
+  editing = null,
+  editor,
   children,
-  showQueue = true,
 }: {
   rows: RotationRow[];
   change: (rows: RotationRow[]) => void;
   edit: (index: number) => void;
-  selection: MapSelection;
-  canAdd: boolean;
-  add: (index: number) => void;
   disabled: boolean;
-  children: ReactNode;
-  showQueue?: boolean;
+  /** False while another entry is open in the editor. */
+  canEdit?: boolean;
+  /** Shown only when the game confirms the rotation position. */
+  markers?: RotationMarkers;
+  /** The row whose editor is open. */
+  editing?: number | null;
+  editor?: ReactNode;
+  children?: ReactNode;
 }) {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
@@ -160,11 +171,8 @@ export function RotationQueue({
     if (!disabled && from !== to && from >= 0 && to >= 0 && from < rows.length && to < rows.length)
       change(arrayMove(rows, from, to));
   }
-  const name = (id: string | number) =>
-    id === newEntry ? selectionLabel(selection) : mapLabel(rows.find((row) => row.id === id)?.entry.map ?? "Map");
-  const destination = (id: string | number) =>
-    id === queueEnd ? "the end" : `position ${rows.findIndex((row) => row.id === id) + 1}`;
-  if (!showQueue) return <>{children}</>;
+  const name = (id: string | number) => mapLabel(rows.find((row) => row.id === id)?.entry.map ?? "Map");
+  const destination = (id: string | number) => `position ${rows.findIndex((row) => row.id === id) + 1}`;
   return (
     <DndContext
       sensors={sensors}
@@ -193,24 +201,14 @@ export function RotationQueue({
         const unchanged = started.current === JSON.stringify(rows);
         started.current = null;
         if (disabled || !unchanged || !over) return;
-        const to = over.id === queueEnd ? rows.length : rows.findIndex((row) => row.id === over.id);
-        if (to < 0) return;
-        if (active.id === newEntry) {
-          if (canAdd) add(to);
-        } else
-          move(
-            rows.findIndex((row) => row.id === active.id),
-            Math.min(to, rows.length - 1),
-          );
+        move(
+          rows.findIndex((row) => row.id === active.id),
+          rows.findIndex((row) => row.id === over.id),
+        );
       }}
     >
-      {children}
-      <DraftCard entry={selection} disabled={disabled || !canAdd} />
-      <p className="muted">
-        Drag a prepared map into the queue or use Add to rotation. Drag ⠿ to reorder. Review and save to apply.
-      </p>
       <SortableContext items={rows.map((row) => row.id)} strategy={verticalListSortingStrategy}>
-        <ol className="rotation-editor rotation-queue" aria-label="Rotation queue">
+        <ol className="rotation-queue" aria-label="Rotation queue">
           {rows.map((row, index) => (
             <QueueRow
               key={row.id}
@@ -218,6 +216,10 @@ export function RotationQueue({
               index={index}
               count={rows.length}
               disabled={disabled}
+              canEdit={canEdit}
+              now={markers?.now === index}
+              next={markers?.next === index}
+              editor={editing === index ? editor : undefined}
               move={(to) => move(index, to)}
               edit={() => edit(index)}
               remove={() => change(rows.filter((item) => item.id !== row.id))}
@@ -225,7 +227,8 @@ export function RotationQueue({
           ))}
         </ol>
       </SortableContext>
-      <EndTarget disabled={disabled} />
+      {!rows.length && <p className="muted">The rotation is empty.</p>}
+      {children}
     </DndContext>
   );
 }

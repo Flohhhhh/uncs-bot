@@ -162,7 +162,15 @@ export const Env = z.object({
     .default("false")
     .transform((value) => value === "true"),
   MAP_VOTES_CHANNEL_ID: discordId.optional(),
-  /** Optional private staff-only text channel in ADMIN_GUILD_ID for staff alerts. Never a community channel. */
+  /**
+   * Owner-only: lets automatic ballots offer "50v50 next round". Off by default and held for the owner's
+   * in-person review. SERVER_EVENTS_ENABLED (staff-run events) never puts 50v50 on a ballot by itself.
+   */
+  MAP_VOTES_FIFTY_ENABLED: flag(),
+  /**
+   * Optional private staff-only text channel in ADMIN_GUILD_ID for staff alerts, including the map-vote
+   * and 50v50 automation alerts. Never a community channel.
+   */
   STAFF_ALERTS_CHANNEL_ID: discordId.optional(),
   /** Alert-only staff alerts: Gramps never kicks, bans or edits the whitelist because of one. */
   STAFF_ALERTS_ENABLED: flag(),
@@ -241,6 +249,21 @@ export const Env = z.object({
     .default("20:00"),
   WEEKLY_LEADERBOARD_MIN_KILLS: z.coerce.number().int().min(1).max(100_000).default(100),
   WEEKLY_LEADERBOARD_MIN_PLAYERS: z.coerce.number().int().min(5).max(1_000).default(10),
+
+  /**
+   * Opt-in Seeder role (/seeding join, /seeding leave, panel buttons) and staff-triggered seeding pings.
+   * Off by default. Nothing is ever pinged automatically; only staff send /seeding ping, by hand.
+   */
+  SEEDING_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  /** A plain role with no permissions in ADMIN_GUILD_ID, below the bot's own role. */
+  SEEDING_ROLE_ID: discordId.optional(),
+  /** Text or announcement channel in ADMIN_GUILD_ID for /seeding ping. */
+  SEEDING_PING_CHANNEL_ID: discordId.optional(),
+  /** Minimum minutes between staff pings per Discord server, kept in memory (a restart resets it). */
+  SEEDING_PING_COOLDOWN_MINUTES: z.coerce.number().int().min(15).max(1440).default(120),
 
   /** One optional community worker; leave off until the old announcer is disabled. */
   SERVER_COMMUNITY_ENABLED: z

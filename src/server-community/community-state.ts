@@ -1,5 +1,6 @@
 import type { WardogsClient } from "../admin/wardogs.client";
-import { mapLabel, sameMap } from "../common/map-labels";
+import { mapLabel } from "../common/map-labels";
+import { changedRound } from "../common/round-tracker";
 
 export type CommunitySnapshot = Awaited<ReturnType<WardogsClient["overview"]>>;
 type Status = CommunitySnapshot["status"];
@@ -23,31 +24,6 @@ export const initialCommunityState = (): CommunityState => ({
   roundAt: null,
   pendingRoundAt: null,
 });
-
-function changedRound(previous: Status, next: Status) {
-  if (!sameMap(previous.map, next.map)) return true;
-  const hasClock =
-    Number.isFinite(previous.matchSeconds) &&
-    Number.isFinite(next.matchSeconds) &&
-    previous.matchSeconds! >= 0 &&
-    next.matchSeconds! >= 0;
-  if (hasClock) return next.matchSeconds! < previous.matchSeconds! - 30;
-  const names = (value: Status) =>
-    value.factionScores
-      .map((faction) => faction.name)
-      .sort()
-      .join("\n");
-  const validScores = (value: Status) =>
-    value.factionScores.length > 0 &&
-    value.factionScores.every((faction) => Number.isFinite(faction.score) && faction.score >= 0);
-  if (!validScores(previous) || !validScores(next) || names(previous) !== names(next)) return false;
-  // An ordinary score correction is not a round. Without a clock, accept only
-  // an observed complete reset; a poll that misses zero may miss this round.
-  return (
-    previous.factionScores.some((faction) => faction.score > 0) &&
-    next.factionScores.every((faction) => faction.score === 0)
-  );
-}
 
 /** Observations imply joins/round transitions; neither is a game-emitted event. */
 export function observeCommunity(previous: CommunityState, snapshot: CommunitySnapshot, now: number) {

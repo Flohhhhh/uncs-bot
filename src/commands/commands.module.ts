@@ -5,7 +5,9 @@ import { PurgeCommand } from "./handlers/purge.command";
 import { UptimeCommand } from "./handlers/uptime.command";
 import { WelcomeCommandHandler } from "./handlers/welcome.command";
 import { ServerCommandHandler } from "./handlers/server.command";
+import { SeedingCommand } from "./handlers/seeding.command";
 import { WelcomeModule } from "src/welcome/welcome.module";
+import { SeedingModule } from "../seeding/seeding.module";
 
 // You can easily disable commands by removing them from this array.
 // This way, you can keep the code as reference but not have it active.
@@ -17,10 +19,11 @@ const HANDLERS: Provider[] = [
   UptimeCommand,
   WelcomeCommandHandler,
   ServerCommandHandler,
+  SeedingCommand,
 ];
 
 @Module({
-  imports: [WelcomeModule],
+  imports: [WelcomeModule, SeedingModule],
   providers: [...HANDLERS],
 })
 export class CommandsModule {}

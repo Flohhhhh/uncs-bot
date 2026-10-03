@@ -3,18 +3,10 @@ import type { Audit } from "../../api/types";
 import { useGameApi } from "../../api/server-client";
 import { useAdmin } from "../../app/context";
 import { CopyValue } from "../../components/data-table";
+import { OutcomeBadge, outcomeLabels } from "../../components/ui";
 import { errorMessage } from "./policy";
 
 type Receipt = Pick<Audit, "id" | "state" | "message">;
-
-const labels: Record<Audit["state"], string> = {
-  started: "Unconfirmed",
-  unknown: "Unconfirmed",
-  accepted: "Accepted · not verified",
-  pending: "Pending",
-  failed: "Failed",
-  applied: "Applied",
-};
 
 export function ActionReceipt({ id }: { id: string }) {
   const { server } = useAdmin();
@@ -48,7 +40,7 @@ function ReceiptRead({ id }: { id: string }) {
           (!response.record ||
             typeof response.record !== "object" ||
             response.record.id !== id ||
-            !Object.hasOwn(labels, response.record.state) ||
+            !Object.hasOwn(outcomeLabels, response.record.state) ||
             typeof response.record.message !== "string"))
       )
         throw new Error("The saved result did not match this action. Check Action history.");
@@ -77,7 +69,9 @@ function ReceiptRead({ id }: { id: string }) {
         <div role="status" aria-label="Saved action result">
           {result.record ? (
             <>
-              <strong>Recorded outcome: {labels[result.record.state]}</strong>
+              <p className="action-receipt-outcome">
+                <strong>Recorded outcome:</strong> <OutcomeBadge state={result.record.state} />
+              </p>
               <p>{result.record.message}</p>
               <p className="muted">This reads the stored receipt. It does not resend the action or recheck the game.</p>
             </>

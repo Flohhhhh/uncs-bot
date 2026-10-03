@@ -10,6 +10,7 @@ import {
 } from "discord.js";
 import { createHash, randomBytes } from "node:crypto";
 import { EnvService } from "../env/env.service";
+import { LEGACY_SERVER_ID, LEGACY_SERVER_NAME } from "../common/game-server";
 import {
   alertCategory,
   reviewDecisions,
@@ -37,6 +38,9 @@ const RECORDS_PER_SERVER = 200;
 const RECORDS_TOTAL = 1000;
 const VIEW_LIMIT = 100;
 const SNOOZE_MINUTES = { min: 15, max: 1440 };
+/** One automation alert per key and server every 30 minutes, and at most 10 per server an hour. */
+const AUTOMATION_REPEAT_MS = 30 * 60_000;
+const AUTOMATION_PER_HOUR = 10;
 const COLORS: Record<StaffAlertSeverity, number> = { info: 0x95a5a6, warning: 0xe6a23c, high: 0xe74c3c };
 const REQUIRED_PERMISSIONS = [
   PermissionFlagsBits.ViewChannel,
@@ -123,10 +127,12 @@ export function discordText(value: string, max = 600) {
 const clip = (value: string, max: number) => (value.length > max ? `${value.slice(0, max - 1)}…` : value);
 
 /**
- * Tells staff about things that need a person. Alert-only: it never changes the game. Posts to
- * the optional STAFF_ALERTS_CHANNEL_ID only, never to a community, voting, leaderboard or status
- * channel, and refuses a channel that @everyone can view. Delivery is best effort and never throws into a
- * worker. Records stay in memory (200 per server, 1,000 in all) and are lost on restart.
+ * Tells staff about things that need a person: the monitor's health, seeding, performance and
+ * watch-list alerts (raise) and map-vote and 50v50 automation (send). Alert-only: it never changes
+ * the game. Posts to the optional STAFF_ALERTS_CHANNEL_ID only, never to a community, voting,
+ * leaderboard or status channel, and refuses a channel that @everyone can view. Delivery is best
+ * effort and never throws into a worker. Records stay in memory (200 per server, 1,000 in all) and
+ * are lost on restart.
  */
 @Injectable()
 export class StaffAlerts {
@@ -152,6 +158,41 @@ export class StaffAlerts {
       ...(this.env.get("WARDOGS_SERVERS") ?? []).map((server) => server.communityStatus?.channelId),
     ];
     return community.includes(channelId);
+  }
+  /** The configured server name, the same one GameServers gives the monitor's alerts; undefined when unknown. */
+  private serverName(serverId: string) {
+    const configured = this.env.get("WARDOGS_SERVERS");
+    if (configured) return configured.find((server) => server.id === serverId)?.name;
+    return serverId === LEGACY_SERVER_ID ? LEGACY_SERVER_NAME : undefined;
+  }
+
+  /**
+   * Map-vote and 50v50 automation that needs a person. Logs the text, then records an `automation`
+   * alert and posts it like any other: the same channel checks and refusals, no mentions (warning
+   * severity, never a ping) and no snooze. The footer names the configured server, as the monitor's
+   * alerts do. The same key repeats at most every 30 minutes, and at most 10 a server post per
+   * rolling hour. Returns true only when the alert was posted. Never throws.
+   */
+  async send(serverId: string, key: string, message: string): Promise<boolean> {
+    const text = cleanText(message, 1800);
+    this.logger.warn(`Staff alert for ${serverId}: ${text}`);
+    try {
+      const alert = await this.raise({
+        serverId,
+        serverName: this.serverName(serverId),
+        kind: "automation",
+        severity: "warning",
+        key: `automation:${key}`,
+        repeatMs: AUTOMATION_REPEAT_MS,
+        title: "Automation needs a person",
+        lines: [text],
+        deliver: true,
+      });
+      return alert?.delivery.state === "posted";
+    } catch {
+      this.logger.warn("A staff alert could not be recorded. It remains in the log.");
+      return false;
+    }
   }
 
   /**
@@ -247,6 +288,7 @@ export class StaffAlerts {
 
   private hourlyLimit(category: StaffAlertCategory) {
     if (category === "performance") return staffAlertsOptions(this.env).performance.maxPerHour;
+    if (category === "automation") return AUTOMATION_PER_HOUR;
     return 6;
   }
   private allowHourly(serverId: string, category: StaffAlertCategory, now: number) {
@@ -352,6 +394,7 @@ export class StaffAlerts {
     const ping =
       record.severity === "high" &&
       record.category !== "performance" &&
+      record.category !== "automation" &&
       !!role &&
       this.pingReady(check.channel) === "ok" &&
       now - this.lastPingAt >= PING_INTERVAL_MS;
@@ -379,6 +422,8 @@ export class StaffAlerts {
   }
 
   private snoozed(serverId: string, category: StaffAlertCategory, now: number) {
+    // A ballot or 50v50 that needs a person is never held back by a snooze.
+    if (category === "automation") return false;
     const active = this.snoozes.get(serverId);
     return [category, "all"].some((item) => (active?.get(item as StaffAlertSnoozeCategory)?.until ?? 0) > now);
   }

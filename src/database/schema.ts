@@ -12,7 +12,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import type { MapVoteCancellation, MapVoteChoice, MapVoteState } from "../map-votes/map-votes.types";
-import type { VoteAutomation, VotingPolicy } from "../common/voting-policy";
+import type { StoredVotingPolicy, VoteAutomation } from "../common/voting-policy";
 import type {
   EventOperation,
   EventOptions,
@@ -128,7 +128,7 @@ export const whitelistApplicationReviews = pgTable(
 export const mapVotePolicies = pgTable("map_vote_policies", {
   serverId: text("server_id").primaryKey(),
   version: integer("version").notNull().default(1),
-  policy: jsonb("policy").$type<VotingPolicy>().notNull(),
+  policy: jsonb("policy").$type<StoredVotingPolicy>().notNull(),
   actorId: text("actor_id").notNull(),
   actorName: text("actor_name").notNull(),
   connectionHash: text("connection_hash").notNull(),

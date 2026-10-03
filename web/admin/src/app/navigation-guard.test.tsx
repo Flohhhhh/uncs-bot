@@ -31,8 +31,12 @@ const snapshot: SettingsSnapshot = {
   },
 };
 afterEach(() => vi.unstubAllGlobals());
+function chooseEventServer() {
+  fireEvent.click(screen.getByRole("combobox", { name: "Game server" }));
+  fireEvent.click(screen.getByRole("option", { name: /^Event server / }));
+}
 
-function mount() {
+function mount(path = "/settings") {
   const fetcher = vi.fn(
     async (url: string) =>
       new Response(
@@ -71,7 +75,7 @@ function mount() {
   );
   vi.stubGlobal("fetch", fetcher);
   const router = createMemoryRouter([{ path: "/*", element: <App /> }], {
-    initialEntries: ["/overview", "/settings"],
+    initialEntries: ["/overview", path],
     initialIndex: 1,
   });
   render(<RouterProvider router={router} />);
@@ -106,30 +110,52 @@ it("keeps a settings draft when leaving is cancelled, then discards only after c
   expect(actionCalls(fetcher)).toHaveLength(0);
 });
 
+it("switches Match & maps views with a rotation draft and still guards leaving the page", async () => {
+  const { router, fetcher } = mount("/match?view=rotation");
+  // Europe is shown as Ozeti.
+  fireEvent.click(await screen.findByRole("button", { name: "Move Ozeti up" }));
+  expect(unload()).toBe(true);
+  fireEvent.click(screen.getByRole("tab", { name: "Next round" }));
+  await waitFor(() => expect(router.state.location.search).toBe("?view=next"));
+  expect(screen.queryByRole("dialog", { name: "Discard unsaved changes?" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("tab", { name: "Rotation" }));
+  const queue = screen.getByRole("list", { name: "Rotation queue" });
+  expect(within(queue).getAllByRole("listitem")[0]).toHaveTextContent("Ozeti");
+  expect(unload()).toBe(true);
+  fireEvent.click(screen.getByRole("link", { name: /Server activity/ }));
+  expect(await screen.findByRole("dialog", { name: "Discard unsaved changes?" })).toBeInTheDocument();
+  expect(router.state.location.pathname).toBe("/match");
+  fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+  expect(actionCalls(fetcher)).toHaveLength(0);
+});
+
 it("guards a server switch on the same page and remounts only after discarding the draft", async () => {
   const { router, fetcher } = mount();
   await editName();
-  fireEvent.change(screen.getByRole("combobox", { name: "Game server" }), { target: { value: "event" } });
+  chooseEventServer();
   expect(await screen.findByRole("dialog", { name: "Discard unsaved changes?" })).toBeInTheDocument();
   expect(router.state.location.search).toBe("");
   expect(fetcher.mock.calls.some(([url]) => url.includes("/servers/event/"))).toBe(false);
   fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
   expect(screen.getByRole("textbox", { name: /Server name/ })).toHaveValue("Event night");
-  fireEvent.change(screen.getByRole("combobox", { name: "Game server" }), { target: { value: "event" } });
+  chooseEventServer();
   fireEvent.click(await screen.findByRole("button", { name: "Discard changes" }));
   await waitFor(() => expect(router.state.location.search).toBe("?server=event"));
   expect(await screen.findByRole("textbox", { name: /Server name/ })).toHaveValue("The UNCs");
   expect(actionCalls(fetcher)).toHaveLength(0);
 });
 
-it("keeps the section picker on settings when a draft navigation is cancelled", async () => {
+it("keeps settings open when a draft navigation from More is cancelled", async () => {
   const { router } = mount();
   await editName();
-  fireEvent.change(screen.getByRole("combobox", { name: "Dashboard section" }), { target: { value: "audit" } });
+  const more = screen.getByRole("button", { name: "More sections" });
+  expect(more).toHaveClass("active");
+  fireEvent.click(more);
+  fireEvent.click(within(screen.getByRole("dialog", { name: "More" })).getByRole("link", { name: /Bans/ }));
   expect(await screen.findByRole("dialog", { name: "Discard unsaved changes?" })).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
   expect(router.state.location.pathname).toBe("/settings");
-  expect(screen.getByRole("combobox", { name: "Dashboard section" })).toHaveValue("settings");
+  expect(screen.getByRole("link", { name: /Settings/ })).toHaveAttribute("aria-current", "page");
   expect(screen.getByRole("textbox", { name: /Server name/ })).toHaveValue("Event night");
 });
 
@@ -139,7 +165,8 @@ it("blocks Back/Forward to a different server while a review is open", async () 
   fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
   expect(await screen.findByRole("dialog", { name: "Save settings" })).toHaveTextContent("Primary server");
   expect(screen.getByRole("combobox", { name: "Game server" })).toBeDisabled();
-  expect(screen.getByRole("combobox", { name: "Dashboard section" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "More sections" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: /^Account:/ })).toBeDisabled();
   await act(async () => {
     await router.navigate("/settings?server=event");
   });
@@ -162,25 +189,6 @@ it("guards browser Back and keeps editing when Escape dismisses the warning", as
   });
   fireEvent.click(await screen.findByRole("button", { name: "Discard changes" }));
   await waitFor(() => expect(router.state.location.pathname).toBe("/overview"));
-});
-
-it("retains hidden rotation drafts and does not clear their warning when a settings draft is discarded", async () => {
-  const { router } = mount();
-  fireEvent.click(await screen.findByRole("button", { name: "Rotation" }));
-  fireEvent.click(screen.getByRole("button", { name: "Move Ozeti up" }));
-  fireEvent.click(screen.getByRole("button", { name: "Identity" }));
-  await editName();
-  fireEvent.click(screen.getByRole("button", { name: "Discard" }));
-  fireEvent.click(screen.getByRole("link", { name: /Server activity/ }));
-  expect(await screen.findByRole("dialog", { name: "Discard unsaved changes?" })).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
-  fireEvent.click(screen.getByRole("button", { name: "Rotation" }));
-  expect(screen.getAllByRole("listitem")[0]).toHaveTextContent("Ozeti");
-  fireEvent.click(screen.getByRole("button", { name: "Discard draft" }));
-  expect(unload()).toBe(false);
-  fireEvent.click(screen.getByRole("link", { name: /Server activity/ }));
-  await waitFor(() => expect(router.state.location.pathname).toBe("/activity"));
-  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });
 
 it("does not abandon a review or a pending save through browser history", async () => {
@@ -222,16 +230,26 @@ it("does not abandon a review or a pending save through browser history", async 
   expect(router.state.location.pathname).toBe("/overview");
 });
 
-it.each([0, 1])(
-  "asks before voluntary sign-out from button %i but never sends the draft to the game",
-  async (index) => {
+const signOutFrom = {
+  "the account menu": () => {
+    fireEvent.click(screen.getByRole("button", { name: /^Account:/ }));
+    return screen.getByRole("button", { name: "Sign out" });
+  },
+  More: () => {
+    fireEvent.click(screen.getByRole("button", { name: "More sections" }));
+    return within(screen.getByRole("dialog", { name: "More" })).getByRole("button", { name: "Sign out" });
+  },
+};
+it.each(Object.keys(signOutFrom) as (keyof typeof signOutFrom)[])(
+  "asks before voluntary sign-out from %s but never sends the draft to the game",
+  async (entry) => {
     const { fetcher } = mount();
     await editName();
-    fireEvent.click(screen.getAllByRole("button", { name: "Sign out" })[index]);
+    fireEvent.click(signOutFrom[entry]());
     fireEvent.click(await screen.findByRole("button", { name: "Keep editing" }));
     expect(fetcher.mock.calls.some(([url]) => url.endsWith("/logout"))).toBe(false);
     expect(screen.getByRole("textbox", { name: /Server name/ })).toHaveValue("Event night");
-    fireEvent.click(screen.getAllByRole("button", { name: "Sign out" })[index]);
+    fireEvent.click(signOutFrom[entry]());
     fireEvent.click(await screen.findByRole("button", { name: "Discard and sign out" }));
     await screen.findByRole("link", { name: /Continue with Discord/ });
     expect(fetcher.mock.calls.filter(([url]) => url.endsWith("/logout"))).toHaveLength(1);

@@ -9,7 +9,7 @@
     "build": "nest build && npm run build:admin",
     "start": "node dist/src/main",
     "dev": "nest start --watch",
-    "test:admin": "jest src/admin src/applications src/telemetry src/supporters src/server-community src/map-votes src/server-events src/weekly-leaderboard src/components/handlers src/welcome src/commands/handlers src/common/guards src/common/filters src/listeners src/staff-alerts --runInBand",
+    "test:admin": "jest src/admin src/applications src/telemetry src/supporters src/server-community src/map-votes src/server-events src/weekly-leaderboard src/components/handlers src/welcome src/commands/handlers src/common src/listeners src/staff-alerts src/seeding --runInBand",
     "test:storage": "jest --rootDir . --runTestsByPath test/launch-storage.spec.ts --runInBand",
     "preview:admin": "npm run build && node dist/scripts/preview-admin.js",
     "format": "tsx scripts/run-prettier.ts --write",

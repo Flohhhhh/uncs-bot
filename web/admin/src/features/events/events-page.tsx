@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import type { eventView, EventOptions } from "../../../../../src/server-events/server-events.types";
 import type { SettingsSnapshot } from "../../../../../src/common/server-settings";
 import { useGameApi } from "../../api/server-client";
@@ -9,6 +9,7 @@ import { Badge, Card, Empty, Modal, date } from "../../components/ui";
 import { CopyValue, DataTable } from "../../components/data-table";
 import { hasRoundTiming, RoundTimingNotice } from "../../components/round-timing";
 import { errorMessage } from "../actions/policy";
+import { FactionChip, FactionOptions, liveFactions, type Faction } from "../players/factions";
 
 type Event = ReturnType<typeof eventView>;
 type Events = { enabled: boolean; serverId: string; events: Event[] };
@@ -28,6 +29,20 @@ const stateLabel = (event: Event) =>
 
 const timingMessage = "Round timing is unavailable. 50v50 needs it to start sorting at the right time.";
 
+/** "● Red · Valkyra vs ● Blue · Lonestar", colored by the teams' current colors where the game reports them. */
+function EventTeams({ names, teams }: { names: readonly string[]; teams: Faction[] }) {
+  return (
+    <span className="event-teams">
+      {names.map((name, index) => (
+        <Fragment key={index}>
+          {index > 0 && " vs "}
+          <FactionChip team={teams.find((team) => team.name === name)} fallback={name} />
+        </Fragment>
+      ))}
+    </span>
+  );
+}
+
 function EventReview({
   review,
   close,
@@ -39,13 +54,15 @@ function EventReview({
   finished: () => void;
   statusUnavailable: boolean;
 }) {
-  const { busy, setBusy } = useAdmin();
+  const { busy, setBusy, overview } = useAdmin();
   const api = useGameApi();
   const [id] = useState(() => crypto.randomUUID());
   const submitted = useRef(false);
   const [result, setResult] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
   const settings = useResource<SettingsSnapshot>(review.kind === "restore" ? "settings" : null);
   const roster = useResource<Overview>(review.kind === "start" ? "overview" : null);
+  const teams = liveFactions(roster.data ?? overview);
   const canStart =
     review.kind !== "start" || (!roster.loading && !roster.refreshing && !roster.error && hasRoundTiming(roster.data));
   const confirmation = review.kind === "start" ? "START 50V50" : review.kind === "restore" ? "RESTORE TEAM LOCK" : null;
@@ -71,6 +88,7 @@ function EventReview({
     try {
       setResult((await api<Event>(path, { method: "POST", body: JSON.stringify(body) })).message);
     } catch (error) {
+      setFailed(true);
       setResult(
         `${errorMessage(error)} Refresh event history and inspect this request before another attempt. It will not be sent again.`,
       );
@@ -91,11 +109,12 @@ function EventReview({
       }
       onClose={close}
       busy={busy}
+      eyebrow={result ? null : undefined}
     >
       {review.kind === "start" ? (
         <>
           <p>
-            <strong>{review.draft.serverName}</strong> · {review.draft.teams.join(" vs ")}
+            <strong>{review.draft.serverName}</strong> · <EventTeams names={review.draft.teams} teams={teams} />
           </p>
           <ul className="change-summary">
             <li>
@@ -127,7 +146,7 @@ function EventReview({
       ) : (
         <>
           <p>
-            <strong>{review.event.serverName}</strong> · {review.event.options.teams.join(" vs ")}
+            <strong>{review.event.serverName}</strong> · <EventTeams names={review.event.options.teams} teams={teams} />
           </p>
           <p className="notice warning">
             {review.kind === "stop"
@@ -158,7 +177,7 @@ function EventReview({
       )}
       {result ? (
         <>
-          <p className="notice" role="status">
+          <p className={`notice${failed ? " warning" : ""}`} role="status">
             {result}
           </p>
           <p>
@@ -192,7 +211,15 @@ function EventReview({
   );
 }
 
-function EventDraft({ review, statusUnavailable }: { review: (draft: Draft) => void; statusUnavailable: boolean }) {
+function EventDraft({
+  review,
+  statusUnavailable,
+  onUnsavedChange,
+}: {
+  review: (draft: Draft) => void;
+  statusUnavailable: boolean;
+  onUnsavedChange: (value: boolean) => void;
+}) {
   const admin = useAdmin();
   const settings = useResource<SettingsSnapshot>("settings"),
     roster = useResource<Overview>("overview");
@@ -205,17 +232,17 @@ function EventDraft({ review, statusUnavailable }: { review: (draft: Draft) => v
   });
   const [options, setOptions] = useState(defaults),
     [revision, setRevision] = useState<string | null>(null);
-  const { setUnsavedChanges } = admin;
   useEffect(() => {
-    setUnsavedChanges(revision !== null);
-    return () => setUnsavedChanges(false);
-  }, [revision, setUnsavedChanges]);
+    onUnsavedChange(revision !== null);
+    return () => onUnsavedChange(false);
+  }, [revision, onUnsavedChange]);
   const change = (update: Partial<EventOptions>) => {
     setRevision(revision ?? settings.data?.revision ?? null);
     setOptions({ ...options, ...update });
   };
   const lock = settings.data?.fields.find((field) => field.id === "lockOverpopulated");
   const teams = roster.data?.status.factionScores ?? [];
+  const factions = liveFactions(roster.data);
   const stale = revision !== null && revision !== settings.data?.revision;
   const unavailable =
     statusUnavailable || settings.loading || roster.loading || !!settings.error || !!roster.error || admin.busy;
@@ -252,7 +279,7 @@ function EventDraft({ review, statusUnavailable }: { review: (draft: Draft) => v
           </div>
         )}
         <RoundTimingNotice resource={roster} busy={admin.busy} message={timingMessage} />
-        <div className="settings-grid">
+        <div className="settings-grid event-fields">
           {([0, 1] as const).map((index) => (
             <label key={index}>
               Team {index + 1}
@@ -265,14 +292,7 @@ function EventDraft({ review, statusUnavailable }: { review: (draft: Draft) => v
                   change({ teams: chosen });
                 }}
               >
-                <option value="">Choose a team</option>
-                {teams
-                  .filter((team) => team.name !== options.teams[index === 0 ? 1 : 0])
-                  .map((team) => (
-                    <option key={team.name} value={team.name}>
-                      {team.name}
-                    </option>
-                  ))}
+                <FactionOptions teams={factions} excluded={options.teams[index === 0 ? 1 : 0]} />
               </select>
             </label>
           ))}
@@ -313,7 +333,7 @@ function EventDraft({ review, statusUnavailable }: { review: (draft: Draft) => v
             />
           </label>
         </div>
-        <label className="checkbox-label">
+        <label className="checkbox-label event-respawn">
           <input
             type="checkbox"
             checked={options.forceRespawn}
@@ -363,6 +383,7 @@ function EventDraft({ review, statusUnavailable }: { review: (draft: Draft) => v
 }
 
 function EventOperations({ event, close }: { event: Event; close: () => void }) {
+  const { overview } = useAdmin();
   const resource = useResource<{
     operations: {
       id: string;
@@ -376,7 +397,8 @@ function EventOperations({ event, close }: { event: Event; close: () => void }) 
   return (
     <Modal serverScoped title="Event actions" onClose={close}>
       <p>
-        {event.options.teams.join(" vs ")} · {event.serverName}. Latest 100 actions.
+        <EventTeams names={event.options.teams} teams={liveFactions(overview)} /> · {event.serverName}. Latest 100
+        actions.
       </p>
       {resource.error && (
         <p className="notice warning" role="alert">
@@ -428,9 +450,11 @@ function EventOperations({ event, close }: { event: Event; close: () => void }) 
   );
 }
 
-export function EventsPage() {
+/** Optional 50v50 events. `onUnsavedChange` reports this page's draft when it shares a page. */
+export function EventsPage({ onUnsavedChange }: { onUnsavedChange?: (value: boolean) => void } = {}) {
   const admin = useAdmin();
   const resource = useResource<Events>(admin.me.role === "admin" ? "events" : null);
+  const teams = liveFactions(admin.overview);
   const [review, setReview] = useState<Review | null>(null);
   const [inspect, setInspect] = useState<Event | null>(null);
   if (admin.me.role !== "admin") return <Empty title="Administrator access required" />;
@@ -464,95 +488,102 @@ export function EventsPage() {
   return (
     <>
       {errorNotice}
-      {!active && (
-        <EventDraft
-          statusUnavailable={resource.loading || !!resource.error}
-          review={(draft) => setReview({ kind: "start", draft })}
-        />
-      )}
-      <Card
-        title="Event history"
-        subtitle="Latest 20 events. Refresh to see worker progress; an unresolved event must be reviewed before another starts."
-      >
-        {!resource.data.events.length ? (
-          <Empty title="No events yet" />
-        ) : (
-          <DataTable
-            label="Optional events"
-            rows={resource.data.events}
-            columns={[
-              { label: "Event", value: (event) => Date.parse(event.createdAt) },
-              { label: "Status", value: (event) => stateLabel(event) },
-              { label: "Ends", value: (event) => Date.parse(event.endsAt) },
-              { label: "Actions" },
-            ]}
-            renderRow={(event) => (
-              <tr key={event.id}>
-                <td>
-                  <details>
-                    <summary>
-                      {event.options.teams.join(" vs ")} · {event.serverName}
-                    </summary>
-                    <p>{event.message}</p>
-                    <p>
-                      Started by {event.actorName}: {event.reason}
-                    </p>
-                    <p>
-                      {event.movedThisRound} confirmed moves this round. Forced respawns:{" "}
-                      {event.options.forceRespawn ? "on" : "off"}.
-                    </p>
-                    {event.stop && (
+      <div className="stack">
+        {!active && (
+          <EventDraft
+            onUnsavedChange={onUnsavedChange ?? admin.setUnsavedChanges}
+            statusUnavailable={resource.loading || !!resource.error}
+            review={(draft) => setReview({ kind: "start", draft })}
+          />
+        )}
+        <Card
+          title="Event history"
+          subtitle="Latest 20 events. Refresh to see worker progress; an unresolved event must be reviewed before another starts."
+        >
+          {!resource.data.events.length ? (
+            <Empty title="No events yet" />
+          ) : (
+            <DataTable
+              label="Optional events"
+              rows={resource.data.events}
+              columns={[
+                { label: "Event", value: (event) => Date.parse(event.createdAt) },
+                { label: "Status", value: (event) => stateLabel(event) },
+                { label: "Ends", value: (event) => Date.parse(event.endsAt) },
+                { label: "Actions" },
+              ]}
+              renderRow={(event) => (
+                <tr key={event.id}>
+                  <td>
+                    <details>
+                      <summary>
+                        <EventTeams names={event.options.teams} teams={teams} /> · {event.serverName}
+                      </summary>
+                      <p>{event.message}</p>
                       <p>
-                        Stopped by {event.stop.actorName}: {event.stop.reason}
+                        Started by {event.actorName}: {event.reason}
                       </p>
-                    )}
-                    <CopyValue value={event.id} label="event receipt" />
-                  </details>
-                </td>
-                <td>
-                  <Badge
-                    kind={
-                      resource.error || event.state === "needs_review"
-                        ? "warn"
-                        : event.state === "complete"
-                          ? "neutral"
-                          : "good"
-                    }
-                  >
-                    {resource.error ? `Last known: ${stateLabel(event)}` : stateLabel(event)}
-                  </Badge>
-                </td>
-                <td>{date(event.endsAt)}</td>
-                <td>
-                  <div className="row-actions">
-                    <button className="button secondary small" disabled={admin.busy} onClick={() => setInspect(event)}>
-                      View actions
-                    </button>
-                    {event.state !== "complete" && !event.stop && (
+                      <p>
+                        {event.movedThisRound} confirmed moves this round. Forced respawns:{" "}
+                        {event.options.forceRespawn ? "on" : "off"}.
+                      </p>
+                      {event.stop && (
+                        <p>
+                          Stopped by {event.stop.actorName}: {event.stop.reason}
+                        </p>
+                      )}
+                      <CopyValue value={event.id} label="event receipt" />
+                    </details>
+                  </td>
+                  <td>
+                    <Badge
+                      kind={
+                        resource.error || event.state === "needs_review"
+                          ? "warn"
+                          : event.state === "complete"
+                            ? "neutral"
+                            : "good"
+                      }
+                    >
+                      {resource.error ? `Last known: ${stateLabel(event)}` : stateLabel(event)}
+                    </Badge>
+                  </td>
+                  <td>{date(event.endsAt)}</td>
+                  <td>
+                    <div className="row-actions">
                       <button
                         className="button secondary small"
                         disabled={admin.busy}
-                        onClick={() => setReview({ kind: "stop", event })}
+                        onClick={() => setInspect(event)}
                       >
-                        Stop event
+                        View actions
                       </button>
-                    )}
-                    {event.stop && event.state === "needs_review" && (
-                      <button
-                        className="button secondary small"
-                        disabled={admin.busy || resource.loading || resource.refreshing || !!resource.error}
-                        onClick={() => setReview({ kind: "restore", event })}
-                      >
-                        Review restoration
-                      </button>
-                    )}
-                  </div>
-                </td>
-              </tr>
-            )}
-          />
-        )}
-      </Card>
+                      {event.state !== "complete" && !event.stop && (
+                        <button
+                          className="button secondary small"
+                          disabled={admin.busy}
+                          onClick={() => setReview({ kind: "stop", event })}
+                        >
+                          Stop event
+                        </button>
+                      )}
+                      {event.stop && event.state === "needs_review" && (
+                        <button
+                          className="button secondary small"
+                          disabled={admin.busy || resource.loading || resource.refreshing || !!resource.error}
+                          onClick={() => setReview({ kind: "restore", event })}
+                        >
+                          Review restoration
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              )}
+            />
+          )}
+        </Card>
+      </div>
       {review && (
         <EventReview
           statusUnavailable={resource.loading || resource.refreshing || !!resource.error}

@@ -107,6 +107,7 @@ export function ManualMember({
           ? "No payment, founder promise, game access or Discord role was granted."
           : "Use this when an existing Patreon member is missing from this page. Check their membership on The UNCs creator page before entering it."
       }
+      eyebrow={result ? null : undefined}
       busy={sending}
       onClose={onClose}
     >
