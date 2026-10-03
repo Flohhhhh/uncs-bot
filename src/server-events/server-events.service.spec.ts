@@ -10,7 +10,7 @@ import { eventFixture, eventNow, eventStaff, snapshotAt } from "./event-fixtures
 import { operation } from "./event-planner";
 import type { EventRecord } from "./server-events.types";
 
-function fixture(serverId = "primary") {
+function fixture(serverId = "primary", workerStarted = true) {
   const record = eventFixture();
   record.serverId = serverId;
   let current: EventRecord | null = record;
@@ -88,6 +88,12 @@ function fixture(serverId = "primary") {
     auth as unknown as AdminAuth,
     { get: (key: string) => environment[key] } as EnvService,
   );
+  if (workerStarted) {
+    // Nest starts the event worker after the Discord sign-in. Start it here without scheduling a tick.
+    environment.SERVER_EVENTS_ENABLED = false;
+    service.onApplicationBootstrap();
+    environment.SERVER_EVENTS_ENABLED = true;
+  }
   const input = {
     id: record.id,
     serverId,
@@ -174,6 +180,16 @@ describe("durable optional event service", () => {
     expect(await f.service.start(eventStaff, f.input)).toEqual(started);
     expect(f.game.configuration).toHaveBeenCalledTimes(reads);
     await expect(f.service.start(eventStaff, { ...f.input, durationMinutes: 90 })).rejects.toThrow("different request");
+  });
+  it("arms no event while Gramps is still starting, before its worker runs after the Discord sign-in", async () => {
+    const f = fixture("primary", false);
+    f.set(null);
+    await expect(f.service.start(eventStaff, f.input)).rejects.toThrow("still starting");
+    expect(f.game.configuration).not.toHaveBeenCalled();
+    expect(f.store.create).not.toHaveBeenCalled();
+    f.service.onApplicationBootstrap();
+    expect((await f.service.start(eventStaff, f.input)).state).toBe("preparing");
+    f.service.onModuleDestroy();
   });
   it.each(["revision", "clock", "roster", "capability", "allowance"])(
     "rejects unsafe %s start conditions",
