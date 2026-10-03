@@ -495,7 +495,7 @@ function Dashboard({
                 {logoutError}
               </div>
             )}
-            <section id="page" aria-live="polite">
+            <section id="page">
               <Routes>
                 <Route index element={<Navigate to={{ pathname: "/overview", search: location.search }} replace />} />
                 <Route path="overview" element={<OverviewPage />} />
