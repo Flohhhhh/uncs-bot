@@ -68,6 +68,13 @@ beforeEach(() => {
   request.mockReset();
 });
 
+it("announces a failed application read without announcing the read while it loads", async () => {
+  request.mockRejectedValue(new Error("The dashboard could not be reached."));
+  render(page());
+  expect(screen.getByText("Loading applications…").closest("[role=alert]")).toBeNull();
+  expect(await screen.findByRole("alert")).toHaveTextContent("Applications could not be loaded");
+});
+
 it("waits for a refreshed list before freezing an application for review", async () => {
   const refreshed = deferred<ApplicationsResponse>();
   request.mockResolvedValueOnce({ applications: [record] }).mockReturnValueOnce(refreshed.promise);

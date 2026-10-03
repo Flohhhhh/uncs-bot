@@ -23,6 +23,7 @@ export function CommunityMessages() {
           <Empty
             title="Message status could not be loaded"
             detail="Refresh to try again. No activation state has been assumed."
+            alert
           />
         ) : !data ? (
           <Empty title="Loading message status…" />

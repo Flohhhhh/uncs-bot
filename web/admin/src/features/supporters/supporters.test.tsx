@@ -115,6 +115,21 @@ it("searches all stored supporters on explicit submit rather than filtering only
   expect(request).toHaveBeenLastCalledWith("supporters", expect.any(Object));
 });
 
+it("announces a failed search to screen readers without announcing the search while it loads", async () => {
+  request.mockImplementation(async (path) => {
+    if (String(path).includes("?search=")) throw new Error("The dashboard could not be reached.");
+    return data();
+  });
+  render(page());
+  await screen.findByRole("button", { name: "Review supporter" });
+  fireEvent.change(screen.getByRole("searchbox", { name: "Search all supporter records" }), {
+    target: { value: "Earlier donor" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Search all records" }));
+  expect(screen.getByText("Loading supporters…").closest("[role=alert], [aria-live]")).toBeNull();
+  expect(await screen.findByRole("alert")).toHaveTextContent("Supporter records could not be loaded");
+});
+
 it("keeps a failed search changeable and clearable", async () => {
   request.mockImplementation(async (path) => {
     if (String(path).includes("?search=")) throw new Error("The dashboard could not be reached.");

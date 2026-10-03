@@ -468,6 +468,7 @@ function AdminSupporters() {
         <Empty
           title={resource.error ? "Supporter records could not be loaded" : "Loading supporters…"}
           detail={resource.error ? "Refresh to try again. No empty list has been assumed." : undefined}
+          alert={!!resource.error}
         />
       </>
     );

@@ -86,6 +86,7 @@ it("stops displaying old activation states when refresh fails and permits retry"
   await screen.findByText("Needs channel and message");
   fireEvent.click(screen.getByRole("button", { name: "Refresh message status" }));
   await screen.findByText("STATUS UNAVAILABLE");
+  expect(screen.getByRole("alert")).toHaveTextContent("Message status could not be loaded");
   expect(screen.queryByText("Enabled")).not.toBeInTheDocument();
   expect(screen.getByText(/No activation state has been assumed/)).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Refresh message status" }));

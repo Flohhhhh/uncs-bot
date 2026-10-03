@@ -7,7 +7,10 @@ import { WhitelistPage } from "./pages";
 
 vi.mock("../../api/client", () => ({ api: vi.fn() }));
 const request = vi.mocked(api);
-beforeEach(() => request.mockReset());
+// Braces keep the hook from returning the mock, which Vitest would then call as a teardown.
+beforeEach(() => {
+  request.mockReset();
+});
 
 it("shows valid saved status and a config warning without blocking supported live-list actions", async () => {
   request.mockResolvedValue({
@@ -29,4 +32,15 @@ it("shows valid saved status and a config warning without blocking supported liv
   expect(within(row).getByRole("button", { name: "Remove" })).toBeEnabled();
   expect(screen.getByRole("button", { name: "+ Add player" })).toBeEnabled();
   expect(request).toHaveBeenCalledTimes(1);
+});
+
+it("announces a failed whitelist read without announcing the read while it loads", async () => {
+  request.mockRejectedValue(new Error("The game server did not respond."));
+  render(
+    <AdminContext.Provider value={context()}>
+      <WhitelistPage />
+    </AdminContext.Provider>,
+  );
+  expect(screen.getByText("Loading whitelist…").closest("[role=alert]")).toBeNull();
+  expect(await screen.findByRole("alert")).toHaveTextContent("Whitelist could not be loaded");
 });
