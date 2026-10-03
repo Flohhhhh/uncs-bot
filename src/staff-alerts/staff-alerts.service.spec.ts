@@ -202,31 +202,41 @@ describe("alert-only staff alert delivery", () => {
     expect(rich.role).toEqual({ id: rich.pingRole, mentionable: false });
   });
 
-  const refusals: [string, (rich: Rich) => void, string][] = [
-    ["no staff channel", (rich) => delete rich.env.STAFF_ALERTS_CHANNEL_ID, "no staff channel"],
-    ["the voting channel", (rich) => (rich.env.STAFF_ALERTS_CHANNEL_ID = votes), "community-channel"],
-    ["the community channel", (rich) => (rich.env.STAFF_ALERTS_CHANNEL_ID = community), "community-channel"],
-    ["the weekly leaderboard channel", (rich) => (rich.env.STAFF_ALERTS_CHANNEL_ID = leaderboard), "community-channel"],
+  /** Label, change, reason, and whether the channel is fetched at all (refused from the settings alone if not). */
+  const refusals: [string, (rich: Rich) => void, string, boolean][] = [
+    ["no staff channel", (rich) => delete rich.env.STAFF_ALERTS_CHANNEL_ID, "no staff channel", false],
+    ["no staff guild", (rich) => delete rich.env.ADMIN_GUILD_ID, "wrong-guild", false],
+    ["the voting channel", (rich) => (rich.env.STAFF_ALERTS_CHANNEL_ID = votes), "community-channel", false],
+    ["the community channel", (rich) => (rich.env.STAFF_ALERTS_CHANNEL_ID = community), "community-channel", false],
+    [
+      "the weekly leaderboard channel",
+      (rich) => (rich.env.STAFF_ALERTS_CHANNEL_ID = leaderboard),
+      "community-channel",
+      false,
+    ],
     [
       "a server status channel",
       (rich) => (rich.env.WARDOGS_SERVERS = [{ communityStatus: { channelId: alerts, messageId: "1".repeat(18) } }]),
       "community-channel",
+      false,
     ],
-    ["another guild", (rich) => (rich.channel.guildId = "999999999999999999"), "wrong-guild"],
-    ["not a text channel", (rich) => (rich.channel.type = ChannelType.GuildVoice), "not-text"],
-    ["visible to @everyone", (rich) => rich.makePublic(), "public"],
-    ["missing Embed Links", (rich) => rich.deny(PermissionFlagsBits.EmbedLinks), "missing-permissions"],
+    ["another guild", (rich) => (rich.channel.guildId = "999999999999999999"), "wrong-guild", true],
+    ["not a text channel", (rich) => (rich.channel.type = ChannelType.GuildVoice), "not-text", true],
+    ["visible to @everyone", (rich) => rich.makePublic(), "public", true],
+    ["missing Embed Links", (rich) => rich.deny(PermissionFlagsBits.EmbedLinks), "missing-permissions", true],
     [
       "missing Read Message History",
       (rich) => rich.deny(PermissionFlagsBits.ReadMessageHistory),
       "missing-permissions",
+      true,
     ],
-    ["Discord offline", (rich) => rich.offline(), "discord-offline"],
+    ["Discord offline", (rich) => rich.offline(), "discord-offline", false],
   ];
-  it.each(refusals)("records a failed delivery without throwing for %s", async (_, change, reason) => {
+  it.each(refusals)("records a failed delivery without throwing for %s", async (_, change, reason, fetches) => {
     const rich = richFixture();
     change(rich);
     await expect(rich.service.raise(input())).resolves.toMatchObject({ delivery: { state: "failed", reason } });
+    expect(rich.client.channels.fetch).toHaveBeenCalledTimes(fetches ? 1 : 0);
     expect(rich.channel.send).not.toHaveBeenCalled();
   });
 
@@ -468,5 +478,126 @@ describe("alert-only staff alert delivery", () => {
     expect(
       rich.service.amend("primary", "perf:2:r", { kind: "performance-window", title: "Review: unusual kill rate" }),
     ).toMatchObject({ kind: "performance-window", category: "performance", title: "Review: unusual kill rate" });
+  });
+
+  describe("map-vote and 50v50 automation through send()", () => {
+    it("posts once per issue as an embed without mentions, then again after 30 minutes", async () => {
+      const rich = richFixture();
+      expect(await rich.service.send("primary", "review:1", "Ballot @everyone needs review.\nCheck it.")).toBe(true);
+      expect(rich.client.channels.fetch).toHaveBeenCalledWith(alerts);
+      const options = sent(rich, 0);
+      expect(options.content).toBeUndefined();
+      expect(options.allowedMentions).toEqual({ parse: [], users: [], roles: [], repliedUser: false });
+      expect(options.embeds).toEqual([
+        expect.objectContaining({
+          title: "Automation needs a person",
+          color: 0xe6a23c,
+          description: expect.stringContaining("needs review. Check it."),
+        }),
+      ]);
+      expect(options.embeds[0].description).not.toMatch(/@everyone/);
+      expect(await rich.service.send("primary", "review:1", "Again")).toBe(false);
+      expect(await rich.service.send("event", "review:1", "Other server")).toBe(true);
+      jest.setSystemTime(now + 30 * 60_000);
+      expect(await rich.service.send("primary", "review:1", "Still waiting")).toBe(true);
+      expect(rich.channel.send).toHaveBeenCalledTimes(3);
+      expect(Logger.prototype.warn).toHaveBeenCalledTimes(4);
+      expect(Logger.prototype.warn).toHaveBeenCalledWith(
+        "Staff alert for primary: Ballot @everyone needs review. Check it.",
+      );
+    });
+
+    it("names the configured server in the footer, as monitor alerts do, or its ID when unknown", async () => {
+      const legacy = richFixture();
+      await legacy.service.send("primary", "review:1", "Needs review");
+      await legacy.service.send("event", "review:1", "Needs review");
+      const [primary, other] = [legacy.service.list("primary")[0], legacy.service.list("event")[0]];
+      expect(sent(legacy, 0).embeds[0].footer).toEqual({ text: `Gramps · The UNCs · alert ${primary.id}` });
+      expect(sent(legacy, 1).embeds[0].footer).toEqual({ text: `Gramps · event · alert ${other.id}` });
+      const configured = richFixture({
+        WARDOGS_SERVERS: [
+          { id: "primary", name: "UNCs Primary" },
+          { id: "event", name: "UNCs Event" },
+        ],
+      });
+      await configured.service.send("event", "review:1", "Needs review");
+      const alert = configured.service.list("event")[0];
+      expect(sent(configured, 0).embeds[0].footer).toEqual({ text: `Gramps · UNCs Event · alert ${alert.id}` });
+    });
+
+    it("posts at most ten a server an hour, apart from the monitoring limits", async () => {
+      const rich = richFixture();
+      for (let index = 0; index < 12; index++) await rich.service.send("primary", `issue:${index}`, "Alert");
+      expect(rich.channel.send).toHaveBeenCalledTimes(10);
+      expect(
+        rich.service
+          .list("primary")
+          .slice(0, 2)
+          .map((alert) => alert.delivery),
+      ).toEqual([
+        { state: "suppressed", reason: "hourly limit" },
+        { state: "suppressed", reason: "hourly limit" },
+      ]);
+      expect((await rich.service.raise(input({ kind: "game-restart", severity: "info" })))?.delivery.state).toBe(
+        "posted",
+      );
+      expect(await rich.service.send("event", "issue:0", "Alert")).toBe(true);
+      jest.setSystemTime(now + 60 * 60_000 + 1);
+      expect(await rich.service.send("primary", "issue:12", "Alert")).toBe(true);
+    });
+
+    it("never pings, and leaves the ping for the next high alert", async () => {
+      const rich = richFixture();
+      await expect(rich.service.channelStatus()).resolves.toMatchObject({ ping: "ok" });
+      expect(await rich.service.send("primary", "event-lock-off:1", "Team lock is OFF.")).toBe(true);
+      expect(sent(rich, 0).content).toBeUndefined();
+      expect(sent(rich, 0).allowedMentions.roles).toEqual([]);
+      expect(rich.service.list("primary")[0]).toMatchObject({ kind: "automation", pinged: false });
+      expect((await rich.service.raise(input({ kind: "automation" })))?.pinged).toBe(false);
+      expect((await rich.service.raise(input()))?.pinged).toBe(true);
+    });
+
+    it.each(refusals)("refuses %s like any other alert, without throwing", async (_, change, reason, fetches) => {
+      const rich = richFixture();
+      change(rich);
+      await expect(rich.service.send("primary", "map-vote-review:1", "Needs review")).resolves.toBe(false);
+      expect(rich.client.channels.fetch).toHaveBeenCalledTimes(fetches ? 1 : 0);
+      expect(rich.channel.send).not.toHaveBeenCalled();
+      expect(rich.service.list("primary")[0]).toMatchObject({
+        kind: "automation",
+        delivery: { state: "failed", reason },
+      });
+      expect(Logger.prototype.warn).toHaveBeenCalledWith(expect.stringContaining("Needs review"));
+    });
+
+    it("never throws into a worker when Discord refuses the send", async () => {
+      const rich = richFixture();
+      rich.channel.send.mockRejectedValue(new Error("token and network details"));
+      await expect(rich.service.send("primary", "issue", "Needs review")).resolves.toBe(false);
+      expect(rich.service.list("primary")[0].delivery).toEqual({ state: "failed", reason: "discord error" });
+    });
+
+    it("is never held back by a snooze and is recorded for the staff status, acknowledgement only", async () => {
+      const rich = richFixture();
+      rich.service.snooze("primary", "all", 60, "Mod");
+      expect(
+        await rich.service.send("primary", "map-vote-brake:1", "UNCs Primary: Paused after 3 refused results."),
+      ).toBe(true);
+      const [alert] = rich.service.list("primary");
+      expect(alert).toMatchObject({
+        kind: "automation",
+        category: "automation",
+        severity: "warning",
+        title: "Automation needs a person",
+        lines: ["UNCs Primary: Paused after 3 refused results."],
+        delivery: { state: "posted", reason: null },
+      });
+      await expect(rich.service.review("primary", alert.id, "legit", { name: "Mod" })).rejects.toThrow(
+        "Only performance alerts",
+      );
+      await expect(rich.service.review("primary", alert.id, "ack", { name: "Mod" })).resolves.toMatchObject({
+        alert: { review: { decision: "ack" } },
+      });
+    });
   });
 });

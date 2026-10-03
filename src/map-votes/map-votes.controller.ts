@@ -20,6 +20,9 @@ export class MapVotesController {
   @Post("controls") saveControls(@Req() request: StaffRequest, @Body() body: unknown) {
     return this.service.saveControls(request.staff, body);
   }
+  @Post("preview") preview(@Req() request: StaffRequest, @Body() body: unknown) {
+    return this.service.preview(request.staff, body);
+  }
   @Post() start(@Req() request: StaffRequest, @Body() body: unknown) {
     return this.service.start(request.staff, body);
   }

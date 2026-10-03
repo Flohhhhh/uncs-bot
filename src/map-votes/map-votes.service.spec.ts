@@ -1,16 +1,31 @@
 import { createHash, randomUUID } from "node:crypto";
-import { HttpException } from "@nestjs/common";
+import { ConflictException, HttpException } from "@nestjs/common";
 import { MapVotesService } from "./map-votes.service";
 import { MapVotesStore } from "./map-votes.store";
 import { MapVotesDiscord } from "./map-votes.discord";
 import { fixtureServers } from "../admin/game-server-fixture";
-import { AdminService } from "../admin/admin.service";
+import { AdminService, type UnchangedQueueListener } from "../admin/admin.service";
 import type { AdminStore } from "../admin/admin.store";
 import { AdminAuth } from "../admin/admin.auth";
+import { GameRounds } from "../admin/game-rounds";
 import { EnvService } from "../env/env.service";
+import { StaffAlerts } from "../staff-alerts/staff-alerts.service";
+import { ServerEventsService } from "../server-events/server-events.service";
 import type { Staff } from "../admin/admin.types";
 import { ballotWinner, mapVoteView, type MapVoteRecord, type StartMapVote } from "./map-votes.types";
-import { defaultVotingPolicy, type VotingPolicy, type VoteReminder } from "../common/voting-policy";
+import {
+  defaultVotingPolicy,
+  defaultVotingSettings,
+  voteChoiceKey,
+  type DeepPartial,
+  type StoredVotingPolicy,
+  type VoteAutomation,
+  type VotingPolicy,
+  type VotingSettings,
+  type VoteReminder,
+} from "../common/voting-policy";
+import { rotationFingerprint } from "./ballot-builder";
+import { mergeSettings, readStoredPolicy } from "./voting-settings";
 import { actionSchema } from "../admin/admin.types";
 
 const staff: Staff = { id: "123456789012345678", name: "Test admin", role: "admin", csrf: "test" };
@@ -69,12 +84,24 @@ function fixture(enabled = true, serverId = "primary") {
       record: { ...record, ...values, messageId: null, state: "publishing" },
     })),
     published: jest.fn().mockImplementation(async (id, messageId) => ({ ...record, id, messageId, state: "open" })),
-    cast: jest.fn().mockResolvedValue(input.choices[0]),
+    cast: jest.fn().mockResolvedValue({ selection: input.choices[0], closeAtScore: null }),
     cancel: jest.fn().mockResolvedValue({ ...record, state: "cancelled" }),
     recover: jest.fn().mockResolvedValue([]),
     due: jest.fn().mockResolvedValue([record]),
     claimClose: jest.fn().mockResolvedValue(record),
     finish: jest.fn().mockImplementation(async (id, state, message) => ({ ...record, id, state, message })),
+    patchAutomation: jest.fn().mockImplementation(async (id: string, patch: Partial<VoteAutomation>) => ({
+      ...record,
+      id,
+      automation: { ...record.automation, ...patch },
+    })),
+    resolveReview: jest.fn().mockImplementation(async (id: string, state: string, message: string) => ({
+      ...record,
+      id,
+      state,
+      message,
+    })),
+    needsReview: jest.fn().mockResolvedValue([]),
   };
   const game = {
     configuration: jest.fn().mockResolvedValue({
@@ -104,10 +131,20 @@ function fixture(enabled = true, serverId = "primary") {
       .mockResolvedValue({ maps: [{ id: "Europe" }, { id: "Islands" }], experiences: [], lightings: [] }),
     overview: jest.fn().mockResolvedValue({
       observedAt: now.toISOString(),
-      status: { serverName: "The UNCs", map: "Kavkazi", matchSeconds: 600 as number | undefined },
+      status: {
+        serverName: "The UNCs",
+        map: "Kavkazi",
+        matchSeconds: 600 as number | undefined,
+        players: { current: 60, max: 100 },
+      },
     }),
   };
-  const admin = { act: jest.fn().mockResolvedValue({ state: "pending", message: "Saved" }) };
+  const admin = {
+    act: jest.fn().mockResolvedValue({ state: "pending", message: "Saved" }),
+    receipt: jest.fn().mockResolvedValue({ record: null }),
+    onUnchangedQueue: jest.fn(),
+    staffQueuedSince: jest.fn().mockResolvedValue(false),
+  };
   const role = jest.fn().mockResolvedValue("admin");
   const auth = {
     role,
@@ -123,6 +160,13 @@ function fixture(enabled = true, serverId = "primary") {
     publish: jest.fn().mockResolvedValue(messageId),
     update: jest.fn(),
     remind: jest.fn().mockResolvedValue(undefined),
+    findBallotMessage: jest.fn().mockResolvedValue(null),
+  };
+  const alerts = { send: jest.fn().mockResolvedValue(true) };
+  const events = {
+    voteEventReadiness: jest.fn().mockResolvedValue({ ok: false, reason: "optional events are off in Gramps" }),
+    startFromVote: jest.fn().mockResolvedValue({ created: true, event: {} }),
+    voteEvent: jest.fn().mockResolvedValue(null),
   };
   const environment: Record<string, unknown> = {
     MAP_VOTES_ENABLED: enabled,
@@ -130,16 +174,106 @@ function fixture(enabled = true, serverId = "primary") {
     ADMIN_GUILD_ID: guild,
     MAP_VOTES_CHANNEL_ID: channel,
   };
-  const service = new MapVotesService(
-    store as unknown as MapVotesStore,
-    fixtureServers(game, () => environment.WARDOGS_RCON_URL as string, serverId),
-    admin as unknown as AdminService,
-    auth as unknown as AdminAuth,
-    discord as unknown as MapVotesDiscord,
-    { get: (key: string) => environment[key] } as EnvService,
-  );
+  const servers = fixtureServers(game, () => environment.WARDOGS_RCON_URL as string, serverId);
+  /** A new process: fresh in-memory round state over the same storage, game and Discord. */
+  const make = () => {
+    const rounds = new GameRounds(servers);
+    const service = new MapVotesService(
+      store as unknown as MapVotesStore,
+      servers,
+      admin as unknown as AdminService,
+      auth as unknown as AdminAuth,
+      discord as unknown as MapVotesDiscord,
+      { get: (key: string) => environment[key] } as EnvService,
+      rounds,
+      alerts as unknown as StaffAlerts,
+      events as unknown as ServerEventsService,
+    );
+    return { service, rounds };
+  };
+  const { service, rounds } = make();
   const closing = () => store.get.mockResolvedValue(record);
-  return { service, store, game, admin, auth, discord, input, record, closing, environment };
+  return {
+    service,
+    rounds,
+    make,
+    store,
+    game,
+    admin,
+    auth,
+    discord,
+    alerts,
+    events,
+    input,
+    record,
+    closing,
+    environment,
+  };
+}
+
+/** A live status during a populated, clockless round on the first rotation entry. */
+function baseStatus() {
+  return {
+    serverName: "Test",
+    map: "Kavkazi",
+    matchSeconds: undefined as number | undefined,
+    rotation: { nowIndex: 0 as number | null, nextIndex: 1 as number | null },
+    players: { current: 60, max: 100 },
+    factionScores: [
+      { name: "Lonestar", score: 10 },
+      { name: "Manticore", score: 5 },
+      { name: "Valkyra", score: 2 },
+    ],
+  };
+}
+type StatusPatch = Partial<ReturnType<typeof baseStatus>>;
+function automatic(serverId = "primary", settings: DeepPartial<VotingSettings> = {}) {
+  const f = fixture(true, serverId);
+  const saved = {
+    serverId,
+    actorId: staff.id,
+    actorName: staff.name,
+    version: 1,
+    connectionHash: f.record.connectionHash,
+    // In-game announcements have their own tests; keep the other cases to ballot effects.
+    policy: {
+      ...defaultVotingPolicy,
+      enabled: true,
+      settings: mergeSettings(
+        mergeSettings(defaultVotingSettings, { announce: { openInGame: false, resultInGame: false } }),
+        settings,
+      ),
+    } as StoredVotingPolicy,
+  };
+  f.store.policy.mockImplementation(async () => saved);
+  f.store.policies.mockImplementation(async () => [saved]);
+  f.store.due.mockResolvedValue([]);
+  f.store.history.mockResolvedValue([]);
+  let status: StatusPatch = {};
+  f.game.overview.mockImplementation(async () => ({
+    observedAt: new Date().toISOString(),
+    status: { ...baseStatus(), ...status },
+  }));
+  f.store.published.mockImplementation(async (id, messageId) => {
+    const record = { ...f.record, ...f.store.create.mock.calls.at(-1)![0], id, messageId, state: "open" as const };
+    f.store.history.mockResolvedValue([record]);
+    return record;
+  });
+  return {
+    ...f,
+    saved,
+    status: (patch: StatusPatch) => {
+      status = { ...status, ...patch };
+    },
+  };
+}
+/** Seven passes 30 seconds apart: more than the default three-minute opening delay. */
+async function observeForWindow(f: ReturnType<typeof automatic>) {
+  await f.service.tick();
+  for (let i = 0; i < 7; i++) {
+    jest.setSystemTime(Date.now() + 30_000);
+    await f.service.tick();
+  }
 }
 
 describe("durable Discord map voting", () => {
@@ -232,6 +366,7 @@ describe("durable Discord map voting", () => {
     const { service, input, store } = fixture();
     await expect(service.list({ ...staff, role })).rejects.toMatchObject({ status: 403 });
     await expect(service.setup({ ...staff, role })).rejects.toMatchObject({ status: 403 });
+    await expect(service.preview({ ...staff, role }, { serverId: "primary" })).rejects.toMatchObject({ status: 403 });
     await expect(service.start({ ...staff, role }, input)).rejects.toMatchObject({ status: 403 });
     await expect(
       service.cancel({ ...staff, role }, input.id, { id: randomUUID(), reason: "Close vote" }),
@@ -249,7 +384,16 @@ describe("durable Discord map voting", () => {
     });
     const result = await f.service.setup({ ...staff, serverId: "event" });
     expect(result.serverId).toBe("event");
-    expect(result.checks.map((item) => item.status)).toEqual(["ok", "ok", "ok", "ok"]);
+    expect(result.checks.map((item) => item.label)).toEqual([
+      "Storage",
+      "Discord channel",
+      "Automatic voting",
+      "Rotation",
+      "Players",
+      "50v50 option",
+    ]);
+    expect(result.checks.map((item) => item.status)).toEqual(["ok", "ok", "ok", "ok", "ok", "ok"]);
+    expect(result.checks[4].message).toBe("60 players online. Ballots open from 40 players.");
     expect(f.store.checkSetup).toHaveBeenCalledWith("event");
     expect(f.auth.serverStaff).toHaveBeenCalledWith(expect.objectContaining({ id: staff.id }), "event", true);
     expect(result.checks[1].message).toContain("#map-voting");
@@ -275,7 +419,14 @@ describe("durable Discord map voting", () => {
     f.auth.serverStaff.mockRejectedValue(privateError);
     f.game.configuration.mockRejectedValue(privateError);
     const result = await f.service.setup(staff);
-    expect(result.checks.map((item) => item.status)).toEqual(["blocked", "blocked", "blocked", "blocked"]);
+    expect(result.checks.map((item) => item.status)).toEqual([
+      "blocked",
+      "blocked",
+      "blocked",
+      "blocked",
+      "blocked",
+      "ok",
+    ]);
     expect(JSON.stringify(result)).not.toContain("private connection");
     expect(f.admin.act).not.toHaveBeenCalled();
   });
@@ -284,7 +435,7 @@ describe("durable Discord map voting", () => {
     delete f.environment.MAP_VOTES_CHANNEL_ID;
     f.store.checkSetup.mockResolvedValue({ unfinished: true });
     const result = await f.service.setup(staff);
-    expect(result.checks.map((item) => item.status)).toEqual(["review", "blocked", "blocked", "ok"]);
+    expect(result.checks.map((item) => item.status)).toEqual(["review", "blocked", "blocked", "ok", "ok", "ok"]);
     expect(f.discord.check).not.toHaveBeenCalled();
     expect(f.auth.serverStaff).not.toHaveBeenCalled();
     expect(f.store.finish).not.toHaveBeenCalled();
@@ -303,6 +454,12 @@ describe("durable Discord map voting", () => {
       ],
     },
     { extra: true },
+    {
+      choices: [
+        { map: "Europe", experiences: [], event: "50v50" },
+        { map: "Islands", experiences: [] },
+      ],
+    },
   ])("rejects malformed or ambiguous ballots: %j", async (patch) => {
     const { service, input, store, game } = fixture();
     await expect(service.start(staff, { ...input, ...patch })).rejects.toMatchObject({ status: 400 });
@@ -417,40 +574,24 @@ describe("durable Discord map voting", () => {
   });
   it("closes under its own audit actor, so the creator's last dashboard action cannot throttle it", async () => {
     const f = fixture();
-    const servers = fixtureServers({
-      ...f.game,
-      execute: jest.fn().mockResolvedValue({ state: "pending", message: "Saved" }),
-    });
     const adminStore = { begin: jest.fn().mockResolvedValue({ created: true }), finish: jest.fn() };
-    const admin = new AdminService(servers, adminStore as unknown as AdminStore);
-    const service = new MapVotesService(
-      f.store as unknown as MapVotesStore,
-      servers,
-      admin,
-      f.auth as unknown as AdminAuth,
-      f.discord as unknown as MapVotesDiscord,
-      { get: (key: string) => f.environment[key] } as EnvService,
+    const admin = new AdminService(
+      fixtureServers({ ...f.game, execute: jest.fn().mockResolvedValue({ state: "pending", message: "Saved" }) }),
+      adminStore as unknown as AdminStore,
     );
+    f.admin.act.mockImplementation((actor: Staff, action: unknown) => admin.act(actor, action));
     await admin.act(
       { ...staff, serverId: "primary" },
       { id: randomUUID(), action: "broadcast", reason: "Staff notice", message: "Hello" },
     );
     f.closing();
-    await service.tick();
+    await f.service.tick();
     expect(adminStore.begin).toHaveBeenLastCalledWith(
       expect.objectContaining({ id: `system:map-vote:${f.record.id}`, name: staff.name }),
       expect.objectContaining({ id: f.record.id, action: "map-next" }),
       expect.any(String),
     );
     expect(f.store.finish).toHaveBeenCalledWith(f.record.id, "queued", expect.any(String));
-  });
-  it("closes as cancelled when the audited action path refuses the queue change before sending it", async () => {
-    const { service, closing, store, admin, input } = fixture();
-    closing();
-    admin.act.mockRejectedValue(new HttpException("Wait a moment before sending another action.", 429));
-    await service.tick();
-    expect(admin.act).toHaveBeenCalledTimes(1);
-    expect(store.finish).toHaveBeenCalledWith(input.id, "cancelled", expect.stringContaining("without sending"));
   });
   it("retains the rotation without game or role reads when nobody voted", async () => {
     const { service, store, record, admin, game, auth } = fixture();
@@ -520,13 +661,36 @@ describe("durable Discord map voting", () => {
     if (failure === "recovered") expect(store.finish).not.toHaveBeenCalled();
     else expect(store.finish).toHaveBeenCalledWith(record.id, "cancelled", expect.any(String));
   });
-  it.each(["unknown", "failed", "accepted"])("does not claim queueing for an %s action receipt", async (state) => {
+  it.each(["unknown", "accepted"])("does not claim queueing for an %s action receipt", async (state) => {
     const { service, closing, store, admin, input } = fixture();
     closing();
     admin.act.mockResolvedValue({ state, message: "Check receipt" });
     await service.tick();
     expect(store.finish).toHaveBeenCalledWith(input.id, "needs_review", "Check receipt");
     expect(admin.act).toHaveBeenCalledTimes(1);
+  });
+  it.each([
+    ["a failed queue result", () => ({ state: "failed", message: "The current round changed." })],
+    ["a refused request", () => Promise.reject(new HttpException("Wait a moment before sending another action.", 429))],
+  ])("closes the ballot and keeps the rotation after %s, because nothing was changed", async (_, result) => {
+    const { service, closing, store, admin, input } = fixture();
+    closing();
+    admin.act.mockImplementation(async () => result());
+    await service.tick();
+    expect(store.finish).toHaveBeenCalledWith(
+      input.id,
+      "cancelled",
+      expect.stringMatching(/^Not queued: .+ The rotation continues\.$/),
+      { outcome: "refused" },
+    );
+    expect(store.finish).not.toHaveBeenCalledWith(input.id, "needs_review", expect.anything());
+  });
+  it("keeps an unexpected error after sending in review", async () => {
+    const { service, closing, store, admin, input } = fixture();
+    closing();
+    admin.act.mockRejectedValue(new Error("socket closed"));
+    await service.tick();
+    expect(store.finish).toHaveBeenCalledWith(input.id, "needs_review", expect.stringContaining("unconfirmed"));
   });
   it("recovers interrupted work without resending publication or a game change", async () => {
     const { service, store, discord, admin, record } = fixture();
@@ -599,53 +763,19 @@ describe("durable Discord map voting", () => {
     expect(f.store.finish).toHaveBeenCalledWith(f.record.id, "tied", expect.stringContaining("left unchanged"));
   });
 
-  function automatic(serverId = "primary") {
-    const f = fixture(true, serverId);
-    const saved = {
-      serverId,
-      actorId: staff.id,
-      version: 1,
-      connectionHash: f.record.connectionHash,
-      policy: { ...defaultVotingPolicy, enabled: true },
-    };
-    f.store.policy.mockResolvedValue(saved);
-    f.store.policies.mockResolvedValue([saved]);
-    f.store.due.mockResolvedValue([]);
-    f.store.history.mockResolvedValue([]);
-    f.game.overview.mockImplementation(async () => ({
-      observedAt: new Date().toISOString(),
-      status: {
-        serverName: "Test",
-        map: "Kavkazi",
-        matchSeconds: undefined,
-        factionScores: [
-          { name: "A", score: 10 },
-          { name: "B", score: 5 },
-        ],
-      },
-    }));
-    f.store.published.mockImplementation(async (id, messageId) => {
-      const record = { ...f.record, ...f.store.create.mock.calls.at(-1)![0], id, messageId, state: "open" as const };
-      f.store.history.mockResolvedValue([record]);
-      return record;
-    });
-    return { ...f, saved };
-  }
-  async function observeForWindow(f: ReturnType<typeof automatic>) {
-    await f.service.tick();
-    for (let i = 0; i < 4; i++) {
-      jest.setSystemTime(Date.now() + 30_000);
-      await f.service.tick();
-    }
-  }
+  it.each(["queued", "cancelled", "tied", "no_votes"] as const)(
+    "does not reopen after %s at the same position, including after a bot restart",
+    async (state) => {
+      const f = automatic();
+      f.store.history.mockResolvedValue([{ ...f.record, roundStartedAt: null, state }]);
+      await observeForWindow(f);
+      expect(f.discord.publish).not.toHaveBeenCalled();
+      expect((await f.service.list(staff)).automatic).toMatchObject({ phase: "done_this_round" });
+    },
+  );
   it("keeps automatic observation valid across known configuration/status map names", async () => {
     const f = automatic();
-    const overview = await f.game.overview();
-    f.game.overview.mockImplementation(async () => ({
-      ...overview,
-      observedAt: new Date().toISOString(),
-      status: { ...overview.status, map: "Bakurani" },
-    }));
+    f.status({ map: "Bakurani" });
     await observeForWindow(f);
     expect(f.discord.publish).toHaveBeenCalledTimes(1);
     expect(f.store.create).toHaveBeenCalledWith(
@@ -667,64 +797,52 @@ describe("durable Discord map voting", () => {
     await f.service.tick();
     expect(f.discord.publish).toHaveBeenCalledTimes(1);
     const status = await f.service.list({ ...staff, serverId: "event" });
-    expect(status.automatic).toMatchObject({ enabled: true, closesAtScore: 95 });
+    expect(status.automatic).toMatchObject({ enabled: true, closesAtScore: 95, delaySeconds: 180, choices: 3 });
     expect(JSON.stringify(status.automatic)).not.toContain(staff.id);
   });
-  it("opens mode-only automatic choices on the current map from validated rotation combinations", async () => {
+  it("offers rule variants of the running map from the rotation, never the running option itself", async () => {
     const f = automatic();
-    const policy = { ...defaultVotingPolicy, enabled: true, mapChoices: false, modeChoices: true };
-    const saved = {
-      serverId: "primary",
-      actorId: staff.id,
-      policy,
-      connectionHash: f.record.connectionHash,
-      version: 1,
-    };
-    f.store.policy.mockResolvedValue(saved);
-    f.store.policies.mockResolvedValue([saved]);
+    f.saved.policy = { ...f.saved.policy, mapChoices: false, modeChoices: true };
     const settings = await f.game.configuration();
     const normal = { map: "Kavkazi", experiences: ["KOTH"] };
     const infantry = { map: "Kavkazi", experiences: ["KOTH", "KOTH_InfantryOnly"] };
-    f.game.configuration.mockResolvedValue({
-      ...settings,
-      rotation: {
-        ...settings.rotation,
-        entries: [normal, { map: "Europe", experiences: ["KOTH"] }, infantry, { ...infantry, lighting: "DayClear" }],
-      },
-    });
+    const hardcore = { map: "Kavkazi", experiences: ["KOTH", "KOTH_Hardcore"] };
+    const entries = [
+      normal,
+      { map: "Europe", experiences: ["KOTH"] },
+      infantry,
+      { ...infantry, lighting: "DayClear" },
+      hardcore,
+    ];
+    f.game.configuration.mockResolvedValue({ ...settings, rotation: { ...settings.rotation, entries } });
     f.game.catalog.mockResolvedValue({
       maps: [{ id: "Kavkazi" }, { id: "Europe" }],
-      experiences: [{ id: "KOTH" }, { id: "KOTH_InfantryOnly" }],
+      experiences: [{ id: "KOTH" }, { id: "KOTH_InfantryOnly" }, { id: "KOTH_Hardcore" }],
       lightings: [{ id: "DayClear" }],
     });
-    f.game.overview.mockImplementation(async () => ({
-      observedAt: new Date().toISOString(),
-      status: {
-        serverName: "Test",
-        map: "Kavkazi",
-        matchSeconds: undefined,
-        factionScores: [
-          { name: "A", score: 10 },
-          { name: "B", score: 5 },
-        ],
-      },
-    }));
     await observeForWindow(f);
-    expect(f.store.create.mock.calls[0][0]).toMatchObject({
-      choices: [infantry, normal],
-      automation: { policy, highestScore: 10, reminders: {} },
+    const created = f.store.create.mock.calls[0][0];
+    expect(created.choices).toEqual([infantry, hardcore]);
+    expect(created.automation).toEqual({
+      policy: readStoredPolicy(f.saved.policy).policy,
+      policyVersion: 1,
+      settings: readStoredPolicy(f.saved.policy).settings,
+      highestScore: 10,
+      openedAtScore: 10,
+      maxStep: 0,
+      reminders: {},
+      round: expect.objectContaining({ source: "baseline", map: "Kavkazi", index: 0, exact: false }),
+      rotation: {
+        fingerprint: rotationFingerprint({ enabled: true, mode: "Ordered", entries }),
+        length: 5,
+        currentIndex: 0,
+        nextSlot: 1,
+        nextKey: voteChoiceKey(entries[1]),
+        nextLabel: "Ozeti · King of the Hill",
+      },
     });
     expect(f.admin.act).not.toHaveBeenCalled();
   });
-  it.each(["queued", "cancelled", "tied", "no_votes"] as const)(
-    "does not reopen after %s at the same position, including after a bot restart",
-    async (state) => {
-      const f = automatic();
-      f.store.history.mockResolvedValue([{ ...f.record, roundStartedAt: null, state }]);
-      await observeForWindow(f);
-      expect(f.discord.publish).not.toHaveBeenCalled();
-    },
-  );
   it.each(["storage", "role", "catalog", "unknown-position", "too-few-maps", "changed-before-publish"])(
     "does not automatically publish when %s is unavailable",
     async (failure) => {
@@ -778,18 +896,7 @@ describe("durable Discord map voting", () => {
       ...settings,
       rotation: { ...settings.rotation, currentMap: "Europe", currentIndex: 1 },
     });
-    f.game.overview.mockImplementation(async () => ({
-      observedAt: new Date().toISOString(),
-      status: {
-        serverName: "Test",
-        map: "Europe",
-        matchSeconds: undefined,
-        factionScores: [
-          { name: "A", score: 10 },
-          { name: "B", score: 5 },
-        ],
-      },
-    }));
+    f.status({ map: "Europe", rotation: { nowIndex: 1, nextIndex: 2 } });
     f.game.catalog.mockResolvedValue({
       maps: [{ id: "Kavkazi" }, { id: "Europe" }, { id: "Islands" }],
       experiences: [],
@@ -812,24 +919,21 @@ describe("durable Discord map voting", () => {
   it("waits again after a reported clock reset at the same rotation position", async () => {
     const f = automatic();
     let startedAt = Date.now() - 600_000;
+    let factionScores = baseStatus().factionScores;
     f.game.overview.mockImplementation(async () => ({
       observedAt: new Date().toISOString(),
-      status: {
-        serverName: "Test",
-        map: "Kavkazi",
-        matchSeconds: (Date.now() - startedAt) / 1000,
-        factionScores: [
-          { name: "A", score: 10 },
-          { name: "B", score: 5 },
-        ],
-      },
+      status: { ...baseStatus(), factionScores, matchSeconds: (Date.now() - startedAt) / 1000 },
     }));
     f.store.history.mockResolvedValue([{ ...f.record, state: "queued" }]);
     await observeForWindow(f);
     expect(f.discord.publish).not.toHaveBeenCalled();
+    // Each status read has its own observation time. The new match starts at 0 and scores again.
+    jest.setSystemTime(Date.now() + 1_000);
     startedAt = Date.now();
+    factionScores = leadingScores(0);
     await f.service.tick();
     expect(f.discord.publish).not.toHaveBeenCalled();
+    factionScores = leadingScores(4);
     await observeForWindow(f);
     expect(f.discord.publish).toHaveBeenCalledTimes(1);
     expect(f.store.create.mock.calls[0][0].roundStartedAt).toEqual(new Date(startedAt));
@@ -843,7 +947,7 @@ describe("durable Discord map voting", () => {
   });
   it("skips known unavailable saved options but preserves a later validated mode and zone", async () => {
     const f = automatic();
-    f.saved.policy.modeChoices = true;
+    f.saved.policy = { ...f.saved.policy, modeChoices: true };
     const settings = await f.game.configuration();
     const valid = { map: "Europe", experiences: ["Infantry"], zoneAlternator: "Zone.Farmland" };
     f.game.configuration.mockResolvedValue({
@@ -964,13 +1068,10 @@ describe("score-based voting controls and reminders", () => {
       version: 0,
       policy: { ...defaultVotingPolicy, modeChoices: true, finalReminder: true },
     });
-    expect(f.store.savePolicy).toHaveBeenCalledWith(
-      "primary",
-      0,
-      expect.objectContaining({ enabled: false, finalReminder: true, midpointReminder: false }),
-      staff,
-      f.record.connectionHash,
-    );
+    expect(f.store.savePolicy).toHaveBeenCalledWith("primary", 0, expect.any(Function), staff, f.record.connectionHash);
+    const saved = f.store.savePolicy.mock.calls[0][2](null);
+    expect(saved).toMatchObject({ enabled: false, finalReminder: true, midpointReminder: false });
+    expect(saved.settings).toEqual(defaultVotingSettings);
     expect(f.discord.publish).not.toHaveBeenCalled();
     expect(f.admin.act).not.toHaveBeenCalled();
     await expect(
@@ -1049,13 +1150,13 @@ describe("score-based voting controls and reminders", () => {
     }
     expect(f.store.claimClose).not.toHaveBeenCalled();
   });
-  it("broadcasts reminders as the ballot's audit actor and records a refused broadcast as not sent", async () => {
+  it("broadcasts reminders as the voting system and records a refused broadcast as not sent", async () => {
     const f = scored();
     f.admin.act.mockRejectedValue(new HttpException("Wait a moment before sending another action.", 429));
-    await f.service.tick();
+    for (let index = 0; index < 3; index++) await f.service.tick();
     expect(f.discord.remind).toHaveBeenCalledTimes(1);
     expect(f.admin.act).toHaveBeenCalledWith(
-      expect.objectContaining({ id: `system:map-vote:${f.record.id}`, name: staff.name }),
+      expect.objectContaining({ id: "system:map-vote-say:primary", role: "admin" }),
       expect.objectContaining({ action: "broadcast" }),
     );
     expect(f.store.finishReminder).toHaveBeenCalledWith(
@@ -1063,6 +1164,15 @@ describe("score-based voting controls and reminders", () => {
       "midpoint",
       "failed",
       expect.stringContaining("not sent"),
+    );
+    const unconfirmed = scored();
+    unconfirmed.admin.act.mockRejectedValue(new Error("socket closed"));
+    for (let index = 0; index < 3; index++) await unconfirmed.service.tick();
+    expect(unconfirmed.store.finishReminder).toHaveBeenCalledWith(
+      unconfirmed.record.id,
+      "midpoint",
+      "unknown",
+      expect.stringContaining("not confirmed"),
     );
   });
   it("skips the earlier reminder when scores jump to the final milestone", async () => {
@@ -1164,7 +1274,8 @@ describe("score-based voting controls and reminders", () => {
       f.record.id,
       expect.any(String),
       expect.objectContaining({ name: "Gramps" }),
-      "The score reached 100 or moved backwards. The rotation was left unchanged.",
+      // This branch words a score-based end the same way as any other ended match.
+      "The match ended before voting closed. The rotation continues.",
       expect.any(String),
     );
     expect(f.store.claimClose).not.toHaveBeenCalled();
@@ -1230,4 +1341,1442 @@ describe("score-based voting controls and reminders", () => {
       expect(f.discord.remind).not.toHaveBeenCalled();
     },
   );
+});
+
+const leadingScores = (lonestar: number) => [
+  { name: "Lonestar", score: lonestar },
+  { name: "Manticore", score: Math.min(lonestar, 20) },
+  { name: "Valkyra", score: Math.min(lonestar, 10) },
+];
+/** An open automatic ballot created by this version, in an observed round on the first entry. */
+async function openBallot(
+  options: {
+    settings?: DeepPartial<VotingSettings>;
+    policy?: Partial<VotingPolicy>;
+    openedAt?: number;
+    leading?: number;
+  } = {},
+) {
+  const f = automatic("primary", options.settings);
+  f.saved.policy = { ...f.saved.policy, ...options.policy };
+  const { policy, settings } = readStoredPolicy(f.saved.policy);
+  const config = await f.game.configuration();
+  const opened = options.openedAt ?? 20;
+  const automation: VoteAutomation = {
+    policy,
+    policyVersion: 1,
+    settings,
+    highestScore: opened,
+    openedAtScore: opened,
+    maxStep: 0,
+    reminders: {},
+    round: {
+      id: "observed:1",
+      map: "Kavkazi",
+      index: 0,
+      startedAt: now.getTime() - 600_000,
+      source: "observed",
+      exact: true,
+    },
+    rotation: {
+      fingerprint: rotationFingerprint(config.rotation),
+      length: 3,
+      currentIndex: 0,
+      nextSlot: 1,
+      nextKey: voteChoiceKey(config.rotation.entries[1]),
+      nextLabel: "Ozeti · Normal",
+    },
+  };
+  f.record.state = "open";
+  f.record.winner = null;
+  f.record.counts = [0, 0];
+  f.record.roundStartedAt = null;
+  f.record.closesAt = new Date(now.getTime() + 180 * 60_000);
+  f.record.automation = automation;
+  f.store.automaticOpen.mockImplementation(async () => (f.record.state === "open" ? [f.record] : []));
+  f.store.get.mockImplementation(async () => f.record);
+  f.store.history.mockImplementation(async () => [f.record]);
+  f.store.liveCounts.mockResolvedValue([
+    { voteId: f.record.id, choice: 0, total: 3 },
+    { voteId: f.record.id, choice: 1, total: 2 },
+  ]);
+  f.store.observeScore.mockImplementation(async (_id: string, score: number, step: number | null) => {
+    automation.highestScore = Math.max(automation.highestScore, score);
+    automation.maxStep = Math.max(automation.maxStep ?? 0, step ?? 0);
+    return true;
+  });
+  f.store.claimReminder.mockImplementation(async (_id: string, stage: VoteReminder, receiptId: string) => {
+    if (automation.reminders[stage]) return null;
+    automation.reminders[stage] = { id: receiptId, state: "started", message: "Claimed", at: now.toISOString() };
+    return f.record;
+  });
+  f.store.claimClose.mockImplementation(async () => {
+    f.record.state = "closing";
+    f.record.counts = [2, 3];
+    f.record.winner = 1;
+    return { ...f.record };
+  });
+  f.store.cancel.mockImplementation(async (_id: string, _request: string, _actor: Staff, reason: string) => {
+    f.record.state = "cancelled";
+    f.record.message = reason;
+    return { ...f.record };
+  });
+  f.status({ factionScores: leadingScores(options.leading ?? 30) });
+  return { ...f, automation, score: (value: number) => f.status({ factionScores: leadingScores(value) }) };
+}
+const later = (ms = 15_000) => jest.setSystemTime(Date.now() + ms);
+/** The listener map votes register with the dashboard's actions for a staff queue of the entry already next. */
+function registeredQueueListener(f: ReturnType<typeof fixture>) {
+  f.service.onModuleInit();
+  const [[listener]] = f.admin.onUnchangedQueue.mock.calls as [UnchangedQueueListener][];
+  return listener;
+}
+const broadcasts = (admin: { act: jest.Mock }) =>
+  (admin.act.mock.calls as [Staff, { action: string; message: string }][]).filter(
+    ([, action]) => action.action === "broadcast",
+  );
+
+describe("automatic ballots that follow the round, not the clock", () => {
+  beforeEach(() => jest.useFakeTimers().setSystemTime(now));
+  afterEach(() => jest.useRealTimers());
+  it("opens nothing during the live pre-round sample or below the player minimum", async () => {
+    const f = automatic();
+    f.status({
+      players: { current: 1, max: 100 },
+      factionScores: leadingScores(0),
+      rotation: { nowIndex: 0, nextIndex: 1 },
+    });
+    await observeForWindow(f);
+    expect((await f.service.list(staff)).automatic).toMatchObject({
+      phase: "pre_round",
+      message: "Waiting for players (1/20) before the round starts.",
+    });
+    f.status({ players: { current: 23, max: 100 }, factionScores: leadingScores(10) });
+    await observeForWindow(f);
+    expect((await f.service.list(staff)).automatic).toMatchObject({
+      phase: "waiting_players",
+      message: "Waiting for 40 players before a ballot opens (23/100).",
+      players: { current: 23, required: 40 },
+    });
+    expect(f.discord.publish).not.toHaveBeenCalled();
+    f.saved.policy = { ...f.saved.policy, settings: { ...f.saved.policy.settings, minPlayers: 20 } };
+    await observeForWindow(f);
+    expect(f.discord.publish).toHaveBeenCalledTimes(1);
+  });
+  it("opens at once when the match clock shows the round is already far enough along", async () => {
+    const f = automatic();
+    f.status({ matchSeconds: 400 });
+    await f.service.tick();
+    expect(f.discord.publish).toHaveBeenCalledTimes(1);
+    const created = f.store.create.mock.calls[0][0];
+    expect(created.roundStartedAt).toEqual(new Date(now.getTime() - 400_000));
+    expect(created.automation.round).toMatchObject({
+      source: "clock",
+      exact: true,
+      startedAt: now.getTime() - 400_000,
+    });
+  });
+  it("opens again at the same rotation entry after an observed score reset, ten minutes after the last ballot", async () => {
+    const f = automatic();
+    await observeForWindow(f);
+    expect(f.discord.publish).toHaveBeenCalledTimes(1);
+    const [first] = (await f.store.history()) as MapVoteRecord[];
+    f.store.history.mockResolvedValue([{ ...first, state: "queued" }]);
+    for (let i = 0; i < 8; i++) {
+      later(30_000);
+      await f.service.tick();
+    }
+    expect((await f.service.list(staff)).automatic).toMatchObject({
+      phase: "done_this_round",
+      message: "This round already had a ballot. Waiting for the next round.",
+    });
+    f.status({ factionScores: leadingScores(0) });
+    later(30_000);
+    await f.service.tick();
+    f.status({ factionScores: leadingScores(3) });
+    for (let i = 0; i < 7; i++) {
+      later(30_000);
+      await f.service.tick();
+    }
+    expect(f.discord.publish).toHaveBeenCalledTimes(1);
+    expect((await f.service.list(staff)).automatic?.message).toBe(
+      "Waiting at least 10 minutes between automatic ballots.",
+    );
+    for (let i = 0; i < 5; i++) {
+      later(30_000);
+      await f.service.tick();
+    }
+    expect(f.discord.publish).toHaveBeenCalledTimes(2);
+    const second = f.store.create.mock.calls[1][0].automation;
+    expect(second.round).toMatchObject({ source: "observed", exact: true });
+    expect(second.round.id).not.toBe(first.automation!.round!.id);
+  });
+  it("opens no ballot between the score reset and map travel, and counts the delay on the new map", async () => {
+    const f = automatic("primary", { openDelaySeconds: 60 });
+    f.game.catalog.mockResolvedValue({
+      maps: [{ id: "Kavkazi" }, { id: "Europe" }, { id: "Islands" }],
+      experiences: [],
+      lightings: [],
+    });
+    f.status({ factionScores: leadingScores(100) });
+    await f.service.tick();
+    // Round N ends: the scores reset on Kavkazi and the server travels to Europe 90 seconds later.
+    f.status({ factionScores: leadingScores(0) });
+    for (let i = 0; i < 7; i++) {
+      later();
+      await f.service.tick();
+    }
+    expect(f.discord.publish).not.toHaveBeenCalled();
+    expect((await f.service.list(staff)).automatic?.message).toBe(
+      "A new round is starting. Waiting for its first points before a ballot opens.",
+    );
+    const settings = await f.game.configuration();
+    f.game.configuration.mockResolvedValue({
+      ...settings,
+      rotation: { ...settings.rotation, currentIndex: 1, currentMap: "Europe" },
+    });
+    f.status({ map: "Europe", rotation: { nowIndex: 1, nextIndex: 2 } });
+    later();
+    await f.service.tick();
+    later(45_000);
+    f.status({ factionScores: leadingScores(3) });
+    await f.service.tick();
+    // Points 45 seconds after travel: the 60-second delay counts from the new map, not the reset.
+    expect(f.discord.publish).not.toHaveBeenCalled();
+    later();
+    await f.service.tick();
+    expect(f.discord.publish).toHaveBeenCalledTimes(1);
+    const created = f.store.create.mock.calls[0][0];
+    expect(created).toMatchObject({ currentMap: "Europe", currentIndex: 1 });
+    expect(created.automation.round).toMatchObject({ map: "Europe", index: 1 });
+  });
+  it("opens no ballot once the leading team passes the opening ceiling", async () => {
+    const f = automatic();
+    f.status({ factionScores: leadingScores(75) });
+    await observeForWindow(f);
+    expect(f.discord.publish).not.toHaveBeenCalled();
+    expect((await f.service.list(staff)).automatic).toMatchObject({
+      phase: "too_late",
+      message: "Too late in this round; the next round gets a ballot.",
+      leadingProgress: 75,
+    });
+  });
+  it("shows the game's rotation position note word for word", async () => {
+    const f = automatic();
+    const note =
+      "This match was not started from the rotation, so the game will play entry 2 next. Queue a map once that round starts.";
+    const settings = await f.game.configuration();
+    f.game.configuration.mockResolvedValue({
+      ...settings,
+      rotation: { ...settings.rotation, currentIndex: null, positionNote: note },
+    });
+    await observeForWindow(f);
+    expect((await f.service.list(staff)).automatic?.message).toBe(note);
+    expect((await f.service.setup(staff)).checks.find((check) => check.label === "Rotation")).toEqual({
+      label: "Rotation",
+      status: "review",
+      message: note,
+    });
+    expect(f.discord.publish).not.toHaveBeenCalled();
+  });
+  it("opens after the last entry only when the game confirms it returns to the first", async () => {
+    const f = automatic();
+    const settings = await f.game.configuration();
+    f.game.configuration.mockResolvedValue({
+      ...settings,
+      rotation: { ...settings.rotation, currentIndex: 2, currentMap: "Islands" },
+    });
+    f.game.catalog.mockResolvedValue({
+      maps: [{ id: "Kavkazi" }, { id: "Europe" }, { id: "Islands" }],
+      experiences: [],
+      lightings: [],
+    });
+    f.status({ map: "Islands", rotation: { nowIndex: 2, nextIndex: null } });
+    await observeForWindow(f);
+    expect(f.discord.publish).not.toHaveBeenCalled();
+    expect((await f.service.list(staff)).automatic?.message).toContain("returns to entry 1 after the last entry");
+    f.status({ rotation: { nowIndex: 2, nextIndex: 0 } });
+    await observeForWindow(f);
+    expect(f.store.create.mock.calls[0][0].choices).toEqual([
+      { map: "Kavkazi", experiences: [] },
+      { map: "Europe", experiences: [] },
+    ]);
+  });
+  it("keeps a ballot open through unrelated settings saves and queues at the fresh revision", async () => {
+    const f = await openBallot();
+    const settings = await f.game.configuration();
+    f.game.configuration.mockResolvedValue({ ...settings, revision: "r2" });
+    await f.service.tick();
+    expect(f.store.cancel).not.toHaveBeenCalled();
+    later();
+    f.score(95);
+    await f.service.tick();
+    expect(f.store.claimClose).toHaveBeenCalledWith(f.record.id, true);
+    expect(f.store.patchAutomation).toHaveBeenCalledWith(
+      f.record.id,
+      {
+        queue: {
+          receiptId: f.record.id,
+          before: f.automation.rotation!.fingerprint,
+          after: rotationFingerprint({
+            ...settings.rotation,
+            entries: [settings.rotation.entries[0], settings.rotation.entries[2], settings.rotation.entries[1]],
+          }),
+          kind: "move",
+        },
+      },
+      ["closing"],
+    );
+    expect(f.admin.act).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "system:map-vote:primary", role: "admin" }),
+      expect.objectContaining({ action: "map-next", revision: "r2", entry: { map: "Islands", experiences: [] } }),
+    );
+    expect(f.store.finish).toHaveBeenCalledWith(f.record.id, "queued", expect.any(String));
+  });
+  it("queues as the voting system, so the saving administrator's last dashboard action cannot throttle it", async () => {
+    const f = await openBallot();
+    const adminStore = { begin: jest.fn().mockResolvedValue({ created: true }), finish: jest.fn() };
+    const admin = new AdminService(
+      fixtureServers({ ...f.game, execute: jest.fn().mockResolvedValue({ state: "pending", message: "Saved" }) }),
+      adminStore as unknown as AdminStore,
+    );
+    f.admin.act.mockImplementation((actor: Staff, action: unknown) => admin.act(actor, action));
+    await f.service.tick();
+    later();
+    f.score(95);
+    await admin.act(
+      { ...staff, serverId: "primary" },
+      { id: randomUUID(), action: "broadcast", reason: "Staff notice", message: "Hello" },
+    );
+    await f.service.tick();
+    expect(adminStore.begin).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: "system:map-vote:primary" }),
+      expect.objectContaining({ id: f.record.id, action: "map-next" }),
+      expect.any(String),
+    );
+    expect(f.store.finish).toHaveBeenCalledWith(f.record.id, "queued", expect.any(String));
+  });
+  it("cancels when staff change the rotation itself", async () => {
+    const f = await openBallot();
+    const settings = await f.game.configuration();
+    f.game.configuration.mockResolvedValue({
+      ...settings,
+      revision: "r2",
+      rotation: {
+        ...settings.rotation,
+        entries: [settings.rotation.entries[0], ...settings.rotation.entries.slice(1).reverse()],
+      },
+    });
+    await f.service.tick();
+    expect(f.store.cancel).toHaveBeenCalledWith(
+      f.record.id,
+      expect.any(String),
+      expect.anything(),
+      "Staff changed the rotation. Votes were not applied.",
+      "Staff changed the rotation. Votes were not applied.",
+    );
+    expect(f.admin.act).not.toHaveBeenCalled();
+  });
+  it("closes the ballot when staff queue the entry that is already next, so the vote cannot replace it", async () => {
+    const f = await openBallot();
+    const staffQueued = registeredQueueListener(f);
+    const queuer: Staff = { ...staff, id: "987654321098765432", name: "Queuing admin", serverId: "primary" };
+    // Another server's queue leaves this ballot open.
+    expect(await staffQueued(queuer, "other")).toBeNull();
+    expect(f.store.cancel).not.toHaveBeenCalled();
+    expect(await staffQueued(queuer, "primary")).toBe(
+      "The open community vote was closed, so it cannot replace this choice.",
+    );
+    expect(f.store.cancel).toHaveBeenCalledWith(
+      f.record.id,
+      expect.any(String),
+      expect.objectContaining({ id: queuer.id, name: "Queuing admin", serverId: "primary" }),
+      "Staff queued the next map. Votes were not applied.",
+      "Staff queued the next map. Votes were not applied.",
+    );
+    // The existing ballot message is edited; nothing new is posted.
+    expect(f.discord.update).toHaveBeenCalledWith(expect.objectContaining({ id: f.record.id, state: "cancelled" }));
+    expect(f.discord.publish).not.toHaveBeenCalled();
+    // At the close score nothing is queued over the staff choice.
+    f.score(95);
+    await f.service.tick();
+    expect(f.store.claimClose).not.toHaveBeenCalled();
+    expect(f.admin.act).not.toHaveBeenCalled();
+    // With no open ballot there is nothing to add to the staff result.
+    expect(await staffQueued(queuer, "primary")).toBeNull();
+  });
+  it("tells staff when the open ballot could not be closed after they queued the entry already next", async () => {
+    const f = await openBallot();
+    const staffQueued = registeredQueueListener(f);
+    f.store.cancel.mockRejectedValue(new ConflictException("This ballot cannot be closed during an operation."));
+    expect(await staffQueued(staff, "primary")).toBe(
+      "The open community vote could not be closed. Close it in Map votes to keep this choice.",
+    );
+    const off = await openBallot();
+    off.environment.MAP_VOTES_ENABLED = false;
+    expect(await registeredQueueListener(off)(staff, "primary")).toBeNull();
+    expect(off.store.automaticOpen).not.toHaveBeenCalled();
+  });
+  it("tells staff about a ballot opening or closing when they queue the entry already next", async () => {
+    const f = await openBallot();
+    const staffQueued = registeredQueueListener(f);
+    f.record.state = "closing";
+    expect(await staffQueued(staff, "primary")).toBe(
+      "A community vote on this server is closing now and may still change the next map. Check Map votes.",
+    );
+    f.record.state = "publishing";
+    expect(await staffQueued(staff, "primary")).toBe(
+      "A community vote on this server is opening now. Close it in Map votes to keep this choice.",
+    );
+    expect(f.store.cancel).not.toHaveBeenCalled();
+    // A manual ballot keeps its original revision rule and is not mentioned.
+    f.record.state = "closing";
+    f.record.automation = null;
+    expect(await staffQueued(staff, "primary")).toBeNull();
+  });
+  it("finishes a closing ballot without its winner when staff queued the entry already next", async () => {
+    const f = await openBallot();
+    const staffQueued = registeredQueueListener(f);
+    const queuer: Staff = { ...staff, id: "987654321098765432", name: "Queuing admin", serverId: "primary" };
+    await f.service.tick();
+    later();
+    f.score(95);
+    // The staff queue lands after Gramps claimed the close and before it sends the winner.
+    const verify = f.auth.serverStaff.getMockImplementation()!;
+    let note: string | null | undefined;
+    f.auth.serverStaff.mockImplementation(async (actor: Staff, serverId: string) => {
+      if (f.record.state === "closing" && note === undefined) {
+        note = await staffQueued(queuer, "primary");
+        f.admin.staffQueuedSince.mockResolvedValue(true);
+      }
+      return verify(actor, serverId);
+    });
+    await f.service.tick();
+    expect(f.store.claimClose).toHaveBeenCalledWith(f.record.id, true);
+    expect(note).toBe(
+      "A community vote on this server is closing now and may still change the next map. Check Map votes.",
+    );
+    expect(f.admin.staffQueuedSince).toHaveBeenCalledWith("primary", f.record.createdAt);
+    expect(f.store.patchAutomation).not.toHaveBeenCalled();
+    expect(f.admin.act).not.toHaveBeenCalled();
+    expect(f.store.finish).toHaveBeenCalledWith(
+      f.record.id,
+      "cancelled",
+      "Staff queued the next map. Votes were not applied.",
+    );
+    // The existing ballot message is edited; nothing new is posted.
+    expect(f.discord.update).toHaveBeenCalledWith(
+      expect.objectContaining({ state: "cancelled", message: "Staff queued the next map. Votes were not applied." }),
+    );
+    expect(f.discord.publish).not.toHaveBeenCalled();
+  });
+  it.each([
+    ["the score reaches 100", { factionScores: leadingScores(100) }, 60],
+    // The game moves on to the next entry; the configuration's position follows the live status.
+    ["the map changes", { map: "Europe", rotation: { nowIndex: 1, nextIndex: 2 } }, 60],
+    ["the next map shows the old final scores", { map: "Europe", rotation: { nowIndex: 1, nextIndex: 2 } }, 92],
+    ["the scores reset", { factionScores: leadingScores(0) }, 60],
+  ] as [string, StatusPatch, number][])(
+    "cancels without queueing when %s before the close",
+    async (_, patch, leading) => {
+      const f = await openBallot({ leading });
+      await f.service.tick();
+      later();
+      f.status(patch);
+      if (patch.map) {
+        const settings = await f.game.configuration();
+        f.game.configuration.mockResolvedValue({
+          ...settings,
+          rotation: { ...settings.rotation, currentIndex: 1, currentMap: "Europe" },
+        });
+      }
+      await f.service.tick();
+      expect(f.store.cancel).toHaveBeenCalledWith(
+        f.record.id,
+        expect.any(String),
+        expect.anything(),
+        "The match ended before voting closed. The rotation continues.",
+        expect.any(String),
+      );
+      expect(f.admin.act).not.toHaveBeenCalled();
+    },
+  );
+  it("cancels when the round tracker sees a new round although the map and score still match", async () => {
+    const f = await openBallot({ leading: 30 });
+    f.status({ matchSeconds: 600 });
+    await f.service.tick();
+    expect(f.store.cancel).not.toHaveBeenCalled();
+    // The match clock restarts while the scoreboard and rotation position are unchanged.
+    later();
+    f.status({ matchSeconds: 5 });
+    await f.service.tick();
+    expect(f.store.cancel).toHaveBeenCalledWith(
+      f.record.id,
+      expect.any(String),
+      expect.anything(),
+      "The match ended before voting closed. The rotation continues.",
+      expect.any(String),
+    );
+    expect(f.admin.act).not.toHaveBeenCalled();
+  });
+  it.each([
+    [
+      "staff reorder the rotation",
+      (f: Awaited<ReturnType<typeof openBallot>>, settings: Awaited<ReturnType<typeof f.game.configuration>>) =>
+        f.game.configuration.mockResolvedValue({
+          ...settings,
+          rotation: {
+            ...settings.rotation,
+            entries: [settings.rotation.entries[0], ...settings.rotation.entries.slice(1).reverse()],
+          },
+        }),
+    ],
+    [
+      "the round tracker sees a new round",
+      (f: Awaited<ReturnType<typeof openBallot>>) => {
+        later(1_000);
+        f.status({ matchSeconds: 5 });
+      },
+    ],
+  ])("closes without queueing when %s between the close claim and the close", async (_, change) => {
+    const f = await openBallot({ leading: 80 });
+    f.status({ matchSeconds: 600 });
+    await f.service.tick();
+    const settings = await f.game.configuration();
+    const claim = f.store.claimClose.getMockImplementation()!;
+    f.store.claimClose.mockImplementation(async (...args: unknown[]) => {
+      const claimed = await claim(...args);
+      change(f, settings);
+      return claimed;
+    });
+    later();
+    f.status({ factionScores: leadingScores(95), matchSeconds: 615 });
+    await f.service.tick();
+    expect(f.store.claimClose).toHaveBeenCalled();
+    expect(f.admin.act).not.toHaveBeenCalled();
+    expect(f.store.finish).toHaveBeenCalledWith(f.record.id, "cancelled", expect.any(String));
+  });
+  it("never opens below the game's start threshold, even with a lower saved minimum", async () => {
+    const f = automatic("primary", { minPlayers: 10 });
+    const settings = await f.game.configuration();
+    f.game.configuration.mockResolvedValue({
+      ...settings,
+      fields: [{ id: "minRequiredPlayers", value: 30, editable: true }],
+    });
+    f.status({ players: { current: 25, max: 100 } });
+    await observeForWindow(f);
+    expect((await f.service.list(staff)).automatic).toMatchObject({
+      phase: "waiting_players",
+      message: "Waiting for 30 players before a ballot opens (25/100).",
+      players: { current: 25, required: 30 },
+    });
+    expect(f.discord.publish).not.toHaveBeenCalled();
+  });
+  it.each([
+    [86, 5_000],
+    [84, 15_000],
+  ])("at %s points, polls again after %s ms", async (leading, delay) => {
+    const f = await openBallot({ leading });
+    await f.service.tick();
+    const timers = jest.spyOn(global, "setTimeout");
+    f.service.onApplicationBootstrap();
+    expect(timers).toHaveBeenLastCalledWith(expect.any(Function), delay);
+    f.service.onModuleDestroy();
+    timers.mockRestore();
+  });
+  it("keeps an open ballot after a restart that reads the same round", async () => {
+    const f = await openBallot({ leading: 30 });
+    const restarted = f.make().service;
+    await restarted.tick();
+    expect(f.store.cancel).not.toHaveBeenCalled();
+    expect((await restarted.list(staff)).automatic?.message).toBe(
+      "Voting is open. Leading score: 30/100; closes at 95.",
+    );
+  });
+  it("closes one observed scoring step early when the next step could end the match", async () => {
+    const f = await openBallot({ leading: 70 });
+    for (const score of [70, 80, 88]) {
+      f.score(score);
+      await f.service.tick();
+      later();
+    }
+    expect(f.store.claimClose).not.toHaveBeenCalled();
+    expect(f.automation.maxStep).toBe(10);
+    f.score(90);
+    await f.service.tick();
+    expect(f.store.claimClose).toHaveBeenCalledWith(f.record.id, true);
+    expect(f.admin.act).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "map-next" }));
+  });
+  it("does not count a score jump across a read gap as one scoring step", async () => {
+    const f = await openBallot({ leading: 70 });
+    await f.service.tick();
+    later(25_000);
+    f.score(88);
+    await f.service.tick();
+    expect(f.automation.maxStep).toBe(0);
+    expect(f.store.claimClose).not.toHaveBeenCalled();
+  });
+  it("uses the configured close and reminder scores", async () => {
+    const f = await openBallot({
+      settings: { closeAtScore: 90, reminders: { midpoint: { score: 40 }, final: { score: 80 } } },
+      policy: { midpointReminder: true, finalReminder: true },
+    });
+    f.score(45);
+    await f.service.tick();
+    expect(f.discord.remind).toHaveBeenCalledWith(expect.anything(), "midpoint");
+    // Reads more than 20 seconds apart: no scoring step is inferred, so the vote stays open.
+    later(25_000);
+    f.score(80);
+    await f.service.tick();
+    expect(f.discord.remind).toHaveBeenLastCalledWith(expect.anything(), "final");
+    expect(broadcasts(f.admin)).toHaveLength(2);
+    for (const [actor, action] of broadcasts(f.admin)) {
+      expect(actor.id).toBe("system:map-vote-say:primary");
+      expect(action.message).toContain("Closes at 90 points");
+      expect(action.message.length).toBeLessThanOrEqual(200);
+    }
+    later();
+    f.score(90);
+    await f.service.tick();
+    expect(f.store.claimClose).toHaveBeenCalledWith(f.record.id, true);
+  });
+  it("skips a reminder whose score had passed when the ballot opened", async () => {
+    const f = await openBallot({ openedAt: 55, leading: 60, policy: { midpointReminder: true, finalReminder: true } });
+    await f.service.tick();
+    expect(f.discord.remind).not.toHaveBeenCalled();
+    later(25_000);
+    f.score(86);
+    await f.service.tick();
+    expect(f.discord.remind).toHaveBeenCalledTimes(1);
+    expect(f.discord.remind).toHaveBeenCalledWith(expect.anything(), "final");
+  });
+  it.each([
+    ["in Discord", { discord: true, inGame: false }, 1, 0, "Sent in Discord only."],
+    ["in game", { discord: false, inGame: true }, 0, 1, "In game only. Saved"],
+  ])("sends a reminder only %s when configured", async (_, channels, discord, game, message) => {
+    const f = await openBallot({ settings: { reminders: { midpoint: channels } }, policy: { midpointReminder: true } });
+    f.admin.act.mockResolvedValue({ state: "applied", message: "Saved" });
+    f.score(55);
+    await f.service.tick();
+    expect(f.discord.remind).toHaveBeenCalledTimes(discord);
+    expect(broadcasts(f.admin)).toHaveLength(game);
+    expect(f.store.finishReminder).toHaveBeenCalledWith(f.record.id, "midpoint", "applied", message);
+  });
+  it("sends the update reminder when only it is on, even at or above the switched-off last-chance score", async () => {
+    // The last-chance score stays at its default 85; saving accepts it because that reminder is off.
+    const f = await openBallot({
+      settings: { reminders: { midpoint: { score: 88 } } },
+      policy: { midpointReminder: true, finalReminder: false },
+    });
+    f.score(89);
+    await f.service.tick();
+    later();
+    f.score(90);
+    await f.service.tick();
+    expect(f.store.claimReminder.mock.calls.map(([, stage]) => stage)).toEqual(["midpoint", "midpoint"]);
+    expect(f.discord.remind).toHaveBeenCalledTimes(1);
+    expect(f.discord.remind).toHaveBeenCalledWith(expect.anything(), "midpoint");
+  });
+  it("sends only the reminder the ballot opened with, not one switched on later", async () => {
+    const f = await openBallot({ policy: { midpointReminder: false, finalReminder: true } });
+    // Staff switch the update reminder on after the ballot opened; the ballot keeps its own switches.
+    f.saved.policy = { ...f.saved.policy, midpointReminder: true };
+    f.score(60);
+    await f.service.tick();
+    expect(f.store.claimReminder).not.toHaveBeenCalled();
+    later(25_000);
+    f.score(86);
+    await f.service.tick();
+    expect(f.discord.remind).toHaveBeenCalledTimes(1);
+    expect(f.discord.remind).toHaveBeenCalledWith(expect.anything(), "final");
+  });
+  it("announces an automatic ballot in game once, as the voting system", async () => {
+    const f = automatic("primary", { announce: { openInGame: true } });
+    await observeForWindow(f);
+    expect(f.discord.publish).toHaveBeenCalledTimes(1);
+    expect(broadcasts(f.admin)).toEqual([
+      [
+        expect.objectContaining({ id: "system:map-vote-say:primary", role: "admin" }),
+        expect.objectContaining({
+          action: "broadcast",
+          message: "Next round vote is open in Discord #map-voting: Ozeti, Islands. Closes at 95 points.",
+        }),
+      ],
+    ]);
+  });
+  it("announces a queued or tied result in game without sharing the queue's actor", async () => {
+    const queued = await openBallot({ settings: { announce: { resultInGame: true } } });
+    queued.score(95);
+    await queued.service.tick();
+    expect(
+      (queued.admin.act.mock.calls as [Staff, { action: string }][]).map(([actor, action]) => [
+        actor.id,
+        action.action,
+      ]),
+    ).toEqual([
+      ["system:map-vote:primary", "map-next"],
+      ["system:map-vote-say:primary", "broadcast"],
+    ]);
+    expect(broadcasts(queued.admin)[0][1].message).toBe("Vote result: Islands is next (3 of 5 votes).");
+    const tied = await openBallot({ settings: { announce: { resultInGame: true } } });
+    tied.store.claimClose.mockImplementation(async () => {
+      tied.record.state = "closing";
+      tied.record.counts = [2, 2];
+      tied.record.winner = null;
+      return { ...tied.record };
+    });
+    tied.store.finish.mockImplementation(async (id: string, state: string, message: string) => ({
+      ...tied.record,
+      id,
+      state,
+      message,
+    }));
+    tied.score(95);
+    await tied.service.tick();
+    expect(broadcasts(tied.admin).map(([, action]) => action.message)).toEqual([
+      "Vote tied: the rotation continues with Ozeti Normal.",
+    ]);
+  });
+  it("records a winner that is already next without a game write", async () => {
+    const f = await openBallot();
+    f.store.claimClose.mockImplementation(async () => {
+      f.record.state = "closing";
+      f.record.counts = [4, 1];
+      f.record.winner = 0;
+      return { ...f.record };
+    });
+    f.score(95);
+    await f.service.tick();
+    expect(f.admin.act).not.toHaveBeenCalled();
+    expect(f.store.finish).toHaveBeenCalledWith(
+      f.record.id,
+      "queued",
+      "Ozeti · Normal was already next. The rotation was left unchanged.",
+    );
+  });
+  /** A ballot opened on the last entry (Islands) after the game confirmed it returns to entry 1. */
+  async function lastRowBallot() {
+    const f = await openBallot();
+    const settings = await f.game.configuration();
+    f.game.configuration.mockResolvedValue({
+      ...settings,
+      rotation: { ...settings.rotation, currentIndex: 2, currentMap: "Islands" },
+    });
+    f.game.catalog.mockResolvedValue({
+      maps: [{ id: "Kavkazi" }, { id: "Europe" }, { id: "Islands" }],
+      experiences: [],
+      lightings: [],
+    });
+    Object.assign(f.record, { currentIndex: 2, currentMap: "Islands" });
+    f.record.choices = [
+      { map: "Kavkazi", experiences: [] },
+      { map: "Europe", experiences: [] },
+    ];
+    Object.assign(f.automation.round!, { map: "Islands", index: 2 });
+    Object.assign(f.automation.rotation!, {
+      currentIndex: 2,
+      nextSlot: 0,
+      nextKey: voteChoiceKey(settings.rotation.entries[0]),
+    });
+    f.status({ map: "Islands", rotation: { nowIndex: 2, nextIndex: 0 } });
+    // Europe, an earlier row, wins: planned as a swap into the first slot.
+    return f;
+  }
+  it("swaps an earlier winner into the first slot after the last entry while the game confirms the wrap", async () => {
+    const f = await lastRowBallot();
+    f.score(95);
+    await f.service.tick();
+    expect(f.store.patchAutomation).toHaveBeenCalledWith(
+      f.record.id,
+      { queue: expect.objectContaining({ kind: "swap" }) },
+      ["closing"],
+    );
+    expect(f.admin.act).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "system:map-vote:primary" }),
+      expect.objectContaining({ action: "map-next", currentIndex: 2, nextSlot: 0 }),
+    );
+    expect(actionSchema.safeParse(f.admin.act.mock.calls[0][1]).success).toBe(true);
+  });
+  it("closes without queueing when the game stops confirming the wrap before the close", async () => {
+    const f = await lastRowBallot();
+    f.score(30);
+    await f.service.tick();
+    later();
+    // A transient read omits nextIndex: Europe would be appended as a duplicate last row.
+    f.status({ factionScores: leadingScores(95), rotation: { nowIndex: 2, nextIndex: null } });
+    await f.service.tick();
+    expect(f.store.claimClose).toHaveBeenCalled();
+    expect(f.admin.act).not.toHaveBeenCalled();
+    expect(f.store.patchAutomation).not.toHaveBeenCalledWith(
+      f.record.id,
+      expect.objectContaining({ queue: expect.anything() }),
+      expect.anything(),
+    );
+    expect(f.store.finish).toHaveBeenCalledWith(
+      f.record.id,
+      "cancelled",
+      "The game no longer confirms it returns to entry 1 after the last entry, so the winner was not queued. The rotation continues.",
+    );
+  });
+  it("closes cleanly and keeps voting automatic when the game refuses the winner", async () => {
+    const f = await openBallot();
+    f.admin.act.mockResolvedValue({ state: "failed", message: "Keep the rotation to 100 entries or fewer." });
+    f.score(95);
+    await f.service.tick();
+    expect(f.store.finish).toHaveBeenCalledWith(
+      f.record.id,
+      "cancelled",
+      "Not queued: Keep the rotation to 100 entries or fewer. The rotation continues.",
+      { outcome: "refused" },
+    );
+  });
+});
+
+describe("ballots that need review", () => {
+  beforeEach(() => jest.useFakeTimers().setSystemTime(now));
+  afterEach(() => jest.useRealTimers());
+  async function review(patch: Partial<MapVoteRecord> = {}, automation: Partial<VoteAutomation> = {}) {
+    const f = await openBallot();
+    const vote: MapVoteRecord = {
+      ...f.record,
+      state: "needs_review",
+      message: "Discord publication could not be confirmed.",
+      createdAt: new Date(now.getTime() - 180_000),
+      updatedAt: new Date(now.getTime() - 180_000),
+      ...patch,
+      automation: { ...f.automation, ...automation },
+    };
+    f.store.needsReview.mockResolvedValue([vote]);
+    f.store.history.mockImplementation(async () => [vote]);
+    f.store.automaticOpen.mockResolvedValue([]);
+    return { ...f, vote };
+  }
+  const queue = { receiptId: "r", before: "b", after: "a", kind: "move" as const };
+  it("closes a late-published ballot without counting it", async () => {
+    const f = await review({ messageId: null });
+    f.discord.findBallotMessage.mockResolvedValue("999999999999999999");
+    await f.service.tick();
+    expect(f.store.resolveReview).toHaveBeenCalledWith(
+      f.vote.id,
+      "cancelled",
+      "Published late; closed without counting. A new ballot opens next round.",
+      expect.objectContaining({
+        outcome: "unposted",
+        resolution: expect.objectContaining({ by: "system:reconcile" }),
+      }),
+      "999999999999999999",
+    );
+    expect(f.discord.update).toHaveBeenCalled();
+    expect(f.discord.publish).not.toHaveBeenCalled();
+  });
+  it("closes an unposted ballot after two minutes, but not while Discord is unreachable", async () => {
+    const posted = await review({ messageId: null });
+    await posted.service.tick();
+    expect(posted.store.resolveReview).toHaveBeenCalledWith(
+      posted.vote.id,
+      "cancelled",
+      "The ballot could not be posted. A new ballot opens next round.",
+      expect.objectContaining({ outcome: "unposted" }),
+      undefined,
+    );
+    const young = await review({ messageId: null, createdAt: now });
+    await young.service.tick();
+    const offline = await review({ messageId: null });
+    offline.discord.findBallotMessage.mockRejectedValue(new Error("Discord is not ready"));
+    await offline.service.tick();
+    expect(young.store.resolveReview).not.toHaveBeenCalled();
+    expect(offline.store.resolveReview).not.toHaveBeenCalled();
+  });
+  it.each([
+    ["the rotation already shows the winner", "after", null, "queued"],
+    ["the rotation is unchanged", "before", null, "cancelled"],
+    ["the receipt confirms the write", "neither", "pending", "queued"],
+    ["the receipt shows a refusal", "neither", "failed", "cancelled"],
+    ["no receipt exists", "neither", null, "cancelled"],
+  ] as const)("settles an unconfirmed queue when %s", async (_, match, receipt, state) => {
+    const settings = await fixture().game.configuration();
+    const current = rotationFingerprint(settings.rotation);
+    const f = await review(
+      {},
+      {
+        queue: {
+          ...queue,
+          before: match === "before" ? current : "before",
+          after: match === "after" ? current : "after",
+        },
+      },
+    );
+    f.admin.receipt.mockResolvedValue({ record: receipt ? { state: receipt, message: "Refused." } : null });
+    await f.service.tick();
+    expect(f.store.resolveReview).toHaveBeenCalledWith(
+      f.vote.id,
+      state,
+      expect.any(String),
+      expect.objectContaining({ resolution: expect.objectContaining({ to: state }) }),
+      undefined,
+    );
+    if (receipt === "failed") expect(f.store.resolveReview.mock.calls[0][3]).toMatchObject({ outcome: "refused" });
+  });
+  it("alerts staff once after two minutes and once more after thirty, and shows the pause", async () => {
+    const f = await review({}, { queue });
+    f.admin.receipt.mockResolvedValue({ record: { state: "unknown", message: "Unconfirmed." } });
+    await f.service.tick();
+    expect(f.store.resolveReview).not.toHaveBeenCalled();
+    expect(f.alerts.send).toHaveBeenCalledTimes(1);
+    expect(f.alerts.send).toHaveBeenCalledWith(
+      "primary",
+      `map-vote-review:${f.vote.id}`,
+      expect.stringContaining("needs staff review"),
+    );
+    expect(f.store.patchAutomation).toHaveBeenCalledWith(
+      f.vote.id,
+      { alert: { firstAt: now.toISOString(), lastAt: now.toISOString(), count: 1 } },
+      ["needs_review"],
+    );
+    expect((await f.service.list(staff)).automatic).toMatchObject({
+      phase: "paused_review",
+      message: "Paused: the 09:57 UTC ballot needs staff review: Discord publication could not be confirmed.",
+    });
+    f.vote.automation!.alert = { firstAt: now.toISOString(), lastAt: now.toISOString(), count: 1 };
+    later(10 * 60_000);
+    await f.service.tick();
+    expect(f.alerts.send).toHaveBeenCalledTimes(1);
+    later(21 * 60_000);
+    await f.service.tick();
+    expect(f.alerts.send).toHaveBeenCalledTimes(2);
+    f.vote.automation!.alert = { firstAt: now.toISOString(), lastAt: now.toISOString(), count: 2 };
+    later(60 * 60_000);
+    await f.service.tick();
+    expect(f.alerts.send).toHaveBeenCalledTimes(2);
+  });
+  it("does not alert during the first two minutes of review", async () => {
+    const f = await review({ updatedAt: now }, { queue });
+    f.admin.receipt.mockResolvedValue({ record: { state: "started", message: "Started." } });
+    await f.service.tick();
+    expect(f.store.resolveReview).not.toHaveBeenCalled();
+    expect(f.alerts.send).not.toHaveBeenCalled();
+  });
+  it("pauses after three refused results under the same controls until they are saved again", async () => {
+    const f = automatic();
+    const refused = (minutes: number): MapVoteRecord => ({
+      ...f.record,
+      id: randomUUID(),
+      state: "cancelled",
+      message: "Not queued: The current round changed. The rotation continues.",
+      createdAt: new Date(now.getTime() - minutes * 60_000),
+      automation: {
+        policy: defaultVotingPolicy,
+        highestScore: 95,
+        reminders: {},
+        policyVersion: 1,
+        outcome: "refused",
+      },
+    });
+    const history = [refused(20), refused(60), refused(100)];
+    f.store.history.mockResolvedValue(history);
+    await f.service.tick();
+    expect((await f.service.list(staff)).automatic).toMatchObject({
+      phase: "paused",
+      message:
+        "Paused after 3 refused results (Not queued: The current round changed. The rotation continues.). Save the voting controls to resume.",
+    });
+    expect(f.alerts.send).toHaveBeenCalledTimes(1);
+    expect(f.store.patchAutomation).toHaveBeenCalledWith(
+      history[0].id,
+      expect.objectContaining({ alert: expect.anything() }),
+      ["cancelled"],
+    );
+    history[0].automation!.alert = { firstAt: now.toISOString(), lastAt: now.toISOString(), count: 1 };
+    await f.service.tick();
+    expect(f.alerts.send).toHaveBeenCalledTimes(1);
+    f.saved.version = 2;
+    await f.service.tick();
+    expect((await f.service.list(staff)).automatic?.phase).not.toBe("paused");
+  });
+  it("keeps voting automatic after 50v50 winners that could not start", async () => {
+    const f = automatic();
+    const unready = (minutes: number): MapVoteRecord => ({
+      ...f.record,
+      id: randomUUID(),
+      state: "cancelled",
+      message: "50v50 could not start: 75 of 80 players online. Ozeti plays with normal teams.",
+      createdAt: new Date(now.getTime() - minutes * 60_000),
+      automation: {
+        policy: defaultVotingPolicy,
+        highestScore: 95,
+        reminders: {},
+        policyVersion: 1,
+        outcome: "fifty_unready",
+      },
+    });
+    f.store.history.mockResolvedValue([unready(20), unready(60), unready(100)]);
+    await f.service.tick();
+    expect((await f.service.list(staff)).automatic?.phase).not.toBe("paused");
+    expect(f.alerts.send).not.toHaveBeenCalled();
+  });
+});
+
+describe("customizable voting controls", () => {
+  beforeEach(() => jest.useFakeTimers().setSystemTime(now));
+  afterEach(() => jest.useRealTimers());
+  const stored = {
+    ...defaultVotingPolicy,
+    settings: {
+      closeAtScore: 90,
+      source: "pool",
+      pool: [
+        { map: "Europe", experiences: [] },
+        { map: "Islands", experiences: [] },
+      ],
+    },
+  } as StoredVotingPolicy;
+  function saving() {
+    const f = fixture(false);
+    let written: StoredVotingPolicy | null = null;
+    f.store.savePolicy.mockImplementation(
+      async (_server: string, _version: number, next: (previous: StoredVotingPolicy) => StoredVotingPolicy) => {
+        written = next(stored);
+        return { saved: written, closed: [] };
+      },
+    );
+    return { ...f, written: () => written! };
+  }
+  it("keeps saved settings when the original dashboard saves only the switches", async () => {
+    const f = saving();
+    await f.service.saveControls(staff, {
+      serverId: "primary",
+      version: 3,
+      policy: { ...defaultVotingPolicy, modeChoices: true },
+    });
+    expect(f.written()).toMatchObject({ ...defaultVotingPolicy, modeChoices: true });
+    expect(f.written().settings).toMatchObject({ closeAtScore: 90, source: "pool", pool: stored.settings!.pool });
+  });
+  it("merges a partial settings save and replaces the map pool whole", async () => {
+    const f = saving();
+    const pool = [
+      { map: "Kavkazi", experiences: [] },
+      { map: "Islands", experiences: [] },
+    ];
+    await f.service.saveControls(staff, {
+      serverId: "primary",
+      version: 3,
+      policy: defaultVotingPolicy,
+      settings: { reminders: { final: { score: 80 } }, pool },
+    });
+    expect(f.written().settings).toMatchObject({
+      closeAtScore: 90,
+      reminders: {
+        midpoint: defaultVotingSettings.reminders.midpoint,
+        final: { score: 80, discord: true, inGame: true },
+      },
+      pool,
+    });
+  });
+  it.each([
+    [
+      { openScoreCeiling: 88 },
+      ["settings", "openScoreCeiling"],
+      "Close score must be at least 5 points above the opening ceiling.",
+    ],
+    [{ optionCount: 9 }, ["settings", "optionCount"], "Options per ballot must be a whole number from 2 to 5."],
+  ])("names the field of an invalid setting: %j", async (settings, path, message) => {
+    const f = saving();
+    const error = await f.service
+      .saveControls(staff, { serverId: "primary", version: 3, policy: defaultVotingPolicy, settings })
+      .catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(HttpException);
+    expect((error as HttpException).getStatus()).toBe(400);
+    expect((error as HttpException).getResponse()).toMatchObject({ message, path });
+  });
+  it("refuses to save 50v50 as offered while it is held, and switches a stored offer off", async () => {
+    const f = saving();
+    const error = await f.service
+      .saveControls(staff, {
+        serverId: "primary",
+        version: 3,
+        policy: defaultVotingPolicy,
+        settings: { fiftyFifty: { offered: true } },
+      })
+      .catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(HttpException);
+    expect((error as HttpException).getResponse()).toMatchObject({
+      statusCode: 400,
+      path: ["settings", "fiftyFifty", "offered"],
+      message: "Leave the 50v50 option off: voted 50v50 is held for the owner's in-person review.",
+    });
+    // An offer saved earlier never blocks a save of the switches, such as switching voting off.
+    const earlier = {
+      ...stored,
+      settings: { ...stored.settings, fiftyFifty: { offered: true, minPlayers: 60 } },
+    } as StoredVotingPolicy;
+    f.store.savePolicy.mockImplementation(
+      async (_server: string, _version: number, next: (previous: StoredVotingPolicy) => StoredVotingPolicy) => ({
+        saved: next(earlier),
+        closed: [],
+      }),
+    );
+    await f.service.saveControls(staff, { serverId: "primary", version: 3, policy: defaultVotingPolicy });
+    const [[, , next]] = f.store.savePolicy.mock.calls.slice(-1) as [
+      string,
+      number,
+      (previous: StoredVotingPolicy) => StoredVotingPolicy,
+    ][];
+    expect(next(earlier).settings?.fiftyFifty).toMatchObject({ offered: false, minPlayers: 60 });
+    // Once the owner has reviewed it, the offer can be saved.
+    f.environment.MAP_VOTES_FIFTY_ENABLED = true;
+    await f.service.saveControls(staff, {
+      serverId: "primary",
+      version: 3,
+      policy: defaultVotingPolicy,
+      settings: { fiftyFifty: { offered: true } },
+    });
+    const [[, , owned]] = f.store.savePolicy.mock.calls.slice(-1) as [
+      string,
+      number,
+      (previous: StoredVotingPolicy) => StoredVotingPolicy,
+    ][];
+    expect(owned(stored).settings?.fiftyFifty).toMatchObject({ offered: true });
+  });
+  it("enforces the request shape and reports a concurrent save", async () => {
+    const f = saving();
+    await expect(
+      f.service.saveControls(staff, { serverId: "primary", version: 3, policy: defaultVotingPolicy, extra: 1 }),
+    ).rejects.toMatchObject({ status: 400, message: "Review the voting controls for the selected server." });
+    await expect(
+      f.service.saveControls(staff, {
+        serverId: "primary",
+        version: 3,
+        policy: { ...defaultVotingPolicy, settings: {} },
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+    f.store.savePolicy.mockRejectedValue(new ConflictException("Voting controls changed. Refresh before saving."));
+    await expect(
+      f.service.saveControls(staff, { serverId: "primary", version: 3, policy: defaultVotingPolicy }),
+    ).rejects.toMatchObject({ status: 409 });
+  });
+  it("returns only the five switches as the policy, with settings, limits and game context", async () => {
+    const f = fixture(false);
+    f.store.policy.mockResolvedValue({
+      serverId: "primary",
+      version: 4,
+      actorId: staff.id,
+      connectionHash: f.record.connectionHash,
+      policy: stored,
+    });
+    const controls = await f.service.controls(staff);
+    expect(controls.policy).toEqual(defaultVotingPolicy);
+    expect(controls.settings).toMatchObject({ closeAtScore: 90, source: "pool", optionCount: 3 });
+    expect(controls.limits?.optionCount).toEqual({ min: 2, max: 5 });
+    expect(controls.context).toMatchObject({
+      startThreshold: 20,
+      factions: [],
+      routes: { kill: false, message: false },
+    });
+  });
+});
+
+describe("previewing the next automatic ballot", () => {
+  beforeEach(() => jest.useFakeTimers().setSystemTime(now));
+  afterEach(() => jest.useRealTimers());
+  it("shows the options a draft would offer and why no ballot would open yet, without recording anything", async () => {
+    const f = automatic();
+    f.status({ players: { current: 23, max: 100 } });
+    const preview = await f.service.preview(staff, {
+      serverId: "primary",
+      settings: { minPlayers: 20, optionCount: 2 },
+    });
+    expect(preview).toMatchObject({
+      phase: "waiting_delay",
+      blocked: "Opens in 3:00, 180 seconds into the round.",
+      players: { current: 23, required: 20 },
+      next: { label: "Ozeti · Map defaults" },
+      options: [
+        { label: "Ozeti · Normal", kind: "map", placement: "already-next" },
+        { label: "Islands · Normal", kind: "map", placement: "move" },
+      ],
+      fifty: { offered: false },
+    });
+    expect(f.rounds.current("primary")).toBeNull();
+    expect(f.store.create).not.toHaveBeenCalled();
+    expect(f.store.savePolicy).not.toHaveBeenCalled();
+    expect(f.discord.publish).not.toHaveBeenCalled();
+    expect(f.admin.act).not.toHaveBeenCalled();
+    await expect(f.service.preview(staff, { serverId: "primary" })).rejects.toMatchObject({ status: 429 });
+    later(5_000);
+    expect((await f.service.preview(staff, { serverId: "primary" })).blocked).toBe(
+      "Waiting for 40 players before a ballot opens (23/100).",
+    );
+  });
+  it("refuses an invalid draft or another server", async () => {
+    const f = automatic();
+    await expect(f.service.preview(staff, { serverId: "primary", settings: { optionCount: 7 } })).rejects.toMatchObject(
+      { status: 400 },
+    );
+    later(5_000);
+    await expect(f.service.preview(staff, { serverId: "other" })).rejects.toMatchObject({ status: 400 });
+  });
+});
+
+describe("a 50v50 option on automatic ballots", () => {
+  beforeEach(() => jest.useFakeTimers().setSystemTime(now));
+  afterEach(() => jest.useRealTimers());
+  const offered = { fiftyFifty: { offered: true, minPlayers: 40, minVotes: 3 } };
+  /** The owner has reviewed voted 50v50 and switched MAP_VOTES_FIFTY_ENABLED on. */
+  const reviewed = <T extends { environment: Record<string, unknown> }>(f: T) => {
+    f.environment.MAP_VOTES_FIFTY_ENABLED = true;
+    return f;
+  };
+  it("never offers or checks 50v50 while it is held for the owner's review, even with events on and every check passing", async () => {
+    const f = automatic("primary", offered);
+    f.environment.SERVER_EVENTS_ENABLED = true;
+    f.events.voteEventReadiness.mockResolvedValue({ ok: true });
+    f.game.capabilities.mockResolvedValue({ routes: ["PATCH /v1/players/{id}", "POST /v1/broadcast"] });
+    await observeForWindow(f);
+    expect(f.store.create.mock.calls[0][0].choices).toEqual([
+      { map: "Europe", experiences: [] },
+      { map: "Islands", experiences: [] },
+    ]);
+    expect(f.events.voteEventReadiness).not.toHaveBeenCalled();
+    const held = { offered: false, reason: "50v50 not offered: voted 50v50 is held for the owner's in-person review." };
+    expect((await f.service.list(staff)).automatic?.fifty).toEqual(held);
+    const preview = await f.service.preview(staff, { serverId: "primary", settings: offered });
+    expect(preview.fifty).toEqual(held);
+    expect((await f.service.setup(staff)).checks.find((check) => check.label === "50v50 option")).toEqual({
+      label: "50v50 option",
+      status: "review",
+      message: "Saved as offered, but voted 50v50 is held for the owner's in-person review. Ballots never offer it.",
+    });
+    expect((await f.service.controls(staff)).context?.fifty).toEqual({
+      available: false,
+      message: expect.stringContaining("Voted 50v50 is held for the owner's in-person review"),
+    });
+    expect(f.events.voteEventReadiness).not.toHaveBeenCalled();
+  });
+  it("offers 50v50 on the next entry as the last option only when every readiness check passes", async () => {
+    const waiting = reviewed(automatic("primary", offered));
+    waiting.events.voteEventReadiness.mockResolvedValue({ ok: false, reason: "64 of 80 players online" });
+    await observeForWindow(waiting);
+    expect(waiting.store.create.mock.calls[0][0].choices).toEqual([
+      { map: "Europe", experiences: [] },
+      { map: "Islands", experiences: [] },
+    ]);
+    expect((await waiting.service.list(staff)).automatic?.fifty).toEqual({
+      offered: false,
+      reason: "50v50 not offered: 64 of 80 players online.",
+    });
+    const ready = reviewed(automatic("primary", offered));
+    ready.events.voteEventReadiness.mockResolvedValue({ ok: true });
+    await observeForWindow(ready);
+    expect(ready.store.create.mock.calls[0][0].choices).toEqual([
+      { map: "Europe", experiences: [] },
+      { map: "Islands", experiences: [] },
+      { map: "Europe", experiences: [], event: "50v50" },
+    ]);
+    // The readiness check receives the settings, the live round and the automatic ballots for the cooldown.
+    expect(ready.events.voteEventReadiness).toHaveBeenCalledWith(
+      "primary",
+      expect.objectContaining({ offered: true, minPlayers: 40 }),
+      expect.objectContaining({ revision: "r1" }),
+      expect.objectContaining({ status: expect.objectContaining({ map: "Kavkazi" }) }),
+      expect.objectContaining({ phase: "live" }),
+      [],
+    );
+    expect((await ready.service.list(staff)).automatic?.fifty).toEqual({
+      offered: true,
+      reason: "Offered as the last option.",
+    });
+    const off = automatic();
+    await observeForWindow(off);
+    expect(off.events.voteEventReadiness).not.toHaveBeenCalled();
+  });
+  /** An open ballot whose 50v50 option won outright with 8 of 10 votes. */
+  async function fiftyWon(settings: DeepPartial<VotingSettings> = offered) {
+    const f = reviewed(await openBallot({ settings: settings as DeepPartial<VotingSettings> }));
+    f.record.choices = [
+      { map: "Europe", experiences: [] },
+      { map: "Europe", experiences: [], event: "50v50" },
+    ];
+    f.store.claimClose.mockImplementation(async () => {
+      f.record.state = "closing";
+      f.record.counts = [2, 8];
+      f.record.winner = 1;
+      return { ...f.record };
+    });
+    f.store.finish.mockImplementation(
+      async (id: string, state: string, message: string, patch?: Partial<VoteAutomation>) => ({
+        ...f.record,
+        id,
+        state,
+        message,
+        automation: { ...f.record.automation!, ...patch },
+      }),
+    );
+    f.score(95);
+    return f;
+  }
+  it("arms the event for the next round without any queue change or result broadcast", async () => {
+    const f = await fiftyWon({ ...offered, announce: { resultInGame: true } });
+    f.saved.actorName = "Dennis";
+    await f.service.tick();
+    expect(f.events.startFromVote).toHaveBeenCalledWith({
+      voteId: f.record.id,
+      serverId: "primary",
+      actor: expect.objectContaining({ id: staff.id, name: "Dennis", role: "admin" }),
+      fifty: expect.objectContaining({ offered: true, minPlayers: 40, minVotes: 3, rounds: 1, autoEnd: true }),
+      // The offer minimum less 10 players who may leave as the voted round ends.
+      minPlayers: 30,
+      votes: 8,
+      total: 10,
+      label: "Ozeti",
+    });
+    expect(f.admin.act).not.toHaveBeenCalled();
+    expect(f.store.patchAutomation).not.toHaveBeenCalledWith(
+      f.record.id,
+      expect.objectContaining({ queue: expect.anything() }),
+      expect.anything(),
+    );
+    expect(f.store.finish).toHaveBeenCalledWith(
+      f.record.id,
+      "queued",
+      "50v50 chosen (8 of 10 votes). Next round on Ozeti runs as 50v50; teams are sorted at round start; normal teams return after 1 round.",
+      { event: { id: f.record.id } },
+    );
+  });
+  it.each([
+    [
+      "too few votes",
+      { ...offered, fiftyFifty: { ...offered.fiftyFifty, minVotes: 9 } },
+      "50v50 won but it needed 9 votes and had 8. The rotation continues with normal teams.",
+    ],
+    [
+      "too few players at the close",
+      { ...offered, fiftyFifty: { ...offered.fiftyFifty, minPlayers: 80 } },
+      "50v50 won but only 60 players are online (70 needed). The rotation continues with normal teams.",
+    ],
+  ] as const)("keeps normal teams when there are %s", async (_, settings, message) => {
+    const f = await fiftyWon(settings as DeepPartial<VotingSettings>);
+    await f.service.tick();
+    expect(f.events.startFromVote).not.toHaveBeenCalled();
+    expect(f.admin.act).not.toHaveBeenCalled();
+    expect(f.store.finish).toHaveBeenCalledWith(f.record.id, "cancelled", message);
+  });
+  it("keeps normal teams when 50v50 wins a ballot that opened before the owner's flag was switched off", async () => {
+    const f = await fiftyWon();
+    f.environment.MAP_VOTES_FIFTY_ENABLED = false;
+    await f.service.tick();
+    expect(f.events.startFromVote).not.toHaveBeenCalled();
+    expect(f.admin.act).not.toHaveBeenCalled();
+    expect(f.store.finish).toHaveBeenCalledWith(
+      f.record.id,
+      "cancelled",
+      "50v50 won but voted 50v50 is held for the owner's in-person review. The rotation continues with normal teams.",
+    );
+  });
+  it("keeps normal teams when the event refuses cleanly", async () => {
+    const f = await fiftyWon();
+    f.events.startFromVote.mockRejectedValue(
+      new ConflictException("Another optional event is active or needs review."),
+    );
+    await f.service.tick();
+    expect(f.store.finish).toHaveBeenCalledWith(
+      f.record.id,
+      "cancelled",
+      "50v50 could not start: Another optional event is active or needs review. Ozeti plays with normal teams; the rotation was left unchanged.",
+      // Not a queue refusal: it never counts towards pausing automatic voting.
+      { outcome: "fifty_unready" },
+    );
+    expect(f.admin.act).not.toHaveBeenCalled();
+  });
+  it.each([
+    ["recorded", { state: "preparing" }, "queued"],
+    ["missing", null, "needs_review"],
+  ] as const)(
+    "settles an unexpected start error from the event store when the event is %s",
+    async (_, event, state) => {
+      const f = await fiftyWon();
+      f.events.startFromVote.mockRejectedValue(new Error("connection reset"));
+      f.events.voteEvent.mockResolvedValue(event);
+      await f.service.tick();
+      expect(f.store.finish).toHaveBeenCalledWith(
+        f.record.id,
+        state,
+        expect.any(String),
+        ...(state === "queued" ? [{ event: { id: f.record.id } }] : []),
+      );
+    },
+  );
+  it.each([
+    ["the event is recorded", { state: "preparing" }, "queued"],
+    ["no event was recorded", null, "cancelled"],
+  ] as const)("rechecks an unconfirmed 50v50 start when %s", async (_, event, state) => {
+    const f = await openBallot();
+    const vote: MapVoteRecord = {
+      ...f.record,
+      state: "needs_review",
+      winner: 1,
+      counts: [2, 8],
+      choices: [
+        { map: "Europe", experiences: [] },
+        { map: "Europe", experiences: [], event: "50v50" },
+      ],
+      message: "The 50v50 start is unconfirmed.",
+      updatedAt: new Date(now.getTime() - 180_000),
+    };
+    f.store.needsReview.mockResolvedValue([vote]);
+    f.store.history.mockImplementation(async () => [vote]);
+    f.store.automaticOpen.mockResolvedValue([]);
+    f.events.voteEvent.mockResolvedValue(event);
+    await f.service.tick();
+    expect(f.store.resolveReview).toHaveBeenCalledWith(
+      vote.id,
+      state,
+      expect.any(String),
+      expect.objectContaining({ resolution: expect.objectContaining({ to: state }) }),
+      undefined,
+    );
+    // No map-next was sent for a 50v50, so the action receipt is never consulted.
+    expect(f.admin.receipt).not.toHaveBeenCalled();
+  });
+  it("shows and alerts staff once when a voted 50v50 needs review", async () => {
+    const f = automatic();
+    const linked = {
+      ...f.record,
+      state: "queued" as const,
+      automation: { policy: defaultVotingPolicy, highestScore: 95, reminders: {}, event: { id: f.record.id } },
+    };
+    f.store.history.mockResolvedValue([linked]);
+    f.events.voteEvent.mockResolvedValue({ state: "needs_review", stop: null, message: "The endpoint changed." });
+    await f.service.tick();
+    await f.service.tick();
+    expect(f.alerts.send).toHaveBeenCalledTimes(1);
+    expect(f.alerts.send).toHaveBeenCalledWith(
+      "primary",
+      `event-review:${f.record.id}`,
+      expect.stringContaining("needs staff review"),
+    );
+    expect((await f.service.list(staff)).automatic?.alert?.message).toContain(
+      "The 50v50 chosen by the 10:00 UTC ballot needs staff review: The endpoint changed.",
+    );
+    f.events.voteEvent.mockResolvedValue({ state: "complete", stop: null, message: "Done." });
+    await f.service.tick();
+    expect((await f.service.list(staff)).automatic?.alert).toBeFalsy();
+  });
+  it("reports 50v50 readiness in setup and the controls context", async () => {
+    const f = reviewed(automatic("primary", offered));
+    f.environment.SERVER_EVENTS_ENABLED = true;
+    f.events.voteEventReadiness.mockResolvedValue({ ok: false, reason: "the server is waiting for players" });
+    const setup = await f.service.setup(staff);
+    expect(setup.checks.find((check) => check.label === "50v50 option")).toEqual({
+      label: "50v50 option",
+      status: "review",
+      message: "Offered, but not right now: the server is waiting for players.",
+    });
+    f.game.capabilities.mockResolvedValue({ routes: ["PATCH /v1/players/{id}", "POST /v1/broadcast"] });
+    expect((await f.service.controls(staff)).context?.fifty).toMatchObject({ available: true });
+    f.environment.SERVER_EVENTS_ENABLED = false;
+    expect((await f.service.controls(staff)).context?.fifty).toMatchObject({
+      available: false,
+      message: expect.stringContaining("Optional events are off in Gramps"),
+    });
+  });
 });

@@ -32,7 +32,17 @@ export class AdminExceptionFilter implements ExceptionFilter {
       error instanceof HttpException
         ? error.message
         : "The dashboard is unavailable. Check its connection and database setup.";
-    res.status(status).json({ message });
+    // A locally raised validation error may name the field it refers to, so forms can highlight it.
+    const response = error instanceof HttpException ? error.getResponse() : null;
+    const path =
+      response && typeof response === "object" && "path" in response && Array.isArray(response.path)
+        ? response.path
+        : null;
+    const field =
+      path && path.length <= 10 && path.every((part) => typeof part === "string" || typeof part === "number")
+        ? path.map((part) => String(part).slice(0, 60))
+        : null;
+    res.status(status).json(field ? { message, path: field } : { message });
   }
 }
 

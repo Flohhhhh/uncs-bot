@@ -101,6 +101,11 @@ export const actionSchema = z.discriminatedUnion("action", [
       currentIndex: z.number().int().min(0),
       currentMap: selection,
       entry: mapSelectionSchema,
+      /**
+       * The rotation slot the choice was planned for. Automatic ballots send it so a write is refused when
+       * the game no longer reports the same next slot (such as the wrap to entry 1 after the last entry).
+       */
+      nextSlot: z.number().int().min(0).max(100).optional(),
     })
     .strict(),
   z.object({ ...player, action: z.literal("kick") }).strict(),

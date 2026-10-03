@@ -40,15 +40,17 @@ export function zoneLabel(id: string) {
     );
   return match ? match[2].replace(/([a-z])([A-Z])/g, "$1 $2") : id;
 }
-export function selectionDetails(entry: MapSelection) {
-  return (
+/** A ballot option marked `event: "50v50"` plays that entry as a 50v50 round. */
+type LabelledSelection = MapSelection & { event?: "50v50" };
+export function selectionDetails(entry: LabelledSelection) {
+  const details =
     [
       ...entry.experiences.map((id) => modeLabel(id)),
       entry.lighting ? lightingLabel(entry.lighting) : "",
       entry.zoneAlternator ? zoneLabel(entry.zoneAlternator) : "",
     ]
       .filter(Boolean)
-      .join(" · ") || "Map defaults"
-  );
+      .join(" · ") || "Map defaults";
+  return entry.event === "50v50" ? `${details} · 50v50 next round` : details;
 }
-export const selectionLabel = (entry: MapSelection) => `${mapLabel(entry.map)} · ${selectionDetails(entry)}`;
+export const selectionLabel = (entry: LabelledSelection) => `${mapLabel(entry.map)} · ${selectionDetails(entry)}`;
