@@ -33,6 +33,7 @@ import { ApplicationsModule } from "./applications.module";
 import { ApplicationsService } from "./applications.service";
 import { ApplicationsStore } from "./applications.store";
 import { DiscordRolesService } from "../discord-roles/discord-roles.service";
+import { SupporterMatchService } from "../supporters/supporter-match.service";
 
 describe("application HTTP routing and privacy", () => {
   let app: INestApplication;
@@ -90,6 +91,7 @@ describe("application HTTP routing and privacy", () => {
         },
         { provide: GameServers, useValue: fixtureServers({}) },
         { provide: DiscordRolesService, useValue: { applicationChanged: jest.fn() } },
+        { provide: SupporterMatchService, useValue: { applicationChanged: jest.fn(async () => undefined) } },
         {
           provide: AdminAuth,
           useValue: {

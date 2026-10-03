@@ -63,7 +63,7 @@ export type ApiImportResult = {
   /** Patreon now reports a different Discord account (or none) for this membership than it did before. */
   patreonDiscordChanged: boolean;
 };
-/** A founder promise for staff review, with the payment that is no longer verified. */
+/** A founder promise for staff review, with the payment that is no longer verified or no longer the first one. */
 export type FounderReview = {
   supporterId: string;
   patreonMemberId: string;
@@ -72,6 +72,8 @@ export type FounderReview = {
   reference: string;
   unverifiedPaymentId: string;
   unverifiedReference: string;
+  /** `unverified`: the payment is no longer verified. `not_first_payment`: the founder's own payment lost its first-payment flag. */
+  reviewReason: "unverified" | "not_first_payment";
 };
 
 type MemberRow = typeof supporterMembers.$inferSelect;
@@ -471,21 +473,26 @@ export class SupportersStore {
   /**
    * Permanent founder promises for staff review: the founder's own payment, or an imported payment dated inside the
    * founder window (widened by the receipt-copy tolerance), is no longer verified. This also covers a founder awarded
-   * on a staff receipt whose charge Patreon later reports as refunded, declined or fraudulent.
+   * on a staff receipt whose charge Patreon later reports as refunded, declined or fraudulent, and a founder whose own
+   * payment is no longer marked as the first successful payment (for example after the import saw an earlier charge).
    */
   async founderReviews(campaignId: string): Promise<FounderReview[]> {
     const tolerance = sql.raw(RECEIPT_COPY_TOLERANCE);
     const result = await this.db.execute<FounderReview>(sql`
       SELECT f.member_id AS "supporterId", m.patreon_member_id AS "patreonMemberId", f.payment_id AS "paymentId",
         q.source AS "paymentSource", q.reference,
-        unverified.id AS "unverifiedPaymentId", unverified.reference AS "unverifiedReference"
+        unverified.id AS "unverifiedPaymentId", unverified.reference AS "unverifiedReference",
+        unverified.review_reason AS "reviewReason"
       FROM supporter_founders f
       JOIN supporter_members m ON m.id = f.member_id
       JOIN supporter_payments q ON q.id = f.payment_id
-      JOIN LATERAL (SELECT x.id, x.reference FROM supporter_payments x
-        WHERE x.member_id = f.member_id AND x.verification_state <> 'verified'
-        AND (x.id = f.payment_id OR (x.source = 'patreon_api'
-          AND x.paid_at >= f.window_start - ${tolerance} AND x.paid_at < f.window_end + ${tolerance}))
+      JOIN LATERAL (SELECT x.id, x.reference,
+          CASE WHEN x.verification_state <> 'verified' THEN 'unverified' ELSE 'not_first_payment' END AS review_reason
+        FROM supporter_payments x
+        WHERE x.member_id = f.member_id AND ((x.verification_state <> 'verified'
+          AND (x.id = f.payment_id OR (x.source = 'patreon_api'
+            AND x.paid_at >= f.window_start - ${tolerance} AND x.paid_at < f.window_end + ${tolerance})))
+          OR (x.id = f.payment_id AND NOT x.first_successful_payment_verified))
         ORDER BY (x.id = f.payment_id) DESC, x.paid_at, x.id LIMIT 1) unverified ON true
       WHERE m.campaign_id = ${campaignId}
       ORDER BY f.awarded_at, f.member_id LIMIT 50

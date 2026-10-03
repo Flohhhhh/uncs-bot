@@ -319,6 +319,8 @@ describe("Discord role passes", () => {
     off.state.member.set(A, "application-a");
     off.addMember(A);
     off.service.applicationChanged(A);
+    // An automatic founder promise queues the same check as a staff award, and nothing while roles are off.
+    off.service.supporterChanged(A);
     off.service.onApplicationBootstrap();
     await off.service.tick();
     expect(off.store.desired).not.toHaveBeenCalled();

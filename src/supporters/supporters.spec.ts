@@ -6,6 +6,7 @@ import { supporterFixture } from "./supporter-fixtures";
 import { SupportersService } from "./supporters.service";
 import type { SupportersStore } from "./supporters.store";
 import type { PatreonSyncService } from "./patreon-sync.service";
+import type { SupporterMatchService } from "./supporter-match.service";
 import {
   founderBlocker,
   linkSchema,
@@ -62,8 +63,13 @@ function fixture(overrides: Record<string, unknown> = {}) {
     mutate: jest.fn().mockResolvedValue({ ok: true }),
     register: jest.fn().mockResolvedValue({ ok: true }),
     recordPaypal: jest.fn().mockResolvedValue({ ok: true }),
+    get: jest.fn().mockResolvedValue(null),
   };
   const roles = { supporterChanged: jest.fn() };
+  const match = {
+    member: jest.fn(async (..._args: unknown[]): Promise<unknown> => null),
+    status: jest.fn(() => ({ steamFill: false, founderAuto: false, running: false })),
+  };
   const sync = {
     configured: jest.fn().mockReturnValue(true),
     status: jest.fn().mockReturnValue({ configured: true, running: false, members: 2 }),
@@ -79,7 +85,9 @@ function fixture(overrides: Record<string, unknown> = {}) {
       { get: (key: string) => values[key] } as EnvService,
       roles as unknown as DiscordRolesService,
       sync as unknown as PatreonSyncService,
+      match as unknown as SupporterMatchService,
     ),
+    match,
   };
 }
 describe("Patreon signed observations", () => {
@@ -188,8 +196,8 @@ describe("supporter reviews", () => {
       await expect(service.list(admin, query)).rejects.toMatchObject({ status: 400 });
     expect(store.list).not.toHaveBeenCalled();
   });
-  it("adds the Patreon sync status to the private list without changing existing fields", async () => {
-    const { service } = fixture();
+  it("adds the Patreon sync and automatic matching status to the private list without changing existing fields", async () => {
+    const { service, match } = fixture();
     const result = await service.list(admin);
     expect(Object.keys(result)).toEqual([
       "enabled",
@@ -202,9 +210,11 @@ describe("supporter reviews", () => {
       "provider",
       "limit",
       "sync",
+      "automation",
       "note",
     ]);
     expect(result.sync).toEqual({ configured: true, running: false, members: 2 });
+    expect(result.automation).toEqual(match.status());
   });
   it("lets only administrators start a configured Patreon sync", async () => {
     const { service, sync } = fixture();
@@ -669,6 +679,58 @@ describe("Supporter role notifications", () => {
       completedPaymentVerified: true,
     });
     expect(roles.supporterChanged).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("automatic supporter matching triggers", () => {
+  const review = { id: randomUUID(), version: 1, confirm: "member-123", reason: "Checked" };
+  it("matches the record of a new webhook observation without waiting, and never on a duplicate", async () => {
+    const { service, store, match } = fixture();
+    const { raw, signature } = signed();
+    store.ingest.mockResolvedValueOnce({ duplicate: false, memberId: "member-a", discordId: null });
+    let finish!: () => void;
+    match.member.mockImplementationOnce(() => new Promise((resolve) => (finish = () => resolve(null))));
+    // The response does not wait for matching, which can wait on locks.
+    await expect(service.webhook(raw, signature, "members:update")).resolves.toEqual({ ok: true, duplicate: false });
+    expect(match.member).toHaveBeenCalledWith("member-a", "webhook");
+    finish();
+    store.ingest.mockResolvedValueOnce({ duplicate: true });
+    await service.webhook(raw, signature, "members:update");
+    expect(match.member).toHaveBeenCalledTimes(1);
+  });
+  it("fills the SteamID after a staff link and returns the record as read again", async () => {
+    const { service, store, match } = fixture();
+    const linked = supporterFixture({ discordId: "123456789012345678", version: 2 });
+    const filled = supporterFixture({
+      discordId: "123456789012345678",
+      steamId: "76561198000000001",
+      steamSource: "application",
+      version: 3,
+    });
+    store.mutate.mockResolvedValueOnce({ ok: true, replayed: false, supporter: linked });
+    store.get.mockResolvedValue(filled);
+    match.member.mockResolvedValueOnce({ steamFilled: true, founderRecorded: false, blocked: [] });
+    const memberId = randomUUID();
+    const result = await service.mutate(admin, memberId, "link", { ...review, discordId: "123456789012345678" });
+    expect(match.member).toHaveBeenCalledWith(memberId, "link", { founder: false });
+    expect(result).toMatchObject({
+      automatic: { steamFilled: true, founderRecorded: false },
+      supporter: { version: 3, steamSource: "application", nextSteps: expect.any(Array) },
+    });
+    expect(store.get).toHaveBeenCalledWith(memberId, campaign, expect.any(Object));
+  });
+  it("keeps the saved link response when matching changes nothing, and never matches on a replay or other actions", async () => {
+    const { service, store, match } = fixture();
+    const linked = supporterFixture({ discordId: "123456789012345678", version: 2 });
+    store.mutate.mockResolvedValue({ ok: true, replayed: false, supporter: linked });
+    match.member.mockResolvedValueOnce({ steamFilled: false, founderRecorded: false, blocked: ["no_application"] });
+    const result = await service.mutate(admin, randomUUID(), "link", { ...review, discordId: "123456789012345678" });
+    expect(result).not.toHaveProperty("automatic");
+    expect(result.supporter).toMatchObject({ version: 2 });
+    await service.mutate(admin, randomUUID(), "review", review);
+    store.mutate.mockResolvedValue({ ok: true, replayed: true, supporter: linked });
+    await service.mutate(admin, randomUUID(), "link", { ...review, discordId: "123456789012345678" });
+    expect(match.member).toHaveBeenCalledTimes(1);
   });
 });
 

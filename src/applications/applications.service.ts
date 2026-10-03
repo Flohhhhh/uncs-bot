@@ -18,6 +18,7 @@ import { GameServers } from "../admin/game-servers";
 import { LEGACY_SERVER_ID, publicGameServer } from "../common/game-server";
 import { DiscordRolesService } from "../discord-roles/discord-roles.service";
 import { EnvService } from "../env/env.service";
+import { SupporterMatchService } from "../supporters/supporter-match.service";
 import { ApplicationsStore } from "./applications.store";
 import {
   applicationSchema,
@@ -48,6 +49,7 @@ export class ApplicationsService implements OnModuleInit, OnModuleDestroy {
     private readonly env: EnvService,
     private readonly servers: GameServers,
     private readonly roles: DiscordRolesService,
+    private readonly match: SupporterMatchService,
   ) {}
 
   onModuleInit() {
@@ -83,6 +85,18 @@ export class ApplicationsService implements OnModuleInit, OnModuleDestroy {
       this.roles.applicationChanged(application?.discordUserId);
     } catch {
       /* The role service logs its own problems. */
+    }
+  }
+
+  /**
+   * An approved application can complete a Patreon supporter's SteamID (automatic supporter matching, off by default).
+   * Fire-and-forget after the review is saved: matching waits on locks and must never delay or fail a review.
+   */
+  private matchSupporters(application: Pick<WhitelistApplication, "discordUserId" | "status"> | null | undefined) {
+    try {
+      if (application?.status === "approved") void this.match.applicationChanged(application.discordUserId);
+    } catch {
+      /* Matching logs its own problems. */
     }
   }
 
@@ -225,10 +239,9 @@ export class ApplicationsService implements OnModuleInit, OnModuleDestroy {
         state: "applied",
         message: "Registered an existing whitelist entry; it was already active. No whitelist change was sent.",
       };
+      let application: WhitelistApplication;
       try {
-        const application = await this.store.finishApproval(applicationId, request.id, outcome, "existing");
-        this.notifyRoles(application);
-        return { application, outcome: { id: request.id, ...outcome } };
+        application = await this.store.finishApproval(applicationId, request.id, outcome, "existing");
       } catch {
         return {
           application: claim.application,
@@ -240,6 +253,9 @@ export class ApplicationsService implements OnModuleInit, OnModuleDestroy {
           },
         };
       }
+      this.notifyRoles(application);
+      this.matchSupporters(application);
+      return { application, outcome: { id: request.id, ...outcome } };
     }
     let outcome: ActionResult;
     try {
@@ -262,18 +278,17 @@ export class ApplicationsService implements OnModuleInit, OnModuleDestroy {
           "Approval could not be confirmed. Check the running whitelist and action history. No automatic retry will be sent.",
       };
     }
+    let application: WhitelistApplication;
     try {
       // A grant for an entry that was already live changed nothing, so it is not recorded as a grant. Neither is
       // one whose earlier whitelist read failed: a build that edits the saved configuration reports an existing
       // entry as applied.
-      const application = await this.store.finishApproval(
+      application = await this.store.finishApproval(
         applicationId,
         request.id,
         outcome,
         alreadyLive || liveUnknown ? null : "granted",
       );
-      this.notifyRoles(application);
-      return { application, outcome: { id: request.id, ...outcome } };
     } catch {
       return {
         application: claim.application,
@@ -285,6 +300,9 @@ export class ApplicationsService implements OnModuleInit, OnModuleDestroy {
         },
       };
     }
+    this.notifyRoles(application);
+    this.matchSupporters(application);
+    return { application, outcome: { id: request.id, ...outcome } };
   }
 
   private recordedReview(record: WhitelistApplication, request: ApplicationReview, kind: ReviewKind, staff: Staff) {
@@ -347,10 +365,9 @@ export class ApplicationsService implements OnModuleInit, OnModuleDestroy {
           "The running whitelist could not be checked. The application still needs review. No game change was sent.",
       };
     }
+    let saved: WhitelistApplication;
     try {
-      const saved = await this.store.finishRecheck(application, request, staff, outcome);
-      this.notifyRoles(saved);
-      return { application: saved, outcome: { id: request.id, ...outcome } };
+      saved = await this.store.finishRecheck(application, request, staff, outcome);
     } catch (error) {
       if (error instanceof ConflictException) throw error;
       return {
@@ -363,6 +380,11 @@ export class ApplicationsService implements OnModuleInit, OnModuleDestroy {
         },
       };
     }
+    this.notifyRoles(saved);
+    // A recheck records no grant, so it never fills a SteamID itself, but ending a review can unblock another
+    // approved application of the same Discord account.
+    this.matchSupporters(saved);
+    return { application: saved, outcome: { id: request.id, ...outcome } };
   }
 
   /**

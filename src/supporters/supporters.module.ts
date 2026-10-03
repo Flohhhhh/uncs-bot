@@ -11,9 +11,10 @@ import { PatreonClient } from "./patreon.client";
 import { PatreonSyncService } from "./patreon-sync.service";
 import { SupportersService } from "./supporters.service";
 import { SupportersStore } from "./supporters.store";
+import { SupporterMatchModule } from "./supporter-match.module";
 
 @Module({
-  imports: [AdminModule, DiscordRolesModule],
+  imports: [AdminModule, DiscordRolesModule, SupporterMatchModule],
   providers: [SupportersService, SupportersStore, SupportersExceptionFilter, PatreonClient, PatreonSyncService],
   controllers: [PatreonWebhookController, SupportersAdminController],
   exports: [SupportersService, SupportersStore, PatreonSyncService],

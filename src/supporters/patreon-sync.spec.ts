@@ -14,6 +14,7 @@ import {
   type PatreonPledgeEvent,
 } from "./patreon.client";
 import { PATREON_SYNC_STARTUP_DELAY_MS, PatreonSyncService } from "./patreon-sync.service";
+import type { SupporterMatchService } from "./supporter-match.service";
 import type { ApiImportResult, SupportersStore } from "./supporters.store";
 
 const token = "creator-token-PRIVATE-0123456789abcdef";
@@ -104,13 +105,15 @@ function fixture(
     importApiMember: jest.fn().mockResolvedValue(imported()),
     founderReviews: jest.fn().mockResolvedValue([]),
   };
+  const match = { sweep: jest.fn(async (_trigger: string) => undefined) };
   const service = new PatreonSyncService(
     new PatreonClient(),
     store as unknown as SupportersStore,
     { get: (key: string) => values[key] } as EnvService,
     roles as DiscordRolesService,
+    match as unknown as SupporterMatchService,
   );
-  return { service, store, roles };
+  return { service, store, roles, match };
 }
 let fetchMock: jest.SpyInstance;
 let warn: jest.SpyInstance;
@@ -413,6 +416,40 @@ describe("Patreon sync worker", () => {
     expect(status.lastSuccessAt).not.toBeNull();
     expect(store.founderReviews).toHaveBeenCalledWith(campaign);
     expectNoToken();
+  });
+  it("runs automatic supporter matching after the import and before the founder reviews, without changing the status", async () => {
+    const { service, store, match } = tracked();
+    fetchMock.mockResolvedValueOnce(onePage());
+    match.sweep.mockImplementationOnce(async () => {
+      throw new Error("never rejects in production");
+    });
+    const failing = await service.sync();
+    // A sweep failure is reported by the match service, never as a failed sync.
+    expect(failing).toMatchObject({ lastError: expect.any(String) });
+    fetchMock.mockResolvedValueOnce(onePage());
+    match.sweep.mockResolvedValueOnce(undefined);
+    jest.spyOn(Date, "now").mockReturnValue(Date.now() + 60_000);
+    const status = await service.sync();
+    expect(status).toMatchObject({ lastError: null, members: 1 });
+    expect(match.sweep).toHaveBeenLastCalledWith("sync");
+    const order = (mock: jest.Mock) => mock.mock.invocationCallOrder.at(-1)!;
+    expect(order(store.importApiMember)).toBeLessThan(order(match.sweep));
+    expect(order(match.sweep)).toBeLessThan(order(store.founderReviews));
+  });
+  it("skips automatic matching after a failed import or a shutdown mid-sync", async () => {
+    const failed = tracked();
+    fetchMock.mockResolvedValueOnce(json({}, { status: 503 }));
+    await failed.service.sync();
+    expect(failed.match.sweep).not.toHaveBeenCalled();
+    const stopped = tracked();
+    fetchMock.mockResolvedValueOnce(onePage());
+    stopped.store.importApiMember.mockImplementationOnce(async () => {
+      stopped.service.onModuleDestroy();
+      return imported();
+    });
+    await stopped.service.sync();
+    expect(stopped.match.sweep).not.toHaveBeenCalled();
+    expect(stopped.store.founderReviews).not.toHaveBeenCalled();
   });
   it("asks the role service to check linked Discord accounts whose supporter record changed", async () => {
     const { service, store, roles } = tracked();

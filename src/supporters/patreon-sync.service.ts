@@ -2,6 +2,7 @@ import { Injectable, Logger, type OnApplicationBootstrap, type OnModuleDestroy }
 import { DiscordRolesService } from "../discord-roles/discord-roles.service";
 import { EnvService } from "../env/env.service";
 import { PatreonApiError, PatreonClient } from "./patreon.client";
+import { SupporterMatchService } from "./supporter-match.service";
 import { SupportersStore, type FounderReview } from "./supporters.store";
 
 export const PATREON_SYNC_STARTUP_DELAY_MS = 15_000;
@@ -110,6 +111,7 @@ export class PatreonSyncService implements OnApplicationBootstrap, OnModuleDestr
     private readonly store: SupportersStore,
     private readonly env: EnvService,
     private readonly roles: DiscordRolesService,
+    private readonly match: SupporterMatchService,
   ) {}
 
   /**
@@ -247,6 +249,9 @@ export class PatreonSyncService implements OnApplicationBootstrap, OnModuleDestr
       }
       // A shutdown mid-sync keeps what was imported but does not report a completed sync.
       if (this.stopped) return;
+      // Automatic supporter matching (off by default) sees this sync's Discord links and payments. It never rejects
+      // and keeps its own status, so it cannot fail the sync.
+      await this.match.sweep("sync");
       counts.founderReviews = await this.store.founderReviews(campaignId);
       this.counts = counts;
       this.lastSuccessAt = Date.now();

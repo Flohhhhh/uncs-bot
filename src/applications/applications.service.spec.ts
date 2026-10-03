@@ -8,6 +8,7 @@ import type { EnvService } from "../env/env.service";
 import type { ActionResult, Staff } from "../admin/admin.types";
 import { fixtureServers } from "../admin/game-server-fixture";
 import type { DiscordRolesService } from "../discord-roles/discord-roles.service";
+import type { SupporterMatchService } from "../supporters/supporter-match.service";
 import { ownApplication, type ApplicantIdentity, type WhitelistApplication } from "./applications.types";
 
 const applicant: ApplicantIdentity = {
@@ -174,6 +175,7 @@ function fixture(
     }),
   };
   const roles = { applicationChanged: jest.fn() };
+  const match = { applicationChanged: jest.fn(async (_discordUserId: unknown) => undefined) };
   const env = {
     get: jest.fn((key: string) =>
       key === "WHITELIST_APPLICATIONS_ENABLED"
@@ -197,8 +199,10 @@ function fixture(
       env as unknown as EnvService,
       servers,
       roles as unknown as DiscordRolesService,
+      match as unknown as SupporterMatchService,
     ),
     store,
+    match,
     admin,
     game,
     servers,
@@ -532,6 +536,69 @@ describe("durable application decisions", () => {
     expect(store.get).toHaveBeenCalledWith(applicationId, "primary");
     expect(game.whitelist).not.toHaveBeenCalled();
     expect(admin.act).not.toHaveBeenCalled();
+  });
+});
+
+describe("automatic supporter matching after a review", () => {
+  it.each([
+    ["a grant", {}, {}],
+    ["a confirmed existing entry", { live: [input.steamId] }, { existingAccessConfirmed: true as const }],
+  ])("asks for a match after the role check when %s is approved", async (_name, options, extra) => {
+    const { service, roles, match } = fixture(options);
+    const result = await service.review(staff, applicationId, "approve", {
+      id: randomUUID(),
+      reason: "Approve",
+      ...extra,
+    });
+    expect(result.application.status).toBe("approved");
+    expect(match.applicationChanged).toHaveBeenCalledWith(applicant.userId);
+    expect(roles.applicationChanged.mock.invocationCallOrder[0]).toBeLessThan(
+      match.applicationChanged.mock.invocationCallOrder[0],
+    );
+  });
+  it("asks for a match when a recheck confirms an approval", async () => {
+    const { service, match } = fixture({ initial: record({ status: "needs_review" }), live: [input.steamId] });
+    const result = await service.review(staff, applicationId, "recheck", { id: randomUUID(), reason: "Check" });
+    expect(result.application.status).toBe("approved");
+    expect(match.applicationChanged).toHaveBeenCalledWith(applicant.userId);
+  });
+  it("does not ask after a decline, an approval that needs review, a revocation or a Whitelist page removal", async () => {
+    const declined = fixture();
+    await declined.service.review(staff, applicationId, "decline", { id: randomUUID(), reason: "Decline" });
+    const unclear = fixture({ result: { state: "unknown", message: "Not confirmed" } });
+    await unclear.service.review(staff, applicationId, "approve", { id: randomUUID(), reason: "Approve" });
+    expect(unclear.current()?.status).toBe("needs_review");
+    const revoked = fixture({ initial: record({ status: "approved", whitelistGrant: "granted" }) });
+    await revoked.service.review(staff, applicationId, "revoke", { id: randomUUID(), reason: "Left" });
+    expect(revoked.current()?.status).toBe("revoked");
+    const removed = fixture({ initial: record({ status: "approved" }) });
+    removed.service.onModuleInit();
+    removed.admin.whitelistRemovals.next({
+      actionId: randomUUID(),
+      serverId: "primary",
+      steamId: input.steamId,
+      actorId: staff.id,
+      actorName: staff.name,
+      state: "applied",
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(removed.store.recordExternalRevoke).toHaveBeenCalled();
+    for (const { match } of [declined, unclear, revoked, removed])
+      expect(match.applicationChanged).not.toHaveBeenCalled();
+  });
+  it("never lets matching change or delay the review result", async () => {
+    const throwing = fixture();
+    throwing.match.applicationChanged.mockImplementation(() => {
+      throw new Error("match unavailable");
+    });
+    await expect(
+      throwing.service.review(staff, applicationId, "approve", { id: randomUUID(), reason: "Approve" }),
+    ).resolves.toMatchObject({ application: { status: "approved" }, outcome: { state: "applied" } });
+    const slow = fixture();
+    slow.match.applicationChanged.mockImplementation(() => new Promise(() => undefined));
+    await expect(
+      slow.service.review(staff, applicationId, "approve", { id: randomUUID(), reason: "Approve" }),
+    ).resolves.toMatchObject({ outcome: { state: "applied" } });
   });
 });
 

@@ -7,6 +7,11 @@ import { setTimeout as delay } from "node:timers/promises";
 import * as schema from "../src/database/schema";
 import { ApplicationsStore } from "../src/applications/applications.store";
 import { SupportersStore } from "../src/supporters/supporters.store";
+import {
+  SupporterMatchStore,
+  type AutoMatchOptions,
+  type AutoMatchResult,
+} from "../src/supporters/supporter-match.store";
 import type {
   FounderPolicy,
   ManualMemberInput,
@@ -33,6 +38,7 @@ describe("launch storage on isolated PostgreSQL", () => {
   let workers: ReturnType<typeof worker>[] = [];
   let initialized = false;
   let supporters: SupportersStore;
+  let match: SupporterMatchStore;
   let applications: ApplicationsStore;
   let admin: AdminStore;
   let votes: MapVotesStore;
@@ -52,6 +58,7 @@ describe("launch storage on isolated PostgreSQL", () => {
     return {
       pool,
       supporters: new SupportersStore(db),
+      match: new SupporterMatchStore(db),
       applications: new ApplicationsStore(db),
       votes: new MapVotesStore(db),
       events: new ServerEventsStore(db),
@@ -270,6 +277,7 @@ describe("launch storage on isolated PostgreSQL", () => {
     };
     const db = drizzle({ client, schema });
     supporters = new SupportersStore(db);
+    match = new SupporterMatchStore(db);
     applications = new ApplicationsStore(db);
     admin = new AdminStore(db);
     votes = new MapVotesStore(db);
@@ -1719,6 +1727,366 @@ describe("launch storage on isolated PostgreSQL", () => {
     });
     expect((await roles.desired()).member.size).toBe(0);
     expect((await roles.revokedBasis()).has("345678901234567890")).toBe(true);
+  });
+
+  describe("automatic supporter matching", () => {
+    const patron = "456789012345678901";
+    const patronSteam = "76561198000000021";
+    // No waiting period, so list() verdicts do not depend on when the suite runs.
+    const automaticPolicy: FounderPolicy = { ...policy, automaticHoldHours: 0 };
+    const options = (overrides: Partial<AutoMatchOptions> = {}): AutoMatchOptions => ({
+      campaignId: campaign,
+      policy: automaticPolicy,
+      fillSteam: true,
+      recordFounder: true,
+      now: new Date(),
+      ...overrides,
+    });
+    async function importPatron(
+      patreonMemberId = "auto-patron",
+      discordId: string | null = patron,
+      event = charge(`pledge_start:${patreonMemberId}`, "2026-10-01T12:00:00.000Z"),
+    ) {
+      await supporters.importApiMember(
+        campaign,
+        { ...apiMember(patreonMemberId, [event], true), discordId },
+        new Date(),
+      );
+      return (await supporters.list(campaign, automaticPolicy, undefined, patreonMemberId))[0];
+    }
+    async function application(discordUserId = patron, steamId = patronSteam, serverId = "primary") {
+      return (await applications.create({ ...applicationInput(discordUserId, steamId), serverId }))!;
+    }
+    const kinds = async (memberId: string) =>
+      (
+        await client.query<{ actor_id: string; kind: string }>(
+          "SELECT actor_id, kind FROM supporter_actions WHERE member_id = $1 ORDER BY created_at, kind",
+          [memberId],
+        )
+      ).rows;
+
+    it("labels older links by the action that made them, once, without touching versions", async () => {
+      const fromPatreon = await importPatron("labelled-patreon");
+      // An older dashboard resent the Patreon Discord ID with the SteamID; that Link did not change the account.
+      await supporters.mutate(
+        fromPatreon.id,
+        { ...review(fromPatreon), kind: "link", discordId: patron, steamId: patronSteam },
+        staff,
+        campaign,
+        policy,
+      );
+      const relinked = await importPatron("labelled-staff", "567890123456789012");
+      await supporters.mutate(
+        relinked.id,
+        { ...review(relinked), kind: "link", discordId: "567890123456789013" },
+        staff,
+        campaign,
+        policy,
+      );
+      await client.query(
+        "UPDATE supporter_members SET discord_source = NULL, steam_source = NULL, steam_application_id = NULL",
+      );
+      const versions = async () => (await client.query("SELECT id, version FROM supporter_members ORDER BY id")).rows;
+      const before = await versions();
+      expect(await match.backfillSources()).toEqual({ discord: 2, steam: 1 });
+      expect(
+        (
+          await client.query(
+            "SELECT patreon_member_id, discord_source, steam_source FROM supporter_members ORDER BY patreon_member_id",
+          )
+        ).rows,
+      ).toEqual([
+        { patreon_member_id: "labelled-patreon", discord_source: "patreon", steam_source: "staff" },
+        { patreon_member_id: "labelled-staff", discord_source: "staff", steam_source: null },
+      ]);
+      expect(await match.backfillSources()).toEqual({ discord: 0, steam: 0 });
+      expect(await versions()).toEqual(before);
+    });
+
+    it("copies the approved SteamID and records an automatic founder with its Founder role basis, once", async () => {
+      const record = await importPatron();
+      expect(record).toMatchObject({ identityState: "partial", discordSource: "patreon", patreonDiscordId: patron });
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        steamFilled: false,
+        founderRecorded: false,
+        blocked: ["no_application", "no_steam"],
+      });
+      const created = await application();
+      expect(await approve(created.id, "primary")).toMatchObject({ whitelistGrant: "granted" });
+      expect((await supporters.get(record.id, campaign, automaticPolicy))?.automaticBlockedReason).toBe("no_steam");
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        steamFilled: true,
+        founderRecorded: true,
+        blocked: [],
+      });
+      const view = (await supporters.get(record.id, campaign, automaticPolicy))!;
+      expect(view).toMatchObject({
+        steamId: patronSteam,
+        steamSource: "application",
+        steamApplicationId: created.id,
+        identityState: "patreon_linked",
+        version: record.version + 1,
+        founder: { automatic: true, source: "patreon_api" },
+        match: { sourceApplication: { id: created.id, serverId: "primary", status: "approved" } },
+      });
+      expect(await kinds(record.id)).toEqual([
+        { actor_id: "system:patreon-sync", kind: "patreon-discord-link" },
+        { actor_id: "system:supporter-match", kind: "application-steam-link" },
+        { actor_id: "system:supporter-match", kind: "founder" },
+      ]);
+      expect((await roles.desired([patron])).founder).toEqual(new Map([[patron, record.id]]));
+      // A second run, from any trigger, writes nothing.
+      expect(await match.autoMatch(record.id, options())).toMatchObject({ steamFilled: false, founderRecorded: false });
+      expect(await kinds(record.id)).toHaveLength(3);
+      expect((await supporters.get(record.id, campaign, automaticPolicy))?.version).toBe(view.version);
+      expect(
+        await match.candidates(campaign, automaticPolicy, { fillSteam: true, recordFounder: true }, null, 10),
+      ).toEqual([]);
+      // A refund still lists the automatic founder for staff review; the promise itself is untouched.
+      await supporters.importApiMember(
+        campaign,
+        {
+          ...apiMember(
+            "auto-patron",
+            [{ ...charge("pledge_start:auto-patron", "2026-10-01T12:00:00.000Z"), paymentStatus: "Refunded" }],
+            true,
+          ),
+          discordId: patron,
+        },
+        new Date(),
+      );
+      expect(await supporters.founderReviews(campaign)).toEqual([
+        expect.objectContaining({ supporterId: record.id, paymentSource: "patreon_api", reviewReason: "unverified" }),
+      ]);
+    });
+
+    it("leaves an approval without a recorded grant for staff, showing the SteamID to check", async () => {
+      const record = await importPatron();
+      const created = await application();
+      const reviewed = { id: randomUUID(), reason: "Approved before grants were recorded" };
+      await applications.claim(created.id, reviewed, "approve", { ...staff, serverId: "primary" });
+      await applications.finishApproval(created.id, reviewed.id, { state: "applied", message: "Confirmed" }, null);
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        steamFilled: false,
+        blocked: ["application_not_confirmed", "no_steam"],
+      });
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        steamId: null,
+        match: { steam: { reason: "application_not_confirmed", steamId: patronSteam, applicationId: created.id } },
+      });
+    });
+
+    it("lets staff win for both identities and keeps what Patreon reports later", async () => {
+      let record = await importPatron();
+      await approve((await application()).id, "primary");
+      record = (
+        await supporters.mutate(
+          record.id,
+          { ...review(record), kind: "link", steamId: "76561198000000022" },
+          staff,
+          campaign,
+          policy,
+        )
+      ).supporter!;
+      expect(await match.autoMatch(record.id, options({ recordFounder: false }))).toMatchObject({ steamFilled: false });
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        steamId: "76561198000000022",
+        steamSource: "staff",
+      });
+      await supporters.importApiMember(
+        campaign,
+        {
+          ...apiMember("auto-patron", [charge("pledge_start:auto-patron", "2026-10-01T12:00:00.000Z")], true),
+          discordId: "567890123456789014",
+        },
+        new Date(),
+      );
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        discordId: patron,
+        discordSource: "patreon",
+        patreonDiscordId: "567890123456789014",
+        automaticBlockedReason: "discord_differs",
+      });
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        founderRecorded: false,
+        blocked: ["discord_differs"],
+      });
+    });
+
+    it("shows a Discord account Patreon reports for one record while another links it", async () => {
+      const linked = await register("linked-by-staff");
+      await supporters.mutate(
+        linked.id,
+        { ...review(linked), kind: "link", discordId: patron },
+        staff,
+        campaign,
+        policy,
+      );
+      const reported = await importPatron("reported-by-patreon");
+      expect(reported).toMatchObject({
+        discordId: null,
+        patreonDiscordId: patron,
+        match: { patreonDiscordElsewhere: true },
+      });
+      expect(await supporters.get(linked.id, campaign, automaticPolicy)).toMatchObject({
+        discordSource: "staff",
+        match: { discordReportedForOtherPatron: true },
+        automaticBlockedReason: "discord_not_from_patreon",
+      });
+    });
+
+    it("keeps a copied SteamID when its application is revoked, flags it, and copies nothing during a review", async () => {
+      const record = await importPatron();
+      const created = await application();
+      await approve(created.id, "primary");
+      expect(await match.autoMatch(record.id, options({ recordFounder: false }))).toMatchObject({ steamFilled: true });
+      const actor = { ...staff, serverId: "primary" };
+      const revocation = { id: randomUUID(), reason: "Left the fictional community" };
+      await applications.claimRevoke(created.id, revocation, actor);
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        founderRecorded: false,
+        blocked: ["source_application_revoked"],
+      });
+      await applications.finishRevoke(created.id, revocation.id, { state: "applied", message: "Removed" });
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        steamId: patronSteam,
+        steamSource: "application",
+        match: { sourceApplicationRevoked: true, steam: { reason: "no_approved_application" } },
+      });
+      const other = await importPatron("reviewing-patron", "567890123456789015");
+      const pending = await application("567890123456789015", "76561198000000023");
+      await applications.claim(pending.id, { id: randomUUID(), reason: "Approving" }, "approve", actor);
+      expect(await match.autoMatch(other.id, options({ recordFounder: false }))).toMatchObject({
+        steamFilled: false,
+        blocked: ["application_in_progress"],
+      });
+    });
+
+    it("makes a revocation claim wait for a SteamID copy that holds the application", async () => {
+      const created = await application();
+      await approve(created.id, "primary");
+      const holder = await client.connect();
+      let claim: Promise<unknown> | undefined;
+      try {
+        await holder.query("BEGIN");
+        // The lock automatic matching takes before reading the applications.
+        await holder.query("SELECT id FROM whitelist_applications WHERE discord_user_id = $1 ORDER BY id FOR SHARE", [
+          patron,
+        ]);
+        claim = workers[0].applications.claimRevoke(
+          created.id,
+          { id: randomUUID(), reason: "Left the fictional community" },
+          { ...staff, serverId: "primary" },
+        );
+        await waitForBlockedWorkers(1);
+      } finally {
+        await holder.query("COMMIT");
+        holder.release();
+      }
+      await expect(claim).resolves.toMatchObject({ claimed: true });
+    });
+
+    it("fills the SteamID and records the founder once when two matches overlap", async () => {
+      const record = await importPatron();
+      await approve((await application()).id, "primary");
+      const results = await overlap(
+        "supporter_members",
+        ({ match }) => match.autoMatch(record.id, options()),
+        ({ match }) => match.autoMatch(record.id, options()),
+      );
+      expect(results.every((result) => result.status === "fulfilled")).toBe(true);
+      const values = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+      expect(values.filter((value) => value.steamFilled)).toHaveLength(1);
+      expect(values.filter((value) => value.founderRecorded)).toHaveLength(1);
+      expect((await kinds(record.id)).map((row) => row.kind)).toEqual([
+        "patreon-discord-link",
+        "application-steam-link",
+        "founder",
+      ]);
+    });
+
+    it("records one founder when an automatic match and a PayPal founder award for the same person overlap", async () => {
+      const record = await importPatron();
+      await approve((await application()).id, "primary");
+      const results = await overlap<unknown>(
+        "supporter_members",
+        ({ match }) => match.autoMatch(record.id, options()),
+        ({ supporters }) =>
+          supporters.recordPaypal(
+            paypalInput({ discordId: patron, paidAt: new Date("2026-10-02T12:00:00.000Z"), awardFounder: true }),
+            staff,
+            null,
+            policy,
+          ),
+      );
+      expect((await client.query("SELECT count(*)::int AS count FROM supporter_founders")).rows).toEqual([
+        { count: 1 },
+      ]);
+      const automatic = results[0] as PromiseSettledResult<AutoMatchResult>;
+      const paypal = results[1];
+      if (automatic.status === "fulfilled" && automatic.value.founderRecorded)
+        expect(paypal).toMatchObject({
+          status: "rejected",
+          reason: { response: { blockedReason: "already_founder" } },
+        });
+      else {
+        expect(paypal.status).toBe("fulfilled");
+        expect(automatic).toMatchObject({ status: "fulfilled", value: { founderRecorded: false } });
+      }
+    });
+
+    it("leaves no partial records when a staff link takes the same SteamID first", async () => {
+      const record = await importPatron();
+      await approve((await application()).id, "primary");
+      const other = await register("staff-linked");
+      const results = await overlap<unknown>(
+        "supporter_members",
+        ({ match }) => match.autoMatch(record.id, options()),
+        ({ supporters }) =>
+          supporters.mutate(
+            other.id,
+            { ...review(other), kind: "link", steamId: patronSteam },
+            staff,
+            campaign,
+            policy,
+          ),
+      );
+      const holders = (
+        await client.query<{ id: string }>("SELECT id FROM supporter_members WHERE steam_id = $1", [patronSteam])
+      ).rows;
+      expect(holders).toHaveLength(1);
+      if (holders[0].id === other.id) {
+        expect(results[0]).toMatchObject({ status: "rejected", reason: { cause: { code: "23505" } } });
+        expect((await kinds(record.id)).map((row) => row.kind)).toEqual(["patreon-discord-link"]);
+        expect((await client.query("SELECT count(*)::int AS count FROM supporter_founders")).rows).toEqual([
+          { count: 0 },
+        ]);
+      } else expect(results[1]).toMatchObject({ status: "rejected", reason: { cause: { code: "23505" } } });
+    });
+
+    it("records no automatic founder on a first payment in another currency", async () => {
+      const record = await importPatron("euro-patron", patron, {
+        ...charge("pledge_start:euro-patron", "2026-10-01T12:00:00.000Z"),
+        currency: "EUR",
+      });
+      await approve((await application()).id, "primary");
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        steamFilled: true,
+        founderRecorded: false,
+        blocked: ["below_minimum"],
+      });
+    });
+
+    it("waits out the hold after the first payment", async () => {
+      const record = await importPatron();
+      await approve((await application()).id, "primary");
+      expect(
+        await match.autoMatch(
+          record.id,
+          options({ policy: { ...policy, automaticHoldHours: 72 }, now: new Date("2026-10-02T12:00:00.000Z") }),
+        ),
+      ).toMatchObject({ steamFilled: true, founderRecorded: false, blocked: ["payment_too_recent"] });
+    });
   });
 
   it("reads who should hold each role and keeps an ordered role ledger", async () => {

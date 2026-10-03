@@ -372,6 +372,14 @@ describe("Patreon API import persistence", () => {
     expect(text).toContain("x.paid_at < f.window_end + interval '36 hours'");
     expect(text).toContain('unverified.id AS "unverifiedPaymentId", unverified.reference AS "unverifiedReference"');
   });
+  it("also lists a founder whose own payment is no longer marked as the first payment", async () => {
+    const { store, query } = fixture();
+    await store.founderReviews(campaign);
+    const text = query.mock.calls[0][0].text;
+    expect(text).toContain("OR (x.id = f.payment_id AND NOT x.first_successful_payment_verified)");
+    expect(text).toContain("ELSE 'not_first_payment' END AS review_reason");
+    expect(text).toContain('unverified.review_reason AS "reviewReason"');
+  });
 });
 
 describe("founder eligibility for authenticated Patreon payments", () => {

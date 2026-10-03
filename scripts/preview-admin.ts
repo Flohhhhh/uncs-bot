@@ -29,6 +29,8 @@ import { TelemetryStore } from "../src/telemetry/telemetry.store";
 import type { CombatStats } from "../src/telemetry/telemetry.types";
 import { SupportersModule } from "../src/supporters/supporters.module";
 import { SupportersStore } from "../src/supporters/supporters.store";
+import { SupporterMatchService } from "../src/supporters/supporter-match.service";
+import { SupporterMatchStore } from "../src/supporters/supporter-match.store";
 import { DiscordRolesDiscord } from "../src/discord-roles/discord-roles.discord";
 import { DiscordRolesStore } from "../src/discord-roles/discord-roles.store";
 import { MapVotesModule } from "../src/map-votes/map-votes.module";
@@ -1527,6 +1529,30 @@ async function main() {
     .useValue(telemetryStore)
     .overrideProvider(SupportersStore)
     .useValue(supporterStore)
+    // No database: automatic supporter matching stays off and reports nothing.
+    .overrideProvider(SupporterMatchStore)
+    .useValue({})
+    .overrideProvider(SupporterMatchService)
+    .useValue({
+      status: () => ({
+        steamFill: false,
+        founderAuto: false,
+        holdHours: 72,
+        configured: false,
+        running: false,
+        lastRunAt: null,
+        lastTrigger: null,
+        lastError: null,
+        checked: 0,
+        steamFilled: 0,
+        foundersRecorded: 0,
+        blocked: {},
+        capped: false,
+      }),
+      sweep: async () => undefined,
+      member: async () => null,
+      applicationChanged: async () => undefined,
+    })
     .overrideProvider(MapVotesStore)
     .useValue(voteStore)
     .overrideProvider(ServerEventsStore)

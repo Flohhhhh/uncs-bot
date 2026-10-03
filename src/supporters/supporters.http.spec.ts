@@ -12,9 +12,12 @@ import { WardogsClient } from "../admin/wardogs.client";
 import { hash } from "../admin/admin.auth";
 import { SupportersModule } from "./supporters.module";
 import { SupportersStore } from "./supporters.store";
+import { supporterFixture } from "./supporter-fixtures";
 import { DiscordRolesDiscord } from "../discord-roles/discord-roles.discord";
 import { DiscordRolesStore } from "../discord-roles/discord-roles.store";
 import { PatreonSyncService } from "./patreon-sync.service";
+import { SupporterMatchService } from "./supporter-match.service";
+import { SupporterMatchStore } from "./supporter-match.store";
 import { AppExceptionFilter } from "../common/filters/app-exception.filter";
 
 const secret = "separate-patreon-webhook-secret";
@@ -32,10 +35,18 @@ class TestEnvModule {}
 describe("private supporters HTTP boundary", () => {
   let app: INestApplication;
   const sessionToken = "c".repeat(64);
-  const store = { ingest: jest.fn(), list: jest.fn(), mutate: jest.fn(), register: jest.fn(), recordPaypal: jest.fn() };
+  const store = {
+    ingest: jest.fn(),
+    list: jest.fn(),
+    mutate: jest.fn(),
+    register: jest.fn(),
+    recordPaypal: jest.fn(),
+    get: jest.fn(),
+  };
   const adminStore = { session: jest.fn() };
   const game = { execute: jest.fn() };
   const sync = { configured: jest.fn(), status: jest.fn(), staffSync: jest.fn() };
+  const match = { member: jest.fn(), status: jest.fn(), sweep: jest.fn(), applicationChanged: jest.fn() };
   const config = {
     origin: "https://theuncs.example",
     clientId: "123",
@@ -57,6 +68,8 @@ describe("private supporters HTTP boundary", () => {
     store.register.mockResolvedValue({ ok: true, replayed: false });
     store.recordPaypal.mockResolvedValue({ ok: true, replayed: false });
     sync.configured.mockReturnValue(true);
+    match.member.mockResolvedValue(null);
+    match.status.mockReturnValue({ steamFill: false, founderAuto: false, configured: true, running: false });
     sync.status.mockReturnValue({ configured: true, running: false, members: 2, lastError: null });
     sync.staffSync.mockResolvedValue({ joined: false, sync: { configured: true, running: false, members: 2 } });
     adminStore.session.mockImplementation(async (key) =>
@@ -85,6 +98,10 @@ describe("private supporters HTTP boundary", () => {
       .useValue({ ready: () => false })
       .overrideProvider(PatreonSyncService)
       .useValue(sync)
+      .overrideProvider(SupporterMatchStore)
+      .useValue({})
+      .overrideProvider(SupporterMatchService)
+      .useValue(match)
       .compile();
     app = module.createNestApplication({ rawBody: true });
     await app.init();
@@ -105,6 +122,51 @@ describe("private supporters HTTP boundary", () => {
     expect(result.headers["cache-control"]).toBe("no-store");
     expect(result.headers["cdn-cache-control"]).toBe("no-store");
     expect(result.headers["vercel-cdn-cache-control"]).toBe("no-store");
+  });
+  it("returns each record's next steps and the automatic matching status to administrators", async () => {
+    store.list.mockResolvedValue([supporterFixture()]);
+    match.status.mockReturnValue({ steamFill: true, founderAuto: false, configured: true, running: false });
+    const result = await request(app.getHttpServer())
+      .get("/admin/api/supporters")
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .expect(200);
+    expect(result.headers["cache-control"]).toBe("no-store");
+    expect(result.body.automation).toEqual({ steamFill: true, founderAuto: false, configured: true, running: false });
+    expect(result.body.supporters[0]).toMatchObject({
+      identityState: "unlinked",
+      match: { steam: null },
+      nextSteps: [
+        { code: "connect_discord_in_patreon", area: "discord" },
+        { code: "founder_no_payment", area: "payment" },
+      ],
+    });
+  });
+  it("returns the record as read again after a staff link fills the SteamID", async () => {
+    store.mutate.mockResolvedValueOnce({ ok: true, replayed: false, supporter: supporterFixture({ version: 2 }) });
+    store.get.mockResolvedValueOnce(supporterFixture({ version: 3, steamSource: "application" }));
+    match.member.mockResolvedValueOnce({ steamFilled: true, founderRecorded: false, blocked: [] });
+    const result = await request(app.getHttpServer())
+      .post(`/admin/api/supporters/${randomUUID()}/link`)
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .set("Origin", config.origin)
+      .set("X-CSRF-Token", "csrf")
+      .send({ id: randomUUID(), version: 1, discordId: "123456789012345678", reason: "Checked", confirm: "member-1" })
+      .expect(201);
+    expect(result.body).toMatchObject({
+      automatic: { steamFilled: true, founderRecorded: false },
+      supporter: { version: 3, steamSource: "application" },
+    });
+  });
+  it("offers no HTTP trigger for automatic matching", async () => {
+    await request(app.getHttpServer())
+      .post("/admin/api/supporters/match")
+      .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+      .set("Origin", config.origin)
+      .set("X-CSRF-Token", "csrf")
+      .send({})
+      .expect(404);
+    expect(match.sweep).not.toHaveBeenCalled();
+    expect(match.member).not.toHaveBeenCalled();
   });
   it.each(["viewer", "moderator"])("rejects private ledger reads for %s", async (role) => {
     jest.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ roles: [role] })));

@@ -10,6 +10,7 @@ import { DiscordRolesService } from "../discord-roles/discord-roles.service";
 import { EnvService } from "../env/env.service";
 import type { Staff } from "../admin/admin.types";
 import { deploymentSecrets, PatreonSyncService } from "./patreon-sync.service";
+import { SupporterMatchService } from "./supporter-match.service";
 import { SupportersStore } from "./supporters.store";
 import { founderPolicy, patreonCampaign } from "./founder-policy";
 import { supporterNextSteps, type NextStepContext } from "./supporter-match.rules";
@@ -36,6 +37,7 @@ export class SupportersService {
     private readonly env: EnvService,
     private readonly roles: DiscordRolesService,
     private readonly patreonSync: PatreonSyncService,
+    private readonly match: SupporterMatchService,
   ) {}
   /** Lets the role service re-check this member. Fire-and-forget: a role problem never fails the request. */
   private notifyRoles(discordId: string | null | undefined) {
@@ -95,7 +97,12 @@ export class SupportersService {
     );
     const result = await this.store.ingest(observation);
     // A new observation can start, pause or end support, so the Supporter role is checked again.
-    if (!result.duplicate) this.notifyRoles(result.discordId);
+    if (!result.duplicate) {
+      this.notifyRoles(result.discordId);
+      // Webhooks carry no Discord account, so this rarely changes anything. Fire-and-forget: it never delays or
+      // changes the response to Patreon.
+      void this.match.member(result.memberId, "webhook");
+    }
     return { ok: true, duplicate: result.duplicate };
   }
   /** Whether a webhook request carries a valid Patreon signature. The body is not parsed or kept. */
@@ -125,7 +132,8 @@ export class SupportersService {
       provider: parsedProvider.data ?? null,
       limit: 100,
       sync: this.patreonSync.status(),
-      note: "Private supporter records for Patreon and PayPal. Membership changes need review; a tier or active membership is not proof of a completed payment. Founder records are permanent promises for future standard whitelist access. No game access is changed here. When Discord roles are switched on, founders with a linked Discord account receive the Founder role, and people who currently support receive the Supporter role if it is configured. The Supporter role is a Discord role only.",
+      automation: this.match.status(),
+      note: "Private supporter records for Patreon and PayPal. Membership changes need review; a tier or active membership is not proof of a completed payment. Founder records are permanent promises for future standard whitelist access. No game access is changed here. When Discord roles are switched on, founders with a linked Discord account receive the Founder role, and people who currently support receive the Supporter role if it is configured. The Supporter role is a Discord role only. With automatic matching switched on, Gramps copies a Patreon supporter's empty SteamID from their approved whitelist application and can record a founder promise itself under a stricter rule; each record's next steps say what is left for staff.",
     };
   }
   /** Staff-triggered Patreon import; concurrent requests join the running sync. */
@@ -164,7 +172,20 @@ export class SupportersService {
       throw new ServiceUnavailableException("Set the 15-day founder window before recording founder promises.");
     try {
       // The store applies the Patreon configuration check to Patreon records only.
-      const result = await this.store.mutate(memberId, input, staff, this.campaign(), policy);
+      const campaign = this.campaign();
+      const result: Awaited<ReturnType<SupportersStore["mutate"]>> & {
+        automatic?: { steamFilled: boolean; founderRecorded: boolean };
+      } = await this.store.mutate(memberId, input, staff, campaign, policy);
+      // A staff Discord link completes the match the way an approval does, but only the SteamID: a staff-entered
+      // Discord account never leads straight to a permanent founder promise. The record is read again, so the
+      // dashboard's next action carries the new version.
+      if (!result.replayed && input.kind === "link") {
+        const automatic = await this.match.member(memberId, "link", { founder: false });
+        if (automatic?.steamFilled) {
+          result.supporter = await this.store.get(memberId, campaign, policy);
+          result.automatic = { steamFilled: true, founderRecorded: false };
+        }
+      }
       // A founder award, a changed Discord link or a new receipt can change who should hold the Founder or
       // Supporter role.
       if (!result.replayed && (input.kind === "founder" || input.kind === "link" || input.kind === "payment"))
