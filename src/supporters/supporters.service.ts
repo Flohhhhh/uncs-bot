@@ -11,15 +11,14 @@ import { EnvService } from "../env/env.service";
 import type { Staff } from "../admin/admin.types";
 import { deploymentSecrets, PatreonSyncService } from "./patreon-sync.service";
 import { SupportersStore } from "./supporters.store";
+import { founderPolicy, patreonCampaign } from "./founder-policy";
 import {
-  FOUNDER_MINIMUM,
   founderSchema,
   linkSchema,
   manualMemberSchema,
   parsePatreon,
   paymentSchema,
   paypalSchema,
-  policyDays,
   providerFilter,
   reviewSchema,
   signedByPatreon,
@@ -44,7 +43,7 @@ export class SupportersService {
     }
   }
   private configured() {
-    return Boolean(this.env.get("PATREON_ENABLED") && this.env.get("PATREON_CAMPAIGN_ID"));
+    return patreonCampaign(this.env) !== null;
   }
   /** The signing secret must be separate from the creator token and every other deployment secret. */
   private webhookConfigured() {
@@ -58,50 +57,11 @@ export class SupportersService {
   }
   /** The configured Patreon campaign, or null when Patreon is off. PayPal records never need it. */
   private campaign() {
-    return this.configured() ? this.env.get("PATREON_CAMPAIGN_ID")! : null;
+    return patreonCampaign(this.env);
   }
-  /**
-   * The provider-neutral founder window. A complete SUPPORTER_FOUNDER_* pair wins; otherwise a
-   * complete PATREON_FOUNDER_* pair is used. A half-set pair, or two complete pairs naming different
-   * instants, leaves the window unconfigured rather than guessing.
-   */
+  /** The provider-neutral founder window (see founderPolicy). */
   policy(): FounderPolicy {
-    const unconfigured: FounderPolicy = {
-      amountCents: FOUNDER_MINIMUM.amountCents,
-      currency: FOUNDER_MINIMUM.currency,
-      startsAt: null,
-      endsAt: null,
-      configured: false,
-      source: null,
-    };
-    const pairs = [
-      {
-        source: "SUPPORTER_FOUNDER" as const,
-        start: this.env.get("SUPPORTER_FOUNDER_START_AT"),
-        end: this.env.get("SUPPORTER_FOUNDER_END_AT"),
-      },
-      {
-        source: "PATREON_FOUNDER" as const,
-        start: this.env.get("PATREON_FOUNDER_START_AT"),
-        end: this.env.get("PATREON_FOUNDER_END_AT"),
-      },
-    ];
-    if (pairs.some((pair) => Boolean(pair.start) !== Boolean(pair.end))) return unconfigured;
-    const complete = pairs.flatMap(({ source, start, end }) =>
-      start && end ? [{ source, start: Date.parse(start), end: Date.parse(end) }] : [],
-    );
-    if (complete.length === 2 && (complete[0].start !== complete[1].start || complete[0].end !== complete[1].end))
-      return unconfigured;
-    const chosen = complete[0];
-    if (!chosen || !Number.isFinite(chosen.start) || chosen.end - chosen.start !== policyDays * 86_400_000)
-      return unconfigured;
-    return {
-      ...unconfigured,
-      startsAt: new Date(chosen.start).toISOString(),
-      endsAt: new Date(chosen.end).toISOString(),
-      configured: true,
-      source: chosen.source,
-    };
+    return founderPolicy(this.env);
   }
   private admin(staff: Staff) {
     if (staff.role !== "admin") throw new ForbiddenException("Only administrators can access supporter records.");

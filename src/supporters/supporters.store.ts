@@ -1,5 +1,5 @@
 import { ConflictException, Inject, Injectable, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
-import { and, eq, lt, ne, or, sql, type SQL } from "drizzle-orm";
+import { and, eq, ne, sql } from "drizzle-orm";
 import { createHash, randomUUID } from "node:crypto";
 import { DATABASE, type Database } from "../database/database.types";
 import {
@@ -13,12 +13,21 @@ import {
 import type { Staff } from "../admin/admin.types";
 import { firstPaidEventId, type PatreonMemberSnapshot } from "./patreon.client";
 import {
-  FOUNDER_PAYMENT_SOURCES,
+  earlierPayment,
+  type Executor,
+  founderCheck,
+  type FounderIdentity,
+  identityKeys,
+  lockKeys,
+  qualifyingSources,
+  RECEIPT_COPY_TOLERANCE,
+  receiptCopy,
+} from "./founder-rules";
+import {
   founderBlockedMessages,
   founderBlocker,
   founderIdentity,
   type FounderBlockedReason,
-  type FounderPaymentFacts,
   type FounderPolicy,
   type ManualMemberInput,
   type PatreonObservation,
@@ -52,21 +61,14 @@ export type FounderReview = {
   unverifiedReference: string;
 };
 
-type Executor = Pick<Database, "select" | "execute">;
 type MemberRow = typeof supporterMembers.$inferSelect;
 type PaymentRow = typeof supporterPayments.$inferSelect;
-type Identity = { id: string; discordId: string | null; steamId: string | null };
 // Internal columns used to explain founder readiness; removed before a view leaves the store.
 type StoredSupporter = Omit<SupporterView, "founderBlockedReason" | "needsDiscordLink"> & {
   founderCandidate: { payment: PaymentView; earlier: boolean; copyUnverified: boolean } | null;
   otherFounder: boolean;
 };
 type ObservedFields = Pick<PatreonObservation, "displayName" | "patronStatus" | "lastChargeStatus" | "lastChargeAt">;
-
-const qualifyingSources = sql`(${sql.join(
-  FOUNDER_PAYMENT_SOURCES.map((source) => sql`${source}`),
-  sql`, `,
-)})`;
 
 // last_charge_date orders charge observations, not membership changes. An older charge never replaces
 // newer state, and an undated observation preserves the last known charge.
@@ -82,29 +84,6 @@ function observedPatch(member: MemberRow, observation: ObservedFields) {
       }
     : {};
 }
-/**
- * Staff estimate a receipt's time from Patreon's date-only payment history, so the imported row for the same charge
- * can fall on either side of it. Monthly charges are weeks apart.
- */
-const RECEIPT_COPY_TOLERANCE = "interval '36 hours'";
-/**
- * Lateral subquery for the imported copy of the staff receipt aliased `receipt`: the patreon_api payment with the
- * receipt's amount and currency nearest in time to it, within the tolerance. Yields no row for other sources.
- */
-const receiptCopy = (receipt: string) =>
-  sql.raw(`(SELECT api.id, api.verification_state FROM supporter_payments api
-      WHERE ${receipt}.source = 'manual_receipt' AND api.member_id = ${receipt}.member_id AND api.source = 'patreon_api'
-      AND api.amount_cents = ${receipt}.amount_cents AND api.currency = ${receipt}.currency
-      AND api.paid_at BETWEEN ${receipt}.paid_at - ${RECEIPT_COPY_TOLERANCE} AND ${receipt}.paid_at + ${RECEIPT_COPY_TOLERANCE}
-      ORDER BY abs(extract(epoch FROM api.paid_at - ${receipt}.paid_at)), api.paid_at, api.id LIMIT 1)`);
-/**
- * The founder rule's earlier-payment test for the payment aliased `p` and its receipt copy `dup`, for every provider.
- * founderCheck applies the same test. The imported copy of a staff receipt's own charge is not an earlier payment, and
- * webhook status rows (no amount, repeating charges the authenticated history covers) never block a Patreon API payment.
- */
-const earlierPayment = sql.raw(`EXISTS (SELECT 1 FROM supporter_payments earlier
-            WHERE earlier.member_id = p.member_id AND earlier.paid_at < p.paid_at AND earlier.id IS DISTINCT FROM dup.id
-            AND (p.source <> 'patreon_api' OR earlier.source <> 'signed_status'))`);
 const sha256 = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 /** Canonical member snapshot: an unchanged Patreon record hashes the same and adds no observation. */
 export function apiSnapshotHash(campaignId: string, snapshot: PatreonMemberSnapshot) {
@@ -575,74 +554,6 @@ export class SupportersStore {
     return (await this.list(campaignId, policy, memberId))[0] ?? null;
   }
 
-  /** Founder awards for one person serialize on each identity before the cross-record check. */
-  private async lock(tx: Executor, keys: string[]) {
-    for (const key of [...new Set(keys)].sort())
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
-  }
-
-  private identityKeys(prefix: string, identity: { discordId?: string | null; steamId?: string | null }) {
-    return [
-      ...(identity.discordId ? [`${prefix}:discord:${identity.discordId}`] : []),
-      ...(identity.steamId ? [`${prefix}:steam:${identity.steamId}`] : []),
-    ];
-  }
-
-  /** Another supporter record for the same Discord account or SteamID already holds a founder promise. */
-  private async otherFounder(db: Executor, member: Identity) {
-    const identity = [
-      member.discordId ? eq(supporterMembers.discordId, member.discordId) : undefined,
-      member.steamId ? eq(supporterMembers.steamId, member.steamId) : undefined,
-    ].filter((condition): condition is SQL => condition !== undefined);
-    if (!identity.length) return false;
-    const [other] = await db
-      .select({ memberId: supporterFounders.memberId })
-      .from(supporterFounders)
-      .innerJoin(supporterMembers, eq(supporterMembers.id, supporterFounders.memberId))
-      .where(and(ne(supporterMembers.id, member.id), or(...identity)))
-      .limit(1);
-    return Boolean(other);
-  }
-
-  /** The founder rule for one payment of any provider; list() applies the same rule in SQL. */
-  private async founderCheck(
-    db: Executor,
-    member: Identity,
-    payment: FounderPaymentFacts & { id: string },
-    policy: FounderPolicy,
-  ) {
-    // The imported copy of a receipt's own charge is not an earlier payment, but a refund of it disqualifies.
-    const [copy] =
-      payment.source === "manual_receipt"
-        ? (
-            await db.execute<{ id: string; verification_state: "verified" | "unverified" }>(
-              sql`SELECT dup.id, dup.verification_state FROM supporter_payments p
-                    CROSS JOIN LATERAL ${receiptCopy("p")} dup WHERE p.id = ${payment.id}`,
-            )
-          ).rows
-        : [];
-    const [earlier] = await db
-      .select({ id: supporterPayments.id })
-      .from(supporterPayments)
-      .where(
-        and(
-          eq(supporterPayments.memberId, member.id),
-          lt(supporterPayments.paidAt, new Date(payment.paidAt)),
-          // Webhook status rows carry no amount and repeat charges the authenticated history already
-          // covers, so they cannot block a verified first payment imported from the Patreon API.
-          payment.source === "patreon_api" ? ne(supporterPayments.source, "signed_status") : undefined,
-          copy ? ne(supporterPayments.id, copy.id) : undefined,
-        ),
-      )
-      .limit(1);
-    return founderBlocker(payment, policy, {
-      earlierPayment: Boolean(earlier),
-      importedCopyUnverified: Boolean(copy && copy.verification_state !== "verified"),
-      hasIdentity: founderIdentity(member),
-      otherFounder: await this.otherFounder(db, member),
-    });
-  }
-
   async mutate(
     memberId: string,
     input: SupporterMutation,
@@ -712,8 +623,8 @@ export class SupportersStore {
           .from(supporterPayments)
           .where(and(eq(supporterPayments.id, input.paymentId), eq(supporterPayments.memberId, memberId)));
         if (!payment) throw new ConflictException("Choose a payment recorded for this supporter.");
-        await this.lock(tx, this.identityKeys("founder", member));
-        const blocked = await this.founderCheck(tx, member, payment, policy);
+        await lockKeys(tx, identityKeys("founder", member));
+        const blocked = await founderCheck(tx, member, payment, policy);
         if (blocked) throw founderConflict(blocked);
         await tx.insert(supporterFounders).values({
           memberId,
@@ -775,7 +686,7 @@ export class SupportersStore {
       .digest("hex");
     const result = await this.db.transaction(async (tx) => {
       // One transaction ID is processed at a time, so a retry sees the first request's committed records.
-      await this.lock(tx, [`paypal:${input.transactionId}`]);
+      await lockKeys(tx, [`paypal:${input.transactionId}`]);
       const [previous] = await tx.select().from(supporterActions).where(eq(supporterActions.id, input.id));
       if (previous) {
         if (
@@ -788,7 +699,7 @@ export class SupportersStore {
         return { replayed: true, memberId: previous.memberId, paymentId: previous.details.paymentId };
       }
       // Two transactions for the same donor attach to one PayPal supporter instead of racing to create two.
-      await this.lock(tx, this.identityKeys("paypal-member", input));
+      await lockKeys(tx, identityKeys("paypal-member", input));
       const [recorded] = await tx
         .select()
         .from(supporterPayments)
@@ -851,7 +762,7 @@ export class SupportersStore {
           })
           .returning();
       }
-      const identity: Identity = {
+      const identity: FounderIdentity = {
         id: member.id,
         discordId: member.discordId ?? input.discordId ?? null,
         steamId: member.steamId ?? input.steamId ?? null,
@@ -877,12 +788,12 @@ export class SupportersStore {
         .returning();
       let founderAwarded = false;
       if (input.awardFounder) {
-        await this.lock(tx, this.identityKeys("founder", identity));
+        await lockKeys(tx, identityKeys("founder", identity));
         const [existing] = await tx
           .select({ memberId: supporterFounders.memberId })
           .from(supporterFounders)
           .where(eq(supporterFounders.memberId, member.id));
-        const blocked = existing ? "already_founder" : await this.founderCheck(tx, identity, payment, policy);
+        const blocked = existing ? "already_founder" : await founderCheck(tx, identity, payment, policy);
         if (blocked) throw founderConflict(blocked, " Nothing was recorded.");
         await tx.insert(supporterFounders).values({
           memberId: member.id,
@@ -933,7 +844,7 @@ export class SupportersStore {
       ? null
       : supporter.founder
         ? "already_founder"
-        : await this.founderCheck(this.db, supporter, payment, policy);
+        : await founderCheck(this.db, supporter, payment, policy);
     return {
       ok: true,
       replayed: result.replayed,
