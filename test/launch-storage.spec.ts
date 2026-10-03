@@ -1932,6 +1932,27 @@ describe("launch storage on isolated PostgreSQL", () => {
       });
     });
 
+    it("asks staff to confirm the previous Discord account's SteamID before it follows a new account", async () => {
+      const record = await importPatron();
+      await application();
+      const moved = { ...review(record), kind: "link" as const, discordId: "567890123456789017", steamId: patronSteam };
+      await expect(supporters.mutate(record.id, moved, staff, campaign, policy)).rejects.toMatchObject({
+        status: 409,
+        response: { blockedReason: "steam_from_application" },
+      });
+      expect(
+        (
+          await supporters.mutate(
+            record.id,
+            { ...moved, id: randomUUID(), steamConfirmed: true },
+            staff,
+            campaign,
+            policy,
+          )
+        ).supporter,
+      ).toMatchObject({ discordId: "567890123456789017", steamId: patronSteam, steamSource: "staff" });
+    });
+
     it("records no automatic founder on a staff SteamID another Discord account applied with", async () => {
       const record = await importPatron();
       await supporters.mutate(
