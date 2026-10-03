@@ -185,6 +185,7 @@ describe("Patreon API client", () => {
       lastChargeStatus: "Paid",
       lastChargeAt: new Date("2026-10-01T12:00:00Z"),
       discordId,
+      discordKnown: true,
       events: [
         {
           id: "pledge_start:1",
@@ -208,11 +209,41 @@ describe("Patreon API client", () => {
     const { members } = await new PatreonClient().members(campaign, token);
     expect(members[0].displayName).toBe(expected);
   });
-  it("ignores a malformed Discord connection instead of linking it", async () => {
+  it("ignores a malformed Discord connection instead of linking it, and reports it as unknown", async () => {
     fetchMock.mockResolvedValueOnce(
       json(page([member("member-1", [], { user: "user-1" })], [user("user-1", { user_id: "not-a-snowflake" })])),
     );
-    expect((await new PatreonClient().members(campaign, token)).members[0].discordId).toBeNull();
+    expect((await new PatreonClient().members(campaign, token)).members[0]).toMatchObject({
+      discordId: null,
+      discordKnown: false,
+    });
+  });
+  it.each([
+    ["no Discord connection", [user("user-1", null)], { discordId: null, discordKnown: true }],
+    [
+      "a Discord connection without an ID",
+      [user("user-1", { user_id: null })],
+      { discordId: null, discordKnown: true },
+    ],
+    [
+      "no connections at all",
+      [{ id: "user-1", type: "user", attributes: { social_connections: null } }],
+      { discordId: null, discordKnown: true },
+    ],
+    [
+      "connections left out of the response",
+      [{ id: "user-1", type: "user", attributes: {} }],
+      { discordId: null, discordKnown: false },
+    ],
+    [
+      "malformed connections",
+      [{ id: "user-1", type: "user", attributes: { social_connections: "discord" } }],
+      { discordId: null, discordKnown: false },
+    ],
+    ["a user missing from the response", [], { discordId: null, discordKnown: false }],
+  ])("tells a disconnected Discord from an unreadable one: %s", async (_name, included, expected) => {
+    fetchMock.mockResolvedValueOnce(json(page([member("member-1", [], { user: "user-1" })], included)));
+    expect((await new PatreonClient().members(campaign, token)).members[0]).toMatchObject(expected);
   });
   it.each([
     ["a non-member resource", page([{ ...member("member-1"), type: "user" }])],

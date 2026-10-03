@@ -40,6 +40,12 @@ export type PatreonMemberSnapshot = {
   lastChargeAt: Date | null;
   /** Discord account the patron connected on Patreon, when the campaign's Discord benefit exposes it. */
   discordId: string | null;
+  /**
+   * Whether Patreon's answer about Discord was read: true when the patron's connections parsed and either name a
+   * valid Discord account or have none. False when the user or their connections were missing or malformed, so a
+   * null `discordId` then means "unknown", not "disconnected".
+   */
+  discordKnown: boolean;
   events: PatreonPledgeEvent[];
   /** False when the returned pledge history may be truncated; the first payment is then not derived. */
   historyComplete: boolean;
@@ -118,27 +124,30 @@ const pageSchema = z.object({
 const userSchema = z.object({
   id: z.string().min(1).max(160),
   type: z.literal("user"),
-  attributes: z
-    .object({
-      // Only the Discord ID is read; other connected accounts are discarded unparsed.
-      social_connections: z
-        .object({
-          discord: z
-            .object({
-              user_id: z
-                .string()
-                .regex(/^\d{17,20}$/)
-                .nullish()
-                .catch(null),
-            })
-            .nullish()
-            .catch(null),
-        })
-        .nullish()
-        .catch(null),
-    })
+  // Only the Discord ID is read (see discordConnection); other connected accounts are discarded unparsed.
+  attributes: z.object({ social_connections: z.unknown() }).nullish(),
+});
+const discordConnectionSchema = z.object({
+  user_id: z
+    .string()
+    .regex(/^\d{17,20}$/)
     .nullish(),
 });
+type DiscordConnection = { discordId: string | null; known: boolean };
+const UNKNOWN_DISCORD: DiscordConnection = { discordId: null, known: false };
+/**
+ * The Discord account in a patron's social connections. Connections that are null, or that name no Discord
+ * account, mean the patron has none connected. Anything malformed is unknown: it is never linked, and it never
+ * clears the Discord ID Patreon reported before.
+ */
+export function discordConnection(connections: unknown): DiscordConnection {
+  if (connections === null) return { discordId: null, known: true };
+  if (typeof connections !== "object" || Array.isArray(connections)) return UNKNOWN_DISCORD;
+  const discord = (connections as Record<string, unknown>).discord;
+  if (discord === undefined || discord === null) return { discordId: null, known: true };
+  const parsed = discordConnectionSchema.safeParse(discord);
+  return parsed.success ? { discordId: parsed.data.user_id ?? null, known: true } : UNKNOWN_DISCORD;
+}
 const eventSchema = z.object({
   id: eventId,
   type: z.enum(["pledge-event", "pledge_event"]),
@@ -301,13 +310,20 @@ export class PatreonClient {
     }
     const parsed = pageSchema.safeParse(body);
     if (!parsed.success) throw new PatreonApiError("schema", UNEXPECTED);
-    const users = new Map<string, string | null>();
+    const users = new Map<string, DiscordConnection>();
     const events = new Map<string, PatreonPledgeEvent>();
     for (const item of parsed.data.included ?? []) {
       if (item.type === "user") {
         const user = userSchema.safeParse(item);
         if (!user.success) throw new PatreonApiError("schema", UNEXPECTED);
-        users.set(user.data.id, user.data.attributes?.social_connections?.discord?.user_id ?? null);
+        // Connections Patreon left out of the response are unknown, not empty.
+        const attributes = user.data.attributes;
+        users.set(
+          user.data.id,
+          attributes && "social_connections" in attributes
+            ? discordConnection(attributes.social_connections)
+            : UNKNOWN_DISCORD,
+        );
       } else if (item.type === "pledge-event" || item.type === "pledge_event") {
         const event = eventSchema.safeParse(item);
         if (!event.success) throw new PatreonApiError("schema", UNEXPECTED);
@@ -334,6 +350,7 @@ export class PatreonClient {
           a.date.getTime() - b.date.getTime() || Number(b.type === "pledge_start") - Number(a.type === "pledge_start"),
       )[0];
       const userId = member.relationships?.user?.data?.type === "user" ? member.relationships.user.data.id : null;
+      const discord = (userId ? users.get(userId) : undefined) ?? UNKNOWN_DISCORD;
       const lastChargeAt = member.attributes.last_charge_date;
       return {
         patreonMemberId: member.id,
@@ -341,7 +358,8 @@ export class PatreonClient {
         patronStatus: member.attributes.patron_status,
         lastChargeStatus: member.attributes.last_charge_status,
         lastChargeAt: lastChargeAt && lastChargeAt.getTime() <= limit ? lastChargeAt : null,
-        discordId: userId ? (users.get(userId) ?? null) : null,
+        discordId: discord.discordId,
+        discordKnown: discord.known,
         events: history,
         historyComplete:
           references !== undefined &&

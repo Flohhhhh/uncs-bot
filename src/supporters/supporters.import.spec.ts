@@ -37,6 +37,7 @@ const snapshot = (overrides: Partial<PatreonMemberSnapshot> = {}): PatreonMember
   lastChargeStatus: "Paid",
   lastChargeAt: new Date("2026-10-01T12:00:00Z"),
   discordId: null,
+  discordKnown: true,
   events: [paid("pledge_start:1", "2026-10-01T12:00:00Z", { type: "pledge_start" })],
   historyComplete: true,
   ...overrides,

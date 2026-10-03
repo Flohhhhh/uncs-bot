@@ -168,6 +168,7 @@ describe("launch storage on isolated PostgreSQL", () => {
     lastChargeStatus: "Paid",
     lastChargeAt: events.at(-1)?.date ?? null,
     discordId: null,
+    discordKnown: true,
     events,
     historyComplete,
   });
@@ -981,6 +982,7 @@ describe("launch storage on isolated PostgreSQL", () => {
       lastChargeStatus: "Paid",
       lastChargeAt: new Date("2026-09-30T12:00:00.000Z"),
       discordId: staff.id,
+      discordKnown: true,
       events: [
         {
           id: "pledge_start:1001",
