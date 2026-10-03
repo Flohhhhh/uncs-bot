@@ -527,8 +527,8 @@ export class StaffAlertsWorker {
       roundKey: peak.roundKey,
       map: cleanText(mapLabel(peak.map), 64),
       startedAt: new Date(peak.startedAt).toISOString(),
-      window: peak.window ? { ...peak.window, name: cleanText(peak.window.name, 64) || "Unknown" } : null,
-      kd: peak.kd ? { ...peak.kd, name: cleanText(peak.kd.name, 64) || "Unknown" } : null,
+      window: peak.window ? { ...peak.window, name: playerLabel(peak.window.name) } : null,
+      kd: peak.kd ? { ...peak.kd, name: playerLabel(peak.kd.name) } : null,
     }));
   }
 }

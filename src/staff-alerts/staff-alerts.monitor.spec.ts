@@ -585,6 +585,16 @@ describe("staff alert player names", () => {
     expect(join.description.split("\n")[0]).toBe(`${shown} joined.`);
     for (const embed of [perf, join]) expect(embed.fields[0]).toEqual({ name: "Player", value: shown, inline: true });
   });
+
+  it("shows a filler-only name as Unknown in the dashboard's round peaks", async () => {
+    const { pass, worker } = workerFixture({ STAFF_ALERTS_PERFORMANCE_ENABLED: "observe" });
+    await pass(snapshot([{ steamId: ids[0], name: "ㅤ", kills: 0, deaths: 0 }]), 0);
+    for (let kills = 2; kills <= 12; kills += 2)
+      await pass(snapshot([{ steamId: ids[0], name: "ㅤ", kills, deaths: 1 }]));
+    const [peak] = worker.peaks();
+    expect(peak.window).toMatchObject({ steamId: ids[0], name: "Unknown" });
+    expect(peak.kd).toMatchObject({ steamId: ids[0], name: "Unknown", kills: 12 });
+  });
 });
 
 describe("staff alerts module wiring", () => {
