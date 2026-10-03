@@ -320,7 +320,17 @@ export class MapVotesService implements OnModuleInit, OnApplicationBootstrap, On
         settings,
         limits: votingSettingLimits,
         // Any save starts a new version, which resumes it; a pause recorded under an older version is over.
-        paused: policy.enabled && pause && pause.version === saved?.version ? pause.message : null,
+        // Like the voting status, only while voting can run: a changed connection or invalid settings need
+        // their own save (voting off, or corrected settings), which an unchanged save would not be.
+        paused:
+          this.options().enabled &&
+          connectionMatches &&
+          valid &&
+          policy.enabled &&
+          pause &&
+          pause.version === saved?.version
+            ? pause.message
+            : null,
       };
     } catch {
       return {

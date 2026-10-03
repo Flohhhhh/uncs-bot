@@ -2367,6 +2367,30 @@ describe("ballots that need review", () => {
     f.auth.role.mockResolvedValue("admin");
     expect((await f.service.controls(staff)).paused).toBeNull();
   });
+  it("offers no unchanged save to resume once voting cannot run on these controls", async () => {
+    const f = automatic();
+    f.auth.role.mockResolvedValue("viewer");
+    await observeForWindow(f);
+    expect((await f.service.controls(staff)).paused).toMatch(/Save the voting controls to resume/);
+    // The connection changed: an enabled save is refused until voting is switched off, so no resume is offered.
+    const connection = f.saved.connectionHash;
+    f.saved.connectionHash = "different endpoint";
+    await f.service.tick();
+    const moved = await f.service.controls(staff);
+    expect(moved.message).toMatch(/server connection changed/);
+    expect(moved.paused).toBeNull();
+    // Invalid saved settings must be corrected, not saved unchanged.
+    f.saved.connectionHash = connection;
+    const settings = f.saved.policy.settings;
+    f.saved.policy.settings = { ...settings, closeAtScore: 120 };
+    expect((await f.service.controls(staff)).paused).toBeNull();
+    f.saved.policy.settings = settings;
+    // Live voting switched off in Gramps.
+    f.environment.MAP_VOTES_ENABLED = false;
+    expect((await f.service.controls(staff)).paused).toBeNull();
+    f.environment.MAP_VOTES_ENABLED = true;
+    expect((await f.service.controls(staff)).paused).toMatch(/Save the voting controls to resume/);
+  });
   it("keeps voting automatic after 50v50 winners that could not start", async () => {
     const f = automatic();
     const unready = (minutes: number): MapVoteRecord => ({
