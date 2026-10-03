@@ -1,5 +1,13 @@
 import { Logger } from "@nestjs/common";
-import { Collection, GatewayIntentBits, GuildMember, IntentsBitField, Role, type APIEmbedField } from "discord.js";
+import {
+  Collection,
+  GatewayIntentBits,
+  GuildMember,
+  IntentsBitField,
+  Role,
+  User,
+  type APIEmbedField,
+} from "discord.js";
 import type { SlashCommandContext } from "necord";
 import { WhatisCommand } from "./whatis.command";
 
@@ -24,7 +32,7 @@ function fixture() {
   return { command: new WhatisCommand(), interaction, context, field };
 }
 
-function memberWithRoles(names: string[]) {
+function memberWithRoles(names: string[], joinedAt: Date | null = new Date("2026-01-01T00:00:00Z")) {
   const roles = new Collection<string, { id: string; name: string; position: number }>();
   roles.set("guild-1", { id: "guild-1", name: "@everyone", position: 0 });
   names.forEach((name, index) => roles.set(`role-${index}`, { id: `role-${index}`, name, position: index + 1 }));
@@ -33,7 +41,7 @@ function memberWithRoles(names: string[]) {
     id: { value: "member-1" },
     guild: { value: { id: "guild-1" } },
     user: { value: { displayName: "Bob", displayAvatarURL: () => "https://cdn.discordapp.com/avatar.png" } },
-    joinedAt: { value: new Date("2026-01-01T00:00:00Z") },
+    joinedAt: { value: joinedAt },
     roles: { value: { cache: roles } },
   });
   return member;
@@ -76,6 +84,34 @@ describe("/whatis on a member", () => {
     const { command, context, field } = fixture();
     await command.handleWhatis(context, { thing: memberWithRoles([]) });
     expect(field("Roles")).toBe("None");
+  });
+
+  it("shows the join date as Discord timestamp markup, so each viewer sees their own calendar day", async () => {
+    const { command, context, field } = fixture();
+    await command.handleWhatis(context, { thing: memberWithRoles([]) });
+    expect(field("Joined At")).toBe("<t:1767225600:D>");
+  });
+
+  it("says Unknown when the member's join date is not known", async () => {
+    const { command, context, field } = fixture();
+    await command.handleWhatis(context, { thing: memberWithRoles([], null) });
+    expect(field("Joined At")).toBe("Unknown");
+  });
+});
+
+describe("/whatis on a user", () => {
+  it("shows the account's creation date as Discord timestamp markup", async () => {
+    const { command, context, field } = fixture();
+    const user = Object.create(User.prototype) as User;
+    Object.defineProperties(user, {
+      id: { value: "user-1" },
+      tag: { value: "bob" },
+      bot: { value: false },
+      createdAt: { value: new Date("2026-10-02T01:30:00Z") },
+      displayAvatarURL: { value: () => "https://cdn.discordapp.com/avatar.png" },
+    });
+    await command.handleWhatis(context, { thing: user });
+    expect(field("Created At")).toBe("<t:1790904600:D>");
   });
 });
 
