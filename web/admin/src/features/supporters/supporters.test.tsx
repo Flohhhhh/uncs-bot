@@ -263,6 +263,36 @@ it("founder eligibility requires first checked payment, linked identities, amoun
   ).toBe(true);
 });
 
+it("records a founder promise against a verified first payment from the Patreon import", async () => {
+  const imported: PaymentEvidence = { ...payment, source: "patreon_api", reference: "patreon-event-1" };
+  const record = { ...supporter, founderEligiblePayment: imported };
+  expect(founderReady(record, policy)).toBe(true);
+  for (const invalid of [{ verificationState: "unverified" as const }, { firstSuccessfulPaymentVerified: false }])
+    expect(founderReady({ ...record, founderEligiblePayment: { ...imported, ...invalid } }, policy)).toBe(false);
+  request.mockImplementation(async (_path, options) =>
+    options?.method === "POST"
+      ? {
+          ok: true,
+          replayed: false,
+          supporter: { ...record, version: 8, founder: { awardedAt: policy.startsAt!, paymentId: imported.id } },
+        }
+      : data(record),
+  );
+  render(page());
+  fireEvent.click(await screen.findByRole("button", { name: "Review supporter" }));
+  fireEvent.click(screen.getByRole("button", { name: "Record founder promise" }));
+  const notice = screen.getByText("Payment supporting this founder promise").parentElement!;
+  expect(notice).toHaveTextContent("5.00 USD · checked by the Patreon import · first payment history checked");
+  expect(notice).not.toHaveTextContent("provider status only");
+  fireEvent.change(screen.getByLabelText("Reason"), {
+    target: { value: "Imported first payment and matched accounts." },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save reviewed record" }));
+  await screen.findByRole("heading", { name: "Supporter record saved" });
+  expect(postCalls()[0][0]).toBe(`supporters/${supporter.id}/founder`);
+  expect(JSON.parse(String(postCalls()[0][1]?.body))).toMatchObject({ version: 7, paymentId: imported.id });
+});
+
 it("checks linked Steam account structure rather than a decimal prefix", () => {
   const input = new FormData();
   input.set("reason", "Checked this supporter's player identity");
