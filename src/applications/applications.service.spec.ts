@@ -576,11 +576,16 @@ describe("existing whitelist members", () => {
     expect(admin.act).toHaveBeenCalledTimes(1);
     expect(roles.applicationChanged).toHaveBeenCalledWith(applicant.userId);
   });
-  it("falls back to the normal grant when the running whitelist cannot be read", async () => {
-    const { service, admin, game } = fixture({ live: [input.steamId] });
+  it("falls back to the normal grant when the running whitelist cannot be read, recording no grant", async () => {
+    // A configuration-edit build reports an entry that was already saved as applied, so "granted" would claim a
+    // grant that may not have changed anything.
+    const { service, admin, game, store } = fixture({ live: [input.steamId] });
     game.whitelist.mockRejectedValueOnce(new Error("offline"));
-    await service.review(staff, applicationId, "approve", { id: randomUUID(), reason: "Approve" });
+    const review = { id: randomUUID(), reason: "Approve" };
+    const result = await service.review(staff, applicationId, "approve", review);
     expect(admin.act).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "whitelist-add" }));
+    expect(store.finishApproval).toHaveBeenCalledWith(applicationId, review.id, expect.any(Object), null);
+    expect(result.application).toMatchObject({ status: "approved", whitelistGrant: null });
   });
   it("never lets the confirmation approve a request automatically or reveal access to the applicant", async () => {
     const { service, admin, store } = fixture({ live: [input.steamId] });

@@ -190,6 +190,7 @@ export class ApplicationsService implements OnModuleInit, OnModuleDestroy {
     // staff confirm this Discord member owns it. Requiring that confirmation is a setting, off by default,
     // so a dashboard that cannot send it keeps the normal grant. Nothing is ever approved automatically.
     let alreadyLive = false;
+    let liveUnknown = false;
     let existing = false;
     if (kind === "approve") {
       const current = await this.store.get(applicationId, serverId);
@@ -198,8 +199,10 @@ export class ApplicationsService implements OnModuleInit, OnModuleDestroy {
           const list = await this.servers.get(serverId).whitelist();
           alreadyLive = list.entries.some((entry) => entry.steamId === current.steamId && entry.active);
         } catch {
-          // An unreadable whitelist falls back to the normal grant, which confirms its own result.
+          // An unreadable whitelist falls back to the normal grant, which confirms its own result. Whether the
+          // SteamID was already live is then unknown, so the approval records no grant.
           alreadyLive = false;
+          liveUnknown = true;
         }
         existing = alreadyLive && request.existingAccessConfirmed === true;
         if (alreadyLive && !existing && this.env.get("WHITELIST_APPLICATION_EXISTING_CONFIRMATION_REQUIRED") === true)
@@ -260,12 +263,14 @@ export class ApplicationsService implements OnModuleInit, OnModuleDestroy {
       };
     }
     try {
-      // A grant for an entry that was already live changed nothing, so it is not recorded as a grant.
+      // A grant for an entry that was already live changed nothing, so it is not recorded as a grant. Neither is
+      // one whose earlier whitelist read failed: a build that edits the saved configuration reports an existing
+      // entry as applied.
       const application = await this.store.finishApproval(
         applicationId,
         request.id,
         outcome,
-        alreadyLive ? null : "granted",
+        alreadyLive || liveUnknown ? null : "granted",
       );
       this.notifyRoles(application);
       return { application, outcome: { id: request.id, ...outcome } };
