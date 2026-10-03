@@ -2,7 +2,6 @@ import { fireEvent, render, screen, within, waitFor } from "@testing-library/rea
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import { useState } from "react";
 import { RotationQueue, type RotationRow } from "./rotation-queue";
-import userEvent from "@testing-library/user-event";
 
 const sample: RotationRow[] = [
   { id: "first", entry: { map: "Kavkazi", experiences: ["Bakurani_KOTH_01"], lighting: "DayClear" } },
@@ -40,12 +39,7 @@ function Fixture({ change, disabled = false }: { change: (rows: RotationRow[]) =
       }}
       disabled={disabled}
       edit={vi.fn()}
-      selection={sample[0].entry}
-      canAdd
-      add={vi.fn()}
-    >
-      {null}
-    </RotationQueue>
+    />
   );
 }
 it("keeps duplicate maps distinct and preserves exact mode and lighting IDs when moved", () => {
@@ -76,27 +70,42 @@ it("locks drag handles and buttons when editing or saving", () => {
   fireEvent.click(screen.getByRole("button", { name: "Move Ozeti up" }));
   expect(change).not.toHaveBeenCalled();
 });
-it("inserts a prepared card through keyboard dragging", async () => {
-  const add = vi.fn();
-  const page = (rows: RotationRow[]) => (
+it("marks only the positions it is given and opens the editor under the edited row", () => {
+  const edit = vi.fn();
+  const page = (editing: number | null) => (
     <RotationQueue
-      rows={rows}
+      rows={sample}
       change={vi.fn()}
-      disabled={false}
-      edit={vi.fn()}
-      selection={sample[0].entry}
-      canAdd
-      add={add}
+      edit={edit}
+      disabled={editing !== null}
+      markers={{ now: 1, next: 2 }}
+      editing={editing}
+      editor={<p>Entry editor</p>}
     >
-      {null}
+      <button type="button">+ Add map</button>
     </RotationQueue>
   );
-  const view = render(page(sample));
-  const user = userEvent.setup();
-  screen.getByRole("button", { name: "Drag Bakurani · King of the Hill · Day · clear into rotation" }).focus();
-  await user.keyboard("[Space]");
-  await user.keyboard("[ArrowDown]");
-  view.rerender(page(structuredClone(sample)));
-  await user.keyboard("[Space]");
-  expect(add).toHaveBeenCalledTimes(1);
+  const view = render(page(null));
+  const rows = () => within(screen.getByRole("list", { name: "Rotation queue" })).getAllByRole("listitem");
+  expect(within(rows()[0]).queryByText(/^(Now|Next)$/)).not.toBeInTheDocument();
+  expect(within(rows()[1]).getByText("Now")).toBeInTheDocument();
+  expect(within(rows()[2]).getByText("Next")).toBeInTheDocument();
+  expect(screen.queryByText("Entry editor")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /into rotation/ })).not.toBeInTheDocument();
+  expect(screen.queryByText(/Drop here/)).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Edit Ozeti" }));
+  expect(edit).toHaveBeenCalledWith(2);
+  view.rerender(page(2));
+  expect(within(rows()[2]).getByText("Entry editor")).toBeInTheDocument();
+  for (const button of screen.getAllByRole("button", { name: /^(Edit|Remove|Move) / })) expect(button).toBeDisabled();
+  expect(screen.getByRole("button", { name: "+ Add map" })).toBeInTheDocument();
+});
+it("labels the edit and remove icon buttons", () => {
+  const change = vi.fn();
+  render(<Fixture change={change} />);
+  const remove = screen.getByRole("button", { name: "Remove Ozeti" });
+  expect(remove).toHaveAttribute("title", "Remove");
+  expect(screen.getByRole("button", { name: "Edit Ozeti" })).toHaveAttribute("title", "Edit");
+  fireEvent.click(remove);
+  expect(change).toHaveBeenCalledWith([sample[0], sample[1]]);
 });

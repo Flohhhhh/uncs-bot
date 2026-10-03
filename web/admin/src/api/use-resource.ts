@@ -39,7 +39,12 @@ export function useResource<T>(path: string | null) {
       });
     return () => controller.abort();
   }, [path, refreshVersion, version, gameApi]);
-  const refresh = useCallback(() => setVersion((value) => value + 1), []);
+  const refresh = useCallback(() => {
+    // Report the read as in flight from this call, not from the effect that starts it a render later,
+    // so a caller never sees one render with the old answer and nothing pending.
+    setResult((previous) => (previous.path === null || previous.loading ? previous : { ...previous, loading: true }));
+    setVersion((value) => value + 1);
+  }, []);
   const current = result.path === path;
   return {
     data: current ? result.data : null,

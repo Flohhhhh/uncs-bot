@@ -3,6 +3,7 @@ import type { GameLog } from "../../../../../src/admin/game-log";
 import { useResource } from "../../api/use-resource";
 import { Card, Empty, date } from "../../components/ui";
 import { DataTable } from "../../components/data-table";
+import { When } from "./activity-entries";
 
 export function GameLogView() {
   const { data, error, loading, refreshing, refresh } = useResource<GameLog>("game-log");
@@ -12,32 +13,31 @@ export function GameLogView() {
       .map((entry, index) => ({ ...entry, key: index }))
       .filter((entry) => all || entry.changesState || entry.event === "COMMAND") ?? [];
   return (
-    <Card title="Game command log" subtitle="Recent RCON activity, including other admin tools.">
+    <Card
+      title="Game command log"
+      subtitle="Requests from every admin tool. Staff are not named; an HTTP status confirms a response, not that a change took effect."
+    >
       <div className="card-body">
-        <p className="filter-note">
-          This limited log does not identify Discord staff. HTTP status confirms a response, not that a change took
-          effect. Private details are omitted.
-        </p>
         {error && (
           <p className="notice error" role="alert">
             {error} {data && "Showing the last snapshot."}
           </p>
         )}
-        <div className="toolbar">
+        <div className="toolbar game-log-tools">
           <label>
             <input type="checkbox" checked={all} onChange={(event) => setAll(event.target.checked)} /> Include reads and
             connections
           </label>
+          {data && (
+            <span className="muted">
+              {entries.length} shown of {data.entries.length} recent (up to {data.limit}) · read{" "}
+              <When at={data.observedAt} />
+            </span>
+          )}
           <button type="button" className="button secondary small" disabled={loading || refreshing} onClick={refresh}>
             Refresh game log
           </button>
         </div>
-        {data && (
-          <p className="filter-note">
-            {entries.length} shown from {data.entries.length} recent records (up to {data.limit}). Read{" "}
-            {date(data.observedAt)}.
-          </p>
-        )}
         {!data ? (
           <Empty title={error ? "Game log unavailable" : "Loading game log…"} />
         ) : !data.available ? (

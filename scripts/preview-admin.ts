@@ -29,6 +29,7 @@ import { TelemetryStore } from "../src/telemetry/telemetry.store";
 import type { CombatStats } from "../src/telemetry/telemetry.types";
 import { SupportersModule } from "../src/supporters/supporters.module";
 import { SupportersStore } from "../src/supporters/supporters.store";
+import { PatreonSyncService, type PatreonSyncStatus } from "../src/supporters/patreon-sync.service";
 import { MapVotesModule } from "../src/map-votes/map-votes.module";
 import { MapVotesStore } from "../src/map-votes/map-votes.store";
 import { MapVotesDiscord } from "../src/map-votes/map-votes.discord";
@@ -852,6 +853,64 @@ const supporterStore = {
     return { ok: true, replayed: false, supporter: structuredClone(record) };
   },
 };
+// A simulated Patreon import: no token and no Patreon calls. "Sync now" runs for two seconds.
+// It reports one Discord conflict and one founder promise to recheck, so both review lists show on a phone.
+const [, previewFounder, previewBacker] = [...demoSupporters.values()];
+const previewUnverifiedPaymentId = randomUUID();
+let previewSyncRun: Promise<PatreonSyncStatus> | null = null;
+let previewSyncedAt = Date.now() - 12 * 60_000;
+const previewSyncStatus = (): PatreonSyncStatus => ({
+  configured: true,
+  running: previewSyncRun !== null,
+  lastAttemptAt: new Date(previewSyncedAt - 4_000).toISOString(),
+  lastSuccessAt: new Date(previewSyncedAt).toISOString(),
+  lastError: null,
+  tokenRejected: false,
+  members: demoSupporters.size,
+  newMembers: 0,
+  updated: 1,
+  payments: 2,
+  discordLinks: 1,
+  conflicts: 1,
+  truncated: 0,
+  revokedPayments: 1,
+  memberListComplete: true,
+  intervalMinutes: 30,
+  nextAttemptAt: new Date(previewSyncedAt + 30 * 60_000).toISOString(),
+  conflictDetails: [
+    { supporterId: previewBacker.id, patreonMemberId: previewBacker.patreonMemberId, reason: "discord-in-use" },
+  ],
+  founderReviews: previewFounder.founder
+    ? [
+        {
+          supporterId: previewFounder.id,
+          patreonMemberId: previewFounder.patreonMemberId,
+          paymentId: previewFounder.founder.paymentId,
+          paymentSource: "manual_receipt",
+          reference: "DEMO-RECEIPT-2",
+          unverifiedPaymentId: previewUnverifiedPaymentId,
+          unverifiedReference: "DEMO-PLEDGE-EVENT-2",
+        },
+      ]
+    : [],
+});
+const patreonSync = {
+  configured: () => true,
+  status: previewSyncStatus,
+  async staffSync() {
+    if (previewSyncRun) return { joined: true, sync: await previewSyncRun };
+    previewSyncRun = new Promise<PatreonSyncStatus>((done) =>
+      setTimeout(() => {
+        previewSyncedAt = Date.now();
+        previewSyncRun = null;
+        done(previewSyncStatus());
+      }, 2_000),
+    );
+    return { joined: false, sync: await previewSyncRun };
+  },
+  onApplicationBootstrap() {},
+  onModuleDestroy() {},
+};
 const previewEnvironment: Record<string, unknown> = {
   MAP_VOTES_ENABLED: process.env.PREVIEW_MAP_VOTES_ENABLED !== "false",
   // Voted 50v50 stays held for the owner's review unless a rehearsal asks for it.
@@ -1464,12 +1523,38 @@ async function main() {
                 "Welcome to The UNCs! Website: theuncsgaming.com",
                 "Get whitelisted: theuncsgaming.com/whitelist. Sign in with Discord and apply on the website.",
               ],
+              variants: [
+                [
+                  "Welcome to The UNCs! Website: theuncsgaming.com",
+                  "Get whitelisted: theuncsgaming.com/whitelist. Sign in with Discord and apply on the website.",
+                ],
+                [
+                  "Pull up a chair, the coffee's fresh. Welcome to The UNCs.",
+                  "The whitelist is free: theuncsgaming.com/whitelist.",
+                ],
+                ["Welcome in! Be kind to the new guys, we were all new once."],
+              ],
+              whitelistedVariants: [
+                ["Welcome back! Good to see a regular."],
+                ["The usual table is ready. Welcome back to The UNCs."],
+              ],
+              whitelist: {
+                source: "running-whitelist",
+                cacheSeconds: 300,
+                lastLoadedAt: id === "primary" ? new Date(Date.now() - 3 * 60_000).toISOString() : null,
+                lastFailedAt: null,
+              },
               delaySeconds: 10,
               spacingSeconds: 20,
             },
             round: {
               enabled: false,
               message: "GG! Get whitelisted at theuncsgaming.com/whitelist. Thanks for playing on The UNCs.",
+              messages: [
+                "GG! Get whitelisted at theuncsgaming.com/whitelist. Thanks for playing on The UNCs.",
+                "Round's done. Stretch those knees and grab a refill.",
+                "GG! Same time next round?",
+              ],
             },
             discordStatus: { enabled: false, configured: false, problem: null },
           }),
@@ -1504,6 +1589,8 @@ async function main() {
     .useValue(telemetryStore)
     .overrideProvider(SupportersStore)
     .useValue(supporterStore)
+    .overrideProvider(PatreonSyncService)
+    .useValue(patreonSync)
     .overrideProvider(MapVotesStore)
     .useValue(voteStore)
     .overrideProvider(ServerEventsStore)

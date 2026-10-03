@@ -1,60 +1,245 @@
-import { useId } from "react";
-import type { ActionName } from "../../api/types";
+import { useEffect, useId, useState } from "react";
+import { Link, useLocation } from "react-router-dom";
+import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
+import type { ActionName, Player } from "../../api/types";
 import { useGameAdmin as useAdmin } from "../../app/context";
-import { Modal } from "../../components/ui";
+import { Sheet } from "../../components/ui";
+import { CopyValue } from "../../components/data-table";
 import { actionDefinitions, allowed } from "../actions/policy";
+import { FactionChip, liveFactions, playerFaction } from "./factions";
+import { TeamMoveDialog, type TeamMoveResult } from "./team-move";
 
-export function PlayerActions({ steamId, onClose }: { steamId: string; onClose: () => void }) {
-  const admin = useAdmin();
-  const notice = useId();
-  const player = admin.overview?.players.find((entry) => entry.steamId === steamId);
-  const actions = (["message", "kick", "ban", "whitelist-add", "team", "kill"] as ActionName[]).map((action) => ({
-    action,
-    permitted: allowed(action, admin.me, admin.overview, admin.stale, admin.busy),
-  }));
-  const off = actions.filter(({ permitted }) => !permitted).length;
-  // The open dialog pauses polling, so the snapshot can expire here and turn every action off. Otherwise an
-  // action is off for the staff role or the server build. Say why next to the disabled buttons.
-  let reason = "";
-  if (player && admin.stale)
-    reason = "Server details need a fresh check. Close this dialog and refresh before choosing an action.";
-  else if (player && off && !admin.busy)
-    reason =
-      off < actions.length
-        ? "Some actions are unavailable for your role, connection, or server build."
-        : "Unavailable for your role, connection, or server build. Refresh the dashboard before trying again.";
+/** A player to show in the panel. `name` is used when the player is no longer in the live roster. */
+export type SheetPlayer = { steamId: string; name?: string };
+
+/** `/activity?view=…`, keeping only the selected server from the current URL. */
+export function activityLink(search: string, view: "feed" | "combat" | "actions", extra: Record<string, string> = {}) {
+  const params = new URLSearchParams();
+  const server = new URLSearchParams(search).get("server");
+  if (server) params.set("server", server);
+  params.set("view", view);
+  for (const [key, value] of Object.entries(extra)) params.set(key, value);
+  return { pathname: "/activity", search: `?${params}` };
+}
+/** `/activity?view=…&player=…`, keeping the selected server. */
+export function playerHistory(search: string, view: "combat" | "actions", steamId: string) {
+  return activityLink(search, view, { player: steamId });
+}
+
+/** Opens the player panel; shown wherever a player's name appears. */
+export function PlayerButton({
+  player,
+  onOpen,
+}: {
+  player: Player | SheetPlayer;
+  onOpen: (player: SheetPlayer) => void;
+}) {
+  const name = player.name || player.steamId;
   return (
-    <Modal serverScoped title={player?.name ?? "Player unavailable"} description={steamId} onClose={onClose}>
-      {/* Always present, so screen readers announce the reason when it is filled in. */}
-      <div role="status" id={notice}>
-        {reason && <p className="notice warning">{reason}</p>}
-      </div>
-      {player ? (
-        <div className="action-list">
-          {actions.map(({ action, permitted }) => (
-            <button
-              type="button"
-              key={action}
-              className="button secondary small"
-              disabled={!permitted}
-              aria-describedby={!permitted && reason ? notice : undefined}
-              onClick={() => {
-                onClose();
-                admin.openAction(action, steamId);
-              }}
-            >
-              {actionDefinitions[action][0]}
-            </button>
-          ))}
+    <button
+      type="button"
+      className="player-link"
+      aria-haspopup="dialog"
+      onClick={() => onOpen({ steamId: player.steamId, name })}
+    >
+      {name}
+    </button>
+  );
+}
+
+/** Every action the panel offers; "team" covers the per-team move buttons. */
+const panelActions: ActionName[] = ["message", "team", "kick", "ban", "whitelist-add", "kill"];
+
+const stat = (value: number | undefined) =>
+  typeof value === "number" && Number.isFinite(value) ? value.toLocaleString() : "—";
+
+/**
+ * The player panel: stats, SteamID, history links and grouped actions. Each action opens its own
+ * review on top of the panel, which stays open behind it.
+ */
+export function PlayerSheet({
+  player: target,
+  onClose,
+  onTeamMoveComplete,
+}: {
+  player: SheetPlayer;
+  onClose: () => void;
+  onTeamMoveComplete?: (result: TeamMoveResult) => void;
+}) {
+  const admin = useAdmin();
+  const location = useLocation();
+  const [move, setMove] = useState<{ players: Player[]; faction: string; key: string } | null>(null);
+  const { steamId } = target;
+  const { watchRoster } = admin;
+  // Records pages such as Server activity do not read the live roster; the open panel asks for it, so its
+  // stats and actions come from a current read that Refresh keeps up to date.
+  useEffect(() => watchRoster(), [watchRoster]);
+  const player = admin.overview?.players.find((entry) => entry.steamId === steamId);
+  const teams = liveFactions(admin.overview);
+  const current = player ? playerFaction(player, teams) : undefined;
+  const can = (action: ActionName) => allowed(action, admin.me, admin.overview, admin.stale, admin.busy);
+  const notice = useId();
+  const off = panelActions.filter((action) => !can(action)).length;
+  // The snapshot can expire while the panel is open and turn every action off, or the server can stop offering
+  // them. The page's own refresh is behind the panel, and on records pages it does not read the roster, so the
+  // panel offers its own check. Otherwise an action is off for the staff role or the server build. Say why next
+  // to the disabled buttons.
+  const needsCheck = admin.stale || (!!player && off === panelActions.length && !admin.busy);
+  // Once offered, Check again stays until the panel closes: a button removed while it has focus drops keyboard
+  // and screen reader users out of the panel, and a check that succeeds would otherwise remove it.
+  const [offered, setOffered] = useState(needsCheck);
+  useEffect(() => {
+    if (needsCheck) setOffered(true);
+  }, [needsCheck]);
+  // The read this panel asked for: the one its opening starts or finds in flight, or the one Check again starts.
+  // Only that read is announced as a check; the dashboard's background reads leave the reason as it is, so a
+  // server that keeps failing does not change the status line on every tick.
+  const [askedVersion, setAskedVersion] = useState(admin.refreshVersion);
+  const askedCheck = admin.checking && admin.refreshVersion === askedVersion;
+  const waiting = admin.checking || admin.busy;
+  const checkAgain = () => {
+    // aria-disabled, not disabled, so the button keeps focus while the check runs; the press is ignored instead.
+    if (waiting) return;
+    // Refresh starts the read for the next version.
+    setAskedVersion(admin.refreshVersion + 1);
+    admin.refresh();
+  };
+  let reason = "";
+  if (player && needsCheck)
+    reason = askedCheck
+      ? "Checking the server for current details…"
+      : admin.stale
+        ? "Server details need a fresh check before choosing an action."
+        : "Unavailable for your role, connection, or server build. Check again to read the server's current details.";
+  else if (player && off && !admin.busy)
+    reason = "Some actions are unavailable for your role, connection, or server build.";
+  const describedBy = (action: ActionName) => (!can(action) && reason ? notice : undefined);
+  const button = (action: ActionName, kind = "secondary") => (
+    <button
+      type="button"
+      className={`button ${kind} small`}
+      disabled={!can(action)}
+      aria-describedby={describedBy(action)}
+      onClick={() => admin.openAction(action, steamId)}
+    >
+      {actionDefinitions[action][0]}
+    </button>
+  );
+  const linkable = isPublicIndividualSteamId(steamId);
+  return (
+    <>
+      <Sheet title={player?.name ?? target.name ?? steamId} onClose={onClose} className="player-sheet">
+        {player ? (
+          <>
+            <FactionChip team={current} fallback={player.faction || "Choosing team"} />
+            <dl className="player-stats">
+              <div>
+                <dt>Kills</dt>
+                <dd>{stat(player.kills)}</dd>
+              </div>
+              <div>
+                <dt>Deaths</dt>
+                <dd>{stat(player.deaths)}</dd>
+              </div>
+              <div>
+                <dt>Ping</dt>
+                <dd>{typeof player.pingMs === "number" ? `${player.pingMs} ms` : "—"}</dd>
+              </div>
+              <div>
+                <dt>Cash</dt>
+                <dd>{stat(player.cash)}</dd>
+              </div>
+            </dl>
+            {admin.stale && <p className="muted">From the last roster check.</p>}
+          </>
+        ) : !admin.overview ? (
+          // Never present a roster that has not been read as the player leaving.
+          <p className="notice info">
+            {askedCheck ? "Checking the live roster…" : "The live roster could not be read."}
+          </p>
+        ) : (
+          <p className="notice info">
+            {admin.stale ? "Not in the last roster check." : "This player is no longer in the current roster."}
+          </p>
+        )}
+        <p className="player-sheet-id">
+          <span className="muted">SteamID</span> <CopyValue value={steamId} />
+        </p>
+        {linkable && (
+          <p className="player-sheet-links">
+            <Link className="text-button" to={playerHistory(location.search, "combat", steamId)} onClick={onClose}>
+              Combat history →
+            </Link>
+            <Link className="text-button" to={playerHistory(location.search, "actions", steamId)} onClick={onClose}>
+              Actions on this player →
+            </Link>
+          </p>
+        )}
+        {/* Always present, so screen readers announce the reason when it is filled in. */}
+        <div role="status" id={notice}>
+          {reason && <p className="notice warning">{reason}</p>}
         </div>
-      ) : (
-        <p>This player is no longer in the current roster.</p>
+        {(offered || needsCheck) && (
+          <p>
+            <button type="button" className="button secondary small" aria-disabled={waiting} onClick={checkAgain}>
+              Check again
+            </button>
+          </p>
+        )}
+        {player && (
+          <div className="player-sheet-actions">
+            <section aria-label="Message">
+              <h3>Message</h3>
+              <div className="action-list">{button("message")}</div>
+            </section>
+            <section aria-label="Team">
+              <h3>Team</h3>
+              <div className="action-list">
+                {teams
+                  .filter((team) => team.name !== current?.name)
+                  .map((team) => (
+                    <button
+                      type="button"
+                      key={team.name}
+                      className="button secondary small"
+                      aria-label={`Move to ${team.label}`}
+                      disabled={!can("team")}
+                      aria-describedby={describedBy("team")}
+                      onClick={() => setMove({ players: [player], faction: team.name, key: crypto.randomUUID() })}
+                    >
+                      <FactionChip team={team} />
+                    </button>
+                  ))}
+                {teams.length === 0 && <span className="muted">No teams reported</span>}
+              </div>
+            </section>
+            <section aria-label="Moderation">
+              <h3>Moderation</h3>
+              <div className="action-list">
+                {button("kick", "danger")}
+                {button("ban", "danger")}
+              </div>
+            </section>
+            <section aria-label="Whitelist">
+              <h3>Whitelist</h3>
+              <div className="action-list">{button("whitelist-add")}</div>
+            </section>
+            <details className="player-sheet-more">
+              <summary>More</summary>
+              <div className="action-list">{button("kill")}</div>
+            </details>
+          </div>
+        )}
+      </Sheet>
+      {move && (
+        <TeamMoveDialog
+          key={move.key}
+          players={move.players}
+          initialFaction={move.faction}
+          onClose={() => setMove(null)}
+          onComplete={onTeamMoveComplete}
+        />
       )}
-      <div className="dialog-actions">
-        <button type="button" className="button secondary" onClick={onClose}>
-          Close
-        </button>
-      </div>
-    </Modal>
+    </>
   );
 }

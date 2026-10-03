@@ -42,17 +42,13 @@ export const actionDefinitions: Record<ActionName, readonly [string, string, str
     "Broadcast to everyone currently in the game. This sends immediately.",
     "POST /v1/broadcast",
   ],
-  "match-end": [
-    "End current match",
-    "Ends the current round for everyone and follows the server’s rotation. The round cannot be resumed.",
-    "POST /v1/match/end",
-  ],
+  "match-end": ["End current match", "The round cannot be resumed.", "POST /v1/match/end"],
   "match-restart": [
     "Restart current match",
-    "Interrupts and reloads the current match for everyone. This does not restart the server process or apply startup settings.",
+    "This does not restart the server process or apply startup settings.",
     "POST /v1/match/restart",
   ],
-  map: ["Change map", "Travel to the selected map after the end-of-match screen.", "POST /v1/match/map"],
+  map: ["Change map", "Travels to the selected map after the end-of-match screen.", "POST /v1/match/map"],
   lighting: ["Change lighting", "Apply a lighting preset to the current game.", "PUT /v1/world/lighting"],
 };
 
