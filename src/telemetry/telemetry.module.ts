@@ -55,9 +55,11 @@ export class TelemModule implements NestModule, OnModuleInit {
   configure(consumer: MiddlewareConsumer) {
     // Feed delivery must not compete with public/staff reads behind one proxy. Requests carrying the
     // targeted server's feed token count in that server's own bucket, so traffic without the token
-    // can neither use up the game's allowance nor fill the address map and lock the game out.
+    // can neither use up the game's allowance nor fill the address map and lock the game out. Staff
+    // combat reads have their own bucket, so public leaderboard traffic cannot use up theirs.
     const feeds = new Map<string, { until: number; count: number }>();
     const reads = new Map<string, { until: number; count: number }>();
+    const staff = new Map<string, { until: number; count: number }>();
     const tokened = new Map<string, { until: number; count: number }>();
     consumer
       .apply((req: Request, res: Response, next: NextFunction) => {
@@ -74,7 +76,7 @@ export class TelemModule implements NestModule, OnModuleInit {
         });
         const ingest = /^\/api\/ingest(?:\/|$)/i.test(req.originalUrl);
         const serverId = ingest ? this.deliveries.tokenServer(req.originalUrl, req.headers.authorization) : null;
-        const peers = serverId ? tokened : ingest ? feeds : reads;
+        const peers = serverId ? tokened : ingest ? feeds : /^\/admin\//i.test(req.originalUrl) ? staff : reads;
         const now = Date.now();
         for (const [key, value] of peers) if (value.until <= now) peers.delete(key);
         const key = serverId ?? req.socket.remoteAddress ?? "unknown";
@@ -85,8 +87,7 @@ export class TelemModule implements NestModule, OnModuleInit {
           peers.set(key, peer);
         }
         if (!peer || ++peer.count > 300) {
-          if (peers !== reads)
-            this.deliveries.rejectedRequest(req.originalUrl, 429, "rate limited", req.headers.authorization);
+          if (ingest) this.deliveries.rejectedRequest(req.originalUrl, 429, "rate limited", req.headers.authorization);
           res
             .set("Retry-After", "60")
             .status(429)

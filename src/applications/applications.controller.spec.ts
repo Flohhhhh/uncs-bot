@@ -1,6 +1,7 @@
 import {
   ForbiddenException,
   Module,
+  type ExecutionContext,
   UnauthorizedException,
   type INestApplication,
   type MiddlewareConsumer,
@@ -10,7 +11,8 @@ import { Test } from "@nestjs/testing";
 import type { Request, Response } from "express";
 import request from "supertest";
 import { AdminApiController, AdminGameController, AdminExceptionFilter } from "../admin/admin.controller";
-import { AdminAuth, AdminGuard, AdminServerGuard } from "../admin/admin.auth";
+import { AdminAuth, AdminGuard, AdminServerGuard, type StaffRequest } from "../admin/admin.auth";
+import { AdminModule } from "../admin/admin.module";
 import { AdminService } from "../admin/admin.service";
 import { GameServers } from "../admin/game-servers";
 import { fixtureServers } from "../admin/game-server-fixture";
@@ -210,6 +212,63 @@ describe("application HTTP routing and privacy", () => {
     await request(app.getHttpServer()).get("/admin/api/applications").expect(503);
     expect(store.own).not.toHaveBeenCalled();
     expect(store.list).not.toHaveBeenCalled();
+  });
+});
+
+describe("staff application review traffic limit", () => {
+  let app: INestApplication;
+  const service = { list: jest.fn(async () => []), review: jest.fn(async () => ({ ok: true })), me: jest.fn() };
+  @Module({
+    controllers: [ApplicantApiController, StaffApplicationsController],
+    providers: [ApplicationsExceptionFilter, { provide: ApplicationsService, useValue: service }],
+  })
+  class ReviewAndApply implements NestModule {
+    configure(consumer: MiddlewareConsumer) {
+      new AdminModule().configure(consumer);
+      new ApplicationsModule().configure(consumer);
+    }
+  }
+  beforeAll(async () => {
+    const module = await Test.createTestingModule({ imports: [ReviewAndApply] })
+      .overrideGuard(ApplicationsEnabledGuard)
+      .useValue({ canActivate: () => true })
+      .overrideGuard(ApplicantGuard)
+      .useValue({
+        canActivate: () => {
+          throw new UnauthorizedException("Sign in with Discord to continue.");
+        },
+      })
+      .overrideGuard(AdminGuard)
+      .useValue({
+        canActivate: (context: ExecutionContext) => {
+          const req = context.switchToHttp().getRequest<StaffRequest>();
+          req.staff = { id: "234567890123456789", name: "Reviewer", role: "admin", csrf: "csrf" };
+          return true;
+        },
+      })
+      .overrideGuard(AdminServerGuard)
+      .useValue({ canActivate: () => true })
+      .compile();
+    app = module.createNestApplication({ logger: false });
+    await app.listen(0);
+  });
+  afterAll(async () => app.close());
+
+  it("keeps anonymous applicant traffic from one proxy address out of staff review", async () => {
+    const server = app.getHttpServer();
+    for (let count = 0; count < 180; count++) await request(server).get("/apply/api/me").expect(401);
+    await request(server).get("/apply/api/me").expect(429);
+    await request(server).get("/admin/api/servers/primary/applications").expect(200);
+    await request(server).post("/admin/api/applications/x/approve").send({}).expect(201);
+    expect(service.review).toHaveBeenCalledTimes(1);
+  });
+
+  it("still counts staff review routes in the dashboard's own /admin limit", async () => {
+    const server = app.getHttpServer();
+    // The previous test's two staff requests already count.
+    for (let count = 2; count < 600; count++) await request(server).get("/admin/api/applications").expect(200);
+    const refused = await request(server).get("/admin/api/applications").expect(429);
+    expect(refused.body.message).toBe("Too many dashboard requests. Try again in a minute.");
   });
 });
 
