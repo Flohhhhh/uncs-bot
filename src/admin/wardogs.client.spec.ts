@@ -811,9 +811,13 @@ describe("live faction assignment", () => {
     await expect(client.execute({ ...teamAction, faction: "BLU" })).rejects.toThrow("currently reported");
     expect(request.mock.calls.every(([method]) => method === "GET")).toBe(true);
   });
-  it("refuses a disconnected player before any move", async () => {
+  it("refuses a disconnected player before any move as a precondition that changed nothing", async () => {
     const { client, request } = mockTeamChange({ targetPresent: false });
-    await expect(client.execute(teamAction)).rejects.toThrow("no longer connected");
+    await expect(client.execute(teamAction)).resolves.toEqual({
+      state: "failed",
+      changed: false,
+      message: expect.stringContaining("no longer connected"),
+    });
     expect(request.mock.calls.every(([method]) => method === "GET")).toBe(true);
   });
   it("does not label an accepted but unchanged assignment as applied", async () => {
