@@ -143,6 +143,7 @@ export class ServerCommunityWorker implements OnApplicationBootstrap, OnModuleDe
   private stopped = false;
   private running = false;
   private cardAttemptAt = 0;
+  private cardInFlight?: Promise<void>;
   private cardSavedAt = 0;
   private cardKey = "";
   private lastMessageAcknowledgedAt: string | null = null;
@@ -214,7 +215,7 @@ export class ServerCommunityWorker implements OnApplicationBootstrap, OnModuleDe
       } catch {
         this.state = initialCommunityState();
         this.queue = [];
-        if (!this.stopped) await this.updateCard(false);
+        this.refreshCard(false);
         return 30_000;
       }
       if (this.stopped) return 30_000;
@@ -273,7 +274,7 @@ export class ServerCommunityWorker implements OnApplicationBootstrap, OnModuleDe
           );
         }
       }
-      if (!this.stopped) await this.updateCard(true);
+      this.refreshCard(true);
       return current.status.players.current > 0 ? 5_000 : 15_000;
     } finally {
       this.running = false;
@@ -351,6 +352,19 @@ export class ServerCommunityWorker implements OnApplicationBootstrap, OnModuleDe
     const acknowledged = result.state === "accepted" || result.state === "applied";
     if (acknowledged) this.lastMessageAcknowledgedAt = new Date().toISOString();
     return acknowledged;
+  }
+
+  /**
+   * Starts a status-card update without waiting for Discord. A slow edit must not hold the next
+   * observation past the baseline gap, which would drop queued welcomes and round messages.
+   */
+  private refreshCard(online: boolean) {
+    if (this.stopped || this.cardInFlight) return;
+    this.cardInFlight = this.updateCard(online)
+      .catch(() => undefined)
+      .finally(() => {
+        this.cardInFlight = undefined;
+      });
   }
 
   private async updateCard(online: boolean) {
