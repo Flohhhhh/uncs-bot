@@ -122,7 +122,7 @@ function ApplicationDetails({ record }: { record: WhitelistApplication }) {
         )}
       </dl>
       {record.lastActionState && (
-        <div className={`notice ${record.status === "approved" ? "" : "warning"}`}>
+        <div className={`notice ${record.status === "approved" ? "success" : "warning"}`}>
           <strong>Last review: {record.lastActionState}</strong>
           <br />
           {record.lastActionMessage || "No additional details were recorded."}
@@ -255,6 +255,7 @@ function ApplicationReview({
       }
       busy={sending}
       onClose={onClose}
+      eyebrow={result ? null : undefined}
     >
       <form onSubmit={submit}>
         <ApplicationDetails record={record} />
@@ -312,7 +313,7 @@ function ApplicationReview({
           </p>
         )}
         {result && (
-          <p className={`notice ${result.complete ? "" : "warning"}`} role="status">
+          <p className={`notice ${result.complete ? "success" : "warning"}`} role="status">
             {result.message}
           </p>
         )}
@@ -331,11 +332,28 @@ function ApplicationReview({
   );
 }
 
+type ApplicationFilter = "" | "pending" | "follow-up" | "approved" | "declined";
+const applicationFilters: {
+  id: ApplicationFilter;
+  label: string;
+  matches: (record: WhitelistApplication) => boolean;
+}[] = [
+  { id: "", label: "All", matches: () => true },
+  { id: "pending", label: "Awaiting review", matches: (record) => record.status === "pending" },
+  {
+    id: "follow-up",
+    label: "Need follow-up",
+    matches: (record) => ["processing", "needs_review"].includes(record.status),
+  },
+  { id: "approved", label: "Approved", matches: (record) => record.status === "approved" },
+  { id: "declined", label: "Declined", matches: (record) => record.status === "declined" },
+];
+
 function AdminApplications() {
   const { busy } = useAdmin();
   const resource = useResource<ApplicationsResponse>("applications");
   const [query, setQuery] = useState("");
-  const [status, setStatus] = useState("");
+  const [status, setStatus] = useState<ApplicationFilter>("");
   const [selected, setSelected] = useState<WhitelistApplication | null>(null);
   const off = resource.data?.enabled === false;
   const records = resource.data?.applications;
@@ -356,9 +374,10 @@ function AdminApplications() {
       />
     );
   const needle = query.trim().toLocaleLowerCase();
+  const chosen = applicationFilters.find((entry) => entry.id === status) ?? applicationFilters[0];
   const rows = records.filter(
     (record) =>
-      (!status || record.status === status) &&
+      chosen.matches(record) &&
       [record.discordDisplayName, record.discordUserId, record.steamId].some((value) =>
         value.toLocaleLowerCase().includes(needle),
       ),
@@ -370,41 +389,24 @@ function AdminApplications() {
           Applications could not be refreshed. Refresh before reviewing a request.
         </p>
       )}
-      <div className="application-counts">
-        <span>
-          <strong>{records.filter((record) => record.status === "pending").length}</strong> awaiting review in this list
-        </span>
-        <span>
-          <strong>{records.filter((record) => ["processing", "needs_review"].includes(record.status)).length}</strong>{" "}
-          need follow-up
-        </span>
-        <span>Up to 100 requests; awaiting review first</span>
-      </div>
       <Search value={query} onChange={setQuery} placeholder="Search Discord name, Discord ID, or SteamID">
-        <select aria-label="Application status" value={status} onChange={(event) => setStatus(event.target.value)}>
-          <option value="">All statuses</option>
-          {Object.entries(statuses).map(([value, label]) => (
-            <option key={value} value={value}>
-              {label}
-            </option>
+        <div className="filter-chips" role="group" aria-label="Application status">
+          {applicationFilters.map((entry) => (
+            <button
+              type="button"
+              key={entry.id || "all"}
+              className="filter-chip"
+              aria-pressed={status === entry.id}
+              onClick={() => setStatus(entry.id)}
+            >
+              {entry.label} <span className="chip-count">{records.filter(entry.matches).length}</span>
+            </button>
           ))}
-        </select>
-        {status && (
-          <button
-            type="button"
-            className="button secondary"
-            onClick={() => {
-              setStatus("");
-              setQuery("");
-            }}
-          >
-            Reset filters
-          </button>
-        )}
+        </div>
       </Search>
       <Card
         title="Community requests"
-        subtitle={`${rows.length} shown of ${records.length} loaded · private email inside each request`}
+        subtitle={`${rows.length} shown of ${records.length} loaded · up to 100, awaiting review first`}
         badge={<Badge>ADMIN ONLY</Badge>}
       >
         {rows.length ? (

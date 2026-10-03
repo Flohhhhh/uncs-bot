@@ -31,46 +31,96 @@ function mount(
   return { fetcher, router };
 }
 afterEach(() => vi.unstubAllGlobals());
+function switchServer(name: string) {
+  fireEvent.click(screen.getByRole("combobox", { name: "Game server" }));
+  fireEvent.click(screen.getByRole("option", { name: new RegExp(`^${name} `) }));
+}
 
 it("requires an explicit selection before any game read and hides inaccessible game controls", async () => {
   const { fetcher } = mount("/players");
   expect(await screen.findByRole("heading", { name: "Choose a server" })).toBeInTheDocument();
   expect(fetcher.mock.calls).toHaveLength(2);
-  fireEvent.change(screen.getByRole("combobox", { name: "Game server" }), { target: { value: "event" } });
+  expect(screen.queryByRole("combobox", { name: "Game server" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Primary admin" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Events viewer" }));
   await screen.findByText("Events player");
   expect(screen.queryByRole("link", { name: /Server settings/ })).not.toBeInTheDocument();
   expect(screen.queryByRole("link", { name: /Applications/ })).not.toBeInTheDocument();
   expect(screen.getByRole("link", { name: /Supporters/ })).toBeInTheDocument();
-  const sections = within(screen.getByRole("combobox", { name: "Dashboard section" }));
-  expect(sections.queryByRole("option", { name: "Server settings" })).not.toBeInTheDocument();
-  expect(sections.queryByRole("option", { name: "Applications" })).not.toBeInTheDocument();
-  expect(sections.getByRole("option", { name: "Supporters" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "More sections" }));
+  const more = within(screen.getByRole("dialog", { name: "More" }));
+  expect(more.queryByRole("link", { name: /Settings/ })).not.toBeInTheDocument();
+  expect(more.queryByRole("link", { name: /Applications/ })).not.toBeInTheDocument();
+  expect(more.getByRole("link", { name: /Supporters/ })).toBeInTheDocument();
+  expect(more.getByText("Your access: viewer", { exact: false })).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Review move" })).not.toBeInTheDocument();
 });
-it("retains the selected server when using the compact section picker", async () => {
-  const { router } = mount("/players?server=event");
-  fireEvent.change(await screen.findByRole("combobox", { name: "Dashboard section" }), {
-    target: { value: "permissions" },
-  });
+it("retains the selected server when choosing a section from More", async () => {
+  const { router } = mount("/players?server=event", async (url) =>
+    json(url.endsWith("/overview") ? overview("Events") : []),
+  );
+  await screen.findByText("Events player");
+  const more = screen.getByRole("button", { name: "More sections" });
+  expect(more).toHaveAttribute("aria-expanded", "false");
+  fireEvent.click(more);
+  expect(more).toHaveAttribute("aria-expanded", "true");
+  fireEvent.click(within(screen.getByRole("dialog", { name: "More" })).getByRole("link", { name: /Bans/ }));
+  await waitFor(() => expect(router.state.location.pathname).toBe("/bans"));
+  expect(router.state.location.search).toBe("?server=event");
+  expect(screen.queryByRole("dialog", { name: "More" })).not.toBeInTheDocument();
+  // More stands for the section that is open now.
+  expect(more).toHaveClass("active");
+  fireEvent.click(more);
+  fireEvent.click(within(screen.getByRole("dialog", { name: "More" })).getByRole("link", { name: "View permissions" }));
   await waitFor(() => expect(router.state.location.pathname).toBe("/permissions"));
   expect(router.state.location.search).toBe("?server=event");
-  expect(screen.getByRole("combobox", { name: "Dashboard section" })).toHaveValue("permissions");
+  expect(screen.getByRole("heading", { level: 1, name: "Staff permissions" })).toHaveFocus();
+});
+it("switches servers from More only on an explicit choice", async () => {
+  const { router } = mount("/players?server=primary");
+  await screen.findByText("Primary player");
+  fireEvent.click(screen.getByRole("button", { name: "More sections" }));
+  const sheet = within(screen.getByRole("dialog", { name: "More" }));
+  const switcher = sheet.getByRole("combobox", { name: "Game server" });
+  fireEvent.keyDown(switcher, { key: "ArrowDown" });
+  fireEvent.keyDown(switcher, { key: "ArrowDown" });
+  expect(router.state.location.search).toBe("?server=primary");
+  fireEvent.keyDown(switcher, { key: "Enter" });
+  await waitFor(() => expect(router.state.location.search).toBe("?server=event"));
+  await screen.findByText("Events player");
+  expect(screen.queryByRole("dialog", { name: "More" })).not.toBeInTheDocument();
 });
 it.each([
-  ["/audit", "activity"],
-  ["/combat", "activity"],
-  ["/events", "match"],
-])("lets the compact section picker open the parent section from %s", async (path, parent) => {
+  ["/audit", "/activity", "actions", "Server activity", "Activity views", "All activity"],
+  ["/combat", "/activity", "combat", "Server activity", "Activity views", "All activity"],
+  ["/events", "/match", "events", "Match & maps", "Match & maps", "Next round"],
+  ["/votes", "/match", "voting", "Match & maps", "Match & maps", "Next round"],
+])("lets the phone tab bar open the parent section from %s", async (path, parent, view, section, tablist, first) => {
+  // Only the roster answers; the hub's own reads fail, which leaves its views and tabs in place.
   const { router } = mount(`${path}?server=primary`, async (url) =>
-    json(url.endsWith("/overview") ? overview("Primary") : []),
+    url.endsWith("/overview")
+      ? json(overview("Primary"))
+      : new Response(JSON.stringify({ message: "Unavailable" }), { status: 503 }),
   );
-  const sections = await screen.findByRole("combobox", { name: "Dashboard section" });
-  expect(sections).toHaveValue("");
-  expect(within(sections).getByRole("option", { name: "Choose a section" })).toHaveProperty("selected", true);
-  fireEvent.change(sections, { target: { value: parent } });
-  await waitFor(() => expect(router.state.location.pathname).toBe(`/${parent}`));
-  expect(router.state.location.search).toBe("?server=primary");
-  expect(screen.getByRole("combobox", { name: "Dashboard section" })).toHaveValue(parent);
+  await waitFor(() => expect(router.state.location.pathname).toBe(parent));
+  expect(new URLSearchParams(router.state.location.search).get("view")).toBe(view);
+  // The first navigation group is the phone tab bar; the sub-page is a view of the hub it names.
+  const tabs = screen.getByRole("list", { name: "Live" });
+  const link = within(tabs).getByRole("link", { name: section });
+  await waitFor(() => expect(link).toHaveAttribute("aria-current", "page"));
+  expect(
+    within(screen.getByRole("tablist", { name: tablist })).getByRole("tab", { selected: true }),
+  ).not.toHaveTextContent(first);
+  fireEvent.click(link);
+  await waitFor(() => expect(router.state.location.search).toBe("?server=primary"));
+  expect(router.state.location.pathname).toBe(parent);
+  expect(within(screen.getByRole("tablist", { name: tablist })).getByRole("tab", { selected: true })).toHaveTextContent(
+    first,
+  );
+  expect(within(screen.getByRole("list", { name: "Live" })).getByRole("link", { name: section })).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
 });
 it("cancels a previous server read and ignores its late response after a switch", async () => {
   let complete!: (response: Response) => void;
@@ -81,8 +131,10 @@ it("cancels a previous server read and ignores its late response after a switch"
     url.includes("/primary/") ? pending : Promise.resolve(json(overview("Events"))),
   );
   expect(await screen.findByText("Connecting…")).toBeInTheDocument();
-  expect(screen.queryByText("Connection needs attention")).not.toBeInTheDocument();
-  fireEvent.change(await screen.findByRole("combobox", { name: "Game server" }), { target: { value: "event" } });
+  expect(screen.queryByText("Not connected")).not.toBeInTheDocument();
+  expect(screen.queryByText("Stale")).not.toBeInTheDocument();
+  await screen.findByRole("combobox", { name: "Game server" });
+  switchServer("Events");
   await screen.findByText("Events player");
   const first = fetcher.mock.calls.find(([url]) => url.includes("/primary/overview"))!;
   expect(first[1]?.signal?.aborted).toBe(true);
@@ -96,39 +148,101 @@ it("clears a player selection on switching servers even when both rosters contai
   mount("/players?server=primary");
   fireEvent.click(await screen.findByRole("checkbox", { name: "Select Primary player" }));
   expect(screen.getByText("1 selected")).toBeInTheDocument();
-  fireEvent.change(screen.getByRole("combobox", { name: "Game server" }), { target: { value: "event" } });
+  switchServer("Events");
   await screen.findByText("Events player");
   expect(screen.getByText("0 selected")).toBeInTheDocument();
+});
+it("moves through servers with the keyboard and switches only on Enter", async () => {
+  const { router, fetcher } = mount("/players?server=primary");
+  const switcher = await screen.findByRole("combobox", { name: "Game server" });
+  await screen.findByText("Primary player");
+  expect(switcher).toHaveTextContent("Primary");
+  expect(switcher).toHaveAttribute("aria-expanded", "false");
+  const eventReads = () => fetcher.mock.calls.filter(([url]) => url.includes("/servers/event/"));
+  switcher.focus();
+  fireEvent.keyDown(switcher, { key: "ArrowDown" });
+  expect(switcher).toHaveAttribute("aria-expanded", "true");
+  const options = within(screen.getByRole("listbox", { name: "Game server" })).getAllByRole("option");
+  expect(options.map((option) => option.textContent)).toEqual(["Primary admin✓", "Events viewer"]);
+  expect(options[0]).toHaveAttribute("aria-selected", "true");
+  expect(switcher).toHaveAttribute("aria-activedescendant", options[0].id);
+  fireEvent.keyDown(switcher, { key: "ArrowDown" });
+  expect(switcher).toHaveAttribute("aria-activedescendant", options[1].id);
+  // Highlighting a server is not a switch.
+  expect(router.state.location.search).toBe("?server=primary");
+  expect(eventReads()).toHaveLength(0);
+  fireEvent.keyDown(switcher, { key: "Escape" });
+  expect(switcher).toHaveAttribute("aria-expanded", "false");
+  expect(router.state.location.search).toBe("?server=primary");
+  fireEvent.keyDown(switcher, { key: "ArrowDown" });
+  fireEvent.keyDown(switcher, { key: "End" });
+  fireEvent.keyDown(switcher, { key: "Tab" });
+  expect(switcher).toHaveAttribute("aria-expanded", "false");
+  expect(router.state.location.search).toBe("?server=primary");
+  expect(eventReads()).toHaveLength(0);
+  fireEvent.keyDown(switcher, { key: "ArrowDown" });
+  fireEvent.keyDown(switcher, { key: "ArrowDown" });
+  fireEvent.keyDown(switcher, { key: "Enter" });
+  await waitFor(() => expect(router.state.location.search).toBe("?server=event"));
+  await screen.findByText("Events player");
+  expect(screen.getByRole("combobox", { name: "Game server" })).toHaveTextContent("Events");
+});
+it("closes on an outside click and keeps the current server when it is chosen again", async () => {
+  const { router } = mount("/players?server=primary");
+  await screen.findByText("Primary player");
+  const switcher = screen.getByRole("combobox", { name: "Game server" });
+  fireEvent.click(switcher);
+  expect(switcher).toHaveAttribute("aria-expanded", "true");
+  fireEvent.pointerDown(document.body);
+  expect(switcher).toHaveAttribute("aria-expanded", "false");
+  switchServer("Primary");
+  expect(screen.getByRole("combobox", { name: "Game server" })).toHaveAttribute("aria-expanded", "false");
+  expect(router.state.location.search).toBe("?server=primary");
+  expect(screen.getByText("Primary player")).toBeInTheDocument();
 });
 it("does not silently fall back when an unavailable server is in a deep link", async () => {
   const { fetcher } = mount("/players?server=missing");
   await screen.findByText("That server is unavailable or outside your staff access.");
   await waitFor(() => expect(fetcher.mock.calls).toHaveLength(2));
 });
-it("keeps map editing and voting links on the explicitly selected server", async () => {
-  const { router } = mount("/match?server=primary", async (url) =>
+it("keeps map editing and the voting view on the explicitly selected server", async () => {
+  const { router, fetcher } = mount("/match?server=primary", async (url) =>
     url.endsWith("/map-votes")
       ? json({ enabled: false, votes: [], serverId: "primary" })
-      : url.endsWith("/settings")
-        ? json({
-            revision: "r1",
-            fields: [],
-            rotation: {
-              mode: "Ordered",
-              enabled: true,
-              editable: true,
-              entries: [],
-              currentIndex: null,
-              currentMap: "Harbor",
-            },
-          })
-        : url.endsWith("/catalog")
-          ? json({ maps: [], experiences: [], lightings: [] })
-          : json(overview("Primary")),
+      : url.endsWith("/map-votes/controls")
+        ? json({ serverId: "primary", version: 0, available: true, ready: false, message: "Voting is off." })
+        : url.endsWith("/settings")
+          ? json({
+              revision: "r1",
+              fields: [],
+              rotation: {
+                mode: "Ordered",
+                enabled: true,
+                editable: true,
+                entries: [],
+                currentIndex: null,
+                currentMap: "Harbor",
+              },
+            })
+          : url.endsWith("/catalog")
+            ? json({ maps: [], experiences: [], lightings: [] })
+            : json(overview("Primary")),
   );
-  const link = await screen.findByRole("link", { name: "Voting controls & history →" });
-  expect(link).toHaveAttribute("href", "/votes?server=primary");
-  fireEvent.click(await screen.findByRole("button", { name: "Edit rotation" }));
-  expect(screen.getByRole("button", { name: "Edit rotation" })).toHaveAttribute("aria-pressed", "true");
-  expect(router.state.location.search).toBe("?server=primary");
+  const rotation = await screen.findByRole("tab", { name: "Rotation" });
+  fireEvent.click(rotation);
+  expect(rotation).toHaveAttribute("aria-selected", "true");
+  expect(router.state.location.search).toBe("?server=primary&view=rotation");
+  fireEvent.click(screen.getByRole("tab", { name: "Voting" }));
+  await screen.findByRole("heading", { name: "Discord map voting is off" });
+  expect(router.state.location.search).toBe("?server=primary&view=voting");
+  expect(fetcher.mock.calls.some(([url]) => url.includes("/servers/event/"))).toBe(false);
+  // Older voting links land on the Match & maps voting view of the same server.
+  await act(async () => {
+    await router.navigate("/votes?server=primary");
+  });
+  await waitFor(() => expect(router.state.location.pathname).toBe("/match"));
+  expect(Object.fromEntries(new URLSearchParams(router.state.location.search))).toEqual({
+    server: "primary",
+    view: "voting",
+  });
 });

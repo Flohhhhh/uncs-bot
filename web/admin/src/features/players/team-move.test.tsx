@@ -182,6 +182,58 @@ describe("reviewed team moves", () => {
     await act(async () => finish({ state: "applied", message: "Confirmed" }));
     expect(screen.getByRole("heading", { name: "Team requests complete" })).toBeInTheDocument();
   });
+  it("shows a single player's result on one line without the outcomes table or review label", async () => {
+    let read!: (overview: Overview) => void;
+    request.mockImplementation((path) =>
+      path === "overview"
+        ? new Promise((resolve) => {
+            read = resolve;
+          })
+        : Promise.resolve({ state: "applied", message: "Assignment confirmed by the game." }),
+    );
+    render(
+      <AdminContext.Provider value={context()}>
+        <TeamMoveDialog players={[alice]} initialFaction="Lonestar" onClose={vi.fn()} />
+      </AdminContext.Provider>,
+    );
+    expect(screen.getByRole("dialog")).toHaveTextContent("STAFF REVIEW");
+    submit();
+    const line = await screen.findByRole("status", { name: "Team move outcome" });
+    // The live roster read before the move can take a while; the line shows it is working, not "Not sent".
+    await waitFor(() => expect(request.mock.calls.some(([path]) => path === "overview")).toBe(true));
+    expect(line).toHaveTextContent("Checking roster… Reading the live roster before sending the move.");
+    expect(line).not.toHaveTextContent("Not sent");
+    await act(async () => read(live));
+    await waitFor(() => expect(line).toHaveTextContent("Applied Assignment confirmed by the game."));
+    expect(line).not.toHaveTextContent("Not sent");
+    expect(screen.queryByRole("table", { name: "Team move outcomes" })).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog")).not.toHaveTextContent("STAFF REVIEW");
+    expect(sent()).toHaveLength(1);
+  });
+  it("says a single move stopped during the roster read was not sent", async () => {
+    let read!: (overview: Overview) => void;
+    request.mockImplementation((path) =>
+      path === "overview"
+        ? new Promise((resolve) => {
+            read = resolve;
+          })
+        : Promise.resolve({ state: "applied", message: "Confirmed" }),
+    );
+    render(
+      <AdminContext.Provider value={context()}>
+        <TeamMoveDialog players={[alice]} initialFaction="Lonestar" onClose={vi.fn()} />
+      </AdminContext.Provider>,
+    );
+    submit();
+    const line = await screen.findByRole("status", { name: "Team move outcome" });
+    await waitFor(() => expect(request.mock.calls.some(([path]) => path === "overview")).toBe(true));
+    fireEvent.click(screen.getByRole("button", { name: "Stop remaining moves" }));
+    expect(line).toHaveTextContent("Checking roster… Stopping before the request is sent.");
+    await act(async () => read(live));
+    expect(screen.getByRole("heading", { name: "Team move stopped" })).toBeInTheDocument();
+    expect(line).toHaveTextContent("Not sent");
+    expect(sent()).toHaveLength(0);
+  });
   it("sends each player with a unique ID, exact confirmation, faction name and reviewed round, spaced sequentially", async () => {
     vi.useFakeTimers();
     answer(() => ({ state: "applied", message: "Assignment confirmed; respawn may be needed." }));

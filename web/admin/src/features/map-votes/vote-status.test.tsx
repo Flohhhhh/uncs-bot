@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import { expect, it } from "vitest";
-import { VoteResults, type VoteList } from "./vote-status";
+import { VoteResults, voteSummary, type VoteList } from "./vote-status";
 const ballot: VoteList = {
   enabled: true,
   serverId: "event",
@@ -55,4 +55,17 @@ it("qualifies a previously disabled status when its next read fails", () => {
   expect(
     screen.queryByText("Community voting is not enabled. The saved rotation chooses the next map."),
   ).not.toBeInTheDocument();
+});
+it("summarizes voting in one short line without presenting a failed read as current", () => {
+  const ends = new Date(ballot.votes[0].closesAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  expect(voteSummary(ballot)).toEqual({ label: `Open · ends ${ends}`, kind: "good" });
+  expect(voteSummary({ ...ballot, votes: [{ ...ballot.votes[0], state: "queued" }] }).label).toBe("None");
+  expect(voteSummary({ ...ballot, votes: [{ ...ballot.votes[0], state: "needs_review" }] })).toEqual({
+    label: "Needs review",
+    kind: "warn",
+  });
+  expect(voteSummary({ ...ballot, enabled: false }).label).toBe("Off");
+  expect(voteSummary(ballot, "Read failed")).toEqual({ label: "Unavailable", kind: "warn" });
+  expect(voteSummary(null).label).toBe("Checking…");
+  expect(voteSummary(null, "Read failed").label).toBe("Unavailable");
 });
