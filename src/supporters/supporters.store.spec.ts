@@ -873,8 +873,8 @@ describe("supporter persistence and founder eligibility", () => {
       "settled.kind IN ('link', 'review', 'patron-discord-link', 'patreon-discord-link')\n            AND settled.created_at > refused.created_at",
     );
     expect(statement.text).toContain("ORDER BY refused.created_at DESC, refused.id DESC LIMIT 1");
-    // The link-age hold reads when the patron linked the current account.
-    expect(statement.text).toContain("AND a.kind = 'patron-discord-link' AND a.details->>'discordId' = m.discord_id");
+    // A patron's own link waits for nothing beyond the payment's refund window, so its time is never read.
+    expect(statement.text).not.toContain("patronLinkedAt");
   });
   it("reads whether a founder with no SteamID linked applied with the record's SteamID, by the shared expression", async () => {
     const { store, query } = fixture();

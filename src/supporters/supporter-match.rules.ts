@@ -74,8 +74,6 @@ export type MatchFacts = {
   patreonDiscordElsewhere: boolean;
   /** Another Discord account has an application for the record's linked SteamID that was not declined or revoked. */
   linkedSteamShared: boolean;
-  /** When the patron last linked the record's current Discord account by signing in ("Link Patreon"), or null. */
-  patronLinkedAt: string | null;
 };
 export type MatchMember = {
   provider: SupporterProvider;
@@ -195,7 +193,6 @@ export type AutomaticFounderBlockedReason =
   | SteamMatchBlock
   | "no_patreon_payment"
   | "charge_reversed"
-  | "patron_link_too_recent"
   | "payment_too_recent"
   | "earlier_payment_other_record"
   | FounderBlockedReason;
@@ -220,7 +217,6 @@ export const automaticBlockedMessages: Record<AutomaticFounderBlockedReason, str
   steam_on_another_record: "Another supporter record holds a SteamID this Discord account applied with.",
   no_patreon_payment: "No first payment from the Patreon import. A staff receipt is made a founder by staff.",
   charge_reversed: "Patreon reports the latest charge as refunded, reversed or fraudulent.",
-  patron_link_too_recent: "The patron linked this Discord account inside the waiting period.",
   payment_too_recent: "The first payment is still inside the waiting period for refunds.",
   earlier_payment_other_record: "Another supporter record for this person has an earlier payment.",
 };
@@ -232,8 +228,8 @@ export const automaticBlockedMessages: Record<AutomaticFounderBlockedReason, str
  * ("Link Patreon"), Patreon must report no other account for them and this account for no other patron, and the
  * payment must be a verified first Patreon API payment whose latest charge was not reversed, that has passed the
  * waiting period, and that has no earlier payment on another record for the same person. A link Patreon no longer
- * reports any account for is kept, and still counts. A link the patron made themselves must also have stood for the
- * waiting period, so staff can review it before a permanent promise.
+ * reports any account for is kept, and still counts. A link the patron made by signing in counts like one from
+ * Patreon, since the patron proved the account to both, so it too waits only for the payment's refund window.
  *
  * A founder needs no SteamID: the Discord account is the identity. The SteamID alerts on the Supporters page matter
  * for the whitelist promise later, so they never stop a founder. A linked SteamID must still be a valid player ID, as
@@ -246,8 +242,6 @@ export function automaticFounderBlocker(
   facts: MatchFacts,
   context: { now: Date | number; holdHours: number },
 ): AutomaticFounderBlockedReason | null {
-  const now = typeof context.now === "number" ? context.now : context.now.getTime();
-  const hold = context.holdHours * 3_600_000;
   if (member.provider !== "patreon") return "not_patreon";
   if (!member.discordId) return "no_discord";
   // The patron proved the account either way: through Patreon's own connection, or by signing in to both themselves.
@@ -263,11 +257,9 @@ export function automaticFounderBlocker(
   // Patreon dates that same charge a few seconds apart, which makes it a refund of the qualifying charge itself.
   if (member.lastChargeStatus && PATREON_REVERSED_CHARGE_STATUSES.has(member.lastChargeStatus))
     return "charge_reversed";
-  // A missing or unreadable link time never passes.
-  if (member.discordSource === "patron_signin" && !(Date.parse(facts.patronLinkedAt ?? "") <= now - hold))
-    return "patron_link_too_recent";
   const paidAt = Date.parse(automatic.payment.paidAt);
-  if (!(paidAt <= now - hold)) return "payment_too_recent";
+  const now = typeof context.now === "number" ? context.now : context.now.getTime();
+  if (!(paidAt <= now - context.holdHours * 3_600_000)) return "payment_too_recent";
   if (automatic.earlierOtherRecord) return "earlier_payment_other_record";
   return null;
 }
@@ -293,8 +285,6 @@ export type NextStep = { code: string; area: NextStepArea; message: string };
 export type NextStepRecord = MatchMember & {
   /** A refused patron sign-in staff have not settled yet. Omitted, none. */
   patronLinkConflict?: PatronLinkConflict | null;
-  /** When the patron linked the current Discord account with "Link Patreon" (MatchFacts). Omitted, never. */
-  patronLinkedAt?: string | null;
   founder: { automatic: boolean } | null;
   founderBlockedReason: FounderBlockedReason | "no_payment" | null;
   /** Only the first-payment mark, which the import has not settled yet, keeps it from being a founder (see SupporterView). */
@@ -400,25 +390,6 @@ const patronLinkConflictMessages: Record<PatronLinkConflictReason, (conflict: Pa
   founder_tie: ({ discordId }) =>
     `Discord account ${discordId} signed in as this patron, but another founder record holds it.`,
 };
-
-/**
- * A founder promise that waits only for the patron's own link to stand for the waiting period. Automatic matching
- * records it on its own once both the link and the first payment are that old, so staff get the time to check the
- * link by. Null for anything else, and for a link with no readable time, which never passes on its own.
- */
-function patronLinkWaiting(record: NextStepRecord, context: NextStepContext): NextStep | null {
-  if (record.provider !== "patreon" || record.automaticBlockedReason !== "patron_link_too_recent") return null;
-  const linkedAt = Date.parse(record.patronLinkedAt ?? "");
-  if (!context.founderAuto || !Number.isFinite(linkedAt)) return null;
-  const paidAt = record.automaticPayment ? Date.parse(record.automaticPayment.paidAt) : NaN;
-  const at = Math.max(linkedAt, Number.isFinite(paidAt) ? paidAt : linkedAt) + context.holdHours * 3_600_000;
-  const when = `${new Date(at).toISOString().slice(0, 16).replace("T", " ")} UTC`;
-  return {
-    code: "founder_patron_link_waiting",
-    area: "founder",
-    message: `Gramps records it on its own at ${when}, once the patron's own link and payment are ${context.holdHours} hours old, so check the link before then.`,
-  };
-}
 
 /**
  * The steps still needed for one record, in the order they are taken: Discord, SteamID, payment, founder. Alerts
@@ -536,12 +507,6 @@ export function supporterNextSteps(record: NextStepRecord, context: NextStepCont
   }
   // Why automation would not record it is on the record as automaticBlockedMessage, so the step stays one sentence.
   const automatic = record.automaticBlockedReason;
-  // Gramps records this one itself once the patron's own link has stood for the wait, so the step is to check the link.
-  const patronLinkWait = patronLinkWaiting(record, context);
-  if (patronLinkWait) {
-    steps.push(patronLinkWait);
-    return steps;
-  }
   const founder = (code: string, message: string) => steps.push({ code, area: "founder", message });
   if (record.provider !== "patreon") founder("founder_ready_staff", "Ready to be made a founder.");
   // Gramps would record it now, or once the refund wait is over. With automatic founders off it waits for the switch.

@@ -71,7 +71,6 @@ export class SupporterMatchStore {
       discordReportedForOtherPatron: Boolean(facts?.discordReportedForOtherPatron),
       patreonDiscordElsewhere: Boolean(facts?.patreonDiscordElsewhere),
       linkedSteamShared: Boolean(facts?.linkedSteamShared),
-      patronLinkedAt: facts?.patronLinkedAt ?? null,
     } satisfies MatchFacts;
   }
 

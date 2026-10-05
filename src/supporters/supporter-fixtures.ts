@@ -55,7 +55,6 @@ export function supporterFixture(overrides: Partial<SupporterView> = {}): Suppor
     discordSource: null,
     patreonDiscordId: null,
     patronLinkConflict: null,
-    patronLinkedAt: null,
     steamId: null,
     steamSource: null,
     steamApplicationId: null,

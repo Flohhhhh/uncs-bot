@@ -371,7 +371,7 @@ export class PatronLinkService {
     });
     if (result.outcome !== "conflict") {
       this.notifyRoles(flow.discordId);
-      // Fire-and-forget, and it never rejects. A new link is held for the waiting period before any founder promise.
+      // Fire-and-forget, and it never rejects. A founder promise still waits for the first payment's refund window.
       void this.match.member(result.memberId, "patron");
     }
     return this.finish(result.outcome);

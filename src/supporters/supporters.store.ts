@@ -114,7 +114,6 @@ type StoredSupporter = Omit<
   | "automaticPayment"
   | "automaticBlockedReason"
   | "automaticBlockedMessage"
-  | "patronLinkedAt"
 > & {
   founderCandidate: {
     payment: PaymentView;
@@ -839,7 +838,6 @@ export class SupportersStore {
       discordReportedForOtherPatron: Boolean(matchFacts?.discordReportedForOtherPatron),
       patreonDiscordElsewhere: Boolean(matchFacts?.patreonDiscordElsewhere),
       linkedSteamShared: Boolean(matchFacts?.linkedSteamShared),
-      patronLinkedAt: matchFacts?.patronLinkedAt ?? null,
     };
     let founderBlockedReason: SupporterView["founderBlockedReason"] = null;
     let founderFirstPaymentWaiting = false;
@@ -913,7 +911,6 @@ export class SupportersStore {
     return {
       ...supporter,
       patronLinkConflict: supporter.patronLinkConflict ?? null,
-      patronLinkedAt: facts.patronLinkedAt,
       payments: supporter.payments ?? [],
       founderBlockedReason,
       founderFirstPaymentWaiting,

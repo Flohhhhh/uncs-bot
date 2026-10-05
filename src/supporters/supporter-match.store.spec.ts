@@ -70,7 +70,6 @@ function fixture() {
       discordReportedForOtherPatron: false,
       patreonDiscordElsewhere: false,
       linkedSteamShared: false,
-      patronLinkedAt: null,
     } as MatchFacts,
   };
   const query = jest.fn(async (config: { text: string }, params: unknown[]) => {
@@ -656,18 +655,15 @@ describe("automatic founder promise", () => {
       Object.assign(f.member, { discordSource: "patron_signin", patreonDiscordId: null });
       return f;
     };
-    it("holds a new link for the waiting period, writing nothing", async () => {
+    it("waits only for the payment to pass the hold, writing nothing meanwhile", async () => {
       const f = patron();
-      f.state.facts.patronLinkedAt = new Date(now.getTime() - 3_600_000).toISOString();
-      expect(await f.run({ recordFounder: true })).toMatchObject({
-        founderRecorded: false,
-        blocked: ["patron_link_too_recent"],
-      });
+      expect(
+        await f.run({ recordFounder: true, now: new Date(Date.parse(paymentFixture().paidAt) + 3_600_000) }),
+      ).toMatchObject({ founderRecorded: false, blocked: ["payment_too_recent"] });
       expect(writes(f.texts())).toEqual([]);
     });
-    it("records it after the hold, saying the patron linked the account", async () => {
+    it("records it on the first run after the payment's hold, however new the link, saying the patron linked it", async () => {
       const f = patron();
-      f.state.facts.patronLinkedAt = new Date(now.getTime() - 72 * 3_600_000).toISOString();
       expect(await f.run({ recordFounder: true })).toMatchObject({ founderRecorded: true, blocked: [] });
       const [[, founderValues]] = f.calls('insert into "supporter_founders"');
       expect(founderValues).toContain(PATRON_LINK_FOUNDER_REASON);

@@ -2972,7 +2972,7 @@ describe("launch storage on isolated PostgreSQL", () => {
 
     it("fills the empty link as the patron's own, bumps the version once and audits it, then writes nothing again", async () => {
       const record = await importPatron("self-linked");
-      expect(record).toMatchObject({ discordId: null, identityState: "unlinked", patronLinkedAt: null });
+      expect(record).toMatchObject({ discordId: null, identityState: "unlinked" });
       expect(await patronLink.linked(campaign, patron)).toBe(false);
       expect(await patronLink.link(signIn("self-linked"))).toEqual({ outcome: "linked", memberId: record.id });
       const view = (await supporters.get(record.id, campaign, automaticPolicy))!;
@@ -3202,17 +3202,14 @@ describe("launch storage on isolated PostgreSQL", () => {
       expect((await actions(lost.memberId)).map(({ kind }) => kind)).toEqual(["patron-link-conflict"]);
     });
 
-    it("holds an automatic founder on a new patron link for the waiting period, then records it with its own reason", async () => {
-      const record = await importPatron("held-link");
+    it("records an automatic founder on a new patron link once the first payment has passed its refund wait, with its own reason", async () => {
+      const record = await importPatron("own-link");
       const linkedAt = new Date("2026-10-08T12:00:00.000Z");
-      expect(await patronLink.link(signIn("held-link", patron, linkedAt))).toEqual({
+      expect(await patronLink.link(signIn("own-link", patron, linkedAt))).toEqual({
         outcome: "linked",
         memberId: record.id,
       });
       const held = { ...policy, automaticHoldHours: 72 };
-      // The page reads the link's time from its audit row, so it can say when Gramps records the founder.
-      const linkedView = (await supporters.get(record.id, campaign, held))!;
-      expect(Date.parse(linkedView.patronLinkedAt!)).toBe(linkedAt.getTime());
       const options = (now: string): AutoMatchOptions => ({
         campaignId: campaign,
         policy: held,
@@ -3220,13 +3217,14 @@ describe("launch storage on isolated PostgreSQL", () => {
         recordFounder: true,
         now: new Date(now),
       });
-      // The first payment is days old, but the link is not.
-      expect(await match.autoMatch(record.id, options("2026-10-11T11:59:59.999Z"))).toMatchObject({
+      // The first payment, from October 1 at 12:00 UTC, waits out Patreon's refund window whoever linked the account.
+      expect(await match.autoMatch(record.id, options("2026-10-04T11:59:59.999Z"))).toMatchObject({
         founderRecorded: false,
-        blocked: expect.arrayContaining(["patron_link_too_recent"]),
+        blocked: expect.arrayContaining(["payment_too_recent"]),
       });
       expect(await supporters.get(record.id, campaign, held)).toMatchObject({ founder: null });
-      expect(await match.autoMatch(record.id, options("2026-10-11T12:00:00.000Z"))).toMatchObject({
+      // The link itself waits for nothing: a moment after it, the founder is recorded.
+      expect(await match.autoMatch(record.id, options("2026-10-08T12:00:00.001Z"))).toMatchObject({
         founderRecorded: true,
       });
       expect(await supporters.get(record.id, campaign, held)).toMatchObject({ founder: { automatic: true } });
