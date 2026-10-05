@@ -3,6 +3,7 @@ import { and, desc, eq, gte, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { DATABASE, type Database } from "../database/database.types";
 import { combatEvents, combatTracking, gameFeedEventTypes } from "../database/telemetry.schema";
 import { isPublicIndividualSteamId } from "../common/steam-id";
+import { FIREARM_ITEM_KEYS } from "../common/cause-labels";
 import {
   type CombatAggregate,
   type FeedEventTypeSummary,
@@ -51,6 +52,24 @@ function receivedWindow(serverId: string, since: Date, until: Date) {
     bound = true;
     return sql`${sql.raw(p)}server_id = ${serverId} AND ${sql.raw(p)}received_at >= ${since} AND ${sql.raw(p)}received_at <= ${until}`;
   };
+}
+/**
+ * `<column>` is a long shot: describeCause() calls the cause a firearm, so artillery, rocket pods, vehicle
+ * guns, explosives, melee, tools and unlabelled items never top a longest-kill list. The item code is the
+ * text after `Id.Item.` (any casing) or a whole bare code with no dot, slash or backslash; it is a firearm
+ * when its norm() key is a labelled firearm (FIREARM_ITEM_KEYS, bound as one text[] parameter) or it is a
+ * `WEPN_` code. Every other cause, including vehicles and their weapons (`Vehicle.Variant.`, `Id.Vehicle.`),
+ * has no item code. parseFeed() already trims stored causes and caps them at 200 characters, as describeCause()
+ * does. Plain text tests on rows the range scan already reads. Use it after receivedWindow() in text order.
+ */
+function longShot(column: "cause" | "c.cause" | "kills.cause") {
+  const cause = `lower(btrim(${column}))`;
+  const code = sql.raw(
+    `(CASE WHEN ${cause} LIKE 'id.item.%' THEN substr(${cause}, 9) WHEN ${cause} !~ '[./\\\\]' THEN ${cause} END)`,
+  );
+  // describeCause()'s norm() of the code, or its WEPN_ family code (a single segment, so no dot).
+  return sql`(regexp_replace(${code}, '[^a-z0-9]', '', 'g') = ANY(${sql.param([...FIREARM_ITEM_KEYS])}::text[])
+      OR ${code} ~ '^wepn_?[0-9]{1,4}$')`;
 }
 const idList = (ids: string[]) =>
   sql.join(
@@ -246,7 +265,7 @@ export class TelemetryStore {
   /**
    * Read-only weekly shout-out inputs over the same bounds as snapshot(). A kill is a non-suicide
    * event with a linked killer; names use snapshot()'s latest non-empty name, else the SteamID.
-   * bestKd only ranks players with at least minKdKills kills.
+   * bestKd only ranks players with at least minKdKills kills; longestKill counts long shots only (longShot()).
    */
   async weeklyHighlights(since: Date, until: Date, serverId = "primary", minKdKills = 10): Promise<WeeklyHighlights> {
     const rows = await this.db.execute<WeeklyHighlights>(sql`
@@ -288,7 +307,7 @@ export class TelemetryStore {
           SELECT kills.killer_steam_id AS "steamId", coalesce(names.name, kills.killer_steam_id) AS name,
             kills.distance_centimeters AS "distanceCentimeters", kills.cause, kills.map_name AS "mapName"
           FROM kills LEFT JOIN names ON names.steam_id = kills.killer_steam_id
-          WHERE kills.distance_centimeters IS NOT NULL
+          WHERE kills.distance_centimeters IS NOT NULL AND ${longShot("kills.cause")}
           ORDER BY kills.distance_centimeters DESC, kills.received_at, kills.event_time, kills.event_id LIMIT 1
         ) r) AS "longestKill",
         (SELECT count(*)::int FROM kills) AS kills,
@@ -352,15 +371,16 @@ export class TelemetryStore {
           GROUP BY v.id
         ) g
       `);
-      // S3: named lists. The ten players with the longest capped kills, ranked by each player's own best
-      // shot so a few snipers cannot crowd the others out, and the top five per tag. Names are then read
-      // for those players only (at most 40), with one short backward index probe each.
+      // S3: named lists. The ten players with the longest capped long shots (firearm kills, longShot()),
+      // ranked by each player's own best shot so a few snipers cannot crowd the others out, and the top
+      // five per tag. Names are then read for those players only (at most 40), with one short backward
+      // index probe each.
       const range3 = receivedWindow(serverId, since, until);
       const lists = await tx.execute<Pick<ServerStatsAggregate, "longest" | "leaders">>(sql`
         WITH best AS (
           SELECT killer_steam_id AS steam_id, max(distance_centimeters) AS cm FROM combat_events
           WHERE ${range3()} AND NOT suicide AND killer_steam_id IS NOT NULL
-            AND distance_centimeters > 0 AND distance_centimeters <= ${DISTANCE_CAP}
+            AND distance_centimeters > 0 AND distance_centimeters <= ${DISTANCE_CAP} AND ${longShot("cause")}
           GROUP BY killer_steam_id
           ORDER BY cm DESC, killer_steam_id LIMIT 10
         ), longest AS (
@@ -368,7 +388,7 @@ export class TelemetryStore {
           FROM best CROSS JOIN LATERAL (
             SELECT c.cause, c.map_name, c.distance_centimeters, c.received_at, c.event_id FROM combat_events c
             WHERE ${range3("c")} AND c.killer_steam_id = best.steam_id AND NOT c.suicide
-              AND c.distance_centimeters = best.cm
+              AND c.distance_centimeters = best.cm AND ${longShot("c.cause")}
             ORDER BY c.received_at, c.event_id LIMIT 1
           ) shot
         ), tagged AS (
@@ -430,21 +450,28 @@ export class TelemetryStore {
   }
 
   /**
-   * Leaderboard row extras for up to 100 listed players over the same bounds as snapshot(): kills and
-   * longest kill per cause, and each player's most kills without dying within one server session
-   * (ordered by receipt, then game clock; a suicide counts as a death). Reads only these players' own
-   * events through the killer and victim indexes. Rows keep SteamIDs and never leave the service.
+   * Leaderboard row extras for up to 100 listed players over the same bounds as snapshot(): kills per
+   * cause, with its longest capped kill when the cause is a long shot (longShot()), and each player's
+   * most kills without dying within one server session (ordered by receipt, then game clock; a suicide
+   * counts as a death). Reads only these players' own events through the killer and victim indexes.
+   * Rows keep SteamIDs and never leave the service.
    */
   async rowExtras(since: Date, until: Date, steamIds: string[], serverId = "primary"): Promise<RowExtrasAggregate> {
     const ids = [...new Set(steamIds.filter(isPublicIndividualSteamId))].slice(0, 100);
     if (!ids.length) return { weapons: [], streaks: [] };
     return this.db.transaction(async (tx) => {
+      // Every row of a cause group shares lower(btrim(cause)), so the long-shot test runs once per group.
       const weapons = await tx.execute<RowExtrasAggregate["weapons"][number]>(sql`
-        SELECT killer_steam_id AS "steamId", min(btrim(cause)) AS cause, count(*)::int AS kills,
-          max(distance_centimeters) FILTER (WHERE distance_centimeters > 0 AND distance_centimeters <= ${DISTANCE_CAP}) AS "longestCentimeters"
-        FROM combat_events
-        WHERE ${receivedWindow(serverId, since, until)()} AND NOT suicide AND killer_steam_id IN (${idList(ids)})
-        GROUP BY killer_steam_id, lower(btrim(cause))
+        WITH causes AS (
+          SELECT killer_steam_id, min(btrim(cause)) AS cause, count(*)::int AS kills,
+            max(distance_centimeters) FILTER (WHERE distance_centimeters > 0 AND distance_centimeters <= ${DISTANCE_CAP}) AS longest
+          FROM combat_events
+          WHERE ${receivedWindow(serverId, since, until)()} AND NOT suicide AND killer_steam_id IN (${idList(ids)})
+          GROUP BY killer_steam_id, lower(btrim(cause))
+        )
+        SELECT killer_steam_id AS "steamId", cause, kills,
+          CASE WHEN ${longShot("cause")} THEN longest END AS "longestCentimeters"
+        FROM causes
       `);
       const range = receivedWindow(serverId, since, until);
       const streaks = await tx.execute<RowExtrasAggregate["streaks"][number]>(sql`

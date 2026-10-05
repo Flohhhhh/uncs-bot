@@ -53,14 +53,25 @@ Routes:
 
 The game reports causes such as `Id.Item.AK74M`, `ID.Item.AK74M` (both casings occur), `Vehicle.Variant.Air.Rotary.ROT_04.Default` and `Id.Vehicle.WeaponExtension.WHL_05.RingTurret`. `describeCause()` in `src/common/cause-labels.ts` turns each into a readable label and a kind (`firearm`, `explosive`, `melee`, `vehicle`, `vehicle_weapon`, `tool`, `environment` or `unknown`): "AK-74M", "ROT-04 helicopter", "Ring turret". It ignores prefix casing, so both AK spellings are one weapon everywhere. Unnamed codes get a tidy generic name, such as "Weapon 029" for `WEPN_029`. A cause it cannot name (an unknown dotted id, a path, a blueprint name, or anything with a 17-digit run) reads as "Unknown weapon", never the raw id. Every label is at most 40 characters of letters, digits, spaces, `'` and `-`, and never contains the word "free". The public stats, the weekly Discord post and the staff dashboard all use it; staff still see and can search the raw cause, and can search the label too. The staff weapon filter has one option per label, so both AK spellings filter together; each cause with no name gets its own "Unknown weapon (raw id)" option.
 
-To name a new item, add it to the tables in that file with a test. As of October 5, CGM4 is assumed to be a Carl Gustaf launcher ("Carl Gustaf M4"; use "CGM4" if that is wrong), and SR_04, the `WEPN_0xx` codes, ROT_04 and WHL_05 keep generic names until someone checks them in game.
+To name a new item, add it to the tables in that file with a test. As of October 5, CGM4 is assumed to be a Carl Gustaf launcher ("Carl Gustaf M4"; use "CGM4" if that is wrong), and SR_04, the `WEPN_0xx` codes, ROT_04 and WHL_05 keep generic names until someone checks them in game. M500 ("M500 shotgun"), A91 ("A-91"), MK22 and Vector are firearms, and M67Grenade reads "M67 grenade" like M67.
+
+### Long shots
+
+The longest kill counts infantry weapons only. Artillery, rocket pods and vehicle main guns reach close to 2 km, so before this rule they filled the longest-kill list and many leaderboard rows. A long shot is a kill whose cause is a firearm (`describeCause()` kind `firearm`), tested in SQL as `TelemetryStore`'s `longShot()`:
+
+- An `Id.Item.` cause (any casing) counts when its item is a labelled firearm (`FIREARM_ITEM_KEYS` in `src/common/cause-labels.ts`, built from the label table and bound as a query parameter) or a `WEPN_` code such as `Id.Item.WEPN_029`.
+- A bare code with no dots counts on the same terms, such as `AK74M` or `WEPN_030`.
+- Nothing else counts: explosives such as the RPG-7, Carl Gustaf, M67 grenade, C4 and mines, melee weapons, build tools, buildables, the defibrillator and the supply pallet, and also items with no label yet and family codes such as `SMG_03`, whose kind is `unknown` even when they have a readable name. Label a new firearm as `firearm` so its kills count as long shots.
+- Vehicles and their weapons (`Vehicle.Variant.`, `Id.Vehicle.`, including `Id.Vehicle.WeaponExtension.` mounts, artillery and rocket pods) never count.
+
+It applies to the public stats' `longestKills`, the leaderboard rows' `longestKillMeters` and the weekly post's long-distance call. Each weapon's own `longestMeters` in the stats `weapons` list still covers every kind. The test is plain text matching on rows each statement already reads in its range scan; there is no new index or materialized copy. `cause-labels.spec.ts` and the PostgreSQL storage suite check that it agrees with `describeCause()` for every cause shape.
 
 ### Leaderboard row extras
 
 Each public leaderboard row can also carry these optional fields. Each is omitted, never null, when it is unknown:
 
 - `topWeapon`: the label of the player's most-used weapon in the window, by kills. "Unknown weapon" is never chosen; ties go to the alphabetically first label.
-- `longestKillMeters`: the player's longest kill in whole metres, within the 2 km public cap.
+- `longestKillMeters`: the player's longest [long shot](#long-shots) (firearm kill) in whole metres, within the 2 km public cap. A player with no firearm kill in the window has none.
 - `bestStreak`: the most kills in a row without dying, at least 1. It is counted within one game server session (`server_instance_id`) in receipt order, then game clock order, so it resets when the game server restarts and is approximate across delivery gaps. A self-inflicted death ends a streak. At an exact tie the kill counts before the death.
 
 They are read for the 100 listed players only, through the killer and victim indexes, in one read-only transaction (`TelemetryStore.rowExtras`). The result is cached for 60 seconds per server and period, separately from the 10-second leaderboard snapshot, and feed batches do not clear it. A player who enters the top 100 after the cache was filled gets extras at the next refresh. If the read fails, Gramps logs "Leaderboard extras unavailable; serving rows without them." and serves the rows as before: the leaderboard never fails because of extras. Staff rankings and player history are unchanged.
@@ -74,7 +85,7 @@ They are read for the 100 listed players only, through the killer and victim ind
 | `totals`       | `events`, `kills`, `deaths`, `headshotKills`, `players` (the same rules as the leaderboard's totals) and `suicides`                                                                 |
 | `weapons`      | Up to 25 `{label, kind, kills, headshotKills, longestMeters}`, most kills first. Causes with one label are merged; "Unknown weapon" stays as an honest row                          |
 | `maps`         | Up to 10 `{label, kills}`; a map's catalog ID and in-game name count once                                                                                                           |
-| `longestKills` | Up to 10 `{name, weapon, meters, map}`: each player's own longest kill, so one sniper cannot fill the list                                                                          |
+| `longestKills` | Up to 10 `{name, weapon, meters, map}`: each player's own longest [long shot](#long-shots) (firearm kills only), so one sniper cannot fill the list                                 |
 | `hours`        | 24 kill counts by UTC hour of receipt (index 0 is 00:00–00:59 UTC). The website shows them in the viewer's time zone                                                                |
 | `tags`         | Counts for `melee`, `roadkill`, `vehicleExplosion`, `penetration`, `ricochet` (kills with that tag), `falling` (deaths with the Falling tag) and `suicide` (self-inflicted deaths)  |
 | `tagLeaders`   | Up to 5 `{name, count}` for each tag except `suicide`, which is a count only: naming who self-inflicted most is in poor taste. Fall deaths are listed by victim, the rest by killer |
@@ -89,7 +100,7 @@ A kill is a non-suicide event with a linked killer, as on the leaderboard, so st
 
 1. Kills grouped by cause, map and UTC hour, plus the total, in one pass (`GROUPING SETS`).
 2. Event totals: events, deaths, suicides, fall deaths and distinct players, grouped by player id first so Postgres hashes about 2k ids instead of sorting two rows per event.
-3. Each killer's own longest capped kill (a hashed group over the same range), the ten best of those with their kill row read through the killer index, the top five per tag, and then names for only those players (at most 40): one latest-name probe each on the killer and victim indexes. Ranking players by their own best shot means a few snipers cannot fill the list; at an exact centimetre tie for tenth place the lower SteamID is kept.
+3. Each killer's own longest capped long shot (a hashed group over the same range), the ten best of those with their kill row read through the killer index, the top five per tag, and then names for only those players (at most 40): one latest-name probe each on the killer and victim indexes. Ranking players by their own best shot means a few snipers cannot fill the list; at an exact centimetre tie for tenth place the lower SteamID is kept.
 
 The result is cached for 60 seconds per server and period (at most 30 entries, one shared read for concurrent callers, a failed read is not kept). Feed batches do not clear it, so recomputes stay at one per server and period per minute whatever the traffic. `asOf` and `feedStatus` describe the cached read.
 

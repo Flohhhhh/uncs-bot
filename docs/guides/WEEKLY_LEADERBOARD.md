@@ -88,9 +88,11 @@ Stretch, hydrate, run it back. Full board: https://theuncsgaming.com/leaderboard
 | ---------------------------- | ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
 | Still got it                 | Best `kills / max(deaths, 1)`, then more kills               | Among players with at least 10 kills                                                                     |
 | Reading glasses not required | Most headshot kills                                          | At least 3                                                                                               |
-| Long-distance call           | Longest single kill; the earliest wins a tie                 | 10–2,000 m. Above 2,000 m the line is left out, because the source's distance units are not yet verified |
+| Long-distance call           | Longest single firearm kill; the earliest wins a tie         | 10–2,000 m. Above 2,000 m the line is left out, because the source's distance units are not yet verified |
 | Old faithful                 | Most-used weapon/cause across all kills                      | A cause on at least half of the kills, at least 5 uses, and a readable name                              |
 | Where the knees hurt most    | Map with the most kills (catalog ID and in-game name merged) | Kills on at least 2 maps, and at least 5 on the top map                                                  |
+
+The longest kill counts infantry weapons only: artillery, rocket pods, vehicle guns, explosives, melee and tools never take the long-distance call, by the same [long-shot rule](COMBAT_HISTORY.md#long-shots) as the website's longest kills.
 
 Weapons use the shared labels in `src/common/cause-labels.ts`, the same ones as the website's server stats and the staff dashboard. `Id.Item.AK74M` and `ID.Item.AK74M` both read "AK-74M", and Old faithful counts them together. Unnamed codes get a tidy generic name, such as "Weapon 029" for `WEPN_029`. A cause the labels cannot name (an unknown dotted id, a path, a `BP_` prefix or `_C` suffix, or anything SteamID-like) is never shown, raw or otherwise; the line simply leaves the weapon out. Team kills are not excluded, because no team-kill tag has been observed yet; add an exclusion once the first real batch shows one.
 
