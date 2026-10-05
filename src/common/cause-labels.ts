@@ -114,7 +114,8 @@ const VEHICLES = labels({
   kodiak: "Kodiak",
   ural: "Ural",
 });
-const MOUNTS = labels({ ringturret: "Ring turret" });
+// Mounted and stationary weapons by in-game name, from the same database.
+const MOUNTS = labels({ ringturret: "Ring turret", mistralaa: "Talon 9K-SAM", phalanx: "Vanguard CIWS" });
 const BUILDABLES = labels({ barbedwire: "Barbed wire", bremerwall: "Bremer wall", hblock: "H-block" });
 
 /**

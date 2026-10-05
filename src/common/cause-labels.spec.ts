@@ -50,6 +50,8 @@ describe("cause labels", () => {
     ["ID.Item.ATMine", "AT mine", "explosive"],
     ["ID.Item.BuildTool.Hammer.Large", "Big hammer", "tool"],
     ["Id.Vehicle.WeaponExtension.WHL_05.RingTurret", "Ring turret", "vehicle_weapon"],
+    ["Id.Vehicle.WeaponExtension.MistralAA", "Talon 9K-SAM", "vehicle_weapon"],
+    ["Id.Vehicle.WeaponExtension.Phalanx", "Vanguard CIWS", "vehicle_weapon"],
     ["Vehicle.Variant.Air.Rotary.ROT_04.Default", "Z20 Lakota", "vehicle"],
     ["Vehicle.Variant.Air.Rotary.LittleBird.Default", "MH-6", "vehicle"],
     ["Vehicle.Variant.Land.Wheeled.Humvee.Default", "Humvee", "vehicle"],
@@ -188,7 +190,9 @@ describe("cause labels", () => {
     const vehicles = ["Humvee", "ROT_04", "LittleBird", "Havoc", "Bobcat", "DuneBuggy", "Kodiak", "Ural"].map((code) =>
       describeCause(`Id.Vehicle.${code}`),
     );
-    const mounts = [describeCause("Id.Vehicle.WeaponExtension.X.RingTurret")];
+    const mounts = ["RingTurret", "MistralAA", "Phalanx"].map((code) =>
+      describeCause(`Id.Vehicle.WeaponExtension.X.${code}`),
+    );
     const tools = ["Hammer.Large", "Hammer.Small", "Hammer", "Drill"].map((code) =>
       describeCause(`Id.Item.BuildTool.${code}`),
     );
