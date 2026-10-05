@@ -352,6 +352,8 @@ const steamStepCodes: Record<SteamMatchBlock, string> = {
 const ASK_FOR_STEAM_ID = "Their application is on a server you cannot open, so ask them for their SteamID.";
 /** Waiting texts: what Gramps waits for, so no one has to do it. */
 const WAITING_FOR_DISCORD = "Waiting for them to connect Discord on Patreon.";
+/** With Link Patreon on, a patron can link a record that has no Discord account themselves. */
+const WAITING_FOR_PATRON_LINK = "Waiting for them to tap Link Patreon in Discord.";
 const WAITING_FOR_IMPORT = "Waiting for the Patreon import to be set up.";
 
 function steamStep(steam: SteamMatch, record: NextStepRecord, context: NextStepContext): NextStep {
@@ -404,6 +406,9 @@ export function supporterNextSteps(record: NextStepRecord, context: NextStepCont
   if (refused) discord("patron_link_conflict", patronLinkConflictMessages[refused.conflict](refused));
   // Without the import nothing reports the account, so the wait is for the import itself.
   const waitingForDiscord = context.importConfigured ? WAITING_FOR_DISCORD : WAITING_FOR_IMPORT;
+  // A record with no account waits for the patron, who can link it in Discord while Link Patreon is on.
+  const waitingForAccount =
+    context.importConfigured && context.patronLink ? WAITING_FOR_PATRON_LINK : waitingForDiscord;
   if (!record.discordId) {
     if (record.provider === "paypal") discord("link_discord_paypal", "Add their Discord account so they get roles.");
     else if (record.match.patreonDiscordElsewhere)
@@ -411,13 +416,10 @@ export function supporterNextSteps(record: NextStepRecord, context: NextStepCont
         "discord_on_another_record",
         `Discord account ${record.patreonDiscordId} is already on another supporter.`,
       );
-    // With Link Patreon on, the patron can link it in Discord without Patreon's integration.
-    else if (context.importConfigured && context.patronLink && !record.patreonDiscordId)
-      discord("connect_discord_in_patreon", "Ask the patron to tap Link Patreon in Discord, or link it here.");
     else if (context.importConfigured)
       discord(
         "connect_discord_in_patreon",
-        record.patreonDiscordId ? "Gramps links their Discord at the next sync." : WAITING_FOR_DISCORD,
+        record.patreonDiscordId ? "Gramps links their Discord at the next sync." : waitingForAccount,
       );
     else discord("link_discord_no_import", WAITING_FOR_IMPORT);
   } else if (record.provider === "patreon") {
@@ -459,7 +461,7 @@ export function supporterNextSteps(record: NextStepRecord, context: NextStepCont
         area: "founder",
         // A Patreon founder's account arrives from Patreon. A PayPal founder's is added by staff.
         message:
-          record.provider === "patreon" ? waitingForDiscord : "Add a Discord account so they get the Founder role.",
+          record.provider === "patreon" ? waitingForAccount : "Add a Discord account so they get the Founder role.",
       });
     return steps;
   }
@@ -523,7 +525,8 @@ export function supporterNextSteps(record: NextStepRecord, context: NextStepCont
     founder("founder_waiting_patreon", "Waiting for Patreon to settle a refunded charge.");
   // The import makes the account a Patreon link once Patreon reports it for them.
   else if (automatic === "no_discord" || automatic === "discord_not_from_patreon")
-    founder("founder_waiting_discord", waitingForDiscord);
+    // Link Patreon links only a record with no account: one staff linked waits for Patreon to report it.
+    founder("founder_waiting_discord", automatic === "no_discord" ? waitingForAccount : waitingForDiscord);
   // The Discord step already says which account Patreon reports, and that staff check it.
   else if (automatic === "discord_differs" || automatic === "discord_reported_for_other_patron") return steps;
   else if (automatic === "steam_on_another_record") {

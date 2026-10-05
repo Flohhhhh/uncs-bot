@@ -244,10 +244,10 @@ In Discord a patron can ask for 5 links per 10 minutes. A Discord account can st
 
 The page has no label of its own for `patron_signin` yet, so it shows these links as older ones. Its next steps carry the rest:
 
-| Code                         | Meaning                                                                                                                                                                                                                                          |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `patron_link_conflict`       | A patron's own sign-in matched this record but was refused, because it would replace a link or take one from another record or founder. It names the account, and stays until a later staff link or review, or a later Discord link, settles it. |
-| `connect_discord_in_patreon` | While Link Patreon is on and Patreon reports no Discord account, it asks staff to point the patron at Link Patreon.                                                                                                                              |
+| Code                         | Meaning                                                                                                                                                                                                                                                                                                                            |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `patron_link_conflict`       | A patron's own sign-in matched this record but was refused, because it would replace a link or take one from another record or founder. It names the account, and stays until a later staff link or review, or a later Discord link, settles it.                                                                                   |
+| `connect_discord_in_patreon` | While Link Patreon is on and Patreon reports no Discord account, it waits for the patron: "Waiting for them to tap Link Patreon in Discord." `founder_waiting_discord` and a Patreon founder's `founder_needs_discord` say the same while the record has no Discord account. It is under **Waiting**, so staff have nothing to do. |
 
 ### Refusals
 

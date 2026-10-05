@@ -179,7 +179,7 @@ describe("private supporters HTTP boundary", () => {
     });
   });
   it.each([true, false, undefined])(
-    "points staff at Link Patreon only while PATREON_LINK_ENABLED is %p",
+    "waits for the patron's Link Patreon only while PATREON_LINK_ENABLED is %p",
     async (enabled) => {
       store.list.mockResolvedValue([supporterFixture()]);
       values.PATREON_LINK_ENABLED = enabled;
@@ -190,7 +190,7 @@ describe("private supporters HTTP boundary", () => {
           .expect(200);
         const [step] = result.body.supporters[0].nextSteps;
         expect(step).toMatchObject({ code: "connect_discord_in_patreon", area: "discord" });
-        if (enabled) expect(step.message).toBe("Ask the patron to tap Link Patreon in Discord, or link it here.");
+        if (enabled) expect(step.message).toBe("Waiting for them to tap Link Patreon in Discord.");
         else expect(step.message).not.toContain("Link Patreon");
       } finally {
         delete values.PATREON_LINK_ENABLED;

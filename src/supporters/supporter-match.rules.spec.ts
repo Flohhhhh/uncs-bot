@@ -1029,11 +1029,11 @@ describe("a Discord account the patron linked by signing in", () => {
 describe("next steps for patrons who link their own Discord account", () => {
   const otherDiscord = "234567890123456789";
   const patronOn = { ...on, patronLink: true };
-  it("asks the patron to tap Link Patreon while linking is on", () => {
+  it("waits for the patron to tap Link Patreon while linking is on, with nothing for staff to do", () => {
     expect(supporterNextSteps(supporterFixture(), patronOn)[0]).toEqual({
       code: "connect_discord_in_patreon",
       area: "discord",
-      message: "Ask the patron to tap Link Patreon in Discord, or link it here.",
+      message: "Waiting for them to tap Link Patreon in Discord.",
     });
     // Off or omitted, the step keeps its usual text, whatever the page's wording is.
     const usual = supporterNextSteps(supporterFixture(), { ...patronOn, patronLink: false })[0];
@@ -1044,6 +1044,37 @@ describe("next steps for patrons who link their own Discord account", () => {
     const reported = supporterFixture({ patreonDiscordId: discordId });
     expect(supporterNextSteps(reported, patronOn)[0]).toEqual(supporterNextSteps(reported, on)[0]);
     expect(supporterNextSteps(reported, patronOn)[0].message).not.toContain("Link Patreon");
+  });
+  it("words a founder's wait for a missing account the same way, so the page shows one line", () => {
+    const waiting = "Waiting for them to tap Link Patreon in Discord.";
+    const message = (record: SupporterView, code: string) =>
+      supporterNextSteps(record, patronOn).find((step) => step.code === code)?.message;
+    const missing = ready({
+      discordId: null,
+      discordSource: null,
+      patreonDiscordId: null,
+      automaticBlockedReason: "no_discord",
+    });
+    expect(message(missing, "connect_discord_in_patreon")).toBe(waiting);
+    expect(message(missing, "founder_waiting_discord")).toBe(waiting);
+    expect(
+      message(
+        ready({
+          discordId: null,
+          patreonDiscordId: null,
+          founder: founderOf("patreon_api", true),
+          needsDiscordLink: true,
+        }),
+        "founder_needs_discord",
+      ),
+    ).toBe(waiting);
+    // Link Patreon never replaces a staff link, so that one still waits for Patreon to report the account.
+    expect(
+      message(
+        ready({ discordSource: "staff", automaticBlockedReason: "discord_not_from_patreon" }),
+        "founder_waiting_discord",
+      ),
+    ).toBe("Waiting for them to connect Discord on Patreon.");
   });
   it.each([
     [
