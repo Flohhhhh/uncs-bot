@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { parseFeed } from "./telemetry.types";
+import { MAX_SAMPLE_BYTES, parseFeed } from "./telemetry.types";
 
 const killer = "76561198000000001";
 const victim = "76561198000000002";
@@ -68,15 +68,184 @@ describe("Wardogs feed parsing", () => {
     expect(parseFeed(batch({ contextTags: ["Meta.PlayerKillFlag.Player.Headshot"] })).events[0].headshot).toBe(true);
     expect(parseFeed(batch({ contextTags: ["NotHeadshot"] })).events[0].headshot).toBe(false);
   });
-  it("skips new event types without inventing combat data", () => {
+  it("counts new event types without inventing combat data", () => {
     const value = batch();
-    value.events.push({ eventId: randomUUID(), type: "future-event", eventTime: 1 });
+    const future = { eventId: randomUUID(), type: "future-event", eventTime: 1 };
+    value.events.push(future);
     expect(parseFeed(value)).toMatchObject({
       skipped: 1,
       invalid: 0,
       firstInvalid: null,
+      types: [
+        { type: "killed", count: 1, sample: null },
+        { type: "future-event", count: 1, sample: future },
+      ],
       events: [expect.objectContaining({ eventTime: 18.25 })],
     });
+  });
+  it("tallies every event type in first-seen order with the latest entry of each, killed unchanged", () => {
+    const value = batch({ killerSteamId: killer, victimSteamId: victim, contextTags: ["Headshot"] });
+    const kill = value.events[0];
+    const joined = (name: string) => ({ type: "playerJoined", steamId: killer, name });
+    value.events.push(
+      joined("First"),
+      { type: "Round.Result:v2", winner: "East", scores: [1, 2] },
+      { ...kill, eventId: "bad", type: "killed" },
+      joined("Second"),
+      { ...kill, eventId: randomUUID() },
+      joined("Latest"),
+    );
+    const result = parseFeed(value);
+    expect(result.types).toEqual([
+      { type: "killed", count: 2, sample: null },
+      { type: "playerJoined", count: 3, sample: joined("Latest") },
+      { type: "Round.Result:v2", count: 1, sample: { type: "Round.Result:v2", winner: "East", scores: [1, 2] } },
+    ]);
+    // Other types are counted as skipped as before; the malformed killed event is invalid, not tallied.
+    expect(result).toMatchObject({ skipped: 5, invalid: 1, firstInvalid: "events.3.eventId (bad format)" });
+    expect(result.events).toEqual([
+      expect.objectContaining({ eventId: kill.eventId, killerSteamId: killer, headshot: true, suicide: false }),
+      expect.objectContaining({ eventId: value.events[5].eventId }),
+    ]);
+    expect(Object.keys(result.events[0]).sort()).toEqual(Object.keys(parseFeed(batch()).events[0]).sort());
+    expect(parseFeed({ ...value, events: [] }).types).toEqual([]);
+  });
+  it("keeps a sample only up to 4 KiB, keeping an earlier fitting one or a size marker", () => {
+    // Pads an entry to an exact serialized size in bytes.
+    const sized = (bytes: number, label: string) => {
+      const entry = { type: "bulk", label, padding: "" };
+      entry.padding = "x".repeat(bytes - Buffer.byteLength(JSON.stringify(entry)));
+      expect(Buffer.byteLength(JSON.stringify(entry))).toBe(bytes);
+      return entry;
+    };
+    const atCap = sized(MAX_SAMPLE_BYTES, "fits");
+    const over = sized(MAX_SAMPLE_BYTES + 1, "over");
+    const types = (...events: unknown[]) => parseFeed({ ...batch(), events }).types;
+    expect(types(over, atCap)).toEqual([{ type: "bulk", count: 2, sample: atCap }]);
+    expect(types(atCap, over)).toEqual([{ type: "bulk", count: 2, sample: atCap }]);
+    expect(types(over, sized(5_000, "later"))).toEqual([
+      { type: "bulk", count: 2, sample: { tooLarge: true, bytes: 5_000 } },
+    ]);
+  });
+  it("makes samples storable in PostgreSQL jsonb and drops IP addresses", () => {
+    const [entry] = parseFeed({
+      ...batch(),
+      events: [
+        {
+          type: "playerConnected",
+          name: "Nul\u0000Name\uD800",
+          ["key\u0000"]: "\uDC00",
+          address: "203.0.113.7:7777",
+          ipv6: "2001:db8::1",
+          bracketed: "[2001:db8::1]:7777",
+          nested: [{ ip: " 198.51.100.2 " }],
+          time: "12:30:45",
+          version: "1.2.3",
+        },
+      ],
+    }).types;
+    expect(entry.sample).toEqual({
+      type: "playerConnected",
+      name: "NulName\uFFFD",
+      key: "\uFFFD",
+      address: "[IP address removed]",
+      ipv6: "[IP address removed]",
+      bracketed: "[IP address removed]",
+      nested: [{ ip: "[IP address removed]" }],
+      time: "12:30:45",
+      version: "1.2.3",
+    });
+    expect(JSON.stringify(entry.sample)).not.toMatch(/\\u0000|\\ud[89a-f]|203\.0\.113|2001:db8|198\.51/i);
+  });
+  it("removes IP addresses from keys and from inside text, with or without a port", () => {
+    const [entry] = parseFeed({
+      ...batch(),
+      events: [
+        {
+          type: "conn",
+          keyed: { "203.0.113.5": 1 },
+          mapped: "::ffff:203.0.113.5:7777",
+          slashed: "203.0.113.5/7777",
+          joined: "steam:76561198000000001@203.0.113.5",
+          text: "from 2001:db8::1 (fe80::1%eth0), addr:198.51.100.2.",
+          kept: "v1.2.3.4 at 12:30:45, Meta::Event, build 1.2.3",
+        },
+      ],
+    }).types;
+    expect(entry.sample).toEqual({
+      type: "conn",
+      keyed: { "[IP address removed]": 1 },
+      mapped: "[IP address removed]",
+      slashed: "[IP address removed]/7777",
+      joined: "steam:76561198000000001@[IP address removed]",
+      text: "from [IP address removed] ([IP address removed]), addr:[IP address removed].",
+      kept: "v1.2.3.4 at 12:30:45, Meta::Event, build 1.2.3",
+    });
+    expect(JSON.stringify(entry.sample)).not.toMatch(/203\.0\.113|2001:db8|198\.51|fe80/);
+  });
+  it("caps a sample by its size as stored, after IP addresses are replaced", () => {
+    // Each "::" is an IPv6 address that grows from 4 to 22 bytes of JSON when replaced.
+    const addresses = { type: "conn", a: [] as string[] };
+    while (Buffer.byteLength(JSON.stringify({ ...addresses, a: [...addresses.a, "::"] })) <= MAX_SAMPLE_BYTES)
+      addresses.a.push("::");
+    expect(Buffer.byteLength(JSON.stringify(addresses))).toBeGreaterThan(MAX_SAMPLE_BYTES - 5);
+    const [entry] = parseFeed({ ...batch(), events: [addresses] }).types;
+    expect(entry.sample).toEqual({ tooLarge: true, bytes: expect.any(Number) });
+    expect((entry.sample as { bytes: number }).bytes).toBeGreaterThan(4 * MAX_SAMPLE_BYTES);
+    // An entry that still fits once replaced keeps its sample.
+    const [small] = parseFeed({ ...batch(), events: [{ type: "conn", a: ["::", "::"] }] }).types;
+    expect(small.sample).toEqual({ type: "conn", a: ["[IP address removed]", "[IP address removed]"] });
+  });
+  it("keeps numbers that JSON writes with an exponent as text, so jsonb cannot print them longer", () => {
+    const [entry] = parseFeed({
+      ...batch(),
+      events: [{ type: "probe", v: [1e308, 5e-324, 1e21, 1e-7, 1e20, 123.5, -0.000001, 0] }],
+    }).types;
+    expect(entry.sample).toEqual({
+      type: "probe",
+      v: ["1e+308", "5e-324", "1e+21", "1e-7", 1e20, 123.5, -0.000001, 0],
+    });
+    // 582 such numbers fit 4 KiB as sent but would print as about 180 KB from jsonb.
+    const huge = { type: "probe", v: Array.from({ length: 582 }, () => 1e308) };
+    expect(Buffer.byteLength(JSON.stringify(huge))).toBeLessThanOrEqual(MAX_SAMPLE_BYTES);
+    const [capped] = parseFeed({ ...batch(), events: [huge] }).types;
+    expect(capped.sample).toEqual({ tooLarge: true, bytes: expect.any(Number) });
+  });
+  it.each(["", "1type", "has space", "x".repeat(65), "line\nbreak", "<script>", "naïve", "-dash"])(
+    "counts an entry whose type is not a bounded name as invalid without naming it: %j",
+    (type) => {
+      const value = batch();
+      value.events.push({ type, secret: "secret-value" });
+      const result = parseFeed(value);
+      expect(result).toMatchObject({ skipped: 1, invalid: 1, firstInvalid: "events.1.type (bad format)" });
+      expect(result.types.map((entry) => entry.type)).toEqual(["killed"]);
+      expect(result.events).toHaveLength(1);
+      // Such an entry was skipped, not refused, before type names were checked.
+      expect(result.firstMalformed).toBeNull();
+    },
+  );
+  it("keeps the valid types of a batch whose only invalid entry is a badly named type", () => {
+    const result = parseFeed({ ...batch(), events: [{ type: "playerSpawned" }, { type: "Round Ended" }] });
+    expect(result).toMatchObject({
+      skipped: 2,
+      invalid: 1,
+      firstInvalid: "events.1.type (bad format)",
+      firstMalformed: null,
+      types: [{ type: "playerSpawned", count: 1, sample: { type: "playerSpawned" } }],
+      events: [],
+    });
+    // A malformed entry after it is named for a refusal.
+    const mixed = parseFeed({ ...batch(), events: [{ type: "Round Ended" }, null] });
+    expect(mixed).toMatchObject({
+      firstInvalid: "events.0.type (bad format)",
+      firstMalformed: "events.1 (not an object)",
+    });
+  });
+  it("accepts a 64-character type name and dotted, namespaced names", () => {
+    const names = ["a".repeat(64), "Meta.Event:Spawn_2", "k-d"];
+    const result = parseFeed({ ...batch(), events: names.map((type) => ({ type })) });
+    expect(result.types.map((entry) => entry.type)).toEqual(names);
+    expect(result).toMatchObject({ skipped: 3, invalid: 0 });
   });
   it.each([
     [{ eventId: "secret-value" }, "events.1.eventId (bad format)"],
@@ -101,6 +270,7 @@ describe("Wardogs feed parsing", () => {
     expect(result.events.map((parsed) => parsed.eventId)).toEqual([good.eventId, value.events[2].eventId]);
     expect(result).toMatchObject({ skipped: 1, invalid: 1 });
     expect(result.firstInvalid).toContain(firstInvalid);
+    expect(result.firstMalformed).toBe(result.firstInvalid);
     // The label names a schema location only, never the submitted value.
     expect(result.firstInvalid).not.toMatch(/secret-value|nnnn|Headshot|xxxx/);
   });

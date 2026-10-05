@@ -44,6 +44,7 @@ describe("telemetry HTTP boundaries", () => {
     snapshot: jest.fn(),
     tracking: jest.fn(),
     events: jest.fn(),
+    eventTypes: jest.fn(),
   };
   const adminStore = { session: jest.fn() };
   const config = {
@@ -71,6 +72,7 @@ describe("telemetry HTTP boundaries", () => {
     store.snapshot.mockResolvedValue({ leaderboard: [], totals: emptyTotals() });
     store.tracking.mockResolvedValue(null);
     store.events.mockResolvedValue([]);
+    store.eventTypes.mockResolvedValue([]);
     adminStore.session.mockImplementation(async (key) =>
       key === hash(sessionToken)
         ? {
@@ -281,6 +283,23 @@ describe("telemetry HTTP boundaries", () => {
     const publicView = await request(app.getHttpServer()).get("/community/api/leaderboard").expect(200);
     expect(publicView.body).not.toHaveProperty("lastBatch");
   });
+  it("accepts a batch of other event types beside a badly named type and stores their counts", async () => {
+    store.ingest.mockResolvedValueOnce({ inserted: 0, duplicates: 0, skipped: 2 });
+    const result = await request(app.getHttpServer())
+      .post("/api/ingest/events")
+      .set("Authorization", `Bearer ${feedToken}`)
+      .send({ ...batch(), events: [{ type: "playerSpawned" }, { type: "Round Ended" }] })
+      .expect(201);
+    expect(result.body).toEqual({ ok: true, inserted: 0, duplicates: 0, skipped: 2 });
+    expect(store.ingest.mock.calls[0][0].types).toEqual([
+      { type: "playerSpawned", count: 1, sample: { type: "playerSpawned" } },
+    ]);
+    await expect(staffCombat()).resolves.toMatchObject({
+      lastBatch: { accepted: 0, invalid: 1, firstInvalid: "events.1.type (bad format)", types: 1 },
+      lastRejected: null,
+      rejectedCount: 0,
+    });
+  });
   it("keeps the game's deliveries flowing while traffic without the token is rate limited", async () => {
     for (let count = 0; count < 300; count++)
       await request(app.getHttpServer()).post("/api/ingest/servers/primary/events").send(batch()).expect(401);
@@ -367,6 +386,44 @@ describe("telemetry HTTP boundaries", () => {
     expect(read("/ADMIN/API/COMBAT")).toBe(429);
     // Read refusals are never filed as feed refusals.
     expect(rejected).not.toHaveBeenCalled();
+  });
+  it("shows staff the game event types received with their latest sample, never the public", async () => {
+    const at = new Date("2026-10-04T18:00:00.000Z");
+    const steamId = "76561198000000001";
+    store.eventTypes.mockResolvedValue([
+      { type: "killed", count: 40, firstReceivedAt: at, lastReceivedAt: at, sample: null },
+      {
+        type: "playerJoined",
+        count: 7,
+        firstReceivedAt: at,
+        lastReceivedAt: at,
+        sample: { type: "playerJoined", steamId, name: "<b>Player</b>" },
+      },
+    ]);
+    const staff = await staffCombat();
+    expect(staff.otherEvents).toEqual([
+      { type: "killed", count: 40, firstReceivedAt: at.toISOString(), lastReceivedAt: at.toISOString(), sample: null },
+      {
+        type: "playerJoined",
+        count: 7,
+        firstReceivedAt: at.toISOString(),
+        lastReceivedAt: at.toISOString(),
+        sample: { type: "playerJoined", steamId, name: "<b>Player</b>" },
+      },
+    ]);
+    expect(store.eventTypes).toHaveBeenCalledWith(expect.any(Date), expect.any(Date), "primary");
+    store.eventTypes.mockClear();
+    for (const path of ["/community/api/leaderboard", "/community/api/servers/primary/leaderboard"]) {
+      const publicView = await request(app.getHttpServer()).get(`${path}?period=week`).expect(200);
+      expect(publicView.body).not.toHaveProperty("otherEvents");
+      expect(publicView.body).not.toHaveProperty("events");
+      expect(publicView.text).not.toMatch(/playerJoined|sample|<b>|7656119/);
+    }
+    await request(app.getHttpServer()).get("/community/api/events").expect(404);
+    expect(store.eventTypes).not.toHaveBeenCalled();
+    // Staff only: no session, no event types.
+    await request(app.getHttpServer()).get("/admin/api/combat").expect(401);
+    expect(store.eventTypes).not.toHaveBeenCalled();
   });
   it("returns safe errors when the database is unavailable", async () => {
     store.snapshot.mockRejectedValueOnce(new Error("postgres://user:password@private-db applications.email"));

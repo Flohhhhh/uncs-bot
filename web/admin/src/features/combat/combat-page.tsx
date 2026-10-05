@@ -9,6 +9,7 @@ import type {
   CombatEvent,
   CombatEventKind,
   CombatFeedDeliveries,
+  CombatFeedEventType,
   CombatPeriod,
   CombatPlayer,
   CombatResponse,
@@ -42,6 +43,12 @@ function FeedDeliveries({ feed }: { feed: CombatFeedDeliveries }) {
           {plural(rejectedCount, "delivery", "deliveries")} with the feed token refused since Gramps started.
         </p>
       )}
+      {lastBatch && (lastBatch.typesOverLimit ?? 0) > 0 && (
+        <p className="notice warning">
+          <strong>Daily event type limit reached.</strong> {date(lastBatch.at)}:{" "}
+          {plural(lastBatch.typesOverLimit ?? 0, "new event type", "new event types")} not counted.
+        </p>
+      )}
       {lastBatch && lastBatch.invalid > 0 && (
         <p className="notice warning">
           <strong>Last batch skipped invalid entries.</strong> {date(lastBatch.at)}:{" "}
@@ -59,6 +66,39 @@ function FeedDeliveries({ feed }: { feed: CombatFeedDeliveries }) {
         </p>
       )}
     </>
+  );
+}
+
+// Every event type the game feed sent in the window, counted per UTC day, with the latest kept entry
+// of each, so staff can learn what the game sends. Only killed events are stored one by one. React
+// escapes the sample text, so a sample can never become markup.
+function FeedEventTypes({ types }: { types: CombatFeedEventType[] }) {
+  return (
+    <Card
+      title="Game events received"
+      subtitle="By type · whole UTC days · latest sample per type"
+      className="combat-event-types"
+    >
+      {types.length ? (
+        <ul aria-label="Game events received">
+          {types.map((entry) => (
+            <li key={entry.type}>
+              <p>
+                <code>{entry.type}</code> · {count(entry.count)} · last seen <When at={entry.lastReceivedAt} />
+              </p>
+              {entry.sample !== null && entry.sample !== undefined && (
+                <details>
+                  <summary>Latest sample</summary>
+                  <pre>{JSON.stringify(entry.sample, null, 2)}</pre>
+                </details>
+              )}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <Empty title="No game events counted in this period" />
+      )}
+    </Card>
   );
 }
 
@@ -441,6 +481,7 @@ function CombatView({
               />
             )}
           </Card>
+          {!playerId && "otherEvents" in data && data.otherEvents && <FeedEventTypes types={data.otherEvents} />}
         </>
       )}
     </div>

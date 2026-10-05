@@ -314,7 +314,7 @@ describe("launch storage on isolated PostgreSQL", () => {
   beforeEach(async () => {
     if (!initialized) return;
     await client.query(
-      "TRUNCATE combat_events, combat_tracking, server_event_operations, server_events, map_vote_ballots, map_votes, map_vote_policies, discord_role_actions, supporter_actions, supporter_founders, supporter_payments, supporter_observations, supporter_members, whitelist_application_reviews, whitelist_applications, admin_actions, admin_sessions CASCADE",
+      "TRUNCATE combat_events, combat_tracking, game_feed_event_types, server_event_operations, server_events, map_vote_ballots, map_votes, map_vote_policies, discord_role_actions, supporter_actions, supporter_founders, supporter_payments, supporter_observations, supporter_members, whitelist_application_reviews, whitelist_applications, admin_actions, admin_sessions CASCADE",
     );
   });
   afterAll(async () => {
@@ -689,11 +689,17 @@ describe("launch storage on isolated PostgreSQL", () => {
         serverName: "Game label",
         events: [{ eventId: id, type: "killed", eventTime: 1, matchId }],
       });
-    expect(await telemetry.ingest(feed(eventId), now, "east")).toEqual({ inserted: 1, duplicates: 0, skipped: 0 });
+    expect(await telemetry.ingest(feed(eventId), now, "east")).toEqual({
+      inserted: 1,
+      duplicates: 0,
+      skipped: 0,
+      typesOverLimit: 0,
+    });
     expect(await telemetry.ingest(feed(eventId.toLowerCase()), now, "east")).toEqual({
       inserted: 0,
       duplicates: 1,
       skipped: 0,
+      typesOverLimit: 0,
     });
     expect(await telemetry.events(since, now, undefined, "east")).toEqual([
       expect.objectContaining({
@@ -701,6 +707,117 @@ describe("launch storage on isolated PostgreSQL", () => {
         serverInstanceId: serverId.toLowerCase(),
         matchId: matchId.toLowerCase(),
       }),
+    ]);
+  });
+  it("counts each feed event type per server and UTC day with one latest sample, capped and purged", async () => {
+    const telemetry = new TelemetryStore(drizzle({ client, schema }));
+    const morning = new Date("2026-10-04T10:00:00.000Z"),
+      evening = new Date("2026-10-04T23:00:00.000Z");
+    const feed = (events: unknown[]) => parseFeed({ serverId: randomUUID(), serverName: "Game label", events });
+    const kill = () => ({ eventId: randomUUID(), type: "killed", eventTime: 1 });
+    const big = (type: string) => ({ type, padding: "x".repeat(5_000) });
+    const rows = async () =>
+      (
+        await client.query(`SELECT server_id, type, day::text AS day, count::int AS count, first_received_at,
+          last_received_at, sample FROM game_feed_event_types WHERE type IN ('killed', 'spawn', 'bulk')
+          ORDER BY server_id, type`)
+      ).rows;
+    await telemetry.ingest(
+      feed([kill(), { type: "spawn", n: 1, at: "203.0.113.7" }, { type: "spawn", n: 2 }]),
+      morning,
+      "east",
+    );
+    // A repeat delivery counts again; an oversized entry keeps the stored sample or leaves a size marker.
+    await telemetry.ingest(feed([kill(), big("spawn"), big("bulk")]), evening, "east");
+    await telemetry.ingest(feed([{ type: "spawn", n: 3 }]), morning, "central");
+    expect(await rows()).toEqual([
+      {
+        server_id: "central",
+        type: "spawn",
+        day: "2026-10-04",
+        count: 1,
+        first_received_at: morning,
+        last_received_at: morning,
+        sample: { type: "spawn", n: 3 },
+      },
+      {
+        server_id: "east",
+        type: "bulk",
+        day: "2026-10-04",
+        count: 1,
+        first_received_at: evening,
+        last_received_at: evening,
+        sample: { tooLarge: true, bytes: Buffer.byteLength(JSON.stringify(big("bulk"))) },
+      },
+      {
+        server_id: "east",
+        type: "killed",
+        day: "2026-10-04",
+        count: 2,
+        first_received_at: morning,
+        last_received_at: evening,
+        sample: null,
+      },
+      {
+        server_id: "east",
+        type: "spawn",
+        day: "2026-10-04",
+        count: 3,
+        first_received_at: morning,
+        last_received_at: evening,
+        sample: { type: "spawn", n: 2 },
+      },
+    ]);
+    // Killed events keep their own rows, unchanged.
+    expect((await client.query("SELECT count(*)::int AS count FROM combat_events")).rows).toEqual([{ count: 2 }]);
+    // A later real sample replaces a size marker.
+    await telemetry.ingest(feed([{ type: "bulk", ok: true }]), evening, "east");
+    expect(await telemetry.eventTypes(new Date("2026-10-04T00:00:00.000Z"), evening, "east")).toEqual([
+      { type: "spawn", count: 3, firstReceivedAt: morning, lastReceivedAt: evening, sample: { type: "spawn", n: 2 } },
+      { type: "bulk", count: 2, firstReceivedAt: evening, lastReceivedAt: evening, sample: { type: "bulk", ok: true } },
+      { type: "killed", count: 2, firstReceivedAt: morning, lastReceivedAt: evening, sample: null },
+    ]);
+    expect(await telemetry.eventTypes(morning, evening, "west")).toEqual([]);
+    // East has 2 types besides killed today, so 198 of 200 new ones fit; killed and known types still count.
+    const many = Array.from({ length: 200 }, (_, index) => ({ type: `t${index}` }));
+    expect((await telemetry.ingest(feed(many), evening, "east")).typesOverLimit).toBe(2);
+    expect(
+      (await telemetry.ingest(feed([kill(), { type: "t0" }, { type: "overflow" }]), evening, "east")).typesOverLimit,
+    ).toBe(1);
+    const today = await client.query(
+      `SELECT type, count::int AS count FROM game_feed_event_types
+       WHERE server_id = 'east' AND day = '2026-10-04' AND type IN ('killed', 't0', 't199', 'overflow')`,
+    );
+    expect(today.rows.sort((a, b) => a.type.localeCompare(b.type))).toEqual([
+      { type: "killed", count: 3 },
+      { type: "t0", count: 2 },
+    ]);
+    expect(
+      (
+        await client.query(
+          "SELECT count(*)::int AS count FROM game_feed_event_types WHERE server_id = 'east' AND type <> 'killed'",
+        )
+      ).rows,
+    ).toEqual([{ count: 200 }]);
+    // A new UTC day starts its own rows, and the daily cleanup drops this server's days before the cutoff.
+    const nextDay = new Date("2026-10-06T00:00:00.000Z");
+    await client.query(
+      `INSERT INTO game_feed_event_types (server_id, type, day, count, first_received_at, last_received_at)
+       VALUES ('east', 'old', '2026-07-07', 1, $1, $1), ('east', 'kept', '2026-07-08', 1, $1, $1),
+         ('central', 'old', '2026-07-07', 1, $1, $1)`,
+      [new Date("2026-07-07T12:00:00.000Z")],
+    );
+    expect((await telemetry.ingest(feed([{ type: "overflow" }]), nextDay, "east")).typesOverLimit).toBe(0);
+    expect(
+      (
+        await client.query(
+          "SELECT server_id, type, day::text AS day FROM game_feed_event_types WHERE type IN ('old', 'kept', 'overflow') ORDER BY server_id, type",
+        )
+      ).rows,
+    ).toEqual([
+      { server_id: "central", type: "old", day: "2026-07-07" },
+      { server_id: "east", type: "kept", day: "2026-07-08" },
+      { server_id: "east", type: "overflow", day: "2026-10-06" },
     ]);
   });
   function eventInput() {

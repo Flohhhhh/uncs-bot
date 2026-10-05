@@ -1,8 +1,13 @@
 import { BadRequestException } from "@nestjs/common";
+import { isIP } from "node:net";
 import { z } from "zod";
 import { isPublicIndividualSteamId } from "../common/steam-id";
 
 export const MAX_FEED_BYTES = 65_536;
+/** Largest kept sample of a feed event type, in bytes of JSON. */
+export const MAX_SAMPLE_BYTES = 4_096;
+/** Feed event type names that are tallied; any other string type is an invalid entry. */
+export const FEED_TYPE_PATTERN = /^[A-Za-z][A-Za-z0-9_.:-]{0,63}$/;
 
 /** A 400 for a refused feed body, with a short category that is safe to show staff and log. */
 export class FeedRejectedException extends BadRequestException {
@@ -74,15 +79,35 @@ const eventSchema = z.object({
 });
 const batchSchema = z.object({ serverId: feedGuid, serverName: feedText, events: z.array(z.unknown()).max(200) });
 
+/** One feed event type in a batch: how many entries it had and the latest one, for staff. */
+export type FeedTypeTally = {
+  type: string;
+  /** Entries of this type. For killed, only valid killed events. */
+  count: number;
+  /**
+   * The latest entry of this type that is at most MAX_SAMPLE_BYTES as JSON, made storable, else
+   * { tooLarge: true, bytes } for the latest. Always null for killed, whose events are stored in full.
+   */
+  sample: unknown;
+};
+
 export type ParsedFeed = {
   serverId: string;
   serverName: string;
-  /** Entries not stored: other event types plus invalid entries. */
+  /** Entries not stored as combat events: other event types plus invalid entries. */
   skipped: number;
-  /** Malformed killed events, entries without a string type and non-objects. Included in skipped. */
+  /** Malformed killed events, entries without a string or bounded type and non-objects. Included in skipped. */
   invalid: number;
   /** Schema location of the first invalid entry, never its value. */
   firstInvalid: string | null;
+  /**
+   * Schema location of the first invalid entry other than one whose string type is not a bounded
+   * name. Such entries were skipped, not refused, before type names were checked, so they alone
+   * never refuse a batch.
+   */
+  firstMalformed: string | null;
+  /** Every valid event type in the batch, in first-seen order: counts for staff, never per-event rows. */
+  types: FeedTypeTally[];
   events: Array<{
     eventId: string;
     eventTime: number;
@@ -112,6 +137,14 @@ export type PublicCombatStats = Omit<CombatStats, "steamId">;
 export type CombatTotals = { events: number; kills: number; deaths: number; headshotKills: number; players: number };
 export type CombatAggregate = { leaderboard: CombatStats[]; totals: CombatTotals };
 export type TrackingRecord = { firstReceivedAt: Date; lastReceivedAt: Date } | null;
+/** Staff diagnostic: one feed event type over whole UTC days, with its latest kept sample. */
+export type FeedEventTypeSummary = {
+  type: string;
+  count: number;
+  firstReceivedAt: Date;
+  lastReceivedAt: Date;
+  sample: unknown;
+};
 export const emptyTotals = (): CombatTotals => ({ events: 0, kills: 0, deaths: 0, headshotKills: 0, players: 0 });
 /** Weekly shout-out inputs. Names fall back to the SteamID, so callers must apply public name rules. */
 export type WeeklyHighlights = {
@@ -141,6 +174,34 @@ export const emptyHighlights = (): WeeklyHighlights => ({
   maps: [],
 });
 
+// PostgreSQL jsonb refuses NUL characters and unpaired UTF-16 surrogates, so a sample drops the first
+// and replaces the second: one odd string must not fail the batch's transaction. IP addresses in keys
+// and strings are replaced too, since an unknown event type could carry a player's address.
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+const IP_REMOVED = "[IP address removed]";
+const OCTET = "(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)";
+const IPV4_IN_TEXT = new RegExp(`\\b${OCTET}(?:\\.${OCTET}){3}\\b`, "g");
+// A run of the characters an address, its brackets, port or zone can contain.
+const ADDRESS_WORD = /[\w.:%[\]]+/g;
+const ipAddress = (text: string) =>
+  isIP(text) !== 0 || isIP(text.replace(/:\d{1,5}$/, "")) !== 0 || isIP(text.replace(/^\[(.+)\]:\d{1,5}$/, "$1")) === 6;
+// A whole-value address is replaced whole; otherwise each address-like word, then IPv4 inside text.
+const storableText = (value: string) => {
+  const text = value.replaceAll("\u0000", "").replace(LONE_SURROGATE, "\uFFFD");
+  if (ipAddress(text.trim())) return IP_REMOVED;
+  return text.replace(ADDRESS_WORD, (word) => (ipAddress(word) ? IP_REMOVED : word)).replace(IPV4_IN_TEXT, IP_REMOVED);
+};
+function storableSample(value: unknown): unknown {
+  if (typeof value === "string") return storableText(value);
+  // jsonb keeps numbers as numeric and prints them without an exponent, so 1e308 would read back as
+  // 309 digits: such numbers are kept as their JSON text.
+  if (typeof value === "number" && /e/i.test(String(value))) return String(value);
+  if (Array.isArray(value)) return value.map(storableSample);
+  if (value && typeof value === "object")
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [storableText(key), storableSample(item)]));
+  return value;
+}
+
 export function parseFeed(input: unknown): ParsedFeed {
   let bytes: number;
   try {
@@ -161,13 +222,23 @@ export function parseFeed(input: unknown): ParsedFeed {
     skipped: 0,
     invalid: 0,
     firstInvalid: null,
+    firstMalformed: null,
+    types: [],
     events: [],
   };
+  const tallies = new Map<string, FeedTypeTally & { fits: boolean }>();
+  const tally = (type: string) => {
+    let entry = tallies.get(type);
+    if (!entry) tallies.set(type, (entry = { type, count: 0, sample: null, fits: false }));
+    entry.count++;
+    return entry;
+  };
   // One odd entry never discards the batch: it is skipped and counted, and the first is named.
-  const invalid = (label: string) => {
+  const invalid = (label: string, malformed = true) => {
     output.skipped++;
     output.invalid++;
     output.firstInvalid ??= label;
+    if (malformed) output.firstMalformed ??= label;
   };
   for (const [index, raw] of batch.data.events.entries()) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -179,8 +250,20 @@ export function parseFeed(input: unknown): ParsedFeed {
       invalid(`events.${index}.type (missing or wrong type)`);
       continue;
     }
+    if (!FEED_TYPE_PATTERN.test(type)) {
+      invalid(`events.${index}.type (bad format)`, false);
+      continue;
+    }
     if (type !== "killed") {
       output.skipped++;
+      const entry = tally(type);
+      // The cap applies to the sample as stored, after IP addresses are replaced, which can lengthen
+      // it. The whole batch serialized above, so this entry does too. An entry over the cap keeps an
+      // earlier sample of its type from this batch.
+      const sample = storableSample(raw);
+      const bytes = Buffer.byteLength(JSON.stringify(sample), "utf8");
+      if (bytes <= MAX_SAMPLE_BYTES) Object.assign(entry, { sample, fits: true });
+      else if (!entry.fits) entry.sample = { tooLarge: true, bytes };
       continue;
     }
     const event = eventSchema.safeParse(raw);
@@ -188,6 +271,7 @@ export function parseFeed(input: unknown): ParsedFeed {
       invalid(issueLabel(event.error, ["events", index]));
       continue;
     }
+    tally(type);
     const value = event.data;
     const tags = new Set(
       value.contextTags.map((tag) =>
@@ -210,5 +294,6 @@ export function parseFeed(input: unknown): ParsedFeed {
       suicide: tags.has("Suicide") || (value.killerSteamId !== null && value.killerSteamId === value.victimSteamId),
     });
   }
+  output.types = [...tallies.values()].map(({ type, count, sample }) => ({ type, count, sample }));
   return output;
 }
