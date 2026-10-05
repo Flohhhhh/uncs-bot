@@ -824,7 +824,7 @@ describe("launch storage on isolated PostgreSQL", () => {
     });
     const batch = (events: unknown[]) => parseFeed({ serverId: randomUUID(), serverName: "Game label", events });
     // 201 sniper shots, every one longer than anyone else's best: the 200 longest kills are all his.
-    const shots = Array.from({ length: 201 }, (_, index) => kill(sniper, "LongShotLarry", 150_000 + index));
+    const shots = Array.from({ length: 201 }, (_, index) => kill(sniper, "LongShotLarry", 100_000 + index));
     const spread = others.map((id, index) => kill(id, `Player ${index}`, 10_000 + index * 100));
     for (const events of [shots.slice(0, 100), shots.slice(100, 200), [...shots.slice(200), ...spread]])
       await telemetry.ingest(batch(events), earlier, "west");
@@ -835,7 +835,7 @@ describe("launch storage on isolated PostgreSQL", () => {
     expect(stats.longest).toHaveLength(10);
     expect(publicServerStats(stats).longestKills.map(({ name, weapon, meters }) => ({ name, weapon, meters }))).toEqual(
       [
-        { name: "LongShotLarry", weapon: "SR-04", meters: 1502 },
+        { name: "LongShotLarry", weapon: "SR-04", meters: 1002 },
         { name: "Renamed Ten", weapon: "SR-04", meters: 110 },
         ...[9, 8, 7, 6, 5, 4, 3, 2].map((index) => ({
           name: `Player ${index}`,
