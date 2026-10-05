@@ -50,6 +50,7 @@ import { TelemModule } from "../src/telemetry/telemetry.module";
 import { TelemetryStore } from "../src/telemetry/telemetry.store";
 import {
   LEADER_TAGS,
+  LONG_SHOT_MAX_CENTIMETERS,
   PUBLIC_MAX_DISTANCE_CENTIMETERS,
   type CombatStats,
   type LeaderTag,
@@ -778,6 +779,12 @@ const demoLongest = (events: DemoEvent[]) =>
   }, null);
 /** Long shots count firearms only, as in the store; every simulated cause has a label. */
 const demoLongShot = (event: DemoEvent) => describeCause(event.cause).kind === "firearm";
+/** The store's plausibleShot(): a distance a gun reaches, and no vehicle explosion, roadkill or fall tag. */
+const demoPlausibleShot = (event: DemoEvent) =>
+  event.distanceCentimeters !== null &&
+  event.distanceCentimeters > 0 &&
+  event.distanceCentimeters <= LONG_SHOT_MAX_CENTIMETERS &&
+  ![LEADER_TAGS.vehicleExplosion, LEADER_TAGS.roadkill, LEADER_TAGS.falling].some((tag) => demoHasTag(event, tag));
 function demoGroupBy<K>(events: DemoEvent[], key: (event: DemoEvent) => K) {
   const groups = new Map<K, DemoEvent[]>();
   for (const event of events) groups.set(key(event), [...(groups.get(key(event)) ?? []), event]);
@@ -855,6 +862,7 @@ const telemetryStore = {
       kills: rows.length,
       headshotKills: rows.filter((event) => event.headshot).length,
       longestCentimeters: demoLongest(rows),
+      longestShotCentimeters: demoLongest(rows.filter(demoPlausibleShot)),
       melee: tagged(rows, LEADER_TAGS.melee),
       roadkill: tagged(rows, LEADER_TAGS.roadkill),
       vehicleExplosion: tagged(rows, LEADER_TAGS.vehicleExplosion),
@@ -875,7 +883,7 @@ const telemetryStore = {
     const longest = [...demoGroupBy(kills, (event) => event.killerSteamId!)]
       .map(([steamId, rows]) => {
         const best = rows
-          .filter((event) => demoCapped(event.distanceCentimeters) !== null && demoLongShot(event))
+          .filter((event) => demoPlausibleShot(event) && demoLongShot(event))
           .sort((a, b) => b.distanceCentimeters! - a.distanceCentimeters!)[0];
         return best
           ? {
@@ -942,7 +950,7 @@ const telemetryStore = {
           steamId,
           cause: rows[0].cause,
           kills: rows.length,
-          longestCentimeters: demoLongShot(rows[0]) ? demoLongest(rows) : null,
+          longestCentimeters: demoLongShot(rows[0]) ? demoLongest(rows.filter(demoPlausibleShot)) : null,
         });
       let run = 0,
         best = 0;

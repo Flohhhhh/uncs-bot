@@ -132,7 +132,9 @@ export function publicServerStats(aggregate: ServerStatsAggregate): PublicServer
     if (kills > entry.kindKills) Object.assign(entry, { kind, kindKills: kills });
     entry.kills += kills;
     entry.headshotKills += count(row.headshotKills);
-    const longest = publicMeters(row.longestCentimeters) === null ? 0 : row.longestCentimeters!;
+    // A firearm's longest kill is its longest plausible shot, as in the long-shot lists.
+    const reach = kind === "firearm" ? row.longestShotCentimeters : row.longestCentimeters;
+    const longest = publicMeters(reach) === null ? 0 : reach!;
     entry.longest = Math.max(entry.longest, longest);
     weapons.set(label, entry);
   }

@@ -702,18 +702,34 @@ describe("public server stats", () => {
     kills: 0,
     headshotKills: 0,
     longestCentimeters: null,
+    longestShotCentimeters: null,
     ...fields,
   });
-  const cause = (raw: string | null, kills: number, headshotKills = 0, longestCentimeters: number | null = null) =>
-    group(3, { causeKey: raw?.toLowerCase() ?? null, cause: raw, kills, headshotKills, longestCentimeters });
+  const cause = (
+    raw: string | null,
+    kills: number,
+    headshotKills = 0,
+    longestCentimeters: number | null = null,
+    longestShotCentimeters = longestCentimeters,
+  ) =>
+    group(3, {
+      causeKey: raw?.toLowerCase() ?? null,
+      cause: raw,
+      kills,
+      headshotKills,
+      longestCentimeters,
+      longestShotCentimeters,
+    });
   const aggregate = (): ServerStatsAggregate => ({
     groups: [
       cause("Id.Item.AK74M", 30, 9, 41_249),
       cause("ID.Item.AK74M", 12, 3, 52_000),
-      cause("Id.Item.Mosin", 5, 2, 30_000),
+      // A firearm reads its longest plausible shot, never a 1.9 km distance no rifle reaches.
+      cause("Id.Item.Mosin", 5, 2, 190_000, 30_000),
       // Over the 2 km cap: counted, but its distance is left out.
       cause("ID.Item.MosinNagant", 4, 1, 250_000),
-      cause("Vehicle.Variant.Air.Rotary.ROT_04.Default", 7),
+      // Other kinds keep their longest kill under the 2 km cap.
+      cause("Vehicle.Variant.Air.Rotary.ROT_04.Default", 7, 0, 150_000, null),
       cause("Weapon.Rifle", 3, 1, 1_000),
       cause("76561198000000009", 2),
       cause(null, 4),
@@ -781,7 +797,7 @@ describe("public server stats", () => {
       // Id. and ID. rows are one weapon; so are two spellings of one name.
       { label: "AK-74M", kind: "firearm", kills: 42, headshotKills: 12, longestMeters: 520 },
       { label: "Mosin-Nagant", kind: "firearm", kills: 9, headshotKills: 3, longestMeters: 300 },
-      { label: "ROT-04 helicopter", kind: "vehicle", kills: 7, headshotKills: 0, longestMeters: null },
+      { label: "ROT-04 helicopter", kind: "vehicle", kills: 7, headshotKills: 0, longestMeters: 1_500 },
       { label: "Unknown weapon", kind: "unknown", kills: 5, headshotKills: 1, longestMeters: 10 },
     ]);
     // Kavkazi is Bakurani's catalog ID; SteamID-like and missing map names are left out.
