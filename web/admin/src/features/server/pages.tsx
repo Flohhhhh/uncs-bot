@@ -584,8 +584,9 @@ export function DashboardHistory({ initialQuery = "" }: { initialQuery?: string 
   const receipt = useResource<{ record: Audit | null }>(lookupId ? `audit/${lookupId}` : null);
   const error = lookupId ? receipt.error : recent.error;
   const loading = lookupId ? receipt.loading && !receipt.data : recent.loading && !recent.data;
-  // Receipts store the SteamID only; names come from the latest roster this page has seen.
-  const nameOf = (target: string) => overview?.players.find((player) => player.steamId === target)?.name ?? "";
+  // Names come from the latest roster this page has seen; kicks and bans also keep the name from when they were sent.
+  const nameOf = (entry: Audit) =>
+    overview?.players.find((player) => player.steamId === entry.target)?.name || entry.details?.playerName || "";
   const search = query.trim().toLowerCase();
   const rows = lookupId
     ? receipt.data?.record
@@ -598,7 +599,7 @@ export function DashboardHistory({ initialQuery = "" }: { initialQuery?: string 
           entry.action,
           actionDefinitions[entry.action]?.[0] || "",
           entry.target,
-          nameOf(entry.target),
+          nameOf(entry),
           entry.message,
           entry.details?.reason,
         ].some((value) => (value ?? "").toLowerCase().includes(search)),
@@ -650,7 +651,7 @@ export function DashboardHistory({ initialQuery = "" }: { initialQuery?: string 
             renderRow={(entry) => {
               const open = lookupId ? !toggled.has(entry.id) : toggled.has(entry.id);
               const player = isPublicIndividualSteamId(entry.target) ? entry.target : "";
-              const name = player ? nameOf(player) : "";
+              const name = player ? nameOf(entry) : "";
               const message = sentMessage(entry);
               return (
                 <Fragment key={entry.id}>

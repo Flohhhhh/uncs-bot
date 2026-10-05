@@ -195,6 +195,12 @@ export const Env = z.object({
   ).optional(),
   STAFF_ALERTS_WATCHLIST_HIGHLIGHT_COMMUNITIES: count(1, 100, 3),
   STAFF_ALERTS_WATCHLIST_COOLDOWN_MINUTES: count(0, 10_080, 360),
+  /**
+   * Checked with the watch list: a join by a player with this many dashboard kicks within
+   * STAFF_ALERTS_REPEAT_OFFENDER_DAYS raises a repeat-offender alert. 0 turns it off. Alert-only.
+   */
+  STAFF_ALERTS_REPEAT_OFFENDER_KICKS: count(0, 100, 3),
+  STAFF_ALERTS_REPEAT_OFFENDER_DAYS: count(1, 365, 30),
   /** Optional event automation; requires a human-reviewed schema and controlled game rehearsal. */
   SERVER_EVENTS_ENABLED: z
     .enum(["true", "false"])

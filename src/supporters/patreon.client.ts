@@ -77,7 +77,7 @@ export type PatreonMemberSnapshot = {
    */
   discordKnown: boolean;
   events: PatreonPledgeEvent[];
-  /** False when the returned pledge history may be truncated; the first payment is then not derived. */
+  /** False when the returned pledge history may be incomplete; the first payment is then not derived. */
   historyComplete: boolean;
 };
 /**
@@ -230,7 +230,7 @@ const tierSchema = z.object({
 });
 /** A paid event in another currency that names its tier: the only kind a tier price can help. */
 const needsTierPrice = (event: PatreonPledgeEvent) =>
-  event.paymentStatus === "Paid" &&
+  patreonChargePaid(event.paymentStatus) &&
   event.tierId !== undefined &&
   event.currency !== null &&
   event.currency !== PATREON_TIER_CURRENCY;
@@ -308,29 +308,36 @@ export const PATREON_REVERSED_CHARGE_STATUSES: ReadonlySet<string> = new Set([
   "Fraud",
   "Other",
 ]);
-/** Statuses that show a charge was taken at some point, whether or not it still stands. */
-const chargedBefore: ReadonlySet<string> = new Set([...PATREON_REVERSED_CHARGE_STATUSES, "Refund Declined"]);
+/** A charge that was taken and still stands: Paid, or a refund Patreon declined. */
+const PAID_CHARGE_STATUSES: ReadonlySet<string> = new Set(["Paid", "Refund Declined"]);
+/** Whether a pledge event is a paid charge that still stands. */
+export const patreonChargePaid = (status: string | null) => status !== null && PAID_CHARGE_STATUSES.has(status);
 /**
- * The member's first successful payment: the earliest `Paid` event of a complete history, only when
- * no earlier event could have been a charge that was later reversed and no other `Paid` event shares
- * its timestamp. Anything uncertain leaves the first-payment flag for staff review.
+ * Whether a pledge event is a charge that was taken: paid, or taken and later reversed. Pending, declined and free
+ * trial events, and any status Patreon adds later, are not charges.
+ */
+export const patreonChargeTaken = (status: string | null) =>
+  patreonChargePaid(status) || (status !== null && PATREON_REVERSED_CHARGE_STATUSES.has(status));
+/**
+ * The member's first successful payment, from a complete history. Events are taken by date, a pledge start before
+ * anything else at the same time, then by event ID. The first charge that was taken decides: when it still stands it
+ * is the first payment, and when it was reversed no later payment is the first. Null when there is none, and also
+ * when the answer is not known yet: the history may be incomplete, or a charge is still pending before the first one
+ * that was taken.
  */
 export function firstPaidEventId(events: PatreonPledgeEvent[], complete: boolean) {
   if (!complete) return null;
-  const sorted = [...events].sort((a, b) => a.date.getTime() - b.date.getTime());
-  const index = sorted.findIndex((event) => event.paymentStatus === "Paid");
-  if (index < 0) return null;
-  const first = sorted[index];
-  if (
-    sorted.some(
-      (event, other) =>
-        other !== index && event.paymentStatus === "Paid" && event.date.getTime() === first.date.getTime(),
-    )
-  )
-    return null;
-  if (sorted.slice(0, index).some((event) => event.paymentStatus && chargedBefore.has(event.paymentStatus)))
-    return null;
-  return first.id;
+  const sorted = [...events].sort(
+    (a, b) =>
+      a.date.getTime() - b.date.getTime() ||
+      Number(b.type === "pledge_start") - Number(a.type === "pledge_start") ||
+      (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
+  for (const event of sorted) {
+    if (event.paymentStatus === "Pending") return null;
+    if (patreonChargeTaken(event.paymentStatus)) return patreonChargePaid(event.paymentStatus) ? event.id : null;
+  }
+  return null;
 }
 
 @Injectable()
@@ -549,10 +556,6 @@ export class PatreonClient {
         .filter((item) => item.type === "pledge-event" || item.type === "pledge_event")
         .map((item) => events.get(item.id));
       const history = found.filter((event): event is PatreonPledgeEvent => !!event && event.date.getTime() <= limit);
-      const earliest = [...history].sort(
-        (a, b) =>
-          a.date.getTime() - b.date.getTime() || Number(b.type === "pledge_start") - Number(a.type === "pledge_start"),
-      )[0];
       const userId = member.relationships?.user?.data?.type === "user" ? member.relationships.user.data.id : null;
       const discord = (userId ? users.get(userId) : undefined) ?? UNKNOWN_DISCORD;
       const lastChargeAt = member.attributes.last_charge_date;
@@ -566,12 +569,14 @@ export class PatreonClient {
           discordId: discord.discordId,
           discordKnown: discord.known,
           events: history,
+          // Every event the member's history names came back, none of them is in the future, and the history is
+          // shorter than the length at which Patreon cuts it. Patreon cuts only long histories, so a history that
+          // starts with a renewal rather than the pledge start is still complete.
           historyComplete:
             references !== undefined &&
             references !== null &&
             history.length === references.length &&
-            references.length < PATREON_HISTORY_CAP &&
-            (history.length === 0 || earliest.type === "pledge_start"),
+            references.length < PATREON_HISTORY_CAP,
         },
         campaignId: relatedCampaign(member.relationships?.campaign),
         userId,

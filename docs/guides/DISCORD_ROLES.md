@@ -120,7 +120,7 @@ Record each PayPal donor with **Record PayPal supporter** (`POST /admin/api/supp
 1. A human contributor generates and reviews one migration for the combined schema changes (this branch and the Patreon import), then deploys. Railway's pre-deploy step runs `db:migrate`.
 2. Set the founder window and the role IDs in Railway (`DISCORD_SUPPORTER_ROLE_ID` is optional), leaving `DISCORD_ROLES_ENABLED=false`.
 3. Fix the bot's permission and role position until the status endpoint reports `ready: true`.
-4. Record the PayPal donors with `awardFounder`, and award the Patreon founders after the import, using the Supporters page's "Would be recorded automatically" preview. Turn on `SUPPORTER_AUTO_FOUNDER_ENABLED` only once staff can void a founder promise; until then award by hand.
+4. Record the PayPal donors with `awardFounder`, and award the Patreon founders after the import, from the Supporters page, where each record Gramps would make a founder shows "Ready to be made a founder." under **Needs you**. Turn on `SUPPORTER_AUTO_FOUNDER_ENABLED` only once staff can void a founder promise; until then award by hand.
 5. Review a dry run, then set `DISCORD_ROLES_ENABLED=true` and restart. The startup pass performs the backfill.
 
 ## Not included

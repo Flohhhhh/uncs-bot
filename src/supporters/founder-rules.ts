@@ -52,6 +52,14 @@ export const paymentJson = (alias: string) =>
   );
 
 /**
+ * The audit rows the Patreon import writes on a record that gave up a Discord account Patreon moved elsewhere: the
+ * record it moved from (`patreon-discord-moved`), or a Patreon link that followed another account
+ * (`patreon-discord-link`). Each names the account in `previousDiscordId`, so that record stays the same person's.
+ */
+export const PATREON_DISCORD_RELEASED = ["patreon-discord-moved", "patreon-discord-link"] as const;
+const releasedKinds = sql.raw(`(${PATREON_DISCORD_RELEASED.map((kind) => `'${kind}'`).join(", ")})`);
+
+/**
  * The facts automatic supporter matching reads for the supporter row aliased `m` (see MatchFacts). The Supporters page
  * and the automatic writes both select this one expression, so the page shows exactly what automation would do.
  *
@@ -60,7 +68,9 @@ export const paymentJson = (alias: string) =>
  *   another supporter record (any PayPal record, or a Patreon record of `campaignId`) holds it. Email, consent and
  *   reviewer notes are never selected.
  * - automatic: the earliest verified first Patreon API payment, with the founder rule's own earlier-payment test and
- *   whether another record with the same Discord account or SteamID has an earlier payment of any kind.
+ *   whether another record with the same Discord account or SteamID has an earlier payment of any kind. A record the
+ *   Patreon import took this Discord account from counts too (see PATREON_DISCORD_RELEASED), so moving an account
+ *   never hides the person's earlier payment.
  * - whether Patreon reports this record's Discord account for another patron, and whether the account Patreon reports
  *   for this record is linked to another record.
  * - whether another Discord account has an application for the linked SteamID that was not declined or revoked. Only
@@ -87,7 +97,10 @@ export function matchFactsSql(campaignId: string | null) {
           JOIN supporter_payments other_payment ON other_payment.member_id = other_record.id
           WHERE other_record.id <> m.id AND other_payment.paid_at < p.paid_at
           AND ((m.discord_id IS NOT NULL AND other_record.discord_id = m.discord_id)
-            OR (m.steam_id IS NOT NULL AND other_record.steam_id = m.steam_id))))
+            OR (m.steam_id IS NOT NULL AND other_record.steam_id = m.steam_id)
+            OR (m.discord_id IS NOT NULL AND EXISTS (SELECT 1 FROM supporter_actions held
+              WHERE held.member_id = other_record.id AND held.kind IN ${releasedKinds}
+              AND held.details->>'previousDiscordId' = m.discord_id)))))
       FROM supporter_payments p LEFT JOIN LATERAL ${receiptCopy("p")} dup ON true
       WHERE p.member_id = m.id AND p.source = 'patreon_api' AND p.verification_state = 'verified'
         AND p.first_successful_payment_verified

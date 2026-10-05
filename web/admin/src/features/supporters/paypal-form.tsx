@@ -5,7 +5,7 @@ import { useAdmin } from "../../app/context";
 import { Badge, Modal, ReasonField, date } from "../../components/ui";
 import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 import { errorMessage } from "../actions/policy";
-import { stepGroups } from "./policy";
+import { rowState } from "./policy";
 import type { FounderPolicy, PaymentEvidence, Supporter } from "./types";
 
 /**
@@ -116,8 +116,8 @@ type Saved = { record: Supporter; payment: PaymentEvidence; replayed: boolean; a
 /** The saved record as the server returned it: who, what was paid, founder or not, and the server's next steps. */
 function SavedRecord({ saved }: { saved: Saved }) {
   const { record, payment } = saved;
-  const { payment: paymentSteps, other, info } = stepGroups(record.nextSteps);
-  const needed = [...other, ...paymentSteps];
+  const { needs, waiting, later, notes } = rowState(record);
+  const waits = [...waiting, ...later];
   const status = useRef<HTMLParagraphElement>(null);
   // The Save button is gone, so focus moves to the result instead of being left on the page behind.
   useEffect(() => status.current?.focus(), []);
@@ -138,19 +138,29 @@ function SavedRecord({ saved }: { saved: Saved }) {
         </div>
         <Badge kind={record.founder ? "good" : "neutral"}>{record.founder ? "Founder" : "Not a founder"}</Badge>
       </div>
-      {(needed.length > 0 || info.length > 0) && (
+      {needs.length + waits.length + notes.length > 0 && (
         <div className="supporter-steps">
-          {info.map((step) => (
-            <p className="muted" key={step.code}>
-              {step.message}
+          {notes.map((note) => (
+            <p className="muted" key={note}>
+              {note}
             </p>
           ))}
-          {needed.length > 0 && (
+          {needs.length > 0 && (
             <>
-              <h3>Still needed</h3>
+              <h3>Needs you</h3>
               <ul>
-                {needed.map((step) => (
-                  <li key={step.code}>{step.message}</li>
+                {needs.map((line) => (
+                  <li key={line}>{line}</li>
+                ))}
+              </ul>
+            </>
+          )}
+          {waits.length > 0 && (
+            <>
+              <h3>Waiting</h3>
+              <ul>
+                {waits.map((line) => (
+                  <li key={line}>{line}</li>
                 ))}
               </ul>
             </>
