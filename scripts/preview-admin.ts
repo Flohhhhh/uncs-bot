@@ -38,6 +38,7 @@ import { settingFields, SESSION, ROTATION } from "../src/common/server-settings"
 import { scalarValue } from "../src/admin/config-document";
 import { parseRotation, auditAction } from "../src/admin/server-configuration";
 import { mapLabel } from "../src/common/map-labels";
+import { describeCause } from "../src/common/cause-labels";
 import type { ActionResult, AdminAction, Staff } from "../src/admin/admin.types";
 import { ApplicationsModule } from "../src/applications/applications.module";
 import { ApplicationsStore } from "../src/applications/applications.store";
@@ -775,6 +776,8 @@ const demoLongest = (events: DemoEvent[]) =>
     const centimeters = demoCapped(event.distanceCentimeters);
     return centimeters !== null && (best === null || centimeters > best) ? centimeters : best;
   }, null);
+/** Long shots count firearms only, as in the store; every simulated cause has a label. */
+const demoLongShot = (event: DemoEvent) => describeCause(event.cause).kind === "firearm";
 function demoGroupBy<K>(events: DemoEvent[], key: (event: DemoEvent) => K) {
   const groups = new Map<K, DemoEvent[]>();
   for (const event of events) groups.set(key(event), [...(groups.get(key(event)) ?? []), event]);
@@ -872,7 +875,7 @@ const telemetryStore = {
     const longest = [...demoGroupBy(kills, (event) => event.killerSteamId!)]
       .map(([steamId, rows]) => {
         const best = rows
-          .filter((event) => demoCapped(event.distanceCentimeters) !== null)
+          .filter((event) => demoCapped(event.distanceCentimeters) !== null && demoLongShot(event))
           .sort((a, b) => b.distanceCentimeters! - a.distanceCentimeters!)[0];
         return best
           ? {
@@ -927,7 +930,7 @@ const telemetryStore = {
       },
     ];
   },
-  /** Per-cause kills, longest kill and best streak for the listed players, from the simulated events. */
+  /** Per-cause kills, longest firearm kill and best streak for the listed players, from the simulated events. */
   async rowExtras(since: Date, until: Date, steamIds: string[], serverId = "primary"): Promise<RowExtrasAggregate> {
     const events = filteredDemoEvents(since, until, undefined, serverId);
     const weapons: RowExtrasAggregate["weapons"] = [];
@@ -935,7 +938,12 @@ const telemetryStore = {
     for (const steamId of new Set(steamIds)) {
       const kills = events.filter((event) => event.killerSteamId === steamId && !event.suicide);
       for (const rows of demoGroupBy(kills, (event) => event.cause?.toLowerCase() ?? null).values())
-        weapons.push({ steamId, cause: rows[0].cause, kills: rows.length, longestCentimeters: demoLongest(rows) });
+        weapons.push({
+          steamId,
+          cause: rows[0].cause,
+          kills: rows.length,
+          longestCentimeters: demoLongShot(rows[0]) ? demoLongest(rows) : null,
+        });
       let run = 0,
         best = 0;
       const own = events

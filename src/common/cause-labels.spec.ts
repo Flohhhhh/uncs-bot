@@ -1,4 +1,11 @@
-import { CAUSE_KINDS, describeCause, UNKNOWN_WEAPON, type CauseKind } from "./cause-labels";
+import {
+  CAUSE_KINDS,
+  describeCause,
+  FIREARM_ITEM_KEYS,
+  NOT_FIREARM_ITEM_KEYS,
+  UNKNOWN_WEAPON,
+  type CauseKind,
+} from "./cause-labels";
 
 const LABEL = /^[A-Za-z0-9][A-Za-z0-9 '-]{0,39}$/;
 const unknown = { label: UNKNOWN_WEAPON, kind: "unknown" };
@@ -21,6 +28,11 @@ describe("cause labels", () => {
     ["Id.Item.SVDM", "SVDM", "firearm"],
     ["Id.Item.TAR21", "TAR-21", "firearm"],
     ["Id.Item.MP9", "MP9", "firearm"],
+    ["Id.Item.M500", "M500 shotgun", "firearm"],
+    ["Id.Item.A91", "A-91", "firearm"],
+    ["Id.Item.MK22", "MK22", "firearm"],
+    ["Id.Item.Vector", "Vector", "firearm"],
+    ["Id.Item.M67Grenade", "M67 grenade", "explosive"],
     ["ID.Item.ATMine", "AT mine", "explosive"],
     ["ID.Item.BuildTool.Hammer.Large", "Big hammer", "tool"],
     ["Id.Vehicle.WeaponExtension.WHL_05.RingTurret", "Ring turret", "vehicle_weapon"],
@@ -112,12 +124,17 @@ describe("cause labels", () => {
       "tar21",
       "mp9",
       "mp5",
+      "m500",
+      "a91",
+      "mk22",
+      "vector",
       "sr04",
       "compoundbow",
       "bow",
       "cgm4",
       "rpg7",
       "m67",
+      "m67grenade",
       "c4",
       "ied",
       "atmine",
@@ -146,6 +163,38 @@ describe("cause labels", () => {
       expect(CAUSE_KINDS).toContain(kind);
     }
     expect(known.map(({ kind }) => kind)).not.toContain("unknown");
+  });
+
+  it("splits every labelled item into the long-shot firearm keys and the keys long shots exclude", () => {
+    const all = [...FIREARM_ITEM_KEYS, ...NOT_FIREARM_ITEM_KEYS];
+    expect(new Set(all).size).toBe(all.length);
+    // The store binds these as SQL parameters and compares them with norm()'d causes.
+    for (const key of all) expect(key).toMatch(/^[a-z0-9]+$/);
+    for (const key of FIREARM_ITEM_KEYS) {
+      expect(describeCause(`Id.Item.${key}`).kind).toBe("firearm");
+      expect(describeCause(key).kind).toBe("firearm");
+    }
+    for (const key of NOT_FIREARM_ITEM_KEYS)
+      expect(["explosive", "melee", "tool", "environment"]).toContain(describeCause(`ID.Item.${key}`).kind);
+    expect(NOT_FIREARM_ITEM_KEYS).toEqual(
+      expect.arrayContaining([
+        "cgm4",
+        "rpg7",
+        "m67",
+        "m67grenade",
+        "c4",
+        "atmine",
+        "claymore",
+        "knife",
+        "fists",
+        "halligan",
+        "defibrillator",
+        "supplypallet",
+      ]),
+    );
+    expect(FIREARM_ITEM_KEYS).toEqual(
+      expect.arrayContaining(["ak74m", "sr04", "svdm", "mosin", "compoundbow", "m500", "a91", "mk22", "vector"]),
+    );
   });
 
   it("never returns a dot, slash, 17-digit run or more than 40 characters for random input", () => {

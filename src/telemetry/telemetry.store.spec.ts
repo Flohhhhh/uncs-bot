@@ -4,6 +4,7 @@ import { getTableConfig } from "drizzle-orm/pg-core";
 import type { Client } from "pg";
 import type { Database } from "../database/database.types";
 import { combatEvents, gameFeedEventTypes } from "../database/telemetry.schema";
+import { FIREARM_ITEM_KEYS, NOT_FIREARM_ITEM_KEYS } from "../common/cause-labels";
 import { MAX_FEED_TYPES_PER_DAY, TelemetryStore } from "./telemetry.store";
 import { MAX_SAMPLE_BYTES, parseFeed } from "./telemetry.types";
 
@@ -15,6 +16,23 @@ function fixture() {
   return { store: new TelemetryStore(db), query };
 }
 const isTypeUpsert = (text: string) => text.includes("INSERT INTO game_feed_event_types");
+/** The bound key lists of one long-shot test (firearms only), in parameter order. */
+const LONG_SHOT_KEYS = [NOT_FIREARM_ITEM_KEYS, FIREARM_ITEM_KEYS];
+/**
+ * The long-shot test on `column`, with its key lists at $first and $first + 1: Id.Item causes except build
+ * tools, buildables and labelled non-firearms, and bare codes only when they are labelled firearms.
+ */
+const longShotSql = (column: string, first: number) => {
+  const cause = `lower(btrim(${column}))`;
+  return [
+    `(CASE WHEN ${cause} LIKE 'id.item.%'`,
+    `THEN ${cause} NOT LIKE 'id.item.buildtool.%' AND ${cause} NOT LIKE '%.buildable%'`,
+    `AND regexp_replace(substr(${cause}, 9), '[^a-z0-9]', '', 'g') <> ALL($${first}::text[])`,
+    `ELSE ${cause} !~ '[./\\\\]'`,
+    `AND (regexp_replace(${cause}, '[^a-z0-9]', '', 'g') = ANY($${first + 1}::text[]) OR ${cause} ~ '^wepn_?[0-9]{1,4}$') END)`,
+  ].join(" ");
+};
+const oneLine = (text: string) => text.replace(/\s+/g, " ");
 const serverInstance = randomUUID();
 const killed = () => ({ eventId: randomUUID(), type: "killed", eventTime: 3 });
 const feed = (events: unknown[]) => parseFeed({ serverId: serverInstance, serverName: "The UNCs", events });
@@ -266,7 +284,7 @@ describe("telemetry persistence contract", () => {
     const [config, params] = query.mock.calls[0];
     expect(config.text.trim()).toMatch(/^WITH scoped AS/);
     expect(config.text).toContain("server_id = $1 AND received_at >= $2 AND received_at <= $3");
-    expect(params).toEqual(["east", since, until, 10]);
+    expect(params).toEqual(["east", since, until, 10, ...LONG_SHOT_KEYS]);
     // A kill is a non-suicide event with a linked killer, as in snapshot().
     expect(config.text).toContain("SELECT * FROM scoped WHERE NOT suicide AND killer_steam_id IS NOT NULL");
     expect(config.text).toContain("ORDER BY steam_id, received_at DESC, event_id DESC");
@@ -275,13 +293,17 @@ describe("telemetry persistence contract", () => {
     expect(config.text).toContain(
       "ORDER BY kills.distance_centimeters DESC, kills.received_at, kills.event_time, kills.event_id LIMIT 1",
     );
+    // Long-distance call: firearm kills only, so artillery and rocket pods never take it.
+    expect(oneLine(config.text)).toContain(
+      `WHERE kills.distance_centimeters IS NOT NULL AND ${longShotSql("kills.cause", 5)} ORDER BY`,
+    );
     expect(config.text).toContain("LIMIT 50");
     // "Id.Item.AK74M" and "ID.Item.AK74M" are one weapon, so Old faithful counts them together.
     expect(config.text).toContain("GROUP BY lower(btrim(cause)) ORDER BY count(*) DESC, lower(btrim(cause)) LIMIT 1");
     expect(config.text).not.toMatch(/\b(insert|update|delete)\b/i);
     expect(config.text).not.toMatch(/email|discord/i);
     await store.weeklyHighlights(since, until, "east", 25);
-    expect(query.mock.calls[1][1]).toEqual(["east", since, until, 25]);
+    expect(query.mock.calls[1][1]).toEqual(["east", since, until, 25, ...LONG_SHOT_KEYS]);
   });
   it("bounds individual history and converts centimetres without altering game timestamps", async () => {
     const { store, query } = fixture();
@@ -322,17 +344,23 @@ describe("telemetry persistence contract", () => {
     expect(statements(query)).toHaveLength(3);
     for (const [config, params] of [s1, s2, s3]) {
       // Every scan uses the leading columns of combat_events_received_idx, bound once per statement.
-      expect(params).toEqual(["east", since, until]);
+      expect(params.slice(0, 3)).toEqual(["east", since, until]);
       expect(config.text).toMatch(/server_id = \$1 AND (e\.)?received_at >= \$2 AND (e\.)?received_at <= \$3/);
-      expect(config.text).not.toMatch(/\$4/);
       expect(config.text).not.toMatch(/\b(insert|update|delete)\b/i);
       expect(config.text).not.toMatch(/email|discord|MATERIALIZED/i);
     }
-    // S1: kills by cause, map and hour plus the total, in one scan.
+    // Only S3's long shots bind more: the firearm key lists, once for the ranking and once for the kill row.
+    for (const [config, params] of [s1, s2]) {
+      expect(params).toHaveLength(3);
+      expect(config.text).not.toMatch(/\$4/);
+    }
+    expect(s3[1].slice(3)).toEqual([...LONG_SHOT_KEYS, ...LONG_SHOT_KEYS]);
+    // S1: kills by cause, map and hour plus the total, in one scan. The per-weapon longest keeps every kind.
     expect(s1[0].text).toContain("GROUP BY GROUPING SETS ((cause_key), (map_name), (hour), ())");
     expect(s1[0].text).toContain("NOT suicide AND killer_steam_id IS NOT NULL");
     expect(s1[0].text).toContain("extract(hour FROM received_at AT TIME ZONE 'UTC')");
     expect(s1[0].text).toContain("distance_centimeters <= 200000");
+    expect(s1[0].text).not.toContain("id.item.");
     expect(s1[0].text).toContain(
       "?| ARRAY['Penetration','Meta.Progression.Context.Player.KillContext.Penetration','Meta.PlayerKillFlag.Player.Penetration']",
     );
@@ -355,7 +383,9 @@ describe("telemetry persistence contract", () => {
     };
     const best = cte("best", "longest");
     expect(best).toContain("NOT suicide AND killer_steam_id IS NOT NULL");
-    expect(best).toContain("distance_centimeters > 0 AND distance_centimeters <= 200000");
+    expect(oneLine(best)).toContain(
+      `distance_centimeters > 0 AND distance_centimeters <= 200000 AND ${longShotSql("cause", 4)} GROUP BY`,
+    );
     expect(best).toContain("GROUP BY killer_steam_id");
     // Capped at ten before any name is looked up.
     expect(best).toContain("ORDER BY cm DESC, killer_steam_id LIMIT 10");
@@ -364,7 +394,8 @@ describe("telemetry persistence contract", () => {
     expect(longest).toContain(
       "c.server_id = $1 AND c.received_at >= $2 AND c.received_at <= $3 AND c.killer_steam_id = best.steam_id",
     );
-    expect(longest).toContain("c.distance_centimeters = best.cm");
+    // The kill row is a long shot too, so a vehicle kill at the same centimetre cannot be shown instead.
+    expect(oneLine(longest)).toContain(`c.distance_centimeters = best.cm AND ${longShotSql("c.cause", 6)} ORDER BY`);
     expect(longest).toContain("ORDER BY c.received_at, c.event_id LIMIT 1");
     expect(s3[0].text).not.toContain("LIMIT 200");
     expect(s3[0].text).not.toContain("DISTINCT ON");
@@ -418,12 +449,16 @@ describe("telemetry persistence contract", () => {
     expect(query.mock.calls.at(-1)![0].text).toBe("commit");
     const [weapons, streaks] = statements(query);
     expect(statements(query)).toHaveLength(2);
-    expect(weapons[1]).toEqual(["east", since, until, "76561198000000001", "76561198000000002"]);
+    expect(weapons[1]).toEqual(["east", since, until, "76561198000000001", "76561198000000002", ...LONG_SHOT_KEYS]);
     expect(weapons[0].text).toContain(
       "server_id = $1 AND received_at >= $2 AND received_at <= $3 AND NOT suicide AND killer_steam_id IN ($4, $5)",
     );
     expect(weapons[0].text).toContain("GROUP BY killer_steam_id, lower(btrim(cause))");
     expect(weapons[0].text).toContain("distance_centimeters <= 200000");
+    // longestKillMeters counts firearm kills only; the test runs once per player and cause.
+    expect(oneLine(weapons[0].text)).toContain(
+      `CASE WHEN ${longShotSql("cause", 6)} THEN longest END AS "longestCentimeters" FROM causes`,
+    );
     expect(streaks[1]).toEqual([
       "east",
       since,
@@ -447,6 +482,6 @@ describe("telemetry persistence contract", () => {
     query.mockClear();
     const many = Array.from({ length: 150 }, (_, index) => String(76561198000000000n + BigInt(index + 1)));
     await store.rowExtras(since, until, many, "east");
-    expect(statements(query)[0][1]).toHaveLength(3 + 100);
+    expect(statements(query)[0][1]).toHaveLength(3 + 100 + LONG_SHOT_KEYS.length);
   });
 });

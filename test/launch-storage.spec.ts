@@ -846,6 +846,91 @@ describe("launch storage on isolated PostgreSQL", () => {
     expect(stats.totals).toEqual({ events: 213, deaths: 213, suicides: 0, falling: 0, players: 13 });
   });
 
+  it("counts only firearm kills as long shots in stats, row extras and the weekly highlight", async () => {
+    const telemetry = new TelemetryStore(drizzle({ client, schema }));
+    const now = new Date(),
+      since = new Date(now.getTime() - 60_000);
+    const [ricky, annie, rita, tom, target] = [
+      "76561198000000301",
+      "76561198000000302",
+      "76561198000000303",
+      "76561198000000304",
+      "76561198000000305",
+    ];
+    const names: Record<string, string> = {
+      [ricky]: "RifleRicky",
+      [annie]: "ArtilleryAnnie",
+      [rita]: "RocketRita",
+      [tom]: "TankTom",
+      [target]: "Target",
+    };
+    let eventTime = 0;
+    const kill = (killer: string, cause: string, distance: number) => ({
+      eventId: randomUUID(),
+      type: "killed",
+      eventTime: ++eventTime,
+      mapName: "Bakurani",
+      killerSteamId: killer,
+      killerName: names[killer],
+      victimSteamId: target,
+      victimName: names[target],
+      cause,
+      distance,
+    });
+    const feed = parseFeed({
+      serverId: randomUUID(),
+      serverName: "Game label",
+      events: [
+        // Artillery, rocket pods, a tank gun, a grenade and an unlabelled bare code all reach farther than
+        // any rifle here, and none of them is a long shot.
+        kill(annie, "Id.Vehicle.WeaponExtension.Artillery", 200_000),
+        kill(rita, "Id.Vehicle.WeaponExtension.ROT_04.RocketPods", 150_000),
+        kill(tom, "Id.Vehicle.WeaponExtension.MBT_01.MainBarrel", 180_000),
+        kill(tom, "ID.Item.M67Grenade", 90_000),
+        kill(tom, "Mortar", 199_000),
+        kill(ricky, "Id.Item.SVDM", 60_000),
+        kill(annie, "ID.Item.AK74M", 5_000),
+        // An item without a label yet still counts.
+        kill(rita, "Id.Item.NewRifle", 1_000),
+      ],
+    });
+    expect((await telemetry.ingest(feed, now, "east")).inserted).toBe(8);
+
+    const result = publicServerStats(await telemetry.serverStats(since, now, "east"));
+    expect(result.longestKills).toEqual([
+      { name: "RifleRicky", weapon: "SVDM", meters: 600, map: "Bakurani" },
+      { name: "ArtilleryAnnie", weapon: "AK-74M", meters: 50, map: "Bakurani" },
+      { name: "RocketRita", weapon: "New Rifle", meters: 10, map: "Bakurani" },
+    ]);
+    // Each weapon's own longest kill still covers every kind.
+    expect(result.weapons).toEqual(
+      expect.arrayContaining([
+        { label: "Artillery", kind: "vehicle_weapon", kills: 1, headshotKills: 0, longestMeters: 2_000 },
+        { label: "Rocket Pods", kind: "vehicle_weapon", kills: 1, headshotKills: 0, longestMeters: 1_500 },
+        { label: "SVDM", kind: "firearm", kills: 1, headshotKills: 0, longestMeters: 600 },
+      ]),
+    );
+
+    const extras = await telemetry.rowExtras(since, now, [ricky, annie, rita, tom], "east");
+    expect(rowExtrasByPlayer(extras)).toEqual(
+      new Map([
+        [ricky, { topWeapon: "SVDM", longestKillMeters: 600, bestStreak: 1 }],
+        [annie, { topWeapon: "AK-74M", longestKillMeters: 50, bestStreak: 2 }],
+        [rita, { topWeapon: "New Rifle", longestKillMeters: 10, bestStreak: 2 }],
+        // No firearm kill, so no longest kill at all.
+        [tom, { topWeapon: "M67 grenade", bestStreak: 3 }],
+      ]),
+    );
+
+    expect((await telemetry.weeklyHighlights(since, now, "east")).longestKill).toEqual({
+      steamId: ricky,
+      name: "RifleRicky",
+      distanceCentimeters: 60_000,
+      cause: "Id.Item.SVDM",
+      mapName: "Bakurani",
+    });
+  });
+
   it("stores game GUIDs that are not RFC 4122 UUIDs and deduplicates them across letter case", async () => {
     const telemetry = new TelemetryStore(drizzle({ client, schema }));
     const now = new Date(),

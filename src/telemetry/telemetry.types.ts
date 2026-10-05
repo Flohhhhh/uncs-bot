@@ -135,8 +135,8 @@ export type CombatStats = {
 };
 /**
  * Optional per-row extras on the public leaderboard, each omitted when unknown (never null): the player's
- * most-used named weapon, their longest kill within the public distance cap, and their most kills without
- * dying within one server session.
+ * most-used named weapon, their longest firearm kill within the public distance cap, and their most kills
+ * without dying within one server session.
  */
 export type RowExtras = { topWeapon?: string; longestKillMeters?: number; bestStreak?: number };
 // Public leaderboard rows carry game statistics only: no SteamID and no other account identifier.
@@ -157,6 +157,7 @@ export const emptyTotals = (): CombatTotals => ({ events: 0, kills: 0, deaths: 0
 export type WeeklyHighlights = {
   bestKd: { steamId: string; name: string; kills: number; deaths: number } | null;
   mostHeadshots: { steamId: string; name: string; headshotKills: number } | null;
+  /** The longest firearm kill: vehicles, their weapons, explosives, melee and tools never count. */
   longestKill: {
     steamId: string;
     name: string;
@@ -199,7 +200,7 @@ export type PublicServerStats = {
   }>;
   /** At most 10, by kills. */
   maps: Array<{ label: string; kills: number }>;
-  /** At most 10, each player's own longest kill. */
+  /** At most 10, each player's own longest firearm kill. */
   longestKills: Array<{ name: string; weapon: string | null; meters: number; map: string | null }>;
   /** Kills per UTC hour of receipt; index 0 is 00:00-00:59 UTC. */
   hours: number[];
@@ -240,6 +241,7 @@ export type ServerStatsAggregate = {
 };
 /** Store-internal leaderboard row inputs, keyed by SteamID for the service to attach. */
 export type RowExtrasAggregate = {
+  /** Per cause; longestCentimeters is set for firearm causes only, so it feeds longestKillMeters alone. */
   weapons: Array<{ steamId: string; cause: string | null; kills: number; longestCentimeters: number | null }>;
   streaks: Array<{ steamId: string; bestStreak: number }>;
 };
