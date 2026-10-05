@@ -159,3 +159,12 @@ describe("Supporters table", () => {
     expect(declared(".supporter-review", "max-width", 1280)).toBe("6.5rem");
   });
 });
+
+describe("Applications requests header", () => {
+  it.each([320, 390, 430, 768, 1280])("drops the select-all under the title when both do not fit at %ipx", (width) => {
+    // On one row with the long subtitle, "Select all pending" was squeezed to 70px at 390px and broke into
+    // three lines. It broke into two at 768px, where the sidebar takes the room.
+    expect(declared(".application-requests .card-header", "flex-wrap", width)).toBe("wrap");
+    expect(declared(".application-requests .selection-label", "white-space", width)).toBe("nowrap");
+  });
+});
