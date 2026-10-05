@@ -1,5 +1,5 @@
 import { Injectable } from "@nestjs/common";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
 /** A ticket from Discord works once, for this long. */
 export const PATRON_LINK_TICKET_MS = 10 * 60_000;
@@ -13,6 +13,14 @@ export const PATRON_LINK_TICKETS_PER_USER = 5;
 export const PATRON_LINK_LEGS_PER_ACCOUNT = 5;
 /** Patreon codes that arrive without their sign-in are spent at Patreon, at most this many a minute. */
 export const PATRON_LINK_BURNS_PER_MINUTE = 30;
+/**
+ * A Patreon code that arrived without its sign-in is refused for this long, whether or not it could be spent at
+ * Patreon. Patreon does not say how long a code lives. OAuth 2.0 (RFC 6749) recommends 10 minutes at most, so an hour
+ * leaves a wide margin.
+ */
+export const PATRON_LINK_REFUSED_CODE_MS = 60 * 60_000;
+/** Refused Patreon codes remembered at once. Past it, the oldest is dropped and no code is used until it expires. */
+export const PATRON_LINK_MAX_REFUSED_CODES = 50_000;
 /** Every map below holds at most this many entries; past it, new sign-ins are told to wait. */
 export const PATRON_LINK_MAX_ENTRIES = 5000;
 /** Tickets, flow IDs and states: 32 random bytes in base64url. */
@@ -32,6 +40,8 @@ export type PatronLinkFlow = {
 };
 
 const randomId = () => randomBytes(32).toString("base64url");
+/** A refused code is kept only as a 128-bit digest. A collision could only refuse a code, never accept one. */
+const codeKey = (code: string) => createHash("sha256").update(code).digest().subarray(0, 16).toString("base64url");
 function same(left: string, right: string) {
   const a = Buffer.from(left),
     b = Buffer.from(right);
@@ -73,6 +83,10 @@ export class PatronLinkState {
   private readonly ticketsIssued = new Counter(PATRON_LINK_TICKETS_PER_USER, PATRON_LINK_LIMIT_WINDOW_MS);
   private readonly legsStarted = new Counter(PATRON_LINK_LEGS_PER_ACCOUNT, PATRON_LINK_LIMIT_WINDOW_MS);
   private burned: number[] = [];
+  /** Digests of Patreon codes that arrived without their sign-in, each with when it may be forgotten, oldest first. */
+  private readonly refusedCodes = new Map<string, number>();
+  /** Until then no Patreon code is used, because a refused code was dropped before it expired. */
+  private refusedCodesFullUntil = 0;
 
   private prune(now: number) {
     for (const [ticket, entry] of this.tickets) if (now >= entry.expiresAt) this.tickets.delete(ticket);
@@ -124,18 +138,29 @@ export class PatronLinkState {
     if (typeof flowId !== "string" || !PATRON_LINK_ID.test(flowId)) return null;
     const flow = this.flows.get(flowId);
     if (!flow) return null;
-    if (
-      flow.stage !== stage ||
-      now >= flow.stageExpiresAt ||
-      now >= flow.flowExpiresAt ||
-      typeof state !== "string" ||
-      !PATRON_LINK_ID.test(state) ||
-      !same(state, flow.state)
-    ) {
+    if (!this.matches(flow, stage, state, now)) {
       this.flows.delete(flowId);
       return null;
     }
     return { ...flow };
+  }
+
+  /** Whether `claim` would succeed, without ending or changing any flow. */
+  holds(flowId: unknown, stage: PatronLinkStage, state: unknown, now = Date.now()) {
+    if (typeof flowId !== "string" || !PATRON_LINK_ID.test(flowId)) return false;
+    const flow = this.flows.get(flowId);
+    return Boolean(flow && this.matches(flow, stage, state, now));
+  }
+
+  private matches(flow: PatronLinkFlow, stage: PatronLinkStage, state: unknown, now: number) {
+    return (
+      flow.stage === stage &&
+      now < flow.stageExpiresAt &&
+      now < flow.flowExpiresAt &&
+      typeof state === "string" &&
+      PATRON_LINK_ID.test(state) &&
+      same(state, flow.state)
+    );
   }
 
   /** Asks Discord again, this time with its Authorize screen. Returns the new state. */
@@ -172,5 +197,42 @@ export class PatronLinkState {
     if (this.burned.length >= PATRON_LINK_BURNS_PER_MINUTE) return false;
     this.burned.push(now);
     return true;
+  }
+
+  /**
+   * Remembers a Patreon code that arrived without its sign-in, so no later callback can use it, even one with a valid
+   * cookie and state: Patreon does not tie a code to the state it was asked with. Unlike spending it at Patreon, this
+   * has no budget anyone can use up. When the list is full the oldest code is dropped, and no code is used until that
+   * one would have expired.
+   */
+  refuseCode(code: string, now = Date.now()) {
+    this.forgetRefusedCodes(now);
+    const key = codeKey(code);
+    // Moved to the end with a fresh expiry, so the list stays in expiry order.
+    this.refusedCodes.delete(key);
+    if (this.refusedCodes.size >= PATRON_LINK_MAX_REFUSED_CODES) {
+      const [oldest, expiresAt] = this.refusedCodes.entries().next().value!;
+      this.refusedCodes.delete(oldest);
+      this.refusedCodesFullUntil = Math.max(this.refusedCodesFullUntil, expiresAt);
+    }
+    this.refusedCodes.set(key, now + PATRON_LINK_REFUSED_CODE_MS);
+  }
+
+  /**
+   * Whether a Patreon code may be exchanged: `refused` when it arrived before without its sign-in, `busy` while a
+   * dropped refused code could still be valid.
+   */
+  codeCheck(code: string, now = Date.now()): "ok" | "refused" | "busy" {
+    this.forgetRefusedCodes(now);
+    if (this.refusedCodes.has(codeKey(code))) return "refused";
+    return now < this.refusedCodesFullUntil ? "busy" : "ok";
+  }
+
+  /** Forgets refused codes past their time. They were added in expiry order, so only the oldest are checked. */
+  private forgetRefusedCodes(now: number) {
+    for (const [key, expiresAt] of this.refusedCodes) {
+      if (now < expiresAt) break;
+      this.refusedCodes.delete(key);
+    }
   }
 }

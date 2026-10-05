@@ -290,8 +290,22 @@ export class PatronLinkService {
   }
 
   /**
-   * Patreon's redirect. A code that arrives without its sign-in is spent at Patreon so nobody can reuse it. The flow
-   * ends before Patreon is called, so a replayed callback finds nothing.
+   * Every request to Patreon's redirect, before any limit can turn it away: a code that arrives without the sign-in
+   * it belongs to is refused for good, so whoever lured a patron there cannot use it later with their own sign-in.
+   * Calls nobody and never throws.
+   */
+  screenPatreonCallback(flowId: unknown, query: Record<string, unknown>) {
+    try {
+      const code = validCode(query.code);
+      if (code && !this.state.holds(flowId, "patreon", query.state)) this.state.refuseCode(code);
+    } catch {
+      this.logger.warn(PATRON_LINK_FAILED);
+    }
+  }
+
+  /**
+   * Patreon's redirect. A code that arrives without its sign-in is refused for good and, within a budget, spent at
+   * Patreon too. The flow ends before Patreon is called, so a replayed callback finds nothing.
    */
   async patreonCallback(flowId: unknown, query: Record<string, unknown>): Promise<PatronLinkStep> {
     const settings = this.enabled() ? this.settings() : null;
@@ -302,12 +316,18 @@ export class PatronLinkService {
     const code = validCode(query.code);
     const flow = this.state.claim(flowId, "patreon", query.state);
     if (!flow) {
-      if (code && this.state.burnAllowed()) await this.oauth.burnPatreonCode(settings, code);
+      if (code) {
+        this.state.refuseCode(code);
+        if (this.state.burnAllowed()) await this.oauth.burnPatreonCode(settings, code);
+      }
       return this.finish("expired");
     }
     this.state.end(flowId);
     if (query.error !== undefined) return this.finish(query.error === "access_denied" ? "declined" : "unavailable");
     if (!code) return this.finish("expired");
+    // A code seen before without its sign-in (a lured patron's) never works, whoever brings it back.
+    const check = this.state.codeCheck(code);
+    if (check !== "ok") return this.finish(check === "busy" ? "busy" : "expired");
     let identity: { userId: string; memberships: string[] };
     try {
       identity = await this.oauth.patreonIdentity(settings, code);

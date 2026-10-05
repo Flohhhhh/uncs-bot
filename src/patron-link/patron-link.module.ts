@@ -5,7 +5,7 @@ import { DiscordRolesModule } from "../discord-roles/discord-roles.module";
 import { SupporterMatchModule } from "../supporters/supporter-match.module";
 import { SupportersModule } from "../supporters/supporters.module";
 import { PAGE_STYLE_SOURCE } from "./patron-link.copy";
-import { PatronLinkController, PatronLinkExceptionFilter } from "./patron-link.controller";
+import { flowCookie, PatronLinkController, PatronLinkExceptionFilter } from "./patron-link.controller";
 import { PatronLinkOAuth } from "./patron-link.oauth";
 import { PatronLinkService } from "./patron-link.service";
 import { PatronLinkState } from "./patron-link.state";
@@ -57,6 +57,9 @@ export class PatronLinkModule implements NestModule {
             : path.includes("/start")
               ? "start"
               : "done";
+        // Runs before the limit: a Patreon code that came without its sign-in is refused even when the limit turns
+        // the request away, so junk requests can never leave a lured patron's code usable.
+        if (route === "patreon") this.service.screenPatreonCallback(flowCookie(req), req.query);
         // Peer-level aggregate guard. Spoofable forwarding headers are never read.
         const key = `${route}:${req.socket.remoteAddress ?? "unknown"}`;
         let counter = traffic.get(key);

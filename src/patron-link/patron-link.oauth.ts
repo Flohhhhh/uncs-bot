@@ -129,8 +129,9 @@ export class PatronLinkOAuth {
   }
 
   /**
-   * Spends a Patreon code that arrived without its sign-in (a forwarded or replayed link), so whoever lured the
-   * patron there has nothing left to use. The answer is never read. Never throws.
+   * Spends a Patreon code that arrived without its sign-in (a forwarded or replayed link) at Patreon too, on top of
+   * Gramps refusing it for good (PatronLinkState.refuseCode), so it is useless even after a restart. Best effort, within
+   * a budget. The answer is never read. Never throws.
    */
   async burnPatreonCode(clients: PatronLinkClients, code: string) {
     try {

@@ -25,7 +25,8 @@ const cookieOptions: CookieOptions = { httpOnly: true, secure: true, sameSite: "
 /** Each leg must come back within its stage window (10 minutes), so the cookie lives that long and is set again. */
 const COOKIE_MAX_AGE_MS = PATRON_LINK_STAGE_MS;
 
-function flowCookie(req: Request) {
+/** The flow ID in the sign-in cookie, or null. */
+export function flowCookie(req: Request) {
   return (
     (req.headers.cookie ?? "")
       .split(";")

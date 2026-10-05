@@ -5,6 +5,8 @@ import {
   PATRON_LINK_LEGS_PER_ACCOUNT,
   PATRON_LINK_LIMIT_WINDOW_MS,
   PATRON_LINK_MAX_ENTRIES,
+  PATRON_LINK_MAX_REFUSED_CODES,
+  PATRON_LINK_REFUSED_CODE_MS,
   PATRON_LINK_STAGE_MS,
   PATRON_LINK_TICKET_MS,
   PATRON_LINK_TICKETS_PER_USER,
@@ -154,6 +156,22 @@ describe("sign-in flows", () => {
     // The Discord leg's state is spent.
     expect(state.claim(early.flowId, "discord", early.state, t0)).toBeNull();
   });
+  it("can be checked without ending or changing them", () => {
+    const state = new PatronLinkState();
+    const flow = state.startFlow(patron, t0)!;
+    expect(state.holds(flow.flowId, "discord", flow.state, t0)).toBe(true);
+    for (const [id, stage, value, at] of [
+      [flow.flowId, "patreon", flow.state, t0],
+      [flow.flowId, "discord", "b".repeat(43), t0],
+      [flow.flowId, "discord", [flow.state], t0],
+      [flow.flowId, "discord", flow.state, t0 + PATRON_LINK_STAGE_MS],
+      [null, "discord", flow.state, t0],
+      ["x".repeat(43), "discord", flow.state, t0],
+    ] as const)
+      expect(state.holds(id, stage, value, at)).toBe(false);
+    // None of those checks ended it.
+    expect(state.claim(flow.flowId, "discord", flow.state, t0)).not.toBeNull();
+  });
   it("end when told to, and stop at 5000 in progress until some expire", () => {
     const state = new PatronLinkState();
     const flow = state.startFlow(patron, t0)!;
@@ -186,5 +204,45 @@ describe("limits", () => {
     for (let index = 0; index < PATRON_LINK_BURNS_PER_MINUTE; index++) expect(state.burnAllowed(t0)).toBe(true);
     expect(state.burnAllowed(t0 + 59_999)).toBe(false);
     expect(state.burnAllowed(t0 + 60_000)).toBe(true);
+  });
+});
+
+describe("refused Patreon codes", () => {
+  it("are refused for an hour from the last time they came without their sign-in, and others still work", () => {
+    const state = new PatronLinkState();
+    expect(state.codeCheck("lured", t0)).toBe("ok");
+    state.refuseCode("lured", t0);
+    expect(state.codeCheck("lured", t0)).toBe("refused");
+    expect(state.codeCheck("lured", t0 + PATRON_LINK_REFUSED_CODE_MS - 1)).toBe("refused");
+    expect(state.codeCheck("other", t0)).toBe("ok");
+    // Coming back again without its sign-in starts the hour again.
+    state.refuseCode("lured", t0 + 1_000);
+    expect(state.codeCheck("lured", t0 + PATRON_LINK_REFUSED_CODE_MS)).toBe("refused");
+    expect(state.codeCheck("lured", t0 + 1_000 + PATRON_LINK_REFUSED_CODE_MS)).toBe("ok");
+    expect(PATRON_LINK_REFUSED_CODE_MS).toBe(3_600_000);
+  });
+  it("need no budget: thousands are refused while spending at Patreon is used up", () => {
+    const state = new PatronLinkState();
+    for (let index = 0; index < PATRON_LINK_BURNS_PER_MINUTE; index++) state.burnAllowed(t0);
+    expect(state.burnAllowed(t0)).toBe(false);
+    for (let index = 0; index < 5_000; index++) state.refuseCode(`junk-${index}`, t0);
+    state.refuseCode("lured", t0);
+    expect(state.codeCheck("lured", t0)).toBe("refused");
+    expect(state.codeCheck("junk-0", t0)).toBe("refused");
+    expect(state.codeCheck("fresh", t0)).toBe("ok");
+  });
+  it("past the cap, drop the oldest and use no code until it would have expired", () => {
+    const state = new PatronLinkState();
+    state.refuseCode("first", t0);
+    for (let index = 1; index < PATRON_LINK_MAX_REFUSED_CODES; index++) state.refuseCode(`junk-${index}`, t0 + 1);
+    expect(state.codeCheck("fresh", t0 + 1)).toBe("ok");
+    state.refuseCode("lured", t0 + 2);
+    expect(state.codeCheck("lured", t0 + 2)).toBe("refused");
+    // "first" was dropped, so no code is trusted until it would have expired.
+    expect(state.codeCheck("first", t0 + 2)).toBe("busy");
+    expect(state.codeCheck("fresh", t0 + PATRON_LINK_REFUSED_CODE_MS - 1)).toBe("busy");
+    expect(state.codeCheck("fresh", t0 + PATRON_LINK_REFUSED_CODE_MS)).toBe("ok");
+    expect(state.codeCheck("lured", t0 + PATRON_LINK_REFUSED_CODE_MS)).toBe("refused");
+    expect(PATRON_LINK_MAX_REFUSED_CODES).toBe(50_000);
   });
 });

@@ -632,14 +632,28 @@ describe("one Patreon member, read for a patron's own sign-in", () => {
     fetchMock.mockResolvedValueOnce(json({ errors: [{ detail: "private detail" }] }, { status: 404 }));
     expect(await new PatreonClient().member("member-1", token)).toBeNull();
   });
-  it("refuses an answer over 1 MB, declared or streamed, and one for another member", async () => {
-    const declared = new Response("{}", { headers: { "content-length": String(PATREON_MAX_MEMBER_BYTES + 1) } });
+  it("refuses a valid answer over 1 MB, declared or streamed, and reads one of exactly 1 MB", async () => {
+    const tooLarge = {
+      kind: "schema",
+      message: "Patreon returned a larger response than expected. Nothing was imported; the next sync will retry.",
+    };
+    // A real member answer, so only the size cap can refuse it. JSON allows the trailing spaces.
+    const body = JSON.stringify(single());
+    expect(PATREON_MAX_MEMBER_BYTES).toBe(1_048_576);
+    const declared = new Response(body, { headers: { "content-length": String(PATREON_MAX_MEMBER_BYTES + 1) } });
     fetchMock.mockResolvedValueOnce(declared);
-    await expect(new PatreonClient().member("member-1", token)).rejects.toMatchObject({ kind: "schema" });
-    fetchMock.mockResolvedValueOnce(new Response(" ".repeat(PATREON_MAX_MEMBER_BYTES + 1)));
-    await expect(new PatreonClient().member("member-1", token)).rejects.toMatchObject({ kind: "schema" });
+    await expect(new PatreonClient().member("member-1", token)).rejects.toMatchObject(tooLarge);
+    fetchMock.mockResolvedValueOnce(new Response(body.padEnd(PATREON_MAX_MEMBER_BYTES + 1, " ")));
+    await expect(new PatreonClient().member("member-1", token)).rejects.toMatchObject(tooLarge);
+    fetchMock.mockResolvedValueOnce(new Response(body.padEnd(PATREON_MAX_MEMBER_BYTES, " ")));
+    expect(await new PatreonClient().member("member-1", token)).toMatchObject({ campaignId: campaign });
+  });
+  it("refuses an answer for another member", async () => {
     fetchMock.mockResolvedValueOnce(json(single()));
-    await expect(new PatreonClient().member("member-2", token)).rejects.toMatchObject({ kind: "schema" });
+    await expect(new PatreonClient().member("member-2", token)).rejects.toMatchObject({
+      kind: "schema",
+      message: "Patreon returned an unexpected member list. Nothing was imported; the next sync will retry.",
+    });
   });
   it("maps a refused token, a rate limit, an outage and a broken answer to fixed errors without the token", async () => {
     const outcomes: [Response | Error, string][] = [

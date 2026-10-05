@@ -15,8 +15,15 @@ import { SupporterMatchStore } from "../supporters/supporter-match.store";
 import { SupportersService } from "../supporters/supporters.service";
 import { SupportersStore } from "../supporters/supporters.store";
 import { PATRON_LINK_CSP, PatronLinkModule } from "./patron-link.module";
+import { PATRON_LINK_MAX_BYTES } from "./patron-link.oauth";
 import { PATRON_LINK_FAILED } from "./patron-link.service";
-import { PATRON_LINK_LEGS_PER_ACCOUNT, PATRON_LINK_TICKET_MS, PatronLinkState } from "./patron-link.state";
+import {
+  PATRON_LINK_BURNS_PER_MINUTE,
+  PATRON_LINK_LEGS_PER_ACCOUNT,
+  PATRON_LINK_MAX_REFUSED_CODES,
+  PATRON_LINK_TICKET_MS,
+  PatronLinkState,
+} from "./patron-link.state";
 import { PatronLinkStore } from "./patron-link.store";
 
 const ORIGIN = "https://admin.theuncs.example";
@@ -120,6 +127,12 @@ function patreonMember(campaignId = CAMPAIGN, userId = PATREON_USER) {
     ],
   };
 }
+/** The signed-in patron's identity, with their one membership of the campaign. */
+const identityBody = {
+  data: { id: PATREON_USER, type: "user", relationships: { memberships: { data: [{ id: MEMBER, type: "member" }] } } },
+};
+/** A valid identity answer padded with JSON whitespace to exactly `bytes`, so only a size cap can refuse it. */
+const paddedIdentity = (bytes: number) => new Response(JSON.stringify(identityBody).padEnd(bytes, " "));
 type Upstream = "discordToken" | "discordUser" | "patreonToken" | "identity" | "member";
 function upstreamOf(url: string): Upstream {
   if (url === "https://discord.com/api/v10/oauth2/token") return "discordToken";
@@ -191,14 +204,7 @@ describe("Link Patreon sign-in pages", () => {
       discordUser: () => json({ id: PATRON, username: "patron", global_name: "Patron", email: "private@example.test" }),
       patreonToken: () =>
         json({ access_token: SECRETS.patreonAccess, refresh_token: SECRETS.patreonRefresh, token_type: "Bearer" }),
-      identity: () =>
-        json({
-          data: {
-            id: PATREON_USER,
-            type: "user",
-            relationships: { memberships: { data: [{ id: MEMBER, type: "member" }] } },
-          },
-        }),
+      identity: () => json(identityBody),
       member: () => json(patreonMember()),
     };
     fetchMock = jest
@@ -508,6 +514,66 @@ describe("Link Patreon sign-in pages", () => {
       expect(calls("patreonToken")).toHaveLength(2);
       expect(calls("identity")).toHaveLength(0);
     });
+    describe("a code a lured patron brings back without the sign-in", () => {
+      const lured = "patreon-code-LURED-0123456789";
+      /** Someone signs in through Discord, sends the Patreon page to a patron, and the patron's browser comes back. */
+      async function lure() {
+        const { cookie, back } = await throughDiscord();
+        const state = stateOf(back.headers.location);
+        return { cookie, url: `/supporters/link/patreon/callback?code=${lured}&state=${state}` };
+      }
+      const replay = async (cookie: string, url: string) => {
+        const response = await request(server).get(url).set("Cookie", cookie).expect(303);
+        expect(response.headers.location).toBe("/supporters/link/done?r=expired");
+        expect(calls("identity")).toHaveLength(0);
+        expect(store.link).not.toHaveBeenCalled();
+        expect(roles.supporterChanged).not.toHaveBeenCalled();
+      };
+      const spent = () =>
+        calls("patreonToken").filter(([, init]) => new URLSearchParams(String(init.body)).get("code") === lured);
+
+      it("never works later with the sender's own cookie and state, even with nothing left to spend it", async () => {
+        for (let index = 0; index < PATRON_LINK_BURNS_PER_MINUTE; index++) expect(state.burnAllowed()).toBe(true);
+        const { cookie, url } = await lure();
+        await request(server).get(url).expect(303).expect("Location", "/supporters/link/done?r=expired");
+        expect(spent()).toHaveLength(0);
+        await replay(cookie, url);
+        // The code was never sent to Patreon, so nobody exchanged it.
+        expect(calls("patreonToken")).toHaveLength(0);
+      });
+      it("never works later even when the page's limit turned the patron away", async () => {
+        const { cookie, url } = await lure();
+        // Junk without a sign-in uses up the page's limit for everyone behind the same address.
+        for (let index = 0; index < 60; index++)
+          await request(server)
+            .get(`/supporters/link/patreon/callback?code=junk-${index}`)
+            .expect(303)
+            .expect("Location", "/supporters/link/done?r=expired");
+        await request(server).get(url).expect(429);
+        expect(spent()).toHaveLength(0);
+        // A minute later the limit is open again, and the sender tries the patron's code with their own sign-in.
+        const later = Date.now() + 61_000;
+        jest.spyOn(Date, "now").mockReturnValue(later);
+        await replay(cookie, url);
+        expect(spent()).toHaveLength(0);
+      });
+      it("never works with a new sign-in either", async () => {
+        const { url } = await lure();
+        await request(server).get(url).expect(303);
+        const fresh = await throughDiscord();
+        await replay(
+          fresh.cookie,
+          `/supporters/link/patreon/callback?code=${lured}&state=${stateOf(fresh.back.headers.location)}`,
+        );
+      });
+      it("says too many tries, calling nobody, while a refused code had to be dropped before it expired", async () => {
+        for (let index = 0; index <= PATRON_LINK_MAX_REFUSED_CODES; index++) state.refuseCode(`junk-${index}`);
+        const { done } = await throughPatreon();
+        expect(done.headers.location).toBe("/supporters/link/done?r=busy");
+        expect(calls("patreonToken")).toHaveLength(0);
+        expect(store.link).not.toHaveBeenCalled();
+      });
+    });
     it("works once: a replayed redirect finds nothing", async () => {
       const { cookie, url } = await throughPatreon();
       const replay = await request(server).get(url).set("Cookie", cookie).expect(303);
@@ -535,12 +601,26 @@ describe("Link Patreon sign-in pages", () => {
       ["a token outage", "patreonToken", () => json({}, 502), "unavailable"],
       ["an identity outage", "identity", () => json({}, 500), "unavailable"],
       ["an unreadable identity", "identity", () => new Response("not json"), "unavailable"],
-      ["an oversized identity", "identity", () => new Response(" ".repeat(65_537)), "unavailable"],
+      ["a valid identity over 64 KB", "identity", () => paddedIdentity(PATRON_LINK_MAX_BYTES + 1), "unavailable"],
+      [
+        "a valid identity declared over 64 KB",
+        "identity",
+        () =>
+          new Response(JSON.stringify(identityBody), {
+            headers: { "content-length": String(PATRON_LINK_MAX_BYTES + 1) },
+          }),
+        "unavailable",
+      ],
     ] as const)("says %s is %s and links nothing", async (_name, upstream, answer, outcome) => {
       answers[upstream] = answer;
       const { done } = await throughPatreon();
       expect(done.headers.location).toBe(`/supporters/link/done?r=${outcome}`);
       expect(store.link).not.toHaveBeenCalled();
+    });
+    it("reads an identity of exactly 64 KB", async () => {
+      expect(PATRON_LINK_MAX_BYTES).toBe(65_536);
+      answers.identity = () => paddedIdentity(PATRON_LINK_MAX_BYTES);
+      expect((await throughPatreon()).done.headers.location).toBe("/supporters/link/done?r=linked");
     });
     it("says not a member for no membership, and unavailable for two", async () => {
       const identity = (memberships: unknown[]) => () =>
