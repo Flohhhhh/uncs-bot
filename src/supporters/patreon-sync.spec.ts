@@ -8,15 +8,16 @@ import type { EnvService } from "../env/env.service";
 import {
   firstPaidEventId,
   PATREON_HISTORY_CAP,
+  PATREON_MAX_MEMBER_BYTES,
   PATREON_PAGE_DELAY_MS,
   PATREON_TOKEN_REJECTED,
   PatreonApiError,
   PatreonClient,
   type PatreonPledgeEvent,
 } from "./patreon.client";
-import { PATREON_SYNC_STARTUP_DELAY_MS, PatreonSyncService } from "./patreon-sync.service";
+import { deploymentSecrets, PATREON_SYNC_STARTUP_DELAY_MS, PatreonSyncService } from "./patreon-sync.service";
 import type { SupporterMatchService } from "./supporter-match.service";
-import type { ApiImportResult, SupportersStore } from "./supporters.store";
+import { apiSnapshotHash, type ApiImportResult, type SupportersStore } from "./supporters.store";
 
 const token = "creator-token-PRIVATE-0123456789abcdef";
 const campaign = "16880209";
@@ -581,6 +582,95 @@ describe("Patreon tier prices", () => {
   });
 });
 
+describe("one Patreon member, read for a patron's own sign-in", () => {
+  const events: EventInput[] = [
+    start("pledge_start:1"),
+    { id: "subscription:2", date: "2026-10-03T12:00:00.000+00:00", status: "Paid", tier: "111" },
+  ];
+  function single(campaignId: unknown = campaign, userId = "user-1") {
+    const value = member("member-1", events, { user: userId });
+    const data = {
+      ...value,
+      relationships: { ...value.relationships, campaign: { data: { id: campaignId, type: "campaign" } } },
+    };
+    const included = [...events.map(event), user(userId), { id: String(campaignId), type: "campaign" }];
+    return { data, included };
+  }
+  it("asks for the list's fields, the campaign and each event's tier, and gives the same snapshot and hash", async () => {
+    const { data, included } = single();
+    fetchMock.mockResolvedValueOnce(json(page([data], included))).mockResolvedValueOnce(json({ data, included }));
+    const client = new PatreonClient();
+    const [listed] = (await client.members(campaign, token)).members;
+    const found = await client.member("member-1", token);
+    expect(found).toEqual({ snapshot: listed, campaignId: campaign, userId: "user-1" });
+    expect(found!.snapshot.events.map((item) => item.tierId)).toEqual([undefined, "111"]);
+    expect(apiSnapshotHash(campaign, found!.snapshot)).toBe(apiSnapshotHash(campaign, listed));
+    const [url, init] = fetchMock.mock.calls[1] as [URL, RequestInit];
+    expect(url.origin + url.pathname).toBe("https://www.patreon.com/api/oauth2/v2/members/member-1");
+    expect(url.searchParams.get("include")).toBe("user,campaign,pledge_history");
+    expect(url.searchParams.get("fields[member]")).toBe("full_name,patron_status,last_charge_status,last_charge_date");
+    expect(url.searchParams.get("fields[user]")).toBe("social_connections");
+    expect(url.searchParams.get("fields[pledge-event]")).toBe(
+      "amount_cents,currency_code,date,payment_status,type,tier_id",
+    );
+    expect(url.toString()).not.toMatch(/email|address|note/);
+    expect(init).toMatchObject({ redirect: "error", headers: { Authorization: `Bearer ${token}` } });
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    // One request for one member: no pages, no tier prices, no pacing.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+  it("reports another campaign and another user as Patreon names them, and a missing campaign as null", async () => {
+    fetchMock.mockResolvedValueOnce(json(single(999, "user-2")));
+    expect(await new PatreonClient().member("member-1", token)).toMatchObject({ campaignId: "999", userId: "user-2" });
+    const { data, included } = single();
+    fetchMock.mockResolvedValueOnce(
+      json({ data: { ...data, relationships: member("member-1").relationships }, included }),
+    );
+    expect(await new PatreonClient().member("member-1", token)).toMatchObject({ campaignId: null, userId: null });
+  });
+  it("returns null when Patreon has no such member", async () => {
+    fetchMock.mockResolvedValueOnce(json({ errors: [{ detail: "private detail" }] }, { status: 404 }));
+    expect(await new PatreonClient().member("member-1", token)).toBeNull();
+  });
+  it("refuses an answer over 1 MB, declared or streamed, and one for another member", async () => {
+    const declared = new Response("{}", { headers: { "content-length": String(PATREON_MAX_MEMBER_BYTES + 1) } });
+    fetchMock.mockResolvedValueOnce(declared);
+    await expect(new PatreonClient().member("member-1", token)).rejects.toMatchObject({ kind: "schema" });
+    fetchMock.mockResolvedValueOnce(new Response(" ".repeat(PATREON_MAX_MEMBER_BYTES + 1)));
+    await expect(new PatreonClient().member("member-1", token)).rejects.toMatchObject({ kind: "schema" });
+    fetchMock.mockResolvedValueOnce(json(single()));
+    await expect(new PatreonClient().member("member-2", token)).rejects.toMatchObject({ kind: "schema" });
+  });
+  it("maps a refused token, a rate limit, an outage and a broken answer to fixed errors without the token", async () => {
+    const outcomes: [Response | Error, string][] = [
+      [json({}, { status: 401 }), "token"],
+      [json({}, { status: 429, headers: { "Retry-After": "5" } }), "rate"],
+      [json({}, { status: 503 }), "unavailable"],
+      [new Error(`network ${token}`), "unavailable"],
+      [new Response("not json"), "schema"],
+      [json({ data: { id: "not a member id", type: "member", attributes: {} } }), "schema"],
+    ];
+    for (const [answer, kind] of outcomes) {
+      if (answer instanceof Error) fetchMock.mockRejectedValueOnce(answer);
+      else fetchMock.mockResolvedValueOnce(answer);
+      const failure = await new PatreonClient().member("member-1", token).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(PatreonApiError);
+      expect(failure).toMatchObject({ kind });
+      expect(String((failure as Error).message)).not.toContain(token);
+    }
+  });
+});
+
+describe("deployment secrets a Patreon credential must not reuse", () => {
+  it("include the Patreon client secret, except for the client secret's own check", () => {
+    const values: Record<string, unknown> = { DISCORD_BOT_TOKEN: "bot", PATREON_CLIENT_SECRET: "client-secret" };
+    const env = { get: (key: string) => values[key] } as EnvService;
+    expect(deploymentSecrets(env)).toContain("client-secret");
+    expect(deploymentSecrets(env, { clientSecret: false })).not.toContain("client-secret");
+    expect(deploymentSecrets(env, { clientSecret: false })).toContain("bot");
+  });
+});
+
 describe("Patreon import settings", () => {
   it("bounds the interval and never rejects the bot's configuration over the token's shape", () => {
     expect(Env.shape.PATREON_SYNC_INTERVAL_MINUTES.parse(undefined)).toBe(30);
@@ -1039,6 +1129,7 @@ describe("Patreon sync worker", () => {
     [{ ADMIN_SESSION_SECRET: token }, /matches another configured secret/],
     [{ PATREON_WEBHOOK_SECRET: token }, /matches another configured secret/],
     [{ WARDOGS_SERVERS: [{ password: token }] }, /matches another configured secret/],
+    [{ PATREON_CLIENT_SECRET: token }, /matches another configured secret/],
     [{ PATREON_CREATOR_ACCESS_TOKEN: "short" }, /does not look like/],
     [{ PATREON_CREATOR_ACCESS_TOKEN: "has whitespace inside the token" }, /does not look like/],
     [{ PATREON_CREATOR_ACCESS_TOKEN: "x".repeat(2049) }, /does not look like/],

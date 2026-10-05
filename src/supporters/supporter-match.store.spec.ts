@@ -11,7 +11,7 @@ import {
   FIXTURE_STEAM_ID as steamId,
   paymentFixture,
 } from "./supporter-fixtures";
-import type { MatchFacts } from "./supporter-match.rules";
+import { AUTO_FOUNDER_REASON, PATRON_LINK_FOUNDER_REASON, type MatchFacts } from "./supporter-match.rules";
 import { SupporterMatchStore, type AutoMatchOptions } from "./supporter-match.store";
 import type { FounderPolicy } from "./supporters.types";
 
@@ -69,6 +69,7 @@ function fixture() {
       discordReportedForOtherPatron: false,
       patreonDiscordElsewhere: false,
       linkedSteamShared: false,
+      patronLinkedAt: null,
     } as MatchFacts,
   };
   const query = jest.fn(async (config: { text: string }, params: unknown[]) => {
@@ -608,6 +609,39 @@ describe("automatic founder promise", () => {
     expect(
       await f.run({ recordFounder: true, now: new Date(Date.parse(paymentFixture().paidAt) + 3_600_000) }),
     ).toMatchObject({ founderRecorded: false, blocked: ["payment_too_recent"] });
+  });
+  describe("on a Discord account the patron linked by signing in", () => {
+    const patron = () => {
+      const f = ready();
+      Object.assign(f.member, { discordSource: "patron_signin", patreonDiscordId: null });
+      return f;
+    };
+    it("holds a new link for the waiting period, writing nothing", async () => {
+      const f = patron();
+      f.state.facts.patronLinkedAt = new Date(now.getTime() - 3_600_000).toISOString();
+      expect(await f.run({ recordFounder: true })).toMatchObject({
+        founderRecorded: false,
+        blocked: ["patron_link_too_recent"],
+      });
+      expect(writes(f.texts())).toEqual([]);
+    });
+    it("records it after the hold, saying the patron linked the account", async () => {
+      const f = patron();
+      f.state.facts.patronLinkedAt = new Date(now.getTime() - 72 * 3_600_000).toISOString();
+      expect(await f.run({ recordFounder: true })).toMatchObject({ founderRecorded: true, blocked: [] });
+      const [[, founderValues]] = f.calls('insert into "supporter_founders"');
+      expect(founderValues).toContain(PATRON_LINK_FOUNDER_REASON);
+      expect(founderValues).not.toContain(AUTO_FOUNDER_REASON);
+      const actions = f.calls('insert into "supporter_actions"');
+      expect(actions[0][1]).toEqual(expect.arrayContaining(["founder", PATRON_LINK_FOUNDER_REASON]));
+      expect(audit(actions)[0]).toMatchObject({ discordSource: "patron_signin", automatic: 1 });
+    });
+    it("keeps the import's reason for an account from Patreon", async () => {
+      const f = ready();
+      await f.run({ recordFounder: true });
+      const [[, founderValues]] = f.calls('insert into "supporter_founders"');
+      expect(founderValues).toContain(AUTO_FOUNDER_REASON);
+    });
   });
   it("writes nothing on a second run once the founder exists", async () => {
     const f = ready();

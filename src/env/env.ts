@@ -299,6 +299,25 @@ export const Env = z.object({
     .optional()
     .transform((value) => value || undefined),
   PATREON_SYNC_INTERVAL_MINUTES: z.coerce.number().int().min(10).max(1440).default(30),
+  /**
+   * "Link Patreon": a patron signs in to Discord and Patreon to link their membership to their Discord account. Off
+   * by default. While off, /patreon is not registered and the sign-in pages only say linking is off.
+   */
+  PATREON_LINK_ENABLED: flag(),
+  /**
+   * The Patreon client's ID and secret (the client behind the Creator's Access Token), used only for the patron's
+   * sign-in. Never logged or returned. A malformed value leaves linking unconfigured instead of stopping the bot.
+   */
+  PATREON_CLIENT_ID: z
+    .string()
+    .trim()
+    .optional()
+    .transform((value) => value || undefined),
+  PATREON_CLIENT_SECRET: z
+    .string()
+    .trim()
+    .optional()
+    .transform((value) => value || undefined),
   /** Provider-neutral founder window (Patreon and PayPal). A complete pair wins over PATREON_FOUNDER_*. */
   SUPPORTER_FOUNDER_START_AT: z.iso.datetime({ offset: true }).optional(),
   SUPPORTER_FOUNDER_END_AT: z.iso.datetime({ offset: true }).optional(),

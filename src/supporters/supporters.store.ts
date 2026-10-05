@@ -597,7 +597,14 @@ export class SupportersStore {
         'steamApplicationId', m.steam_application_id,
         'identityState', CASE WHEN m.discord_id IS NULL AND m.steam_id IS NULL THEN 'unlinked'
           WHEN m.discord_id IS NULL OR m.steam_id IS NULL THEN 'partial'
-          WHEN m.discord_source = 'patreon' THEN 'patreon_linked' ELSE 'staff_linked' END,
+          WHEN m.discord_source IN ('patreon', 'patron_signin') THEN 'patreon_linked' ELSE 'staff_linked' END,
+        'patronLinkConflict', (SELECT json_build_object('discordId', refused.details->>'discordId',
+            'conflict', refused.details->>'conflict', 'linkedDiscordId', refused.details->>'linkedDiscordId')
+          FROM supporter_actions refused WHERE refused.member_id = m.id AND refused.kind = 'patron-link-conflict'
+          AND NOT EXISTS (SELECT 1 FROM supporter_actions settled WHERE settled.member_id = m.id
+            AND settled.kind IN ('link', 'review', 'patron-discord-link', 'patreon-discord-link')
+            AND settled.created_at > refused.created_at)
+          ORDER BY refused.created_at DESC, refused.id DESC LIMIT 1),
         'version', m.version,
         'latestPayment', (SELECT ${payment("p")} FROM supporter_payments p WHERE p.member_id = m.id
           ORDER BY (p.verification_state = 'verified') DESC, (p.source IN ${qualifyingSources}) DESC, p.paid_at DESC,
@@ -660,6 +667,7 @@ export class SupportersStore {
       discordReportedForOtherPatron: Boolean(matchFacts?.discordReportedForOtherPatron),
       patreonDiscordElsewhere: Boolean(matchFacts?.patreonDiscordElsewhere),
       linkedSteamShared: Boolean(matchFacts?.linkedSteamShared),
+      patronLinkedAt: matchFacts?.patronLinkedAt ?? null,
     };
     let founderBlockedReason: SupporterView["founderBlockedReason"] = null;
     if (!supporter.founder) {
@@ -695,6 +703,7 @@ export class SupportersStore {
       : undefined;
     return {
       ...supporter,
+      patronLinkConflict: supporter.patronLinkConflict ?? null,
       payments: supporter.payments ?? [],
       founderBlockedReason,
       founderBlockedMessage: founderBlockedReason ? founderBlockedMessages[founderBlockedReason] : null,

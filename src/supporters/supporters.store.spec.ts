@@ -613,8 +613,24 @@ describe("supporter persistence and founder eligibility", () => {
     expect(statement.text).toContain("'steamSource', m.steam_source");
     expect(statement.text).toContain("'steamApplicationId', m.steam_application_id");
     expect(statement.text).toContain("WHEN m.discord_id IS NULL OR m.steam_id IS NULL THEN 'partial'");
-    expect(statement.text).toContain("WHEN m.discord_source = 'patreon' THEN 'patreon_linked' ELSE 'staff_linked'");
+    // A patron's own sign-in counts as linked from Patreon, like the import's link.
+    expect(statement.text).toContain(
+      "WHEN m.discord_source IN ('patreon', 'patron_signin') THEN 'patreon_linked' ELSE 'staff_linked'",
+    );
     expect(statement.text).toContain("'automatic', f.awarded_by LIKE 'system:%'");
+  });
+  it("shows the newest refused patron sign-in until a later link or review settles it", async () => {
+    const { store, query } = fixture();
+    await store.list("123", policy);
+    const [statement] = query.mock.calls[0];
+    expect(statement.text).toContain("'patronLinkConflict', (SELECT json_build_object('discordId'");
+    expect(statement.text).toContain("refused.kind = 'patron-link-conflict'");
+    expect(statement.text).toContain(
+      "settled.kind IN ('link', 'review', 'patron-discord-link', 'patreon-discord-link')\n            AND settled.created_at > refused.created_at",
+    );
+    expect(statement.text).toContain("ORDER BY refused.created_at DESC, refused.id DESC LIMIT 1");
+    // The link-age hold reads when the patron linked the current account.
+    expect(statement.text).toContain("AND a.kind = 'patron-discord-link' AND a.details->>'discordId' = m.discord_id");
   });
   it("reads whether a founder with no SteamID linked applied with the record's SteamID, by the shared expression", async () => {
     const { store, query } = fixture();

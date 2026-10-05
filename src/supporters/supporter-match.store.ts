@@ -19,6 +19,7 @@ import {
   AUTO_FOUNDER_HOLD_HOURS_DEFAULT,
   AUTO_FOUNDER_REASON,
   automaticFounderBlocker,
+  PATRON_LINK_FOUNDER_REASON,
   SUPPORTER_MATCH_ACTOR,
   type AutomaticFounderBlockedReason,
   type MatchFacts,
@@ -70,6 +71,7 @@ export class SupporterMatchStore {
       discordReportedForOtherPatron: Boolean(facts?.discordReportedForOtherPatron),
       patreonDiscordElsewhere: Boolean(facts?.patreonDiscordElsewhere),
       linkedSteamShared: Boolean(facts?.linkedSteamShared),
+      patronLinkedAt: facts?.patronLinkedAt ?? null,
     } satisfies MatchFacts;
   }
 
@@ -207,6 +209,9 @@ export class SupporterMatchStore {
           if (!result.blocked.includes(reason)) result.blocked.push(reason);
         } else {
           const payment = facts.automatic!.payment;
+          // The promise says where its Discord account came from: Patreon's report or the patron's own sign-in.
+          const founderReason =
+            current.discordSource === "patron_signin" ? PATRON_LINK_FOUNDER_REASON : AUTO_FOUNDER_REASON;
           // The identity after any SteamID fill, so the steam lock and the cross-record check cover the new SteamID.
           const identity = { id: memberId, discordId: current.discordId, steamId: current.steamId };
           await lockKeys(tx, identityKeys("founder", identity));
@@ -218,7 +223,7 @@ export class SupporterMatchStore {
               paymentId: payment.id,
               awardedAt: options.now,
               awardedBy: SUPPORTER_MATCH_ACTOR.id,
-              reason: AUTO_FOUNDER_REASON,
+              reason: founderReason,
               windowStart: new Date(options.policy.startsAt!),
               windowEnd: new Date(options.policy.endsAt!),
             });
@@ -229,7 +234,7 @@ export class SupporterMatchStore {
               actorId: SUPPORTER_MATCH_ACTOR.id,
               actorName: SUPPORTER_MATCH_ACTOR.name,
               kind: "founder",
-              reason: AUTO_FOUNDER_REASON,
+              reason: founderReason,
               fingerprint: sha256({ kind: "automatic-founder", memberId, paymentId: payment.id }),
               details: {
                 paymentId: payment.id,

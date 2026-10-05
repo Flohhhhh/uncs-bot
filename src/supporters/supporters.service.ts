@@ -82,6 +82,7 @@ export class SupportersService {
       founderAuto: this.env.get("SUPPORTER_AUTO_FOUNDER_ENABLED") === true,
       importConfigured: this.patreonSync.configured(),
       holdHours: this.policy().automaticHoldHours ?? AUTO_FOUNDER_HOLD_HOURS_DEFAULT,
+      patronLink: this.env.get("PATREON_LINK_ENABLED") === true,
     };
   }
   /**

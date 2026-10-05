@@ -12,6 +12,9 @@ import { founderBlockedMessages, type FounderBlockedReason, type PaymentView } f
 export const SUPPORTER_MATCH_ACTOR = { id: "system:supporter-match", name: "Automatic supporter match" } as const;
 export const AUTO_FOUNDER_REASON =
   "Recorded automatically: Discord account from Patreon and a first Patreon payment inside the founder window.";
+/** The same promise on a Discord account the patron linked themselves ("Link Patreon"). */
+export const PATRON_LINK_FOUNDER_REASON =
+  "Recorded automatically: Discord account linked by the patron's own Discord and Patreon sign-in, and a first Patreon payment inside the founder window.";
 /** Default wait after an imported first payment before an automatic founder promise (Patreon's refund window). */
 export const AUTO_FOUNDER_HOLD_HOURS_DEFAULT = 72;
 
@@ -66,6 +69,8 @@ export type MatchFacts = {
   patreonDiscordElsewhere: boolean;
   /** Another Discord account has an application for the record's linked SteamID that was not declined or revoked. */
   linkedSteamShared: boolean;
+  /** When the patron last linked the record's current Discord account by signing in ("Link Patreon"), or null. */
+  patronLinkedAt: string | null;
 };
 export type MatchMember = {
   provider: SupporterProvider;
@@ -183,6 +188,7 @@ export type AutomaticFounderBlockedReason =
   | SteamMatchBlock
   | "no_patreon_payment"
   | "charge_reversed"
+  | "patron_link_too_recent"
   | "payment_too_recent"
   | "earlier_payment_other_record"
   | FounderBlockedReason;
@@ -212,6 +218,7 @@ export const automaticBlockedMessages: Record<AutomaticFounderBlockedReason, str
   no_patreon_payment:
     "No verified first payment from the Patreon import. A staff receipt or a PayPal payment is always reviewed by staff.",
   charge_reversed: "Patreon reports the latest charge as refunded, reversed or fraudulent.",
+  patron_link_too_recent: "The patron linked this Discord account inside the waiting period.",
   payment_too_recent: "The first payment is still inside the waiting period for refunds.",
   earlier_payment_other_record: "Another supporter record for this person has an earlier payment.",
 };
@@ -219,23 +226,35 @@ export const automaticBlockedMessages: Record<AutomaticFounderBlockedReason, str
 /**
  * Why automatic matching will not record a founder promise for this Patreon record, apart from the staff founder rule
  * (founderCheck, or founderBlocker on the same facts), which runs after this. It is stricter than staff awards: the
- * Discord account must come from the patron's Patreon connection and still be the one Patreon reports, and the payment
- * must be a verified first Patreon API payment whose latest charge was not reversed, that has passed the waiting
- * period, and that has no earlier payment on another record for the same person. No SteamID is needed. One that is
- * linked must be valid with no SteamID alert: one copied from an application must still pass the SteamID rule, one
- * staff entered must not differ from the approved application's, and no other Discord account may have applied with it.
- * Linked or not, one more thing about SteamIDs stops it: another supporter record holds a SteamID this Discord account
- * applied with, other than the linked one, so that record may be the same person's (see heldOnAnotherRecord).
+ * Discord account must come from the patron's Patreon connection and still be the one Patreon reports, or the patron
+ * must have linked it by signing in to Discord and Patreon, and Patreon must not report a different account. The
+ * payment must be a verified first Patreon API payment whose latest charge was not reversed, that has passed the
+ * waiting period, and that has no earlier payment on another record for the same person. A link the patron made
+ * themselves must also have stood for the waiting period, so staff can review it before a permanent promise. No
+ * SteamID is needed. One that is linked must be valid with no SteamID alert: one copied from an application must still
+ * pass the SteamID rule, one staff entered must not differ from the approved application's, and no other Discord
+ * account may have applied with it. Linked or not, one more thing about SteamIDs stops it: another supporter record
+ * holds a SteamID this Discord account applied with, other than the linked one, so that record may be the same
+ * person's (see heldOnAnotherRecord).
  */
 export function automaticFounderBlocker(
   member: MatchMember,
   facts: MatchFacts,
   context: { now: Date | number; holdHours: number },
 ): AutomaticFounderBlockedReason | null {
+  const now = typeof context.now === "number" ? context.now : context.now.getTime();
+  const hold = context.holdHours * 3_600_000;
   if (member.provider !== "patreon") return "not_patreon";
   if (!member.discordId) return "no_discord";
-  if (member.discordSource !== "patreon") return "discord_not_from_patreon";
-  if (member.patreonDiscordId !== member.discordId) return "discord_differs";
+  if (member.discordSource !== "patreon" && member.discordSource !== "patron_signin") return "discord_not_from_patreon";
+  // An import link must still be the account Patreon reports. A patron's own link proved the account by signing in, so
+  // only a different account reported by Patreon stops it.
+  if (
+    member.discordSource === "patreon"
+      ? member.patreonDiscordId !== member.discordId
+      : member.patreonDiscordId !== null && member.patreonDiscordId !== member.discordId
+  )
+    return "discord_differs";
   if (facts.discordReportedForOtherPatron) return "discord_reported_for_other_patron";
   // A founder needs no SteamID: the Discord account is the identity. A linked SteamID is still checked in full.
   if (member.steamId) {
@@ -258,18 +277,36 @@ export function automaticFounderBlocker(
   // Patreon dates that same charge a few seconds apart, which makes it a refund of the qualifying charge itself.
   if (member.lastChargeStatus && PATREON_REVERSED_CHARGE_STATUSES.has(member.lastChargeStatus))
     return "charge_reversed";
+  // A missing or unreadable link time never passes.
+  if (member.discordSource === "patron_signin" && !(Date.parse(facts.patronLinkedAt ?? "") <= now - hold))
+    return "patron_link_too_recent";
   const paidAt = Date.parse(automatic.payment.paidAt);
-  const now = typeof context.now === "number" ? context.now : context.now.getTime();
-  if (!(paidAt <= now - context.holdHours * 3_600_000)) return "payment_too_recent";
+  if (!(paidAt <= now - hold)) return "payment_too_recent";
   if (automatic.earlierOtherRecord) return "earlier_payment_other_record";
   return null;
 }
+
+/**
+ * Why a patron's own sign-in ("Link Patreon") was refused for this record: it already links another Discord account,
+ * another record of the campaign links that Discord account, or another founder record holds it.
+ */
+export type PatronLinkConflictReason = "membership_linked" | "discord_linked" | "founder_tie";
+/** The newest refused sign-in for a record that staff have not settled since (see SupporterView). */
+export type PatronLinkConflict = {
+  /** The Discord account the patron signed in with. */
+  discordId: string;
+  conflict: PatronLinkConflictReason;
+  /** The Discord account the record links, for `membership_linked`. */
+  linkedDiscordId: string | null;
+};
 
 /** `info` is not a task: it says why no founder promise is possible on this record. */
 export type NextStepArea = "discord" | "steam" | "payment" | "founder" | "info";
 export type NextStep = { code: string; area: NextStepArea; message: string };
 /** What the Supporters page needs to explain one record. */
 export type NextStepRecord = MatchMember & {
+  /** A refused patron sign-in staff have not settled yet. Omitted, none. */
+  patronLinkConflict?: PatronLinkConflict | null;
   founder: { automatic: boolean } | null;
   founderBlockedReason: FounderBlockedReason | "no_payment" | null;
   founderEligiblePayment: PaymentView | null;
@@ -292,6 +329,8 @@ export type NextStepContext = {
   importConfigured: boolean;
   /** Hours an imported first payment must stand before an automatic founder promise. */
   holdHours: number;
+  /** Patrons can link their own Discord account with "Link Patreon" (PATREON_LINK_ENABLED). Omitted, off. */
+  patronLink?: boolean;
   /**
    * Whether the viewer may open a game server. An application on any other server is named without its SteamID or
    * server; the step itself stays. Omitted, every server is shown.
@@ -366,13 +405,25 @@ function steamStep(steam: SteamMatch, record: NextStepRecord, context: NextStepC
   };
 }
 
+const patronLinkConflictMessages: Record<PatronLinkConflictReason, (conflict: PatronLinkConflict) => string> = {
+  membership_linked: ({ discordId, linkedDiscordId }) =>
+    `Discord account ${discordId} signed in as this patron, but this record links ${linkedDiscordId ?? "another account"}.`,
+  discord_linked: ({ discordId }) =>
+    `Discord account ${discordId} signed in as this patron, but another record already links it.`,
+  founder_tie: ({ discordId }) =>
+    `Discord account ${discordId} signed in as this patron, but another founder record holds it.`,
+};
+
 /**
  * The steps still needed for one record, in the order staff take them: Discord, SteamID, payment, founder. Alerts
- * (a different Discord account reported by Patreon, a revoked source application) come first in their area.
+ * (a refused patron sign-in, a different Discord account reported by Patreon, a revoked source application) come
+ * first in their area.
  */
 export function supporterNextSteps(record: NextStepRecord, context: NextStepContext): NextStep[] {
   const steps: NextStep[] = [];
   const discord = (code: string, message: string) => steps.push({ code, area: "discord", message });
+  const refused = record.patronLinkConflict;
+  if (refused) discord("patron_link_conflict", patronLinkConflictMessages[refused.conflict](refused));
   if (!record.discordId) {
     if (record.provider === "paypal")
       discord(
@@ -389,7 +440,9 @@ export function supporterNextSteps(record: NextStepRecord, context: NextStepCont
         "connect_discord_in_patreon",
         record.patreonDiscordId
           ? `Patreon reports Discord account ${record.patreonDiscordId}; the next sync links it.`
-          : "Ask the patron to connect Discord on Patreon, or link it here.",
+          : context.patronLink
+            ? "Ask the patron to tap Link Patreon in Discord, or link it here."
+            : "Ask the patron to connect Discord on Patreon, or link it here.",
       );
     else
       discord(

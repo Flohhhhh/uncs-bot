@@ -65,6 +65,8 @@ export const paymentJson = (alias: string) =>
  *   for this record is linked to another record.
  * - whether another Discord account has an application for the linked SteamID that was not declined or revoked. Only
  *   that yes or no is read: never the other account, its server or its status.
+ * - when the patron last linked the record's current Discord account by signing in to Discord and Patreon, from the
+ *   audit row "Link Patreon" writes. A later link of another account does not count for this one.
  */
 export function matchFactsSql(campaignId: string | null) {
   return sql`json_build_object(
@@ -98,7 +100,9 @@ export function matchFactsSql(campaignId: string | null) {
         AND linked.campaign_id = m.campaign_id AND linked.discord_id = m.patreon_discord_id),
     'linkedSteamShared', m.discord_id IS NOT NULL AND m.steam_id IS NOT NULL
       AND EXISTS (SELECT 1 FROM whitelist_applications shared WHERE shared.steam_id = m.steam_id
-        AND shared.discord_user_id <> m.discord_id AND shared.status NOT IN ('declined', 'revoked')))`;
+        AND shared.discord_user_id <> m.discord_id AND shared.status NOT IN ('declined', 'revoked')),
+    'patronLinkedAt', (SELECT max(a.created_at) FROM supporter_actions a WHERE a.member_id = m.id
+      AND a.kind = 'patron-discord-link' AND a.details->>'discordId' = m.discord_id))`;
 }
 
 /** Founder awards for one person serialize on each identity before the cross-record check. */

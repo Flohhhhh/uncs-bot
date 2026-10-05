@@ -18,10 +18,11 @@ const TOKEN_MALFORMED =
   "PATREON_CREATOR_ACCESS_TOKEN does not look like a Patreon access token. Copy the Creator's Access Token again.";
 
 /**
- * Deployment secrets that must never double as a Patreon credential. Shared by the webhook secret and the
- * creator token checks, so both refuse the same reuse.
+ * Deployment secrets that must never double as a Patreon credential. Shared by the webhook secret, the creator token
+ * and the Patreon client secret checks, so all three refuse the same reuse. The client secret's own check leaves
+ * itself out with `clientSecret: false`.
  */
-export function deploymentSecrets(env: EnvService) {
+export function deploymentSecrets(env: Pick<EnvService, "get">, { clientSecret = true } = {}) {
   return [
     env.get("DISCORD_BOT_TOKEN"),
     env.get("DATABASE_URL"),
@@ -30,6 +31,7 @@ export function deploymentSecrets(env: EnvService) {
     env.get("WARDOGS_RCON_PASSWORD"),
     env.get("WARDOGS_FEED_TOKEN"),
     ...(env.get("WARDOGS_SERVERS") ?? []).flatMap((server) => [server.password, server.feedToken]),
+    ...(clientSecret ? [env.get("PATREON_CLIENT_SECRET")] : []),
   ];
 }
 

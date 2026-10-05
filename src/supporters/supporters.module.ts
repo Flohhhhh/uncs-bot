@@ -17,7 +17,7 @@ import { SupporterMatchModule } from "./supporter-match.module";
   imports: [AdminModule, DiscordRolesModule, SupporterMatchModule],
   providers: [SupportersService, SupportersStore, SupportersExceptionFilter, PatreonClient, PatreonSyncService],
   controllers: [PatreonWebhookController, SupportersAdminController],
-  exports: [SupportersService, SupportersStore, PatreonSyncService],
+  exports: [SupportersService, SupportersStore, PatreonSyncService, PatreonClient],
 })
 export class SupportersModule implements NestModule {
   constructor(private readonly service: SupportersService) {}
