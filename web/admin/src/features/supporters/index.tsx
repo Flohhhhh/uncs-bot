@@ -580,7 +580,7 @@ function AutomationStatusLine({ automation }: { automation: AutomationStatus | u
         <p className="muted">
           {idle && "Patreon is not configured, so nothing is matched automatically. "}
           {founderAuto
-            ? `Gramps records a founder when Patreon shares their Discord account and their first payment qualifies and is ${hold} hours old. No SteamID is needed. Staff record the rest.`
+            ? `Gramps records Patreon founders with Discord linked, ${hold} hours after their first payment.`
             : `Automatic founder recording is off. Choose the “Would be recorded automatically” filter to see what it would record; staff record founder promises. Switched on, it waits ${hold} hours after the first payment for refunds.`}
           {steamFill
             ? " Gramps copies an empty SteamID on a Patreon record from the Discord account’s approved whitelist application when nothing about it needs checking."

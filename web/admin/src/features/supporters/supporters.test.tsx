@@ -900,7 +900,7 @@ it("words switched-on matching by the server's rule and says when Patreon leaves
   const detail = line.nextElementSibling!;
   expect(detail).toHaveTextContent("Patreon is not configured, so nothing is matched automatically.");
   expect(detail).toHaveTextContent(
-    "Gramps records a founder when Patreon shares their Discord account and their first payment qualifies and is 48 hours old. No SteamID is needed. Staff record the rest.",
+    "Gramps records Patreon founders with Discord linked, 48 hours after their first payment.",
   );
   expect(detail).not.toHaveTextContent(/SteamID with nothing to check|Staff can always record one/);
 });
