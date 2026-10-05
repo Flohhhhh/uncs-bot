@@ -1,5 +1,6 @@
 /** Local-only visual preview. Never imported by AppModule or enabled by a production flag. */
 import "reflect-metadata";
+import { PreviewAdminIdentity } from "./preview-admin-auth";
 import { Test } from "@nestjs/testing";
 import { HttpAdapterHost } from "@nestjs/core";
 import { ExpressAdapter } from "@nestjs/platform-express";
@@ -486,6 +487,7 @@ const store = {
     };
   },
 };
+const previewIdentity = new PreviewAdminIdentity(previewPort, process.env.PREVIEW_AUTH_MODE === "session");
 const auth = {
   async serverList() {
     return { legacy: false, servers: gameServers.list().map((server) => ({ ...server, role: "admin" })) };
@@ -497,28 +499,17 @@ const auth = {
   async role() {
     return "admin";
   },
-  async authenticate(req: Request) {
-    if (
-      !["GET", "HEAD"].includes(req.method) &&
-      (![
-        "http://127.0.0.1:4317",
-        "http://127.0.0.1:4318",
-        "http://127.0.0.1:4319",
-        `http://127.0.0.1:${previewPort}`,
-      ].includes(req.headers.origin ?? "") ||
-        req.headers["x-csrf-token"] !== "local-preview")
-    )
-      throw new Error("Preview origin rejected");
-    return { id: "preview", name: "UNC Staff", role: "admin", csrf: "local-preview", demo: true };
+  authenticate(req: Request) {
+    return previewIdentity.authenticate(req);
   },
   login(res: Response) {
-    res.redirect("/admin");
+    previewIdentity.login(res);
   },
   callback(_req: Request, res: Response) {
     res.redirect("/admin");
   },
-  logout() {
-    return { ok: true };
+  logout(req: Request, res: Response) {
+    return previewIdentity.logout(req, res);
   },
 };
 

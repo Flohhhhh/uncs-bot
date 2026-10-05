@@ -12,24 +12,33 @@ npm ci
 npm run dev
 ```
 
-Open http://localhost:3000. The index redirects to `/admin`, which currently shows a public placeholder. There are no auth guards, game actions or backend calls in this scaffold.
+Open http://127.0.0.1:3000. The index redirects to `/admin`; staff sessions gate the admin UI. Nest authorizes every API request.
 
 ```bash
+npm test              # All unit tests, including preview authentication
+npm run test:watch    # Watch tests during development
+npm run preview:backend # Session-mode backend preview on port 4320 (separate terminal)
+npm run verify        # Formatting, lint, typecheck and unit tests
 npm run check         # ESLint and TypeScript (including Next route types)
 npm run build         # Production build with Turbopack
 npm start             # Serve the production build
 npm run format:check
 npm run format:write
+npm run format -- src/path/to/file.tsx # Format selected files
 ```
 
 The root bot install, build and start commands still operate independently. Install root dependencies separately with `npm ci` from the repository root. Root lint includes the web app when its dependencies are installed. Root formatting always covers it, using basic formatting on backend-only installs and the app’s Tailwind-aware formatter when available; root touched-file typechecking routes web files to this app's TypeScript project. Backend TypeScript projects exclude `apps/`.
+
+The preview shortcut invokes the existing root preview command; root dependencies must be installed. It defaults to session mode and port 4320; `PREVIEW_PORT` can override the port. The preview implementation stays shared with the existing dashboard.
+
+Tests live in `tests/unit/<domain>`; future browser tests belong in `tests/e2e/<domain>`. Shared Vitest setup is in `tests/setup.ts`.
 
 ## Conventions
 
 - `src/app/(pages)` owns the index redirect and future public pages.
 - `src/app/(admin)/admin` owns `/admin`, with a separate admin layout.
-- `src/app/(auth)` reserves a centered layout for future authentication pages. It has no routes yet and does not implement login.
-- Route groups share the root layout, theme provider, nuqs App Router adapter and theme-aware Sonner toaster. Group names do not appear in URLs.
+- `src/app/(auth)` owns `/sign-in` and `/access-denied` with a centered layout.
+- Route groups share the root layout, theme and staff session providers, nuqs App Router adapter and theme-aware Sonner toaster. Group names do not appear in URLs.
 - Strict TypeScript with `~/` imports, Tailwind 4, system fonts, and shadcn New York / Radix / neutral tokens / Lucide.
 - Add official shadcn components from this directory using `npx shadcn@latest add <component>`.
 - React Hook Form + Zod 4, SWR, nuqs and TanStack Table are available for future features. SWR has no global polling, fetcher or retry overrides.
@@ -38,11 +47,24 @@ The root bot install, build and start commands still operate independently. Inst
 
 No environment file or credentials are required. `src/env.ts` validates `NODE_ENV` and the optional server-only `BACKEND_URL`.
 
-During `npm run dev`, `/admin/api/*` and `/admin/auth/*` are forwarded to the local Nest preview at `http://127.0.0.1:4320`. Start it from the repository root with `PREVIEW_PORT=4320 npm run preview:admin`. Override the target with `BACKEND_URL` in `apps/web/.env.local`, then restart Next.js. Production builds only enable these rewrites when `BACKEND_URL` is explicitly set at build time.
+During `npm run dev`, `/admin/api/*` rewrites to the local Nest preview at `http://127.0.0.1:4320`. Exact GET handlers for `/admin/auth/login` and `/admin/auth/callback` forward to Nest, preserving cookies and callback parameters. OAuth forwarding allows 45 seconds and returns sanitized failure messages. Override the target with server-only `BACKEND_URL` in `apps/web/.env.local`, then restart Next.js. Production API rewrites require `BACKEND_URL` at build time; configure it at runtime for the OAuth handlers too.
 
-These forwarding rules do not implement login or change the backend's origin/CSRF policy; those require verification before browser writes or real OAuth login.
+To exercise sign-in, reload and logout without Discord or a database, run these in separate terminals from the repository root:
 
-When backend integration is implemented, add server-only variables (such as `BACKEND_URL`) to the `server` schema and explicitly map them in `runtimeEnv`. Read secrets only from server modules marked with `import "server-only"`. Never expose service credentials with a `NEXT_PUBLIC_` prefix. Browser-visible variables belong in the `client` schema with the matching prefix and explicit mapping.
+```bash
+PREVIEW_PORT=4320 PREVIEW_AUTH_MODE=session npm run preview:admin
+npm --prefix apps/web run dev
+```
+
+Use `http://127.0.0.1:3000` consistently. Demo login issues a random HttpOnly cookie backed by an isolated in-memory session, valid for eight hours; logout invalidates it. Restarting the preview clears all sessions. The preview's default mode remains automatic demo authentication for the existing dashboard. Both Next.js loopback origins on port 3000 are allowed for writes, with CSRF validation still required.
+
+For real development OAuth, run the normal Nest backend and set `BACKEND_URL` to its address. Nest's `ADMIN_ORIGIN` must be the browser-facing Next.js origin, for example `http://localhost:3000`. Register `http://localhost:3000/admin/auth/callback` as the Discord OAuth callback. Use the same hostname for the browser, Nest's origin setting and the callback: localhost and 127.0.0.1 are different cookie/origin contexts. Keep Nest's role, MFA, membership and CSRF checks; forwarding does not rewrite origins to bypass them. No production configuration is changed by this app.
+
+Staff identity and CSRF stay in memory; the browser uses Nest's existing HttpOnly session cookies. Sessions are checked on load, every 30 seconds while authenticated and visible, and on focus, with a ten-second timeout. A 401 or 403 clears staff data and removes protected content. Malformed responses and connection failures show retry UI. Logout hides protected content immediately and sends one CSRF-protected POST; uncertain failures require manual retry. The admin status indicator uses this same session state.
+
+The client-side layout gate is UI protection. Nest remains the authorization boundary for all data/actions; future server-side admin data fetching must also verify sessions rather than relying on this gate.
+
+For future backend configuration, add server-only variables (such as `BACKEND_URL`) to the `server` schema and explicitly map them in `runtimeEnv`. Read secrets only from server modules marked with `import "server-only"`. Never expose service credentials with a `NEXT_PUBLIC_` prefix. Browser-visible variables belong in the `client` schema with the matching prefix and explicit mapping.
 
 The current Nest service retains Discord OAuth, sessions, permissions and database ownership. This app has no Better Auth, database client, CMS, uploads or monitoring setup.
 

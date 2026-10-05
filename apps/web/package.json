@@ -14,7 +14,13 @@
     "typecheck": "next typegen && tsc --noEmit",
     "check": "npm run lint && npm run typecheck",
     "format:check": "prettier --check .",
-    "format:write": "prettier --write ."
+    "format:write": "prettier --write .",
+    "test": "vitest run",
+    "format": "prettier --write",
+    "test:unit": "vitest run tests/unit",
+    "test:watch": "vitest",
+    "preview:backend": "cd ../.. && PREVIEW_PORT=${PREVIEW_PORT:-4320} PREVIEW_AUTH_MODE=session npm run preview:admin",
+    "verify": "npm run format:check && npm run check && npm run test:unit"
   },
   "dependencies": {
     "@hookform/resolvers": "5.9.1",
@@ -39,16 +45,21 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "4.3.3",
+    "@testing-library/jest-dom": "7.0.1",
+    "@testing-library/react": "16.3.3",
     "@types/node": "22.20.5",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
     "eslint": "9.39.5",
     "eslint-config-next": "16.3.8",
     "eslint-config-prettier": "10.1.8",
+    "jsdom": "30.1.2",
     "postcss": "8.5.29",
     "prettier": "3.9.9",
     "prettier-plugin-tailwindcss": "0.8.1",
     "tailwindcss": "4.3.3",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "vitest": "5.0.3"
   }
 }

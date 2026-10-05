@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 
+import { BackendStatus } from "~/components/backend-status";
+
 import { Badge } from "~/components/ui/badge";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "~/components/ui/card";
 
@@ -31,8 +33,9 @@ export default function AdminPage() {
             Your community tools will live here. For now, keep using the existing staff dashboard.
           </p>
         </CardContent>
-        <CardFooter>
+        <CardFooter className="flex-wrap gap-3">
           <Badge variant="secondary">Coming soon</Badge>
+          <BackendStatus />
         </CardFooter>
       </Card>
     </>

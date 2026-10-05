@@ -17,7 +17,7 @@ const backendFiles = requestedFiles.length
   : ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "web/admin/**/*.{ts,tsx,mts,css,html,json}"];
 const webFiles = requestedFiles.length
   ? requestedFiles.filter(isWebFile).map((file) => path.relative(webRoot, path.resolve(process.cwd(), file)))
-  : ["src/**/*.{ts,tsx,css}", "*.{ts,mjs,json,md}", "!package-lock.json", "!next-env.d.ts"];
+  : ["src/**/*.{ts,tsx,css}", "tests/**/*.{ts,tsx}", "*.{ts,mjs,json,md}", "!package-lock.json", "!next-env.d.ts"];
 const prettierCli = require.resolve("prettier/bin/prettier.cjs");
 
 function run(cli: string, files: string[], cwd: string, extra: string[] = []) {
