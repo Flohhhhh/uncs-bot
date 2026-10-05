@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter, useLocation } from "react-router-dom";
-import { beforeEach, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../../api/client";
 import { AdminContext, type AdminContextValue } from "../../app/context";
 import { context } from "../players/test-fixtures";
@@ -371,5 +371,56 @@ it("ignores an ID that is not a complete action ID", async () => {
   render(page(context(), <ActivityPage />, "/activity?server=primary&view=actions&id=../settings"));
   expect(screen.getByRole("searchbox")).toHaveValue("");
   await screen.findByText("No recorded staff actions");
-  expect(request.mock.calls.map(([path]) => path)).toEqual(["audit"]);
+  expect(request.mock.calls.map(([path]) => path).sort()).toEqual(["audit", "moderation/repeat-offenders"]);
+});
+describe("repeat offenders on Action history", () => {
+  const griefer = "76561198000000009";
+  const lastAt = "2026-10-02T18:00:00Z";
+  const list = (players: unknown[]) => ({ minimum: 2, days: 30, players });
+  const offender = {
+    steamId: griefer,
+    name: "Griefer",
+    kicks: { count: 4, recent: 3, lastAt, lastBy: "Mod", lastReason: "Team killing" },
+  };
+  function respond(repeat: unknown) {
+    request.mockImplementation(
+      async (path) =>
+        (path === "moderation/repeat-offenders"
+          ? repeat
+          : path === "activity"
+            ? { events: [] }
+            : path.startsWith("moderation/players/")
+              ? { kicks: offender.kicks, bans: null, entries: [] }
+              : []) as never,
+    );
+  }
+  it("lists players kicked often lately, each opening the player panel", async () => {
+    respond(list([offender, { ...offender, steamId: "76561198000000008", name: null }]));
+    render(page(context(), <ActivityPage />, "/activity?server=primary&view=actions"));
+    expect(await screen.findByRole("heading", { name: "Repeat offenders" })).toBeInTheDocument();
+    expect(screen.getByText("2+ kicks in the last 30 days")).toBeInTheDocument();
+    const day = new Date(lastAt).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    const row = screen.getByRole("button", { name: "Griefer" }).closest("li")!;
+    expect(row).toHaveTextContent(`3 kicks · last ${day} by Mod: Team killing`);
+    // A record from before names were kept shows the SteamID.
+    expect(screen.getByRole("button", { name: "76561198000000008" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Griefer" }));
+    const panel = screen.getByRole("dialog");
+    expect(within(panel).getByRole("heading", { name: "Griefer" })).toBeInTheDocument();
+    expect(await within(panel).findByText(`Kicked 4 times · last ${day} by Mod: Team killing`)).toBeInTheDocument();
+  });
+  it("shows nothing when no player qualifies", async () => {
+    respond(list([]));
+    render(page(context(), <ActivityPage />, "/activity?server=primary&view=actions"));
+    await screen.findByText("No recorded staff actions");
+    expect(request).toHaveBeenCalledWith("moderation/repeat-offenders", expect.anything());
+    expect(screen.queryByRole("heading", { name: "Repeat offenders" })).not.toBeInTheDocument();
+  });
+  it("leaves the list out of a linked player's action history", async () => {
+    respond(list([offender]));
+    render(page(context(), <ActivityPage />, `/activity?server=primary&view=actions&player=${griefer}`));
+    await screen.findByText("No matching staff actions");
+    expect(request.mock.calls.map(([path]) => path)).toEqual(["audit"]);
+    expect(screen.queryByRole("heading", { name: "Repeat offenders" })).not.toBeInTheDocument();
+  });
 });

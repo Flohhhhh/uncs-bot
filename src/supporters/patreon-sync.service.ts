@@ -1,9 +1,9 @@
 import { Injectable, Logger, type OnApplicationBootstrap, type OnModuleDestroy } from "@nestjs/common";
 import { DiscordRolesService } from "../discord-roles/discord-roles.service";
 import { EnvService } from "../env/env.service";
-import { PatreonApiError, PatreonClient, type PatreonTierPrices } from "./patreon.client";
+import { PatreonApiError, PatreonClient, patreonChargePaid, type PatreonTierPrices } from "./patreon.client";
 import { SupporterMatchService } from "./supporter-match.service";
-import { SupportersStore, type FounderReview } from "./supporters.store";
+import { SupportersStore } from "./supporters.store";
 
 export const PATREON_SYNC_STARTUP_DELAY_MS = 15_000;
 export const PATREON_SYNC_STAFF_COOLDOWN_MS = 30_000;
@@ -33,12 +33,15 @@ export function deploymentSecrets(env: EnvService) {
   ];
 }
 
+/**
+ * A Discord account the import could not settle: Patreon reports another account than a staff link or a founder's
+ * link (`discord-differs`), or another record holds the account Patreon reports and keeps it (`discord-in-use`).
+ */
 export type PatreonSyncConflict = {
   supporterId: string;
   patreonMemberId: string;
   reason: "discord-in-use" | "discord-differs";
 };
-export type PatreonFounderReview = FounderReview;
 export type PatreonSyncStatus = {
   configured: boolean;
   running: boolean;
@@ -57,7 +60,7 @@ export type PatreonSyncStatus = {
   /** Members whose returned pledge history may be incomplete, so no first payment was derived. */
   truncated: number;
   revokedPayments: number;
-  /** Members with at least one completed payment in the history Patreon returned. */
+  /** Members with at least one paid charge in the history Patreon returned. */
   paidMembers: number;
   /** Members Patreon reported a Discord account for, linked or not. */
   discordReported: number;
@@ -73,7 +76,6 @@ export type PatreonSyncStatus = {
   intervalMinutes: number;
   nextAttemptAt: string | null;
   conflictDetails: PatreonSyncConflict[];
-  founderReviews: PatreonFounderReview[];
 };
 type Counts = Pick<
   PatreonSyncStatus,
@@ -93,7 +95,6 @@ type Counts = Pick<
   | "tierPrices"
   | "memberListComplete"
   | "conflictDetails"
-  | "founderReviews"
 >;
 const emptyCounts = (): Counts => ({
   members: 0,
@@ -112,7 +113,6 @@ const emptyCounts = (): Counts => ({
   tierPrices: "not_requested",
   memberListComplete: true,
   conflictDetails: [],
-  founderReviews: [],
 });
 
 /** Single-instance, single-flight Patreon member import. All state is in memory. */
@@ -187,7 +187,6 @@ export class PatreonSyncService implements OnApplicationBootstrap, OnModuleDestr
       tokenRejected: this.tokenRejected,
       ...this.counts,
       conflictDetails: [...this.counts.conflictDetails],
-      founderReviews: [...this.counts.founderReviews],
       intervalMinutes: this.intervalMs() / 60_000,
       nextAttemptAt: configured ? iso(this.nextAttemptAt) : null,
     };
@@ -254,7 +253,7 @@ export class PatreonSyncService implements OnApplicationBootstrap, OnModuleDestr
         if (this.stopped) break;
         if (!member.historyComplete) counts.truncated++;
         if (member.discordId) counts.discordReported++;
-        if (member.events.some((event) => event.paymentStatus === "Paid")) counts.paidMembers++;
+        if (member.events.some((event) => patreonChargePaid(event.paymentStatus))) counts.paidMembers++;
         const result = await this.store.importApiMember(campaignId, member, new Date());
         if (result.created) counts.newMembers++;
         if (result.updated) counts.updated++;
@@ -267,9 +266,16 @@ export class PatreonSyncService implements OnApplicationBootstrap, OnModuleDestr
         // An unchanged record queues nothing; the six-hour role safety pass covers time-based expiry.
         if (
           result.discordId &&
-          (result.created || result.updated || result.payments || result.revoked || result.discordLinked)
+          (result.created ||
+            result.updated ||
+            result.payments ||
+            result.revoked ||
+            result.discordLinked ||
+            result.discordConfirmed)
         )
           this.notifyRoles(result.discordId);
+        // An account the import took off a record may no longer hold a role.
+        for (const released of result.releasedDiscordIds) this.notifyRoles(released);
         if (result.conflict) {
           counts.conflicts++;
           if (counts.conflictDetails.length < MAX_DETAILS)
@@ -285,7 +291,6 @@ export class PatreonSyncService implements OnApplicationBootstrap, OnModuleDestr
       // Automatic supporter matching (off by default) sees this sync's Discord links and payments. It never rejects
       // and keeps its own status, so it cannot fail the sync.
       await this.match.sweep("sync");
-      counts.founderReviews = await this.store.founderReviews(campaignId);
       // Logged once when the tier result changes, so a deploy shows whether other-currency payments now count.
       const tierChanged =
         counts.tierUnconfirmed !== this.counts.tierUnconfirmed || counts.tierPrices !== this.counts.tierPrices;

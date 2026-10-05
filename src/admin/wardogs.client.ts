@@ -188,6 +188,11 @@ export class WardogsClient {
     return this.observations.view();
   }
 
+  /** A player's name in the last roster this client read, or undefined. Sends nothing to the game. */
+  rosterName(steamId: string) {
+    return this.observations.playerName(steamId);
+  }
+
   async bans() {
     return bansSchema.parse(await this.request("GET", "/v1/bans")).bans;
   }

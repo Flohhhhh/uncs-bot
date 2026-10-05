@@ -106,3 +106,13 @@ it("keeps a bounded independent history and ignores duplicate or late snapshots"
   state.events[0].message = "changed by caller";
   expect(feed.view().events[0].message).not.toBe("changed by caller");
 });
+it("names a player from the last good roster read only", () => {
+  const feed = new ServerActivity();
+  expect(feed.playerName(a.steamId)).toBeUndefined();
+  feed.observe(snapshot(0, [a, b]));
+  feed.observe(snapshot(5, [b]));
+  expect(feed.playerName(b.steamId)).toBe("Bob");
+  expect(feed.playerName(a.steamId)).toBeUndefined();
+  feed.failed();
+  expect(feed.playerName(b.steamId)).toBeUndefined();
+});

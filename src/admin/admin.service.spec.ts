@@ -191,3 +191,85 @@ describe("a person queuing the entry that is already next", () => {
     for (const f of [own, changed, other]) expect(f.listener).not.toHaveBeenCalled();
   });
 });
+
+describe("kick and ban records", () => {
+  const player = "76561198123456789";
+  const kick = () => ({ id: randomUUID(), action: "kick", steamId: player, reason: "Team killing" });
+  // Separate staff members avoid the one-second courtesy limit between actions.
+  const actor = (index: number) => ({ ...staff, id: `12345678901234567${index}` });
+
+  it("keeps the player's name from the last roster read with a kick or ban, without asking the game", async () => {
+    const { service, game, store } = fixture();
+    const rosterName = jest.fn((steamId: string) => (steamId === player ? "  Griefer  " : undefined));
+    Object.assign(game, { rosterName });
+    await service.act(actor(1), kick());
+    await service.act(actor(2), input());
+    await service.act(actor(3), { ...kick(), action: "message", message: "Please stop" });
+    expect(store.begin.mock.calls.map((call) => call.length)).toEqual([4, 4, 3]);
+    expect(store.begin.mock.calls.map((call) => call[3])).toEqual(["Griefer", "Griefer", undefined]);
+    expect(rosterName).toHaveBeenCalledTimes(2);
+    expect(game.execute).toHaveBeenCalledTimes(3);
+  });
+
+  it("records a kick without a name when the roster has none or cannot be read", async () => {
+    const { service, game, store } = fixture();
+    await service.act(actor(1), kick());
+    Object.assign(game, { rosterName: () => "x".repeat(100) });
+    await service.act(actor(2), kick());
+    expect(store.begin.mock.calls[0]).toHaveLength(3);
+    expect(store.begin.mock.calls[1][3]).toBe("x".repeat(64));
+    expect(game.execute).toHaveBeenCalledTimes(2);
+  });
+
+  function readFixture() {
+    const record = { count: 3, recent: 2, lastAt: new Date(), lastBy: "Mod", lastReason: "Team killing" };
+    const store = {
+      moderationSummaries: jest
+        .fn()
+        .mockResolvedValue(new Map([[player, { name: "Griefer", kicks: record, bans: null }]])),
+      moderationEntries: jest.fn().mockResolvedValue([{ id: "entry" }]),
+      repeatOffenders: jest.fn().mockResolvedValue([{ steamId: player, name: "Griefer", kicks: record }]),
+    };
+    return { record, store, service: new AdminService(fixtureServers({}), store as unknown as AdminStore) };
+  }
+
+  it("reads one player's record on the selected server for the player panel", async () => {
+    const { record, store, service } = readFixture();
+    await expect(service.moderation(player)).resolves.toEqual({
+      kicks: record,
+      bans: null,
+      entries: [{ id: "entry" }],
+    });
+    expect(store.moderationSummaries).toHaveBeenCalledWith("primary", [player]);
+    expect(store.moderationEntries).toHaveBeenCalledWith("primary", player);
+    store.moderationSummaries.mockResolvedValue(new Map());
+    await expect(service.moderation(player)).resolves.toMatchObject({ kicks: null, bans: null });
+  });
+
+  it("refuses an invalid SteamID and reports a failed read without its details", async () => {
+    const { store, service } = readFixture();
+    await expect(service.moderation("../audit")).rejects.toThrow("17-digit SteamID64");
+    expect(store.moderationSummaries).not.toHaveBeenCalled();
+    store.moderationEntries.mockRejectedValue(new Error("connection refused at 10.0.0.5"));
+    await expect(service.moderation(player)).rejects.toThrow(
+      "Kick and ban history could not be loaded. Try again shortly.",
+    );
+  });
+
+  it("lists players kicked twice or more in the last 30 days", async () => {
+    jest.useFakeTimers().setSystemTime(Date.parse("2026-10-05T12:00:00Z"));
+    try {
+      const { store, service } = readFixture();
+      await expect(service.repeatOffenders()).resolves.toMatchObject({
+        minimum: 2,
+        days: 30,
+        players: [{ steamId: player }],
+      });
+      expect(store.repeatOffenders).toHaveBeenCalledWith("primary", new Date("2026-09-05T12:00:00Z"), 2);
+      store.repeatOffenders.mockRejectedValue(new Error("DB offline"));
+      await expect(service.repeatOffenders()).rejects.toThrow("Repeat offenders could not be loaded.");
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});

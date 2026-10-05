@@ -215,22 +215,41 @@ export type FounderBlockedReason =
   | "no_identity"
   | "already_founder"
   | "steam_applied_by_founder";
+/** Shown to staff on the Supporters page, as the record's founder verdict and when the server refuses a founder. */
 export const founderBlockedMessages: Record<FounderBlockedReason | "no_payment", string> = {
-  window_not_configured: "The founder window is not configured.",
-  source_not_qualifying:
-    "Only a checked Patreon receipt, a Patreon API payment or a PayPal payment can qualify. A signed status alone cannot.",
-  not_verified: "This payment has not been verified, or Patreon no longer reports its charge as paid.",
-  not_first_payment: "Staff have not confirmed this was the supporter's first successful payment.",
-  earlier_payment:
-    "An earlier payment is recorded. Review the first successful payment before recording a founder promise.",
-  outside_window: "This payment was not made inside the founder window.",
-  below_minimum: "The payment is below US$5, or a non-USD payment has not been confirmed to be worth at least US$5.",
-  no_identity: "Link a Discord account or a valid SteamID64 first. A SteamID that is entered must be valid.",
-  already_founder: "This person already has a founder record. Each person can be a founder once.",
+  window_not_configured: "Founder dates are not set.",
+  source_not_qualifying: "Patreon has not confirmed a payment yet.",
+  not_verified: "This payment is not confirmed as paid.",
+  not_first_payment: "Not confirmed as their first payment.",
+  earlier_payment: "They have an earlier payment.",
+  outside_window: "Paid outside the founder window.",
+  below_minimum: "Paid less than US$5.",
+  no_identity: "Add a Discord account first.",
+  // The founder rule finds this on another record. A record that is a founder itself is refused in its own words.
+  already_founder: "Another supporter with this Discord account or SteamID is already a founder.",
   steam_applied_by_founder:
     "A founder with no SteamID linked applied for the whitelist with this SteamID. Link that founder's SteamID first.",
-  no_payment: "No payment is recorded for this supporter.",
+  no_payment: "No payment yet.",
 };
+/**
+ * A record's verdict when its earliest payment is an imported charge Patreon reversed. Under the first-payment rule no
+ * later payment is their first, so it names that charge rather than the payment the record shows.
+ */
+export const FIRST_PAYMENT_REFUNDED = "Their first payment was refunded.";
+/** A record's verdict when Patreon priced the tier of its payment in another currency under the founder minimum. */
+export const TIER_BELOW_MINIMUM = "Their tier costs less than US$5.";
+/**
+ * The founder verdict as staff read it. A payment in another currency is below the minimum only until it is confirmed
+ * as worth US$5 or more, so its sentence says that rather than what was paid.
+ */
+export function founderBlockedMessage(
+  reason: FounderBlockedReason | "no_payment",
+  payment?: { currency: string | null } | null,
+) {
+  return reason === "below_minimum" && payment?.currency && payment.currency !== FOUNDER_MINIMUM.currency
+    ? `This ${payment.currency} payment is not confirmed as US$5 or more.`
+    : founderBlockedMessages[reason];
+}
 export type FounderPaymentFacts = {
   source: string;
   verificationState: string;
@@ -379,10 +398,32 @@ export type SupporterView = {
   /** Newest first, at most 20. */
   payments: PaymentView[];
   founderEligiblePayment: PaymentView | null;
-  /** `automatic` is true when automatic supporter matching recorded the promise. */
-  founder: { awardedAt: string; paymentId: string; source: SupporterPaymentSource | null; automatic: boolean } | null;
+  /**
+   * `automatic` is true when automatic supporter matching recorded the promise. `paymentVerified` is false once
+   * Patreon no longer reports the founder payment as paid (for a staff receipt, its imported copy), and
+   * `paymentFirst` is false once that payment is no longer marked as the first payment. The promise stands either way.
+   */
+  founder: {
+    awardedAt: string;
+    paymentId: string;
+    source: SupporterPaymentSource | null;
+    automatic: boolean;
+    paymentVerified: boolean;
+    paymentFirst: boolean;
+  } | null;
   /** Why no founder promise can be recorded yet; null for a founder or a member ready to award. */
   founderBlockedReason: FounderBlockedReason | "no_payment" | null;
+  /**
+   * Only the first-payment mark, which the Patreon import has not settled yet, stands between this Patreon record and
+   * a founder promise, apart from a missing Discord account or a tier price Patreon can still supply. Its payment is a
+   * verified imported payment. Gramps waits for the import rather than asking staff.
+   */
+  founderFirstPaymentWaiting: boolean;
+  /**
+   * The founder payment is in another currency and Patreon priced its tier under US$5, so no sync will confirm it as
+   * worth US$5 or more unless that price rises. Gramps knows the answer, so nothing waits for Patreon.
+   */
+  founderTierBelowMinimum: boolean;
   /** The staff-facing text for `founderBlockedReason`. */
   founderBlockedMessage: string | null;
   /** A founder without a linked Discord account cannot receive the Founder role. */

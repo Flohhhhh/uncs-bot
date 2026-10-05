@@ -1,31 +1,33 @@
-import type {
-  FounderPolicy,
-  NextStep,
-  PaymentEvidence,
-  Supporter,
-  SupporterDecision,
-  SupporterReviewInput,
-} from "./types";
+import type { FounderPolicy, PaymentEvidence, Supporter, SupporterDecision, SupporterReviewInput } from "./types";
 import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 
-export function paymentDescription(payment: PaymentEvidence | null) {
-  if (!payment) return "No payment evidence recorded";
+/** The record's name, or which kind of supporter it is when it has none. */
+export const recordName = (record: Supporter) =>
+  record.displayName || (record.provider === "paypal" ? "PayPal supporter" : "Patreon member");
+
+const paymentSources: Record<string, string> = {
+  patreon_api: "from Patreon",
+  manual_receipt: "added by staff",
+  paypal: "PayPal",
+  signed_status: "status only",
+};
+/** "5.00 USD · from Patreon · first payment", or "No payment yet". */
+export function paymentLine(payment: PaymentEvidence | null) {
+  if (!payment) return "No payment yet";
   const amount =
     typeof payment.amountCents === "number"
-      ? `${(payment.amountCents / 100).toFixed(2)} ${payment.currency || "currency not recorded"}`
-      : "Amount not established";
-  const history = payment.firstSuccessfulPaymentVerified
-    ? "first payment history checked"
-    : "first payment history not confirmed";
-  const evidence =
-    payment.source === "manual_receipt"
-      ? `receipt checked by staff · ${history}`
-      : payment.source === "patreon_api"
-        ? `${payment.verificationState === "verified" ? "checked by the Patreon import" : "Patreon import no longer reports this charge as paid"} · ${history}`
-        : payment.source === "paypal"
-          ? `PayPal payment checked by staff · ${history}`
-          : "provider status only";
-  return `${amount} · ${evidence}`;
+      ? `${(payment.amountCents / 100).toFixed(2)} ${payment.currency ?? ""}`.trim()
+      : null;
+  // A signed status is never a payment. Any other payment Patreon stopped reporting as paid says so first.
+  const source =
+    payment.source === "signed_status"
+      ? paymentSources.signed_status
+      : payment.verificationState !== "verified"
+        ? "no longer paid"
+        : (paymentSources[payment.source] ?? payment.source);
+  return [amount, source, payment.firstSuccessfulPaymentVerified ? "first payment" : null]
+    .filter((part) => part !== null)
+    .join(" · ");
 }
 
 /** The server decides founder eligibility; the dashboard only follows its verdict. */
@@ -33,104 +35,188 @@ export function founderReady(record: Supporter) {
   return !record.founder && record.founderBlockedReason === null && Boolean(record.founderEligiblePayment);
 }
 
-/** How the Discord account was linked, in staff-facing words. */
-export function discordDescription(record: Supporter) {
-  const reported = record.patreonDiscordId;
-  if (!record.discordId)
-    return !reported
-      ? "Record the account after confirming the member’s identity."
-      : record.match.patreonDiscordElsewhere
-        ? `Patreon reports Discord account ${reported}, which another supporter record links.`
-        : `Patreon reports Discord account ${reported}. It is not linked to this record yet.`;
-  // The server raises this step only while the import keeps Patreon's answer current.
-  const notReported = record.nextSteps.some((step) => step.code === "discord_not_reported");
-  const patreon =
-    record.provider !== "patreon"
-      ? ""
-      : !reported
-        ? notReported
-          ? " Patreon does not currently report this account."
-          : ""
-        : reported === record.discordId
-          ? " Patreon reports the same account."
-          : ` Patreon now reports a different account: ${reported}.`;
-  if (record.discordSource === "patreon") return `From Patreon (the patron connected it).${patreon}`;
-  if (record.discordSource === "staff") return `Entered by staff; not verified through Discord sign-in.${patreon}`;
-  return `Linked before match sources were recorded.${patreon}`;
+/**
+ * Steps that tie the record to another one that may be the same person: it holds a SteamID they applied with, or it
+ * paid earlier. The staff founder rule compares this record alone, so Make founder stays hidden while one shows.
+ */
+const OTHER_RECORD_CODES = new Set([
+  "steam_on_another_record",
+  "founder_steam_on_another_record",
+  "founder_earlier_payment_other_record",
+]);
+/** Whether the record offers Make founder: the server's verdict, unless another record may be the same person. */
+export function founderOffered(record: Supporter) {
+  return founderReady(record) && !record.nextSteps.some((step) => OTHER_RECORD_CODES.has(step.code));
 }
 
-/** How the SteamID was linked, in staff-facing words. Steam ownership is never verified here. */
-export function steamDescription(record: Supporter) {
-  if (!record.steamId) return "Not linked yet.";
-  if (record.steamSource === "application") {
-    const server = record.match.sourceApplication?.serverId;
-    return `Copied from the approved whitelist application${server ? ` on server ${server}` : ""}. Steam ownership is not verified.`;
-  }
-  if (record.steamSource === "staff") return "Entered by staff; Steam ownership is not verified by this page.";
-  return "Linked before match sources were recorded; Steam ownership is not verified.";
-}
+/** Where the Discord account came from. */
+export const discordSource = (record: Supporter) =>
+  record.discordSource === "patreon"
+    ? "From Patreon"
+    : record.discordSource === "staff"
+      ? "Added by staff"
+      : "Added earlier";
+/** Where the SteamID came from. */
+export const steamSource = (record: Supporter) =>
+  record.steamSource === "application"
+    ? "From their application"
+    : record.steamSource === "staff"
+      ? "Added by staff"
+      : "Added earlier";
 
-export const identityLabels: Record<Supporter["identityState"], string> = {
-  patreon_linked: "Discord from Patreon",
-  staff_linked: "Staff-linked",
-  partial: "Partly matched",
-  unlinked: "Not linked",
-};
-const sourceLabel = (value: string | null, source: string | null) =>
-  !value ? "not linked" : source === "patreon" ? "Patreon" : source === "application" ? "application" : "staff";
-/** One line for the table: where each identity came from. */
-export function matchSummary(record: Supporter) {
-  return `Discord: ${sourceLabel(record.discordId, record.discordSource)} · SteamID: ${sourceLabel(record.steamId, record.steamSource)}`;
+/**
+ * The supporter's provider and payment state for the table's small line. A Patreon charge that was not paid is the
+ * one worth a warning.
+ */
+export function providerLine(record: Supporter): { text: string; warn: boolean } {
+  if (record.provider === "paypal") return { text: "PayPal", warn: false };
+  const charge = record.lastChargeStatus;
+  if (charge && charge !== "Paid") return { text: `Patreon · last charge ${charge}`, warn: true };
+  const statuses: Record<string, string> = {
+    active_patron: "Patreon",
+    declined_patron: "Patreon · payment issue",
+    former_patron: "Patreon · former",
+  };
+  const status = record.patronStatus;
+  return { text: status ? (statuses[status] ?? `Patreon · ${status}`) : "Patreon · not paying", warn: false };
 }
 
 /**
- * The SteamID an approved application offers staff to check and link when the record has none: only one the SteamID
- * rule accepts, or one approved without a recorded grant. A SteamID that is shared, was rejected before, is held by
- * another record, is invalid, or is under review is never offered. It is never filled in.
+ * Gramps, Patreon or the supporter does these next. Nothing for staff to do. A below-minimum step that is not a note
+ * is a Patreon payment in another currency, which every sync checks against its tier's price again.
  */
-const OFFERED_REASONS = new Set<string | null>([null, "application_not_confirmed"]);
+const WAITING_CODES = new Set([
+  "connect_discord_in_patreon",
+  "link_discord_no_import",
+  "steam_ready_automatic",
+  "founder_ready_automatic",
+  "founder_automatic_waiting",
+  "founder_ready_automatic_off",
+  "founder_below_minimum",
+  "founder_not_first_payment",
+  "founder_source_not_qualifying",
+  "founder_waiting_patreon",
+  "founder_waiting_discord",
+]);
+/** A missing whitelist application matters only once the whitelist promise is used, so it is shown in the record only. */
+const LATER_CODES = new Set([
+  "no_whitelist_application",
+  "application_pending",
+  "application_in_progress",
+  "no_approved_application",
+]);
+/**
+ * A founder needs no SteamID, so these SteamID steps and alerts matter only for the whitelist promise later, on every
+ * record. A SteamID another record holds is a real conflict, so it stays a task.
+ */
+const STEAM_LATER_CODES = new Set([
+  "application_not_confirmed",
+  "several_steam_ids",
+  "invalid_steam_id",
+  "steam_shared",
+  "steam_rejected_before",
+  "steam_available",
+  "source_application_revoked",
+  "steam_differs_from_application",
+  "linked_steam_shared",
+]);
+
+export type RowState = {
+  /** `needs` while staff have something to do, `waiting` while Gramps, Patreon or the supporter does, else `set`. */
+  state: "needs" | "waiting" | "set";
+  /** The server's steps only staff can take. */
+  needs: string[];
+  waiting: string[];
+  /** Steps that matter only for the whitelist promise later, shown in the record only. */
+  later: string[];
+  /** Why this record cannot be a founder. */
+  notes: string[];
+};
+
+/**
+ * Sorts a record's next steps by who acts on them; the first match wins. Payment steps and notes say why the record
+ * is not a founder and grant nothing, so they are notes. A step this page does not know lands in `needs`, so nothing
+ * new is hidden. Each line shows once, though two steps can wait for the same thing.
+ */
+export function rowState(record: Supporter): RowState {
+  const needs = new Set<string>();
+  const waiting = new Set<string>();
+  const later = new Set<string>();
+  const notes = new Set<string>();
+  const noAccount = !record.discordId && !record.steamId;
+  const patreon = record.provider === "patreon";
+  for (const step of record.nextSteps) {
+    if (step.area === "payment" || step.area === "info" || step.code === "founder_window_not_configured")
+      notes.add(step.message);
+    else if (
+      WAITING_CODES.has(step.code) ||
+      (step.code === "founder_no_identity" && noAccount) ||
+      (step.code === "founder_needs_discord" && patreon)
+    )
+      waiting.add(step.message);
+    else if (LATER_CODES.has(step.code) || STEAM_LATER_CODES.has(step.code)) later.add(step.message);
+    else needs.add(step.message);
+  }
+  return {
+    state: needs.size ? "needs" : waiting.size ? "waiting" : "set",
+    needs: [...needs],
+    waiting: [...waiting],
+    later: [...later],
+    notes: [...notes],
+  };
+}
+export const stateRank: Record<RowState["state"], number> = { needs: 0, waiting: 1, set: 2 };
+
+/** Discord steps that mean the linked or reported account needs a person to check it. */
+const DISCORD_CHECK_CODES = new Set([
+  "discord_on_another_record",
+  "discord_differs",
+  "discord_reported_for_other_patron",
+]);
+export type DiscordCell = { text: string; warn: boolean; detail?: string; rank: number };
+/**
+ * The table's Discord column. The first match wins, and `rank` sorts problems first. Only a PayPal record misses an
+ * account staff must add: a Patreon one arrives from Patreon.
+ */
+export function discordCell(record: Supporter): DiscordCell {
+  if (record.nextSteps.some((step) => DISCORD_CHECK_CODES.has(step.code)))
+    return { text: "Check", warn: true, rank: 0 };
+  if (record.discordId) return { text: "Linked", warn: false, detail: discordSource(record), rank: 4 };
+  if (record.provider === "paypal") return { text: "Missing", warn: true, rank: 1 };
+  if (record.patreonDiscordId) return { text: "Linking soon", warn: false, rank: 3 };
+  return { text: "Not connected", warn: false, rank: 2 };
+}
+
+/**
+ * Whether the record offers Add payment: a Patreon record while the Patreon import is not set up, with a payment step
+ * or no paid payment on record. While the import runs it brings in every payment itself. A PayPal record records its
+ * payments in the PayPal form.
+ */
+export function paymentOffered(record: Supporter, importConfigured: boolean) {
+  if (record.provider !== "patreon" || importConfigured) return false;
+  if (record.nextSteps.some((step) => step.area === "payment")) return true;
+  const payment = record.latestPayment;
+  return (
+    !payment ||
+    payment.verificationState !== "verified" ||
+    payment.source === "signed_status" ||
+    typeof payment.amountCents !== "number"
+  );
+}
+
+/**
+ * The SteamID an approved application offers staff to check and link when the record has none: one the SteamID rule
+ * accepts, one approved without a recorded grant, or one another record holds, which the record's step asks staff to
+ * link here when they are the same person. A SteamID that is shared, was rejected before, is invalid, or is under
+ * review is never offered. It is never filled in.
+ */
+const OFFERED_REASONS = new Set<string | null>([null, "application_not_confirmed", "steam_on_another_record"]);
 export function applicationSteamId(record: Supporter) {
   const steam = record.match.steam;
   return !record.steamId && steam?.steamId && OFFERED_REASONS.has(steam.reason) ? steam.steamId : null;
 }
 
-const READY_FOR_STAFF = new Set([
-  "founder_ready_staff",
-  "founder_ready_automatic_off",
-  "founder_automatic_waiting",
-  "application_not_confirmed",
-  "steam_available",
-]);
-export const readyForStaff = (record: Supporter) => record.nextSteps.some((step) => READY_FOR_STAFF.has(step.code));
-/** Founder promises automation would record: now, or with automatic recording switched on. */
-export const automaticPreview = (record: Supporter) =>
-  record.nextSteps.some(
-    (step) => step.code === "founder_ready_automatic" || step.code === "founder_ready_automatic_off",
-  );
-/** Records with a Discord or SteamID step left: something staff can still match or check. */
-export const accountsToMatch = (record: Supporter) =>
-  record.nextSteps.some((step) => step.area === "discord" || step.area === "steam");
-/** Steps staff can act on; `info` notes only say why no founder promise is possible. */
-export const actionableSteps = (record: Supporter) => record.nextSteps.filter((step) => step.area !== "info");
-
-/** Steps grouped for the record dialog; payment problems share one heading, and notes are kept apart from tasks. */
-export function stepGroups(steps: NextStep[]) {
-  return {
-    payment: steps.filter((step) => step.area === "payment"),
-    other: steps.filter((step) => step.area !== "payment" && step.area !== "info"),
-    info: steps.filter((step) => step.area === "info"),
-  };
-}
-
-const identityRank: Record<Supporter["identityState"], number> = {
-  unlinked: 0,
-  partial: 1,
-  staff_linked: 2,
-  patreon_linked: 3,
-};
-/** Sorts the account match column from least to most matched. */
-export const identityOrder = (record: Supporter) => identityRank[record.identityState];
-
+/** The request body for a staff action. */
 export function reviewInput(
   record: Supporter,
   decision: SupporterDecision,
@@ -205,12 +291,9 @@ export function reviewInput(
       firstSuccessfulPaymentVerified: values.get("firstSuccessfulPaymentVerified") === "on",
     };
   }
-  if (decision === "founder") {
-    if (!founderReady(record) || !record.founderEligiblePayment)
-      throw new Error(record.founderBlockedMessage ?? "This supporter cannot be recorded as a founder yet.");
-    return { ...base, paymentId: record.founderEligiblePayment.id };
-  }
-  return base;
+  if (!founderReady(record) || !record.founderEligiblePayment)
+    throw new Error(record.founderBlockedMessage ?? "This supporter cannot be made a founder yet.");
+  return { ...base, paymentId: record.founderEligiblePayment.id };
 }
 
 /** Founder dates are set and shown in New York time. */

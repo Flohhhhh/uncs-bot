@@ -3,126 +3,175 @@ import { api } from "../../api/client";
 import { useResource } from "../../api/use-resource";
 import { useAdmin } from "../../app/context";
 import { Badge, Card, Empty, Modal, ReasonField, date } from "../../components/ui";
-import { CopyValue, DataTable } from "../../components/data-table";
+import { DataTable } from "../../components/data-table";
 import {
-  accountsToMatch,
-  actionableSteps,
   applicationSteamId,
-  automaticPreview,
-  discordDescription,
-  founderReady,
+  discordCell,
+  discordSource,
+  founderOffered,
   founderWindowLabel,
-  identityLabels,
-  identityOrder,
-  matchSummary,
   newYork,
-  paymentDescription,
-  readyForStaff,
+  paymentLine,
+  paymentOffered,
+  providerLine,
+  recordName,
   reviewInput,
-  steamDescription,
-  stepGroups,
+  rowState,
+  stateRank,
+  steamSource,
+  type DiscordCell,
+  type RowState,
 } from "./policy";
 import { ManualMember } from "./manual-member";
 import { PatreonImport } from "./patreon-sync";
 import { AddPaypalSupporter } from "./paypal-form";
-import type {
-  AutomationStatus,
-  Supporter,
-  SupporterDecision,
-  SupporterReviewResponse,
-  SupportersResponse,
-} from "./types";
+import type { Supporter, SupporterDecision, SupporterReviewResponse, SupportersResponse } from "./types";
 
+/** Each staff action: its button label, which is also the form's title, the reason it starts with, and where it is sent. */
 const decisions = {
-  link: {
-    title: "Match supporter accounts",
-    description:
-      "Link the Discord account and SteamID64 that belong to this supporter. Only a value you change is saved, as a staff link; it does not authenticate either account.",
-  },
-  payment: {
-    title: "Record a checked payment",
-    description:
-      "Check the completed payment in Patreon first. Membership status, tier price, and a screenshot alone do not establish receipt of funds.",
-  },
-  founder: {
-    title: "Record founder promise",
-    description:
-      "Record the permanent standard whitelist promise against this checked payment. The benefit remains inactive until the game update and a separate release decision.",
-  },
-  review: {
-    title: "Mark observation reviewed",
-    description:
-      "Record that you reviewed this membership observation. This does not verify payment or grant a benefit.",
-  },
-};
+  link: { label: "Change accounts", reason: "Accounts changed", endpoint: "link" },
+  payment: { label: "Add payment", reason: "Payment added", endpoint: "payment" },
+  founder: { label: "Make founder", reason: "Founder confirmed", endpoint: "founder" },
+} satisfies Record<SupporterDecision, { label: string; reason: string; endpoint: SupporterDecision }>;
+type Decision = keyof typeof decisions;
+
+const providerName = (record: Supporter) => (record.provider === "paypal" ? "PayPal" : "Patreon");
+const day = (value: string) =>
+  new Date(value).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+const refundWait = (record: Supporter) => record.nextSteps.some((step) => step.code === "founder_automatic_waiting");
+
+/** The record's steps by who acts on them. Each heading shows only with something under it. */
+function Steps({ record, state }: { record: Supporter; state: RowState }) {
+  // The server's founder verdict, unless a step already gives it.
+  const blocked = record.founderBlockedMessage;
+  const verdictShown = record.nextSteps.some(
+    (step) => step.message === blocked || step.code === `founder_${record.founderBlockedReason}`,
+  );
+  const sections: [string, string[]][] = [
+    ["Needs you", state.needs],
+    ["Waiting", state.waiting],
+    ["Later", state.later],
+    ["Not a founder", blocked && !verdictShown ? [...state.notes, blocked] : state.notes],
+  ];
+  return (
+    <>
+      {sections
+        .filter(([, lines]) => lines.length > 0)
+        .map(([heading, lines]) => (
+          <section className="supporter-steps" key={heading}>
+            <h3>{heading}</h3>
+            <ul>
+              {lines.map((line, index) => (
+                <li key={`${index}:${line}`}>{line}</li>
+              ))}
+            </ul>
+          </section>
+        ))}
+    </>
+  );
+}
 
 /**
- * A founder award, a Discord link or a checked payment can change who should hold the Founder or Supporter role, so
- * the server queues a Discord role check after saving one while Discord roles are switched on. Marking an observation
- * reviewed changes no role.
+ * Four facts about the record: Discord, SteamID, payment and founder. What Patreon reports after the fact is a note
+ * here, never a task: a link Patreon no longer shows is kept, and a founder stays a founder.
  */
-const checksRoles = (decision: SupporterDecision) => decision !== "review";
-
-const recordName = (record: Supporter) =>
-  record.displayName || (record.provider === "paypal" ? "PayPal supporter" : "Patreon member");
-const recordReference = (record: Supporter) =>
-  record.provider === "paypal" ? "PayPal supporter" : `Member ${record.patreonMemberId}`;
-
-function SupporterBadge({ record }: { record: Supporter }) {
-  const labels: Record<string, string> = {
-    active_patron: "Active membership",
-    declined_patron: "Payment issue",
-    former_patron: "Former member",
-  };
-  if (record.provider === "paypal") return <Badge>PayPal</Badge>;
+function Facts({
+  record,
+  founderAuto,
+  importConfigured,
+}: {
+  record: Supporter;
+  founderAuto: boolean;
+  /** The Patreon import runs, so what Patreon reports is current. */
+  importConfigured: boolean;
+}) {
+  const payment = record.latestPayment;
+  const unreported =
+    importConfigured &&
+    record.provider === "patreon" &&
+    Boolean(record.discordId) &&
+    record.discordSource === "patreon" &&
+    !record.patreonDiscordId;
+  const founderNote =
+    record.founder?.paymentVerified === false
+      ? "Patreon no longer shows their founder payment as paid. They stay a founder."
+      : record.founder?.paymentFirst === false
+        ? "Patreon shows an earlier payment. They stay a founder."
+        : null;
+  const charge =
+    record.provider === "patreon" && record.lastChargeStatus && record.lastChargeStatus !== "Paid"
+      ? record.lastChargeStatus
+      : null;
+  // Why Gramps would not make this ready record a founder itself. Only while automatic founders are on does Gramps
+  // look at it at all. PayPal records are never automatic, a record waiting out the refund wait already says when
+  // Gramps makes it a founder, and a record another one may share a person with already says so in its steps.
+  const skipped =
+    founderAuto && founderOffered(record) && record.automaticBlockedReason !== "not_patreon" && !refundWait(record)
+      ? record.automaticBlockedMessage
+      : null;
   return (
-    <Badge kind={record.patronStatus === "declined_patron" ? "warn" : "neutral"}>
-      {(record.patronStatus && labels[record.patronStatus]) || record.patronStatus || "Status not supplied"}
-    </Badge>
-  );
-}
-
-function NextSteps({ record }: { record: Supporter }) {
-  const { payment, other, info } = stepGroups(record.nextSteps);
-  if (!record.nextSteps.length) return null;
-  return (
-    <div className="supporter-steps">
-      {other.length + payment.length > 0 && <h3>Still needed</h3>}
-      {other.length > 0 && (
-        <ul>
-          {other.map((step) => (
-            <li key={step.code}>{step.message}</li>
-          ))}
-        </ul>
-      )}
-      {payment.length > 0 && (
-        <>
-          <h4>Payment needs checking</h4>
-          <ul>
-            {payment.map((step) => (
-              <li key={step.code}>{step.message}</li>
-            ))}
-          </ul>
-        </>
-      )}
-      {info.length > 0 && (
-        <>
-          <h3>Founder promise not possible</h3>
-          <ul>
-            {info.map((step) => (
-              <li key={step.code}>{step.message}</li>
-            ))}
-          </ul>
-        </>
-      )}
-    </div>
+    <dl className="application-details supporter-facts">
+      <div>
+        <dt>Discord</dt>
+        <dd>
+          {record.discordId ? (
+            <>
+              {record.discordId}
+              <small>{discordSource(record)}</small>
+              {unreported && <small>Patreon no longer shows it.</small>}
+            </>
+          ) : (
+            <>
+              Not connected
+              {record.patreonDiscordId && <small>Patreon shows {record.patreonDiscordId}.</small>}
+            </>
+          )}
+        </dd>
+      </div>
+      <div>
+        <dt>SteamID</dt>
+        <dd>
+          {record.steamId ? (
+            <>
+              {record.steamId}
+              <small>{steamSource(record)}</small>
+            </>
+          ) : (
+            "None yet"
+          )}
+        </dd>
+      </div>
+      <div>
+        <dt>Payment</dt>
+        <dd>
+          {paymentLine(payment)}
+          {payment && <small>{date(payment.paidAt)}</small>}
+          {charge && <small className="warning-text">Last charge: {charge}</small>}
+        </dd>
+      </div>
+      <div>
+        <dt>Founder</dt>
+        <dd>
+          {record.founder ? (
+            <>
+              Since {day(record.founder.awardedAt)}
+              <small>{record.founder.automatic ? "Added by Gramps" : "Added by staff"}</small>
+              {founderNote && <small>{founderNote}</small>}
+            </>
+          ) : (
+            "No"
+          )}
+          {skipped && <small className="warning-text">Gramps skipped this: {skipped}</small>}
+        </dd>
+      </div>
+    </dl>
   );
 }
 
 /**
- * The account-match fields. An approved application's SteamID is never filled in: staff choose to use it, and only
- * while the Discord field still holds the account that applied. The server's own SteamID step sits beside the field,
- * so staff see why a SteamID is flagged.
+ * The account fields. An approved application's SteamID is never filled in: staff choose to use it, and only while
+ * the Discord field still holds the account that applied. The server's own SteamID step sits beside the field, so
+ * staff see why a SteamID is flagged.
  */
 function LinkFields({ record }: { record: Supporter }) {
   const [discordId, setDiscordId] = useState(record.discordId ?? "");
@@ -165,10 +214,7 @@ function LinkFields({ record }: { record: Supporter }) {
           {steamNote && <p className="muted">{steamNote}</p>}
           {offered &&
             (discordChanged ? (
-              <p className="muted">
-                SteamID {offered} is on the current Discord account’s application, so it is not offered for a new
-                Discord account.
-              </p>
+              <p className="muted">SteamID {offered} belongs with the current Discord account.</p>
             ) : (
               <button
                 type="button"
@@ -189,128 +235,79 @@ function LinkFields({ record }: { record: Supporter }) {
           <input type="checkbox" name="steamConfirmed" />
           <span>
             The SteamID belongs to the new Discord account too.
-            <small>
-              Needed only when you change the Discord account and keep or enter a SteamID from the current account’s
-              whitelist application.
-            </small>
+            <small>Needed when the Discord account changes and the SteamID stays.</small>
           </span>
         </label>
       )}
-      <p className="muted">Leave a field as it is to keep it. Only changed values are saved.</p>
     </>
   );
 }
 
-function SupporterDetails({ record }: { record: Supporter }) {
-  const payment = record.latestPayment;
+function PaymentFields() {
   return (
     <>
-      <div className="application-identity">
-        <div>
-          <span className="eyebrow">
-            {record.provider === "paypal" ? "PAYPAL SUPPORTER RECORD" : "PATREON MEMBER RECORD"}
-          </span>
-          <strong>{recordName(record)}</strong>
-          <small>{record.provider === "paypal" ? "Recorded by staff from PayPal" : record.patreonMemberId}</small>
-        </div>
-        <SupporterBadge record={record} />
+      <div className="supporter-form-grid">
+        <label>
+          Paid on
+          <input type="datetime-local" name="paidAt" required step={60} />
+          <small>Your local time.</small>
+        </label>
+        <label>
+          Amount (USD)
+          <input type="number" name="amount" required min="0.01" step="0.01" max="1000000" placeholder="5.00" />
+        </label>
       </div>
-      <dl className="application-details">
-        <div>
-          <dt>Record timestamp</dt>
-          <dd>
-            {date(record.observedAt)}
-            <small>
-              {record.reviewState === "verified"
-                ? "Reviewed by staff; this is not payment or account ownership verification."
-                : record.reviewState === "unverified"
-                  ? "Entered by staff; membership status and payment need separate review."
-                  : "Awaiting staff review."}
-            </small>
-          </dd>
-        </div>
-        {record.provider === "patreon" && (
-          <div>
-            <dt>Latest charge status</dt>
-            <dd>
-              {record.lastChargeStatus || "Not supplied"}
-              <small>{date(record.lastChargeAt)}</small>
-            </dd>
-          </div>
-        )}
-        <div>
-          <dt>Discord account</dt>
-          <dd>
-            {record.discordId || "Not linked"}
-            <small>{discordDescription(record)}</small>
-          </dd>
-        </div>
-        <div>
-          <dt>SteamID64</dt>
-          <dd>
-            {record.steamId || "Not linked"}
-            <small>{steamDescription(record)}</small>
-            {record.match.sourceApplicationRevoked && (
-              <small className="warning-text">
-                The application it was copied from is no longer approved. The SteamID was kept; check it.
-              </small>
-            )}
-          </dd>
-        </div>
-        <div>
-          <dt>Payment evidence</dt>
-          <dd>
-            {paymentDescription(payment)}
-            {payment && (
-              <>
-                <small>{date(payment.paidAt)}</small>
-                <small>Reference: {payment.reference || "Not recorded"}</small>
-              </>
-            )}
-          </dd>
-        </div>
-        <div>
-          <dt>Permanent founder record</dt>
-          <dd>
-            {record.founder ? (
-              <>
-                Recorded {date(record.founder.awardedAt)}
-                <small>{record.founder.automatic ? "Recorded automatically by Gramps." : "Recorded by staff."}</small>
-                <small>
-                  Lifetime standard whitelist promise. Awaiting the game’s queue-tier update; no access activated.
-                </small>
-              </>
-            ) : (
-              "Not recorded"
-            )}
-          </dd>
-        </div>
-      </dl>
-      <NextSteps record={record} />
+      <label>
+        Patreon reference
+        <input name="reference" required minLength={3} maxLength={120} autoComplete="off" />
+      </label>
+      <label className="supporter-check">
+        <input type="checkbox" name="completedPaymentVerified" required />
+        <span>I checked this payment in Patreon.</span>
+      </label>
+      <label className="supporter-check">
+        <input type="checkbox" name="firstSuccessfulPaymentVerified" />
+        <span>
+          This was their first payment.
+          <small>Needed to make them a founder.</small>
+        </span>
+      </label>
     </>
   );
 }
 
-function SupporterReview({
+/**
+ * One supporter: what is left and who does it, four facts, and the staff actions. An action opens its form in the
+ * same dialog. A save that cannot be confirmed keeps its review ID and cannot be sent again from here.
+ */
+function SupporterDialog({
   record: initialRecord,
+  importConfigured,
+  founderAuto,
   unavailable,
   onClose,
   onReviewed,
 }: {
   record: Supporter;
+  /** The Patreon import runs, so it brings in each Patreon payment itself. */
+  importConfigured: boolean;
+  /** Automatic founders are switched on. */
+  founderAuto: boolean;
   unavailable: boolean;
   onClose: () => void;
   onReviewed: () => void;
 }) {
   const { busy, setBusy } = useAdmin();
   const [record, setRecord] = useState(initialRecord);
-  const [review, setReview] = useState<{ decision: SupporterDecision; id: string } | null>(null);
+  const [review, setReview] = useState<{ decision: Decision; id: string } | null>(null);
   const [result, setResult] = useState<{ saved: boolean; message: string } | null>(null);
   const [validation, setValidation] = useState("");
   const [sending, setSending] = useState(false);
   const submitted = useRef(false);
   const inFlight = useRef(false);
   const mounted = useRef(true);
+  const fields = useRef<HTMLFieldSetElement>(null);
+  const outcome = useRef<HTMLParagraphElement>(null);
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -318,9 +315,17 @@ function SupporterReview({
       if (inFlight.current) setBusy(false);
     };
   }, [setBusy]);
-  const ready = founderReady(record);
+  // The button that opened a form, or sent it, is gone once pressed, so focus moves to what replaced it.
+  useEffect(() => {
+    if (review) fields.current?.querySelector<HTMLElement>('input:not([type="hidden"]), textarea')?.focus();
+  }, [review]);
+  useEffect(() => {
+    if (result) outcome.current?.focus();
+  }, [result]);
+  // Make founder, unless another record may be the same person.
+  const ready = founderOffered(record);
 
-  function choose(decision: SupporterDecision) {
+  function choose(decision: Decision) {
     if (busy || unavailable || submitted.current || (decision === "founder" && !ready)) return;
     setReview({ decision, id: crypto.randomUUID() });
     setValidation("");
@@ -333,7 +338,7 @@ function SupporterReview({
     try {
       input = reviewInput(record, review.decision, review.id, new FormData(event.currentTarget));
     } catch (error) {
-      setValidation(error instanceof Error ? error.message : "Check the required review fields.");
+      setValidation(error instanceof Error ? error.message : "Check the fields above.");
       return;
     }
     submitted.current = true;
@@ -343,7 +348,7 @@ function SupporterReview({
     setValidation("");
     try {
       const response = await api<SupporterReviewResponse>(
-        `supporters/${encodeURIComponent(record.id)}/${review.decision}`,
+        `supporters/${encodeURIComponent(record.id)}/${decisions[review.decision].endpoint}`,
         { method: "POST", body: JSON.stringify(input) },
       );
       if (!mounted.current) return;
@@ -354,22 +359,18 @@ function SupporterReview({
         !Number.isInteger(response.supporter.version) ||
         response.supporter.version <= record.version
       ) {
-        throw new Error("The saved record could not be confirmed. Refresh before another review.");
+        throw new Error("The save could not be confirmed.");
       }
       setRecord(response.supporter);
       setResult({
         saved: true,
-        message: `Supporter review recorded.${
-          response.automatic?.steamFilled
-            ? " Gramps also copied the SteamID from this Discord account’s approved whitelist application."
-            : ""
-        } Review ID: ${review.id}`,
+        message: `Saved.${response.automatic?.steamFilled ? " Gramps also added their SteamID." : ""}`,
       });
     } catch (error) {
       if (!mounted.current) return;
       setResult({
         saved: false,
-        message: `${error instanceof Error ? error.message : "The saved record could not be confirmed."} Review ID: ${review.id}`,
+        message: `${error instanceof Error ? error.message : "The save could not be confirmed."} Review ID: ${review.id}`,
       });
     } finally {
       inFlight.current = false;
@@ -381,6 +382,8 @@ function SupporterReview({
     }
   }
 
+  const name = recordName(record);
+  const memberId = record.provider === "patreon" ? record.patreonMemberId : null;
   const selected = review ? decisions[review.decision] : null;
   const eligiblePayment = record.founderEligiblePayment;
   return (
@@ -388,146 +391,80 @@ function SupporterReview({
       className="supporter-dialog"
       busy={sending}
       onClose={onClose}
-      eyebrow={result ? null : undefined}
-      title={
-        result
-          ? result.saved
-            ? "Supporter record saved"
-            : "Save result not confirmed"
-          : (selected?.title ?? "Supporter record")
-      }
+      eyebrow={result ? null : providerName(record)}
+      title={result ? (result.saved ? "Saved" : "Not sure it saved") : (selected?.label ?? name)}
       description={
         result
           ? result.saved
-            ? review && checksRoles(review.decision)
-              ? "Your review has been recorded. No game access was changed. With Discord roles switched on, Gramps checks the linked Discord account’s roles next."
-              : "Your review has been recorded. No game access or Discord role was changed."
-            : "Close this record and refresh to check what was saved before submitting another review."
-          : (selected?.description ??
-            "Review account matching and payment evidence before recording any future benefit.")
+            ? "Gramps updates their Discord roles next."
+            : "Close and reload before trying again."
+          : undefined
       }
     >
       <form onSubmit={submit}>
-        <SupporterDetails record={record} />
+        {!result && (selected || memberId) && (
+          <p className="supporter-member">{selected ? [name, memberId].filter(Boolean).join(" · ") : memberId}</p>
+        )}
         {!review && (
-          <div className="supporter-next">
-            <h3>Actions</h3>
-            <div className="action-list">
-              <button
-                type="button"
-                className="button secondary small"
-                disabled={busy || unavailable}
-                onClick={() => choose("link")}
-              >
-                {record.identityState === "unlinked" ? "Match accounts" : "Review account match"}
-              </button>
-              {record.provider === "patreon" && (
+          <>
+            <Steps record={record} state={rowState(record)} />
+            <Facts record={record} founderAuto={founderAuto} importConfigured={importConfigured} />
+            <div className="action-list supporter-actions">
+              {ready && (
+                // Staff make a PayPal founder. Gramps makes a Patreon one, so for Patreon this is only an override.
                 <button
                   type="button"
-                  className="button secondary small"
+                  className={`button ${record.provider === "paypal" ? "primary" : "secondary"}`}
                   disabled={busy || unavailable}
-                  onClick={() => choose("payment")}
+                  onClick={() => choose("founder")}
                 >
-                  Record checked payment
+                  Make founder
                 </button>
               )}
               <button
                 type="button"
-                className="button secondary small"
+                className="button secondary"
                 disabled={busy || unavailable}
-                onClick={() => choose("review")}
+                onClick={() => choose("link")}
               >
-                Mark observation reviewed
+                Change accounts
               </button>
-              <button
-                type="button"
-                className="button primary small"
-                disabled={busy || unavailable || !ready}
-                title={ready ? undefined : (record.founderBlockedMessage ?? undefined)}
-                onClick={() => choose("founder")}
-              >
-                {record.founder ? "Founder promise recorded" : "Record founder promise"}
-              </button>
+              {paymentOffered(record, importConfigured) && (
+                <button
+                  type="button"
+                  className="button secondary"
+                  disabled={busy || unavailable}
+                  onClick={() => choose("payment")}
+                >
+                  Add payment
+                </button>
+              )}
             </div>
-          </div>
+          </>
         )}
         {review && selected && !result && (
           <>
             {review.decision === "founder" && eligiblePayment && (
-              <div className="notice">
-                <strong>Payment supporting this founder promise</strong>
-                <br />
-                {paymentDescription(eligiblePayment)}
-                <br />
-                {date(eligiblePayment.paidAt)}
-                <br />
-                Reference: {eligiblePayment.reference}
-              </div>
+              <>
+                <section className="supporter-steps">
+                  <h3>Payment</h3>
+                  <p className="supporter-founder-payment">
+                    {paymentLine(eligiblePayment)}
+                    <small>{date(eligiblePayment.paidAt)}</small>
+                    <small>Reference {eligiblePayment.reference}</small>
+                  </p>
+                </section>
+                <p className="notice warning">
+                  {refundWait(record) ? "This is permanent and skips the refund wait." : "This is permanent."}
+                </p>
+              </>
             )}
-            <fieldset disabled={sending} className="review-fields">
-              {review.decision === "link" && <LinkFields key={review.id} record={record} />}
-              {review.decision === "payment" && (
-                <>
-                  <div className="supporter-form-grid">
-                    <label>
-                      Completed payment date and time
-                      <input type="datetime-local" name="paidAt" required step={60} />
-                      <small>
-                        Your local timezone: {Intl.DateTimeFormat().resolvedOptions().timeZone}. Recorded as UTC.
-                      </small>
-                    </label>
-                    <label>
-                      Gross completed amount · USD
-                      <input
-                        type="number"
-                        name="amount"
-                        required
-                        min="0.01"
-                        step="0.01"
-                        max="1000000"
-                        placeholder="5.00"
-                      />
-                    </label>
-                  </div>
-                  <label>
-                    Patreon payment reference
-                    <input
-                      name="reference"
-                      required
-                      minLength={3}
-                      maxLength={120}
-                      autoComplete="off"
-                      placeholder="Reference from the completed Patreon payment"
-                    />
-                  </label>
-                  <label className="supporter-check">
-                    <input type="checkbox" name="completedPaymentVerified" required />
-                    <span>I checked this completed payment in Patreon and matched it to this member.</span>
-                  </label>
-                  <label className="supporter-check">
-                    <input type="checkbox" name="firstSuccessfulPaymentVerified" />
-                    <span>
-                      I checked Patreon history and confirmed this was their first successful payment.
-                      <small>Optional for recording a renewal. Required for founder eligibility.</small>
-                    </span>
-                  </label>
-                </>
-              )}
-              <ReasonField key={review.id} />
+            <fieldset ref={fields} disabled={sending} className="review-fields">
+              {review.decision === "link" && <LinkFields key={`link:${review.id}`} record={record} />}
+              {review.decision === "payment" && <PaymentFields />}
+              <ReasonField key={`reason:${review.id}`} defaultValue={selected.reason} />
             </fieldset>
-            <div className="application-confirm">
-              <strong>{selected.title}</strong>
-              <span>
-                {record.provider === "paypal"
-                  ? `PayPal supporter ${recordName(record)}`
-                  : `Patreon member ${record.patreonMemberId}`}
-              </span>
-              <span>
-                {checksRoles(review.decision)
-                  ? "This records staff evidence only and changes no game access. With Discord roles switched on, Gramps then checks the linked Discord account’s roles."
-                  : "This records staff evidence only. No game or Discord access changes."}
-              </span>
-            </div>
+            <p className="muted">Gramps updates their Discord roles after you save.</p>
           </>
         )}
         {validation && (
@@ -536,17 +473,20 @@ function SupporterReview({
           </p>
         )}
         {result && (
-          <p className={`notice ${result.saved ? "success" : "warning"}`} role="status">
-            {result.message}
-          </p>
+          <>
+            <p ref={outcome} tabIndex={-1} className={`notice ${result.saved ? "success" : "warning"}`} role="status">
+              {result.message}
+            </p>
+            {result.saved && <Facts record={record} founderAuto={founderAuto} importConfigured={importConfigured} />}
+          </>
         )}
         <div className="dialog-footer">
           <button type="button" className="button secondary" disabled={sending} onClick={onClose}>
             {review && !result ? "Cancel" : "Close"}
           </button>
-          {review && !result && (
+          {review && selected && !result && (
             <button type="submit" className="button primary" disabled={busy || unavailable || submitted.current}>
-              {sending ? "Saving record…" : "Save reviewed record"}
+              {sending ? "Saving…" : review.decision === "founder" ? selected.label : "Save"}
             </button>
           )}
         </div>
@@ -555,70 +495,31 @@ function SupporterReview({
   );
 }
 
-/**
- * Which automatic matching is switched on, as one status line, with the refund wait, the last run and a run that could
- * not finish. Both switches are off by default.
- */
-function AutomationStatusLine({ automation }: { automation: AutomationStatus | undefined }) {
-  const steamFill = Boolean(automation?.steamFill),
-    founderAuto = Boolean(automation?.founderAuto);
-  const hold = automation?.holdHours ?? 72;
-  // Automatic matching only reads Patreon records, so nothing runs while Patreon is not configured.
-  const idle = (steamFill || founderAuto) && automation?.configured === false;
-  const lastError = automation?.lastError;
-  const lastRunAt = automation?.lastRunAt;
+type Row = { record: Supporter; state: RowState; discord: DiscordCell };
+
+/** The Next column: who acts, the first thing to do, and how many more. */
+function NextCell({ state }: { state: RowState }) {
+  const lines = state.state === "needs" ? state.needs : state.state === "waiting" ? state.waiting : [];
   return (
     <>
-      <div className="status-row supporter-automation">
-        <p className={`status-line ${idle || lastError ? "attention" : steamFill || founderAuto ? "good" : "quiet"}`}>
-          <span>
-            Automatic matching:{" "}
-            <strong>{steamFill && founderAuto ? "on" : steamFill || founderAuto ? "partly on" : "off"}</strong>
-          </span>
-          <span>SteamID fill {steamFill ? "on" : "off"}</span>
-          <span>Automatic founders {founderAuto ? "on" : "off"}</span>
-        </p>
-        <p className="muted">
-          {idle && "Patreon is not configured, so nothing is matched automatically. "}
-          {founderAuto
-            ? `Gramps records Patreon founders with Discord linked, ${hold} hours after their first payment.`
-            : `Automatic founder recording is off. Choose the “Would be recorded automatically” filter to see what it would record; staff record founder promises. Switched on, it waits ${hold} hours after the first payment for refunds.`}
-          {steamFill
-            ? " Gramps copies an empty SteamID on a Patreon record from the Discord account’s approved whitelist application when nothing about it needs checking."
-            : " SteamIDs are linked by staff; the account match can offer an approved application’s SteamID for them to check."}
-          {lastRunAt && ` Last run ${date(lastRunAt)}.`}
-        </p>
-      </div>
-      {lastError && (
-        <p className="notice warning">
-          <strong>Automatic matching needs attention.</strong> {lastError}
-          {lastRunAt && ` Last attempt ${date(lastRunAt)}.`}
-        </p>
+      <Badge kind={state.state === "needs" ? "warn" : state.state === "set" ? "good" : "neutral"}>
+        {state.state === "needs" ? "Needs you" : state.state === "set" ? "All set" : "Waiting"}
+      </Badge>
+      {lines[0] && (
+        <small className="supporter-wrap supporter-next-step">
+          {lines[0]}
+          {lines.length > 1 && ` +${lines.length - 1} more`}
+        </small>
       )}
     </>
   );
 }
 
-/** The first step staff can act on, with a count of the rest; a note that no founder promise is possible is not one. */
-function StillNeeded({ record }: { record: Supporter }) {
-  const steps = actionableSteps(record);
-  return (
-    <small className="supporter-wrap supporter-still-needed">
-      {steps[0] ? steps[0].message : "Nothing left to do"}
-      {steps.length > 1 && ` (+${steps.length - 1} more)`}
-    </small>
-  );
-}
-
-type SupporterFilter = "" | "review" | "unlinked" | "staff" | "preview" | "automatic" | "founder";
-const supporterFilters: { id: SupporterFilter; label: string; matches: (record: Supporter) => boolean }[] = [
+type SupporterFilter = "" | "needs" | "founder";
+const supporterFilters: { id: SupporterFilter; label: string; matches: (row: Row) => boolean }[] = [
   { id: "", label: "All", matches: () => true },
-  { id: "review", label: "Awaiting review", matches: (record) => record.reviewState !== "verified" },
-  { id: "unlinked", label: "Accounts to match", matches: accountsToMatch },
-  { id: "staff", label: "Ready for staff", matches: readyForStaff },
-  { id: "preview", label: "Would be recorded automatically", matches: automaticPreview },
-  { id: "automatic", label: "Recorded automatically", matches: (record) => Boolean(record.founder?.automatic) },
-  { id: "founder", label: "Founder promises", matches: (record) => !!record.founder },
+  { id: "needs", label: "Needs you", matches: (row) => row.state.state === "needs" },
+  { id: "founder", label: "Founders", matches: (row) => Boolean(row.record.founder) },
 ];
 
 function AdminSupporters() {
@@ -648,12 +549,12 @@ function AdminSupporters() {
           maxLength={100}
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          aria-label="Search all supporter records"
-          placeholder="Name, Patreon member ID, PayPal transaction ID, Discord ID or SteamID"
+          aria-label="Search supporters"
+          placeholder="Name or any ID"
         />
       </label>
       <button className="button secondary" disabled={busy || resource.loading || resource.refreshing}>
-        Search all records
+        Search
       </button>
       {search && (
         <button
@@ -665,7 +566,7 @@ function AdminSupporters() {
             setSearch("");
           }}
         >
-          Clear search
+          Clear
         </button>
       )}
     </form>
@@ -677,73 +578,120 @@ function AdminSupporters() {
         {search && <div className="toolbar">{searchForm}</div>}
         <Empty
           title={resource.error ? "Supporter records could not be loaded" : "Loading supporters…"}
-          detail={resource.error ? "Refresh to try again. No empty list has been assumed." : undefined}
+          detail={resource.error ? "Reload to try again." : undefined}
           alert={!!resource.error}
         />
       </>
     );
   const records = data.supporters;
-  const rows = records.filter((supporterFilters.find((entry) => entry.id === filter) ?? supporterFilters[0]).matches);
+  const sync = data.sync;
+  // Needs you first, then Waiting, then All set. The sort is stable, so the server's order holds within each.
+  const rows: Row[] = records
+    .map((record) => ({ record, state: rowState(record), discord: discordCell(record) }))
+    .sort((a, b) => stateRank[a.state.state] - stateRank[b.state.state]);
+  const shown = rows.filter((supporterFilters.find((entry) => entry.id === filter) ?? supporterFilters[0]).matches);
   const policy = data.founderPolicy;
+  const automation = data.automation;
+  const steamFill = Boolean(automation?.steamFill),
+    founderAuto = Boolean(automation?.founderAuto);
   const exactWindow = (value: string | null) =>
     value ? new Date(value).toLocaleString(undefined, { timeZone: newYork, timeZoneName: "short" }) : "Not set";
   // Patreon must be configured for Patreon records; PayPal records stay reviewable without it.
   const patreonReady = data.enabled && data.configured;
+  // While the import runs it brings in every Patreon member and payment, so staff add neither by hand.
+  const importConfigured = Boolean(sync?.configured);
   const pageUnavailable = Boolean(resource.error) || resource.loading || resource.refreshing;
   const reviewUnavailable = (record: Supporter) => (record.provider === "patreon" && !patreonReady) || pageUnavailable;
-  return (
+  const holdHours = automation?.holdHours ?? policy.automaticHoldHours ?? 72;
+  // With automatic founders off, every Patreon supporter Gramps would make a founder waits for the switch. Counted on
+  // the full list only, since a search shows part of it.
+  const readyOff = records.filter((record) =>
+    record.nextSteps.some((step) => step.code === "founder_ready_automatic_off"),
+  ).length;
+  const switchNotice = !founderAuto && policy.configured && patreonReady && !search;
+  const details = (
     <>
-      <div className="supporter-summary">
-        <p>
-          Records only. Grants no game access; with Discord roles switched on, the Founder and Supporter roles follow
-          these records. A membership is not a verified payment.
-        </p>
-        <span
-          className={`pill ${policy.configured ? "neutral" : "warn"}`}
-          title={
-            policy.configured
-              ? `${exactWindow(policy.startsAt)} until ${exactWindow(policy.endsAt)}, end not included. Use the completed payment date, not the date a membership appeared here.`
-              : "Set the launch dates before any founder promise can be recorded."
-          }
-        >
-          {founderWindowLabel(policy)}
-        </span>
-        {!patreonReady && <Badge kind="warn">Patreon not configured</Badge>}
-        <span
-          className="muted"
-          title={
-            data.webhookConfigured
-              ? "Check delivery in Patreon."
-              : "Verified member details can be entered by hand when records are ready."
-          }
-        >
+      <dl className="sync-counts">
+        <div>
+          <dt>Automatic founders</dt>
+          <dd>{founderAuto ? "on" : "off"}</dd>
+        </div>
+        <div>
+          <dt>SteamID fill</dt>
+          <dd>{steamFill ? "on" : "off"}</dd>
+        </div>
+        <div>
+          <dt>Refund wait</dt>
+          <dd>{automation?.holdHours ?? policy.automaticHoldHours ?? 72} hours</dd>
+        </div>
+        <div>
+          <dt>Last run</dt>
+          <dd>{automation?.lastRunAt ? date(automation.lastRunAt) : "Not yet"}</dd>
+        </div>
+        <div>
           {/* The server knows only that the signing secret is set, not that Patreon delivers to it. */}
-          Patreon webhook {data.webhookConfigured ? "set up" : "not set up"}
-        </span>
-      </div>
-      {data.sync && (
-        <PatreonImport
-          sync={data.sync}
-          unavailable={Boolean(resource.error)}
-          disabled={busy || resource.loading || resource.refreshing}
-          onSynced={resource.refresh}
-        />
-      )}
-      <AutomationStatusLine automation={data.automation} />
-      {resource.error && (
-        <p className="notice warning" role="alert">
-          Supporter records could not be refreshed. Refresh before recording another review.
-        </p>
-      )}
-      <div className="toolbar">
-        {searchForm}
+          <dt>Webhook</dt>
+          <dd>{data.webhookConfigured ? "set up" : "not set up"}</dd>
+        </div>
+        <div className="supporter-window">
+          <dt>Founder window</dt>
+          <dd>
+            {policy.configured ? `${exactWindow(policy.startsAt)} until ${exactWindow(policy.endsAt)}` : "Not set"}
+          </dd>
+        </div>
+      </dl>
+      {!importConfigured && (
         <button
-          className="button secondary"
+          type="button"
+          className="button secondary small"
           disabled={busy || pageUnavailable || !patreonReady}
           onClick={() => setAdding(true)}
         >
-          Record existing Patreon member
+          Add Patreon member
         </button>
+      )}
+    </>
+  );
+  return (
+    <>
+      {resource.error && (
+        <p className="notice warning" role="alert">
+          Could not refresh, so reload before saving.
+        </p>
+      )}
+      {automation?.lastError && (
+        <p className="notice warning">
+          <strong>Automatic matching needs attention.</strong> {automation.lastError}
+          {automation.lastRunAt && ` Last attempt ${date(automation.lastRunAt)}.`}
+        </p>
+      )}
+      {!policy.configured && <p className="notice warning">Founder dates are not set.</p>}
+      {switchNotice && (
+        <p className={`notice ${readyOff ? "warning" : "info"}`}>
+          <strong>Automatic founders are off.</strong>{" "}
+          {readyOff === 0
+            ? "No Patreon supporter is ready yet."
+            : readyOff === 1
+              ? "1 Patreon supporter is ready to be a founder."
+              : `${readyOff} Patreon supporters are ready to be founders.`}{" "}
+          Turn on SUPPORTER_AUTO_FOUNDER_ENABLED in Railway and Gramps records them once each payment is {holdHours}{" "}
+          hours old.
+        </p>
+      )}
+      {sync && (
+        <PatreonImport
+          sync={sync}
+          unavailable={Boolean(resource.error)}
+          disabled={busy || resource.loading || resource.refreshing}
+          onSynced={resource.refresh}
+          status={
+            <span>Automatic: {steamFill && founderAuto ? "on" : steamFill || founderAuto ? "partly on" : "off"}</span>
+          }
+          details={details}
+        />
+      )}
+      <div className="toolbar">
+        {searchForm}
         <AddPaypalSupporter
           unavailable={pageUnavailable}
           policy={policy}
@@ -751,11 +699,7 @@ function AdminSupporters() {
           onOpen={setSelected}
         />
       </div>
-      <p className="filter-note">
-        {search
-          ? `Searching all records for “${search}”. Up to 100 matching records are shown.`
-          : "Showing up to 100 recent records. Search all records to find earlier supporters."}
-      </p>
+      {records.length >= 100 && <p className="filter-note">Showing the newest 100.</p>}
       <div className="filter-chips record-filters" role="group" aria-label="Filter supporter records">
         {supporterFilters.map((entry) => (
           <button
@@ -765,86 +709,81 @@ function AdminSupporters() {
             aria-pressed={filter === entry.id}
             onClick={() => setFilter(entry.id)}
           >
-            {entry.label} <span className="chip-count">{records.filter(entry.matches).length}</span>
+            {entry.label} <span className="chip-count">{rows.filter(entry.matches).length}</span>
           </button>
         ))}
       </div>
-      <Card
-        title="Supporters"
-        subtitle={`${rows.length} shown of ${records.length} loaded`}
-        badge={<Badge>ADMIN ONLY</Badge>}
-      >
-        {rows.length ? (
+      <Card title="Supporters" subtitle={founderWindowLabel(policy)}>
+        {shown.length ? (
           <DataTable
             label="Supporters"
-            rows={rows}
+            rows={shown}
+            defaultOrder="Needs you first"
             columns={[
-              { label: "Supporter", value: (record) => record.displayName || record.confirmKey },
-              { label: "Recurring status", value: (record) => record.patronStatus },
-              { label: "Account match", value: identityOrder },
-              { label: "Founder record", value: (record) => !!record.founder, firstDirection: "descending" },
-              { label: "Still needed" },
-              { label: "Actions" },
+              {
+                label: "Supporter",
+                value: (row) => recordName(row.record),
+                sortLabels: { ascending: "Name A to Z", descending: "Name Z to A" },
+              },
+              {
+                label: "Discord",
+                value: (row) => row.discord.rank,
+                sortLabels: { ascending: "Discord problems first", descending: "Discord problems last" },
+              },
+              {
+                label: "Next",
+                value: (row) => stateRank[row.state.state],
+                // Needs you first is already the default order.
+                sortLabels: { ascending: null, descending: "All set first" },
+              },
+              { label: "Open", hideLabel: true },
             ]}
-            renderRow={(record) => (
-              <tr key={record.id}>
-                <td>
-                  <strong>{recordName(record)}</strong>
-                  <small>{recordReference(record)}</small>
-                  <small>{record.reviewState === "verified" ? "Observation reviewed" : "Needs staff review"}</small>
-                </td>
-                <td>
-                  <SupporterBadge record={record} />
-                  {record.provider === "patreon" && (
-                    <small>Latest charge: {record.lastChargeStatus || "not supplied"}</small>
-                  )}
-                </td>
-                <td>
-                  <Badge kind={accountsToMatch(record) ? "warn" : "neutral"}>
-                    {identityLabels[record.identityState]}
-                  </Badge>
-                  <small className="supporter-wrap">{matchSummary(record)}</small>
-                  <small>{record.steamId ? <CopyValue value={record.steamId} /> : "SteamID not recorded"}</small>
-                </td>
-                <td>
-                  <Badge kind={record.founder ? "good" : "neutral"}>
-                    {record.founder
-                      ? record.founder.automatic
-                        ? "Recorded automatically"
-                        : "Permanent promise"
-                      : "Not recorded"}
-                  </Badge>
-                  {record.founder && <small>Waiting for game update</small>}
-                </td>
-                <td>
-                  <StillNeeded record={record} />
-                </td>
-                <td>
-                  <button
-                    className="button secondary small supporter-review"
-                    disabled={busy || resource.loading || resource.refreshing}
-                    onClick={() => setSelected(record)}
-                  >
-                    Review supporter
-                  </button>
-                </td>
-              </tr>
-            )}
+            renderRow={({ record, state, discord }) => {
+              const line = providerLine(record);
+              return (
+                <tr key={record.id}>
+                  <td>
+                    <strong>{recordName(record)}</strong> {record.founder && <Badge kind="good">Founder</Badge>}
+                    <small className={line.warn ? "warning-text" : undefined}>{line.text}</small>
+                  </td>
+                  <td>
+                    {discord.warn ? <Badge kind="warn">{discord.text}</Badge> : discord.text}
+                    {discord.detail && <small>{discord.detail}</small>}
+                  </td>
+                  <td className="wide">
+                    <NextCell state={state} />
+                  </td>
+                  <td>
+                    <div className="row-actions">
+                      <button
+                        type="button"
+                        className="button secondary small"
+                        aria-label={`Open ${recordName(record)}`}
+                        disabled={busy || resource.loading || resource.refreshing}
+                        onClick={() => setSelected(record)}
+                      >
+                        Open
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            }}
           />
         ) : (
           <Empty
-            title={search || filter ? "No matching supporters" : "No supporter records yet"}
+            title={search || filter ? "No matching supporters" : "No supporters yet."}
             detail={
-              search || filter
-                ? "Try another name, account ID or filter."
-                : "Records can be entered after checking the member in Patreon, or arrive through connected webhooks. A payment has not been assumed."
+              search || filter ? "Try another name, account ID or filter." : "They appear after the next Patreon sync."
             }
           />
         )}
       </Card>
       {selected && (
-        <SupporterReview
+        <SupporterDialog
           record={selected}
+          importConfigured={importConfigured}
+          founderAuto={founderAuto}
           unavailable={reviewUnavailable(selected)}
           onClose={() => setSelected(null)}
           onReviewed={() => {

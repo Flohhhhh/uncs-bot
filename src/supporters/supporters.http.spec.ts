@@ -351,6 +351,30 @@ describe("private supporters HTTP boundary", () => {
     expect(store.mutate).toHaveBeenCalledTimes(1);
     expect(game.execute).not.toHaveBeenCalled();
   });
+  it("refuses a payment named with a review and a Discord confirmation sent with a link", async () => {
+    jest.mocked(fetch).mockImplementation(async () => new Response(JSON.stringify({ roles: ["staff"] })));
+    const id = randomUUID();
+    const base = { id: randomUUID(), version: 1, reason: "Checked in Patreon", confirm: "member-123" };
+    const post = (path: string, body: Record<string, unknown>) =>
+      request(app.getHttpServer())
+        .post(`/admin/api/supporters/${id}/${path}`)
+        .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+        .set("Origin", config.origin)
+        .set("X-CSRF-Token", "csrf")
+        .send(body);
+    await post("review", { ...base, paymentId: randomUUID() }).expect(400);
+    await post("link", { ...base, discordId: "123456789012345678", discordConfirmed: true }).expect(400);
+    expect(store.mutate).not.toHaveBeenCalled();
+    // The review endpoint itself stays, as it was before founder payments were settled automatically.
+    await post("review", base).expect(201);
+    expect(store.mutate).toHaveBeenCalledWith(
+      id,
+      { ...base, kind: "review" },
+      expect.any(Object),
+      "123",
+      expect.any(Object),
+    );
+  });
   it("does not reveal database credentials or receipt data in failures", async () => {
     store.list.mockRejectedValueOnce(new Error("postgres://secret@private-db private receipt"));
     const result = await request(app.getHttpServer())
