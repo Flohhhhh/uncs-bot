@@ -408,7 +408,9 @@ export class SupportersStore {
           createdAt: receivedAt,
         });
       };
-      for (const event of [...snapshot.events].sort((a, b) => a.date.getTime() - b.date.getTime())) {
+      // One pass per event: a history that lists an event twice must not write or count it twice.
+      const events = [...new Map(snapshot.events.map((event) => [event.id, event])).values()];
+      for (const event of events.sort((a, b) => a.date.getTime() - b.date.getTime())) {
         const row = existing.get(event.id);
         const paid = event.paymentStatus === "Paid";
         const meets = tierMeetsMinimum(event);

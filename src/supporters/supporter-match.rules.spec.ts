@@ -8,8 +8,10 @@ import {
 import {
   applicationSteamMatch,
   automaticFounderBlocker,
+  heldOnAnotherRecord,
   sourceApplicationRevoked,
   supporterNextSteps,
+  type ApplicationFact,
   type MatchFacts,
   type MatchMember,
   type NextStepContext,
@@ -130,9 +132,36 @@ describe("the automatic founder rule", () => {
       ["is under review", { applications: [application({ status: "needs_review" })] }],
       ["was revoked", { applications: [application({ status: "revoked", accessIntent: "revoke" })] }],
       ["names a SteamID another account applied with", { applications: [application({ otherDiscordClaim: true })] }],
-      ["names a SteamID another record holds", { applications: [application({ otherSupporter: true })] }],
-    ])("skips every SteamID check when the application %s", (_name, change) => {
+      ["names a SteamID that was rejected before", { applications: [application({ rejectedBefore: true })] }],
+    ])("skips the SteamID checks when the application %s", (_name, change) => {
       expect(automaticFounderBlocker(discordOnly, facts(change), later)).toBeNull();
+    });
+    it.each<[string, Partial<ApplicationFact>]>([
+      ["approved", {}],
+      ["pending", { status: "pending" }],
+      ["under review", { status: "needs_review" }],
+    ])(
+      "leaves it to staff when another supporter record holds the SteamID of an application that is %s",
+      (_name, change) => {
+        // That record may be the same person's, with its own founder promise or an earlier payment.
+        const held = facts({ applications: [application({ otherSupporter: true, ...change })] });
+        expect(heldOnAnotherRecord(held)).toBe(true);
+        expect(automaticFounderBlocker(discordOnly, held, later)).toBe("steam_on_another_record");
+      },
+    );
+    it.each(["declined", "revoked"] as const)(
+      "ignores a SteamID another record holds when the application naming it was %s",
+      (status) => {
+        const held = facts({ applications: [application({ otherSupporter: true, status })] });
+        expect(heldOnAnotherRecord(held)).toBe(false);
+        expect(automaticFounderBlocker(discordOnly, held, later)).toBeNull();
+      },
+    );
+    it("checks the Discord account before another record's SteamID", () => {
+      const held = facts({ applications: [application({ otherSupporter: true })] });
+      expect(automaticFounderBlocker({ ...discordOnly, discordSource: "staff" }, held, later)).toBe(
+        "discord_not_from_patreon",
+      );
     });
     it.each([
       ["a staff-entered Discord account", { discordSource: "staff" }, {}, "discord_not_from_patreon"],
@@ -468,6 +497,22 @@ describe("next steps on the Supporters page", () => {
       "no_whitelist_application",
       "founder_ready_automatic",
     ]);
+  });
+  it("leaves a founder to staff when another record holds the SteamID the Discord account applied with", () => {
+    const steps = supporterNextSteps(
+      ready({
+        steamId: null,
+        steamSource: null,
+        automaticBlockedReason: "steam_on_another_record",
+        match: { ...ready().match, steam: steamMatch("steam_on_another_record") },
+      }),
+      on,
+    );
+    expect(steps.map((step) => step.code)).toEqual(["steam_on_another_record", "founder_ready_staff"]);
+    expect(steps[0].message).toContain("Check both records.");
+    expect(steps[1].message).toBe(
+      "Ready for staff to record. Not automatic: Another supporter record already holds this SteamID.",
+    );
   });
   it("tells automatic recording, recording with automation off and staff recording apart", () => {
     expect(codes(ready())).toEqual(["founder_ready_automatic"]);

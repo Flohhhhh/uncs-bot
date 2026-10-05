@@ -147,6 +147,18 @@ export function steamDiffersFromApplication(
   );
 }
 
+/**
+ * Another supporter record holds a SteamID this Discord account applied with (an application not declined or
+ * revoked). With no SteamID linked, the founder checks compare the Discord account only, so they cannot see that
+ * record's founder promise or earlier payment. Each person is a founder once, so staff check both records.
+ */
+export function heldOnAnotherRecord(facts: Pick<MatchFacts, "applications">) {
+  return facts.applications.some(
+    (application) =>
+      application.otherSupporter && application.status !== "declined" && application.status !== "revoked",
+  );
+}
+
 export type AutomaticFounderBlockedReason =
   | "not_patreon"
   | "no_discord"
@@ -199,6 +211,8 @@ export const automaticBlockedMessages: Record<AutomaticFounderBlockedReason, str
  * period, and that has no earlier payment on another record for the same person. No SteamID is needed. One that is
  * linked must be valid with no SteamID alert: one copied from an application must still pass the SteamID rule, one
  * staff entered must not differ from the approved application's, and no other Discord account may have applied with it.
+ * With none linked, one thing about SteamIDs still stops it: another supporter record holds the SteamID this Discord
+ * account applied with, so that record may be the same person's (see heldOnAnotherRecord).
  */
 export function automaticFounderBlocker(
   member: MatchMember,
@@ -223,7 +237,7 @@ export function automaticFounderBlocker(
     } else if (steamDiffersFromApplication(member, applicationSteamMatch(facts.applications)))
       return "steam_differs_from_application";
     if (facts.linkedSteamShared) return "steam_shared";
-  }
+  } else if (heldOnAnotherRecord(facts)) return "steam_on_another_record";
   const automatic = facts.automatic;
   if (!automatic) return "no_patreon_payment";
   // Any reversed latest charge stops automation. The latest charge can only look older than the first payment when

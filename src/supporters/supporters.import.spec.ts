@@ -557,6 +557,15 @@ describe("a Patreon payment in another currency, counted by the price of its tie
       expect(calls('insert into "supporter_actions"')).toHaveLength(0);
     }
   });
+  it("confirms a payment once when the history lists its event twice", async () => {
+    const { store, state, calls } = fixture();
+    state.observed = false;
+    state.payments = [cadRow()];
+    const result = await store.importApiMember(campaign, snapshot({ events: [cad(), cad()] }), at);
+    expect(result).toMatchObject({ tierConfirmed: 1, tierConfirmedNew: 1, tierUnconfirmed: 0 });
+    expect(calls('update "supporter_payments"')).toHaveLength(1);
+    expect(calls('insert into "supporter_actions"')).toHaveLength(1);
+  });
   it("confirms and re-verifies one payment in a single update, with an audit row for each change", async () => {
     const { store, state, calls } = fixture();
     state.payments = [cadRow({ verificationState: "unverified", firstSuccessfulPaymentVerified: false })];

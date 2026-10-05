@@ -2308,7 +2308,7 @@ describe("launch storage on isolated PostgreSQL", () => {
       }
     });
 
-    it("copies nothing when a staff link takes the same SteamID first, and records the founder on Discord alone", async () => {
+    it("leaves no partial records when a staff link takes the same SteamID first", async () => {
       const record = await importPatron();
       await approve((await application()).id, "primary");
       const other = await register("staff-linked");
@@ -2330,17 +2330,48 @@ describe("launch storage on isolated PostgreSQL", () => {
       expect(holders).toHaveLength(1);
       if (holders[0].id === other.id) {
         // Both writes take the SteamID lock first, so the match waits, sees the staff link and fills nothing. The
-        // founder needs no SteamID, so it is still recorded on the Discord account Patreon reported.
+        // record that took the SteamID may be the same person's, so no founder is recorded either.
         expect(results[0]).toMatchObject({
           status: "fulfilled",
-          value: { steamFilled: false, founderRecorded: true, blocked: ["steam_on_another_record"] },
+          value: { steamFilled: false, founderRecorded: false, blocked: ["steam_on_another_record"] },
         });
-        expect((await kinds(record.id)).map((row) => row.kind).sort()).toEqual(["founder", "patreon-discord-link"]);
-        expect((await supporters.get(record.id, campaign, automaticPolicy))?.steamId).toBeNull();
+        expect((await kinds(record.id)).map((row) => row.kind)).toEqual(["patreon-discord-link"]);
+        expect((await client.query("SELECT count(*)::int AS count FROM supporter_founders")).rows).toEqual([
+          { count: 0 },
+        ]);
       } else expect(results[1].status).toBe("rejected");
+    });
+
+    it("records no second founder for a person another record already knows by their SteamID", async () => {
+      // A PayPal founder recorded with a SteamID and no Discord account.
+      const paypal = await supporters.recordPaypal(
+        paypalInput({ discordId: undefined, steamId: patronSteam, awardFounder: true }),
+        staff,
+        null,
+        policy,
+      );
+      expect(paypal).toMatchObject({
+        founder: { awarded: true },
+        supporter: { discordId: null, steamId: patronSteam },
+      });
+      // The same person joins Patreon, connects Discord and applies with that SteamID.
+      const record = await importPatron();
+      await approve((await application()).id, "primary");
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        steamId: null,
+        automaticBlockedReason: "steam_on_another_record",
+        match: { steam: { reason: "steam_on_another_record", steamId: patronSteam } },
+      });
+      for (const fillSteam of [true, false])
+        expect(await match.autoMatch(record.id, options({ fillSteam }))).toMatchObject({
+          steamFilled: false,
+          founderRecorded: false,
+          blocked: ["steam_on_another_record"],
+        });
       expect((await client.query<{ member_id: string }>("SELECT member_id FROM supporter_founders")).rows).toEqual([
-        { member_id: record.id },
+        { member_id: paypal.supporter.id },
       ]);
+      expect((await kinds(record.id)).map((row) => row.kind)).toEqual(["patreon-discord-link"]);
     });
 
     it("records no automatic founder on a first payment in another currency", async () => {

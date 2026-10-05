@@ -173,14 +173,18 @@ describe("automatic SteamID fill", () => {
     );
   });
   it("refuses a SteamID another record linked while the facts were read, writing nothing", async () => {
-    const { run, state, texts } = fixture();
+    const { run, state, texts, query } = fixture();
     state.holder = true;
-    expect(await run()).toMatchObject({
+    // No founder either: that record may be the same person's, and it is listed as one reason, once.
+    expect(await run({ recordFounder: true })).toMatchObject({
       steamFilled: false,
       founderRecorded: false,
       blocked: ["steam_on_another_record"],
     });
     expect(writes(texts())).toEqual([]);
+    // Only the SteamID lock was taken: the founder locks are never reached.
+    const locks = query.mock.calls.filter(([config]) => config.text.includes("pg_advisory_xact_lock"));
+    expect(locks.map(([, params]) => params[0])).toEqual([`supporter:steam:${steamId}`]);
   });
   it("writes nothing when the conditional fill lost a race with a staff link", async () => {
     const { run, state, texts } = fixture();
@@ -325,9 +329,10 @@ describe("automatic founder promise", () => {
       "application_not_confirmed",
     ],
     [
-      "a SteamID another record holds",
-      (f: ReturnType<typeof fixture>) => (f.state.holder = true),
-      "steam_on_another_record",
+      "a SteamID another Discord account applied with",
+      (f: ReturnType<typeof fixture>) =>
+        (f.state.facts.applications = [applicationFixture({ otherDiscordClaim: true })]),
+      "steam_shared",
     ],
   ])("records it on the Discord account when the SteamID is not copied: %s", async (_name, change, reason) => {
     const f = fixture();
@@ -368,6 +373,23 @@ describe("automatic founder promise", () => {
     });
     expect(writes(f.texts())).toEqual([]);
   });
+  it.each([
+    ["with the SteamID fill on", true],
+    ["with the SteamID fill off", false],
+  ])(
+    "records no Discord-only promise when another record holds the SteamID the account applied with, %s",
+    async (_name, fillSteam) => {
+      const f = fixture();
+      f.state.facts.applications = [applicationFixture({ otherSupporter: true })];
+      expect(await f.run({ recordFounder: true, fillSteam })).toMatchObject({
+        steamFilled: false,
+        founderRecorded: false,
+        blocked: ["steam_on_another_record"],
+      });
+      expect(writes(f.texts())).toEqual([]);
+      expect(f.texts().some((text) => text.includes("pg_advisory_xact_lock"))).toBe(false);
+    },
+  );
   it("records a Discord-only promise on a payment in another currency counted by its tier's price", async () => {
     const f = fixture();
     f.state.facts.automatic!.payment = paymentFixture({ currency: "CAD", amountCents: 750, minimumConfirmed: true });

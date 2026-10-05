@@ -115,6 +115,8 @@ export class SupporterMatchStore {
         .where(eq(supporterFounders.memberId, memberId));
       const actions: (typeof supporterActions.$inferInsert)[] = [];
       let current = member;
+      // Another record took the SteamID after the facts were read. Seen only under the SteamID lock.
+      let heldElsewhere = false;
       if (!member.steamId && options.fillSteam) {
         const steam = applicationSteamMatch(facts.applications);
         const application = facts.applications.find((item) => item.id === steam.applicationId);
@@ -123,8 +125,10 @@ export class SupporterMatchStore {
         // so once it is held, every committed holder is visible here.
         if (!refused) {
           await lockKeys(tx, supporterSteamKeys(steam.steamId));
-          if (await this.otherHolder(tx, memberId, steam.steamId!, options.campaignId))
+          if (await this.otherHolder(tx, memberId, steam.steamId!, options.campaignId)) {
             refused = "steam_on_another_record";
+            heldElsewhere = true;
+          }
         }
         // A founder's new SteamID must not be one another founder already holds.
         if (!refused && founder) {
@@ -172,12 +176,17 @@ export class SupporterMatchStore {
         }
       }
       if (options.recordFounder && !founder) {
-        const reason = automaticFounderBlocker(current, facts, {
-          now: options.now,
-          holdHours: options.policy.automaticHoldHours ?? AUTO_FOUNDER_HOLD_HOURS_DEFAULT,
-        });
-        if (reason) result.blocked.push(reason);
-        else {
+        // The rule refuses a record with no SteamID when another record holds the SteamID its Discord account applied
+        // with. A holder found under the lock is newer than the facts the rule reads, and is refused the same way.
+        const reason: AutomaticFounderBlockedReason | null =
+          automaticFounderBlocker(current, facts, {
+            now: options.now,
+            holdHours: options.policy.automaticHoldHours ?? AUTO_FOUNDER_HOLD_HOURS_DEFAULT,
+          }) ?? (heldElsewhere ? "steam_on_another_record" : null);
+        // The SteamID fill may already have listed this reason for the same record.
+        if (reason) {
+          if (!result.blocked.includes(reason)) result.blocked.push(reason);
+        } else {
           const payment = facts.automatic!.payment;
           // The identity after any SteamID fill, so the steam lock and the cross-record check cover the new SteamID.
           const identity = { id: memberId, discordId: current.discordId, steamId: current.steamId };

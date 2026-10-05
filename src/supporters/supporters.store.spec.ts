@@ -674,6 +674,15 @@ describe("supporter persistence and founder eligibility", () => {
     expect(
       await read(stored({ steamId: null, steamSource: null, steamApplicationId: null }, { applications: [] })),
     ).toMatchObject({ automaticBlockedReason: null, match: { steam: { reason: "no_application" } } });
+    // Another record holds the SteamID this Discord account applied with: staff check both before any founder.
+    const held = { ...stored().matchFacts.applications[0], otherSupporter: true };
+    expect(
+      await read(stored({ steamId: null, steamSource: null, steamApplicationId: null }, { applications: [held] })),
+    ).toMatchObject({
+      automaticBlockedReason: "steam_on_another_record",
+      automaticBlockedMessage: "Another supporter record already holds this SteamID.",
+      match: { steam: { reason: "steam_on_another_record" } },
+    });
     // A founder needs no automatic verdict, and a record without a Discord account has no SteamID match.
     expect(
       await read(
