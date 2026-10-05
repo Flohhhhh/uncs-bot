@@ -1,4 +1,5 @@
 import { Module } from "@nestjs/common";
+import { ConditionalModule } from "@nestjs/config";
 import { AppController } from "./app.controller";
 import { AppService } from "./app.service";
 import { BotModule } from "./bot/bot.module";
@@ -20,6 +21,8 @@ import { ServerEventsModule } from "./server-events/server-events.module";
 import { DiscordRolesModule } from "./discord-roles/discord-roles.module";
 import { WeeklyLeaderboardModule } from "./weekly-leaderboard/weekly-leaderboard.module";
 import { StaffAlertsMonitorModule } from "./staff-alerts/staff-alerts-monitor.module";
+import { PatronLinkModule } from "./patron-link/patron-link.module";
+import { PatronLinkCommandsModule, patronLinkCommandsEnabled } from "./patron-link/patron-link-commands.module";
 
 @Module({
   imports: [
@@ -40,6 +43,9 @@ import { StaffAlertsMonitorModule } from "./staff-alerts/staff-alerts-monitor.mo
     DiscordRolesModule,
     WeeklyLeaderboardModule,
     StaffAlertsMonitorModule,
+    PatronLinkModule,
+    // /patreon exists only while PATREON_LINK_ENABLED=true. The sign-in pages and the panel button always answer.
+    ConditionalModule.registerWhen(PatronLinkCommandsModule, patronLinkCommandsEnabled),
   ],
   providers: [AppService, { provide: APP_FILTER, useClass: AppExceptionFilter }],
   controllers: [AppController],
