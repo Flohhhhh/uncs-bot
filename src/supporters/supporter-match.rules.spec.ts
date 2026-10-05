@@ -118,6 +118,49 @@ describe("the automatic founder rule", () => {
   it("accepts a Patreon Discord account, a valid SteamID and a settled first imported payment", () => {
     expect(automaticFounderBlocker(patreonDiscord, facts(), later)).toBeNull();
   });
+  describe("with only a Discord account", () => {
+    const discordOnly: MatchMember = { ...patreonDiscord, steamId: null, steamSource: null };
+    it("needs no SteamID", () => {
+      expect(automaticFounderBlocker(discordOnly, facts(), later)).toBeNull();
+      expect(automaticFounderBlocker(discordOnly, facts({ applications: [] }), later)).toBeNull();
+    });
+    it.each<[string, Partial<MatchFacts>]>([
+      ["names another SteamID", { applications: [application({ steamId: otherSteam })] }],
+      ["was approved without a recorded grant", { applications: [application({ whitelistGrant: null })] }],
+      ["is under review", { applications: [application({ status: "needs_review" })] }],
+      ["was revoked", { applications: [application({ status: "revoked", accessIntent: "revoke" })] }],
+      ["names a SteamID another account applied with", { applications: [application({ otherDiscordClaim: true })] }],
+      ["names a SteamID another record holds", { applications: [application({ otherSupporter: true })] }],
+    ])("skips every SteamID check when the application %s", (_name, change) => {
+      expect(automaticFounderBlocker(discordOnly, facts(change), later)).toBeNull();
+    });
+    it.each([
+      ["a staff-entered Discord account", { discordSource: "staff" }, {}, "discord_not_from_patreon"],
+      ["Patreon reporting no account", { patreonDiscordId: null }, {}, "discord_differs"],
+      [
+        "the account reported for another patron",
+        {},
+        { discordReportedForOtherPatron: true },
+        "discord_reported_for_other_patron",
+      ],
+      ["no imported first payment", {}, { automatic: null }, "no_patreon_payment"],
+      ["a refunded latest charge", { lastChargeStatus: "Refunded" }, {}, "charge_reversed"],
+      [
+        "an earlier payment on another record",
+        {},
+        { automatic: { payment: paymentFixture(), earlier: false, earlierOtherRecord: true } },
+        "earlier_payment_other_record",
+      ],
+    ] as const)("still refuses %s", (_name, member, factChange, reason) => {
+      expect(automaticFounderBlocker({ ...discordOnly, ...member }, facts(factChange), later)).toBe(reason);
+    });
+    it("still waits out the hold", () => {
+      const paidAt = Date.parse(paymentFixture().paidAt);
+      expect(automaticFounderBlocker(discordOnly, facts(), { now: paidAt + 3_600_000, holdHours: 72 })).toBe(
+        "payment_too_recent",
+      );
+    });
+  });
   it.each([
     ["a PayPal record", { provider: "paypal" }, {}, "not_patreon"],
     ["no Discord account", { discordId: null, discordSource: null }, {}, "no_discord"],
@@ -131,8 +174,8 @@ describe("the automatic founder rule", () => {
       { discordReportedForOtherPatron: true },
       "discord_reported_for_other_patron",
     ],
-    ["no SteamID", { steamId: null, steamSource: null }, {}, "no_steam"],
-    ["an invalid SteamID", { steamId: "76561190000000001" }, {}, "no_steam"],
+    // The staff founder rule refuses a linked SteamID that is not a valid player ID with this same reason.
+    ["an invalid SteamID", { steamId: "76561190000000001" }, {}, "no_identity"],
     ["no imported first payment", {}, { automatic: null }, "no_patreon_payment"],
     [
       "a refunded latest charge",
@@ -293,6 +336,13 @@ describe("next steps on the Supporters page", () => {
       ),
     ).toEqual([]);
   });
+  it("asks for a Discord account in one short sentence while the import runs", () => {
+    expect(supporterNextSteps(supporterFixture(), on)[0]).toEqual({
+      code: "connect_discord_in_patreon",
+      area: "discord",
+      message: "Ask the patron to connect Discord on Patreon, or link it here.",
+    });
+  });
   it.each([
     ["the import fills it in", supporterFixture(), on, "connect_discord_in_patreon"],
     ["the import is off", supporterFixture(), { ...on, importConfigured: false }, "link_discord_no_import"],
@@ -409,6 +459,16 @@ describe("next steps on the Supporters page", () => {
     ).toEqual(["linked_steam_shared"]);
     expect(codes(ready())).not.toContain("linked_steam_shared");
   });
+  it("says Gramps records a founder who has only a Discord account, and still asks for the SteamID", () => {
+    const discordOnly = ready({ steamId: null, steamSource: null, identityState: "partial" });
+    expect(codes(discordOnly)).toEqual(["steam_ready_automatic", "founder_ready_automatic"]);
+    expect(codes(discordOnly, off)).toEqual(["steam_available", "founder_ready_automatic_off"]);
+    const none = { ...ready().match, steam: steamMatch("no_application") };
+    expect(codes(ready({ steamId: null, steamSource: null, match: none }))).toEqual([
+      "no_whitelist_application",
+      "founder_ready_automatic",
+    ]);
+  });
   it("tells automatic recording, recording with automation off and staff recording apart", () => {
     expect(codes(ready())).toEqual(["founder_ready_automatic"]);
     expect(codes(ready(), off)).toEqual(["founder_ready_automatic_off"]);
@@ -447,9 +507,25 @@ describe("next steps on the Supporters page", () => {
       }),
       on,
     );
-    expect(euro.at(-1)!.message).toContain("EUR payment");
-    // Another currency needs a staff decision, so it stays a founder task rather than a note.
+    expect(euro.at(-1)!.message).toBe(
+      "This EUR payment is not confirmed as US$5 or more. Check the patron's tier on Patreon.",
+    );
+    // Another currency is something staff can check, so it stays a founder task rather than a note.
     expect(euro.at(-1)!.area).toBe("founder");
+    // PayPal has no tiers to check.
+    const paypal = supporterNextSteps(
+      ready({
+        provider: "paypal",
+        founderBlockedReason: "below_minimum",
+        latestPayment: paymentFixture({ source: "paypal", currency: "CAD" }),
+        founderEligiblePayment: null,
+      }),
+      on,
+    );
+    expect(paypal.at(-1)).toMatchObject({
+      area: "founder",
+      message: "This CAD payment is not confirmed as US$5 or more.",
+    });
   });
   it("asks for a Discord account for a founder without one", () => {
     expect(

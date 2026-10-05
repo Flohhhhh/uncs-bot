@@ -175,10 +175,10 @@ describe("automatic SteamID fill", () => {
   it("refuses a SteamID another record linked while the facts were read, writing nothing", async () => {
     const { run, state, texts } = fixture();
     state.holder = true;
-    expect(await run({ recordFounder: true })).toMatchObject({
+    expect(await run()).toMatchObject({
       steamFilled: false,
       founderRecorded: false,
-      blocked: ["steam_on_another_record", "no_steam"],
+      blocked: ["steam_on_another_record"],
     });
     expect(writes(texts())).toEqual([]);
   });
@@ -275,6 +275,106 @@ describe("automatic founder promise", () => {
       automatic: 1,
     });
     expect(calls('update "supporter_members" set "version"')).toHaveLength(1);
+  });
+  it("records it with only a Discord account, locking and checking that account alone", async () => {
+    const { run, texts, calls, query } = fixture();
+    expect(await run({ recordFounder: true, fillSteam: false })).toMatchObject({
+      steamFilled: false,
+      founderRecorded: true,
+      blocked: [],
+      discordId,
+    });
+    const locks = query.mock.calls.filter(([config]) => config.text.includes("pg_advisory_xact_lock"));
+    expect(locks.map(([, params]) => params[0])).toEqual([`founder:discord:${discordId}`]);
+    const all = texts();
+    // The cross-record founder check names the Discord account only: there is no SteamID to compare.
+    const other = all.findIndex((text) => text.includes('from "supporter_founders" inner join'));
+    const insert = all.findIndex((text) => text.startsWith('insert into "supporter_founders"'));
+    expect(other).toBeGreaterThan(all.findIndex((text) => text.includes("pg_advisory_xact_lock")));
+    expect(other).toBeLessThan(insert);
+    expect(all[other]).toContain('"supporter_members"."discord_id" = $');
+    expect(all[other]).not.toContain('"steam_id"');
+    expect(query.mock.calls[other][1]).toEqual(expect.arrayContaining([memberId, discordId]));
+    const [[, founderValues]] = calls('insert into "supporter_founders"');
+    expect(founderValues).toEqual(
+      expect.arrayContaining([memberId, paymentFixture().id, "system:supporter-match", policy.startsAt, policy.endsAt]),
+    );
+    const actions = calls('insert into "supporter_actions"');
+    expect(actions).toHaveLength(1);
+    expect(audit(actions)[0]).toMatchObject({
+      paymentId: paymentFixture().id,
+      discordId,
+      discordSource: "patreon",
+      steamId: null,
+      steamSource: null,
+      automatic: 1,
+    });
+    expect(calls('update "supporter_members" set "steam_id"')).toHaveLength(0);
+    expect(calls('update "supporter_members" set "version"')).toHaveLength(1);
+    expect(all.at(-1)).toBe("commit");
+  });
+  it.each([
+    [
+      "no whitelist application",
+      (f: ReturnType<typeof fixture>) => (f.state.facts.applications = []),
+      "no_application",
+    ],
+    [
+      "an approval without a recorded grant",
+      (f: ReturnType<typeof fixture>) => (f.state.facts.applications = [applicationFixture({ whitelistGrant: null })]),
+      "application_not_confirmed",
+    ],
+    [
+      "a SteamID another record holds",
+      (f: ReturnType<typeof fixture>) => (f.state.holder = true),
+      "steam_on_another_record",
+    ],
+  ])("records it on the Discord account when the SteamID is not copied: %s", async (_name, change, reason) => {
+    const f = fixture();
+    change(f);
+    expect(await f.run({ recordFounder: true })).toMatchObject({
+      steamFilled: false,
+      founderRecorded: true,
+      blocked: [reason],
+    });
+    expect(f.calls('update "supporter_members" set "steam_id"')).toHaveLength(0);
+    expect(f.calls('insert into "supporter_founders"')).toHaveLength(1);
+    expect(audit(f.calls('insert into "supporter_actions"'))).toEqual([
+      expect.objectContaining({ steamId: null, automatic: 1 }),
+    ]);
+    const locks = f.query.mock.calls.filter(([config]) => config.text.includes("pg_advisory_xact_lock"));
+    expect(locks.map(([, params]) => params[0])).toContain(`founder:discord:${discordId}`);
+    expect(locks.map(([, params]) => params[0])).not.toContain(`founder:steam:${steamId}`);
+  });
+  it.each([
+    [
+      "another founder with this Discord account",
+      (f: ReturnType<typeof fixture>) => (f.state.otherFounder = true),
+      "already_founder",
+    ],
+    ["an earlier payment", (f: ReturnType<typeof fixture>) => (f.state.earlier = true), "earlier_payment"],
+    [
+      "a payment in another currency that is not confirmed",
+      (f: ReturnType<typeof fixture>) =>
+        (f.state.facts.automatic!.payment = paymentFixture({ currency: "CAD", amountCents: 750 })),
+      "below_minimum",
+    ],
+  ])("refuses a Discord-only promise blocked by %s", async (_name, change, reason) => {
+    const f = fixture();
+    change(f);
+    expect(await f.run({ recordFounder: true, fillSteam: false })).toMatchObject({
+      founderRecorded: false,
+      blocked: [reason],
+    });
+    expect(writes(f.texts())).toEqual([]);
+  });
+  it("records a Discord-only promise on a payment in another currency counted by its tier's price", async () => {
+    const f = fixture();
+    f.state.facts.automatic!.payment = paymentFixture({ currency: "CAD", amountCents: 750, minimumConfirmed: true });
+    expect(await f.run({ recordFounder: true, fillSteam: false })).toMatchObject({
+      founderRecorded: true,
+      blocked: [],
+    });
   });
   it("copies the SteamID and records the founder in one run, locking and checking the new SteamID", async () => {
     const { run, query, calls } = fixture();

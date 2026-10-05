@@ -282,7 +282,7 @@ describe("supporter reviews", () => {
         patreonDiscordId: "123456789012345678",
         identityState: "partial",
         founderBlockedReason: null,
-        automaticBlockedReason: "no_steam",
+        automaticBlockedReason: null,
         steamApplicationId: null,
         match: {
           ...supporterFixture().match,

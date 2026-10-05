@@ -121,7 +121,8 @@ export const supporterPayments = pgTable(
     verificationState: text("verification_state").$type<"verified" | "unverified">().notNull(),
     firstSuccessfulPaymentVerified: boolean("first_successful_payment_verified").notNull().default(false),
     verifiedBy: text("verified_by"),
-    // Staff attestation that a non-USD payment was worth at least the US$5 founder minimum.
+    // A non-USD payment counts as at least the US$5 founder minimum: staff confirmed it (PayPal), or the Patreon
+    // import found that its tier costs US$5 or more.
     minimumConfirmed: boolean("minimum_confirmed").notNull().default(false),
     // Staff ID or a system actor such as "system:patreon-import"; null for signed webhook rows.
     recordedBy: text("recorded_by"),

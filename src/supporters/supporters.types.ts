@@ -243,8 +243,9 @@ export function founderIdentity(member: { discordId: string | null; steamId: str
   return (Boolean(member.discordId) || steamValid) && (!member.steamId || steamValid);
 }
 /**
- * The founder rule's minimum: at least US$5, or a payment in another currency that staff confirmed was worth at
- * least that. Amount and currency are recorded but never create tiers.
+ * The founder rule's minimum: at least US$5, or a payment in another currency marked `minimumConfirmed`. Staff set
+ * that mark on a PayPal payment, and the Patreon import sets it when the payment's tier costs US$5 or more. Amount
+ * and currency are recorded but never create tiers.
  */
 export function meetsFounderMinimum(
   payment: Pick<FounderPaymentFacts, "amountCents" | "currency" | "minimumConfirmed">,
@@ -301,8 +302,8 @@ export type SupportFacts = {
  *
  * - Patreon: an active patron, or a declined patron until 7 days after the declined charge (Patreon retries the
  *   card), whose latest charge was not refunded, fraudulent or otherwise reversed, with at least one completed
- *   payment on record. Patreon charges the tier price itself, so any tier and any currency counts; an imported
- *   charge in another currency could never be confirmed against the founder minimum.
+ *   payment on record. Patreon charges the tier price itself, so any tier and any currency counts, whether or not
+ *   the charge is confirmed against the founder minimum.
  * - PayPal: a staff-recorded payment that meets the founder minimum, until 31 days after it was paid.
  *
  * Every window ends exclusively at the stated time.

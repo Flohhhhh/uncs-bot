@@ -1955,14 +1955,10 @@ describe("launch storage on isolated PostgreSQL", () => {
     it("copies the approved SteamID and records an automatic founder with its Founder role basis, once", async () => {
       const record = await importPatron();
       expect(record).toMatchObject({ identityState: "partial", discordSource: "patreon", patreonDiscordId: patron });
-      expect(await match.autoMatch(record.id, options())).toMatchObject({
-        steamFilled: false,
-        founderRecorded: false,
-        blocked: ["no_application", "no_steam"],
-      });
       const created = await application();
       expect(await approve(created.id, "primary")).toMatchObject({ whitelistGrant: "granted" });
-      expect((await supporters.get(record.id, campaign, automaticPolicy))?.automaticBlockedReason).toBe("no_steam");
+      // No SteamID is linked yet, and the automatic founder does not wait for one.
+      expect((await supporters.get(record.id, campaign, automaticPolicy))?.automaticBlockedReason).toBeNull();
       expect(await match.autoMatch(record.id, options())).toMatchObject({
         steamFilled: true,
         founderRecorded: true,
@@ -2009,15 +2005,74 @@ describe("launch storage on isolated PostgreSQL", () => {
       ]);
     });
 
+    it("records an automatic founder with only a Discord account and copies the SteamID once it is approved", async () => {
+      const record = await importPatron();
+      expect(record).toMatchObject({
+        identityState: "partial",
+        steamId: null,
+        founderBlockedReason: null,
+        automaticBlockedReason: null,
+      });
+      const steps = { fillSteam: true, recordFounder: true };
+      expect(await match.candidates(campaign, automaticPolicy, steps, null, 10)).toEqual([record.id]);
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        steamFilled: false,
+        founderRecorded: true,
+        blocked: ["no_application"],
+      });
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        steamId: null,
+        identityState: "partial",
+        version: record.version + 1,
+        founder: { automatic: true, source: "patreon_api" },
+        needsDiscordLink: false,
+        automaticBlockedReason: null,
+      });
+      expect((await roles.desired([patron])).founder).toEqual(new Map([[patron, record.id]]));
+      expect((await kinds(record.id)).map((row) => row.kind).sort()).toEqual(["founder", "patreon-discord-link"]);
+      expect(
+        (
+          await client.query(
+            "SELECT details->>'discordId' AS discord, details->>'steamId' AS steam FROM supporter_actions WHERE member_id = $1 AND kind = 'founder'",
+            [record.id],
+          )
+        ).rows,
+      ).toEqual([{ discord: patron, steam: null }]);
+      // Nothing is left for automation until an application is approved.
+      expect(await match.candidates(campaign, automaticPolicy, steps, null, 10)).toEqual([]);
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        steamFilled: false,
+        founderRecorded: false,
+        blocked: ["no_application"],
+      });
+      await approve((await application()).id, "primary");
+      expect(await match.candidates(campaign, automaticPolicy, steps, null, 10)).toEqual([record.id]);
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        steamFilled: true,
+        founderRecorded: false,
+        blocked: [],
+      });
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        steamId: patronSteam,
+        steamSource: "application",
+        identityState: "patreon_linked",
+        version: record.version + 2,
+        founder: { automatic: true },
+      });
+      expect((await client.query("SELECT count(*)::int AS count FROM supporter_founders")).rows).toEqual([
+        { count: 1 },
+      ]);
+    });
+
     it("leaves an approval without a recorded grant for staff, showing the SteamID to check", async () => {
       const record = await importPatron();
       const created = await application();
       const reviewed = { id: randomUUID(), reason: "Approved before grants were recorded" };
       await applications.claim(created.id, reviewed, "approve", { ...staff, serverId: "primary" });
       await applications.finishApproval(created.id, reviewed.id, { state: "applied", message: "Confirmed" }, null);
-      expect(await match.autoMatch(record.id, options())).toMatchObject({
+      expect(await match.autoMatch(record.id, options({ recordFounder: false }))).toMatchObject({
         steamFilled: false,
-        blocked: ["application_not_confirmed", "no_steam"],
+        blocked: ["application_not_confirmed"],
       });
       expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
         steamId: null,
@@ -2253,7 +2308,7 @@ describe("launch storage on isolated PostgreSQL", () => {
       }
     });
 
-    it("leaves no partial records when a staff link takes the same SteamID first", async () => {
+    it("copies nothing when a staff link takes the same SteamID first, and records the founder on Discord alone", async () => {
       const record = await importPatron();
       await approve((await application()).id, "primary");
       const other = await register("staff-linked");
@@ -2274,13 +2329,18 @@ describe("launch storage on isolated PostgreSQL", () => {
       ).rows;
       expect(holders).toHaveLength(1);
       if (holders[0].id === other.id) {
-        // Both writes take the SteamID lock first, so the match waits, sees the staff link and fills nothing.
-        expect(results[0]).toMatchObject({ status: "fulfilled", value: { steamFilled: false } });
-        expect((await kinds(record.id)).map((row) => row.kind)).toEqual(["patreon-discord-link"]);
-        expect((await client.query("SELECT count(*)::int AS count FROM supporter_founders")).rows).toEqual([
-          { count: 0 },
-        ]);
+        // Both writes take the SteamID lock first, so the match waits, sees the staff link and fills nothing. The
+        // founder needs no SteamID, so it is still recorded on the Discord account Patreon reported.
+        expect(results[0]).toMatchObject({
+          status: "fulfilled",
+          value: { steamFilled: false, founderRecorded: true, blocked: ["steam_on_another_record"] },
+        });
+        expect((await kinds(record.id)).map((row) => row.kind).sort()).toEqual(["founder", "patreon-discord-link"]);
+        expect((await supporters.get(record.id, campaign, automaticPolicy))?.steamId).toBeNull();
       } else expect(results[1].status).toBe("rejected");
+      expect((await client.query<{ member_id: string }>("SELECT member_id FROM supporter_founders")).rows).toEqual([
+        { member_id: record.id },
+      ]);
     });
 
     it("records no automatic founder on a first payment in another currency", async () => {
@@ -2294,6 +2354,90 @@ describe("launch storage on isolated PostgreSQL", () => {
         founderRecorded: false,
         blocked: ["below_minimum"],
       });
+    });
+
+    it("confirms an earlier payment in another currency by its tier's price, then records the founder", async () => {
+      const cad = {
+        ...charge("pledge_start:cad-patron", "2026-10-01T12:00:00.000Z"),
+        amountCents: 750,
+        currency: "CAD",
+      };
+      // Imported before tier prices were read: the payment is verified, but not confirmed as US$5 or more.
+      const record = await importPatron("cad-patron", patron, cad);
+      expect(record).toMatchObject({
+        founderEligiblePayment: null,
+        founderBlockedReason: "below_minimum",
+        automaticBlockedReason: "below_minimum",
+        latestPayment: { amountCents: 750, currency: "CAD", minimumConfirmed: false },
+      });
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        founderRecorded: false,
+        blocked: ["no_application", "below_minimum"],
+      });
+      // The next sync learns that the tier costs US$5. The member is otherwise unchanged.
+      const priced = {
+        ...apiMember("cad-patron", [{ ...cad, tierId: "111", tierAmountCents: 500 }], true),
+        discordId: patron,
+      };
+      expect(await supporters.importApiMember(campaign, priced, new Date())).toMatchObject({
+        created: false,
+        updated: false,
+        payments: 0,
+        tierConfirmed: 1,
+        tierConfirmedNew: 1,
+        tierUnconfirmed: 0,
+      });
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        version: record.version + 1,
+        founderBlockedReason: null,
+        automaticBlockedReason: null,
+        founderEligiblePayment: {
+          source: "patreon_api",
+          amountCents: 750,
+          currency: "CAD",
+          minimumConfirmed: true,
+          firstSuccessfulPaymentVerified: true,
+        },
+      });
+      // A later sync without the tier, or with a cheaper one, never takes the confirmation back.
+      for (const event of [cad, { ...cad, tierId: "111", tierAmountCents: 100 }])
+        expect(
+          await supporters.importApiMember(
+            campaign,
+            { ...apiMember("cad-patron", [event], true), discordId: patron },
+            new Date(),
+          ),
+        ).toMatchObject({ updated: false, tierConfirmed: 1, tierConfirmedNew: 0, tierUnconfirmed: 0 });
+      expect(
+        (await client.query("SELECT minimum_confirmed FROM supporter_payments WHERE member_id = $1", [record.id])).rows,
+      ).toEqual([{ minimum_confirmed: true }]);
+      expect((await supporters.get(record.id, campaign, automaticPolicy))?.version).toBe(record.version + 1);
+      expect(
+        (
+          await client.query(
+            "SELECT actor_id, details FROM supporter_actions WHERE member_id = $1 AND kind = 'patreon-payment-minimum'",
+            [record.id],
+          )
+        ).rows,
+      ).toEqual([
+        {
+          actor_id: "system:patreon-sync",
+          details: expect.objectContaining({
+            reference: "pledge_start:cad-patron",
+            amountCents: 750,
+            currency: "CAD",
+            tierId: "111",
+            tierAmountCents: 500,
+            minimumConfirmed: 1,
+          }),
+        },
+      ]);
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        steamFilled: false,
+        founderRecorded: true,
+        blocked: ["no_application"],
+      });
+      expect((await roles.desired([patron])).founder).toEqual(new Map([[patron, record.id]]));
     });
 
     it("waits out the hold after the first payment", async () => {

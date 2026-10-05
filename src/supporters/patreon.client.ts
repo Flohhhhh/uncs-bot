@@ -6,13 +6,16 @@ import { z } from "zod";
  * Docs: https://docs.patreon.com/#get-api-oauth2-v2-campaigns-campaign_id-members (endpoint, includes,
  * page size), #member, #pledge-event and #user-v2 (attributes), #pagination ("More Data, Pagination":
  * cursor-based `page[count]`/`page[cursor]`, next cursor in `meta.pagination.cursors.next`),
- * #rate-limits (100 requests per minute per access token) and #errors.
+ * #rate-limits (100 requests per minute per access token) and #errors. Tier prices come from
+ * #get-api-oauth2-v2-campaigns-campaign_id (`include=tiers`) and #tier (`amount_cents`, documented as US cents);
+ * a pledge event names its tier in `tier_id`.
  */
 export const PATREON_API_ORIGIN = "https://www.patreon.com";
 /** Fewer members per page keeps each member's included pledge history from being cut short. */
 export const PATREON_PAGE_COUNT = 50;
 export const PATREON_MAX_PAGES = 100;
 export const PATREON_MAX_PAGE_BYTES = 8 * 1024 * 1024;
+export const PATREON_MAX_TIERS_BYTES = 1024 * 1024;
 export const PATREON_REQUEST_TIMEOUT_MS = 20_000;
 /** Paces multi-page reads under Patreon's 100 requests per minute per access token. */
 export const PATREON_PAGE_DELAY_MS = 700;
@@ -22,6 +25,11 @@ export const PATREON_PAGE_DELAY_MS = 700;
  */
 export const PATREON_HISTORY_CAP = 100;
 export const PATREON_USER_AGENT = "UNCs-Gramps-Bot/1.0 (private supporter ledger sync; +https://theuncsgaming.com)";
+/** Patreon documents a tier's `amount_cents` in US cents, whatever currency the patron pays in. */
+export const PATREON_TIER_CURRENCY = "USD";
+/** The pledge-event fields the import has always asked for, and the same list with each event's tier. */
+const PLEDGE_EVENT_FIELDS = "amount_cents,currency_code,date,payment_status,type";
+const PLEDGE_EVENT_FIELDS_WITH_TIER = `${PLEDGE_EVENT_FIELDS},tier_id`;
 const FUTURE_TOLERANCE_MS = 300_000;
 
 export type PatreonPledgeEvent = {
@@ -31,6 +39,25 @@ export type PatreonPledgeEvent = {
   currency: string | null;
   paymentStatus: string | null;
   type: string | null;
+  /**
+   * The tier this event paid for, and that tier's price in US cents. Each is set only when Patreon reported it.
+   * Neither is part of the snapshot hash, so learning them never sends a record back to review.
+   */
+  tierId?: string;
+  tierAmountCents?: number;
+};
+/**
+ * Whether one sync learned the campaign's tier prices: `read`; `not_needed` (no paid event in another currency named
+ * a tier, so they were not requested); `unavailable` (the tier request failed or could not be read); or `refused`
+ * (Patreon refused the member request that asks for each event's tier, so the sync ran without it).
+ */
+export type PatreonTierPrices = "read" | "not_needed" | "unavailable" | "refused";
+export type PatreonMembersResult = {
+  members: PatreonMemberSnapshot[];
+  complete: boolean;
+  tierPrices: PatreonTierPrices;
+  /** Patreon rate-limited the tier request and asked for this wait before the next request. */
+  retryAfterMs?: number;
 };
 export type PatreonMemberSnapshot = {
   patreonMemberId: string;
@@ -160,8 +187,32 @@ const eventSchema = z.object({
     date: z.iso.datetime({ offset: true }).transform((value) => new Date(value)),
     payment_status: text(60),
     type: text(60),
+    // Read leniently (see tierIdOf): a missing or odd tier never rejects the page.
+    tier_id: z.unknown(),
   }),
 });
+/** A tier ID as Patreon gives it on a pledge event or a tier. Anything else is no tier. */
+export function tierIdOf(value: unknown) {
+  const id = typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? String(value) : value;
+  return typeof id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(id) ? id : null;
+}
+const tiersSchema = z.object({
+  data: z.object({ id: z.union([z.string(), z.number()]), type: z.literal("campaign") }),
+  included: z.array(z.unknown()).max(1000).nullish(),
+});
+const tierSchema = z.object({
+  id: z.unknown(),
+  type: z.literal("tier"),
+  attributes: z.object({ amount_cents: z.number().int().min(0).max(100_000_000) }),
+});
+/** A paid event in another currency that names its tier: the only kind a tier price can help. */
+const needsTierPrice = (event: PatreonPledgeEvent) =>
+  event.paymentStatus === "Paid" &&
+  event.tierId !== undefined &&
+  event.currency !== null &&
+  event.currency !== PATREON_TIER_CURRENCY;
+/** Patreon answered 400 to the member request that also asks for each event's tier. Never leaves the client. */
+class TierFieldRefused extends Error {}
 
 async function readBounded(response: Response, limit: number) {
   const declared = Number(response.headers.get("content-length"));
@@ -246,14 +297,87 @@ export function firstPaidEventId(events: PatreonPledgeEvent[], complete: boolean
 
 @Injectable()
 export class PatreonClient {
-  /** Reads every page (bounded). Throws PatreonApiError before returning anything on any failure. */
-  async members(campaignId: string, token: string, now = new Date()) {
+  /**
+   * Reads every member page (bounded), then the campaign's tier prices when a payment needs one. Throws
+   * PatreonApiError before returning anything when the member list cannot be read. Tier data never fails the read:
+   * without it, events simply carry no tier price.
+   */
+  async members(campaignId: string, token: string, now = new Date()): Promise<PatreonMembersResult> {
+    let list: { members: PatreonMemberSnapshot[]; complete: boolean };
+    try {
+      list = await this.memberPages(campaignId, token, now, true);
+    } catch (error) {
+      if (!(error instanceof TierFieldRefused)) throw error;
+      // Patreon refused the tier field, so this sync sends the request the import has always sent.
+      await this.pause();
+      return { ...(await this.memberPages(campaignId, token, now, false)), tierPrices: "refused" };
+    }
+    if (!list.members.some((member) => member.events.some(needsTierPrice)))
+      return { ...list, tierPrices: "not_needed" };
+    await this.pause();
+    const tiers = await this.tierPrices(campaignId, token, now);
+    if (!tiers.prices) return { ...list, tierPrices: "unavailable", retryAfterMs: tiers.retryAfterMs };
+    for (const member of list.members)
+      for (const event of member.events) {
+        const price = event.tierId === undefined ? undefined : tiers.prices.get(event.tierId);
+        if (price !== undefined) event.tierAmountCents = price;
+      }
+    return { ...list, tierPrices: "read" };
+  }
+
+  /** Paces requests under Patreon's limit of 100 a minute per access token. */
+  private pause() {
+    return new Promise<void>((resolve) => setTimeout(resolve, PATREON_PAGE_DELAY_MS));
+  }
+
+  private request(url: URL, token: string) {
+    return fetch(url, {
+      headers: { Authorization: `Bearer ${token}`, "User-Agent": PATREON_USER_AGENT, Accept: "application/json" },
+      redirect: "error",
+      signal: AbortSignal.timeout(PATREON_REQUEST_TIMEOUT_MS),
+    });
+  }
+
+  /**
+   * The campaign's tier prices in US cents, by tier ID. Never throws: a failed request, or a response that is not
+   * this campaign's tier list, gives no prices, and a tier that cannot be read is left out.
+   */
+  private async tierPrices(
+    campaignId: string,
+    token: string,
+    now: Date,
+  ): Promise<{ prices: Map<string, number> | null; retryAfterMs?: number }> {
+    try {
+      const url = new URL(`/api/oauth2/v2/campaigns/${encodeURIComponent(campaignId)}`, PATREON_API_ORIGIN);
+      url.searchParams.set("include", "tiers");
+      url.searchParams.set("fields[tier]", "amount_cents");
+      const response = await this.request(url, token);
+      if (response.status === 429) return { prices: null, retryAfterMs: await retryAfterMs(response, now.getTime()) };
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined);
+        return { prices: null };
+      }
+      const parsed = tiersSchema.safeParse(JSON.parse(await readBounded(response, PATREON_MAX_TIERS_BYTES)));
+      if (!parsed.success || String(parsed.data.data.id) !== campaignId) return { prices: null };
+      const prices = new Map<string, number>();
+      for (const item of parsed.data.included ?? []) {
+        const tier = tierSchema.safeParse(item);
+        const id = tier.success ? tierIdOf(tier.data.id) : null;
+        if (tier.success && id) prices.set(id, tier.data.attributes.amount_cents);
+      }
+      return { prices };
+    } catch {
+      return { prices: null };
+    }
+  }
+
+  private async memberPages(campaignId: string, token: string, now: Date, tierField: boolean) {
     const members: PatreonMemberSnapshot[] = [];
     const seen = new Set<string>();
     const cursors = new Set<string>();
     let cursor: string | null = null;
     for (let page = 0; page < PATREON_MAX_PAGES; page++) {
-      const result = await this.page(campaignId, token, cursor, now);
+      const result = await this.page(campaignId, token, cursor, now, tierField);
       for (const member of result.members) {
         if (seen.has(member.patreonMemberId)) continue;
         seen.add(member.patreonMemberId);
@@ -263,26 +387,22 @@ export class PatreonClient {
       if (cursors.has(result.next)) throw new PatreonApiError("schema", UNEXPECTED);
       cursors.add(result.next);
       cursor = result.next;
-      await new Promise((resolve) => setTimeout(resolve, PATREON_PAGE_DELAY_MS));
+      await this.pause();
     }
     return { members, complete: false };
   }
 
-  private async page(campaignId: string, token: string, cursor: string | null, now: Date) {
+  private async page(campaignId: string, token: string, cursor: string | null, now: Date, tierField: boolean) {
     const url = new URL(`/api/oauth2/v2/campaigns/${encodeURIComponent(campaignId)}/members`, PATREON_API_ORIGIN);
     url.searchParams.set("include", "user,pledge_history");
     url.searchParams.set("fields[member]", "full_name,patron_status,last_charge_status,last_charge_date");
     url.searchParams.set("fields[user]", "social_connections");
-    url.searchParams.set("fields[pledge-event]", "amount_cents,currency_code,date,payment_status,type");
+    url.searchParams.set("fields[pledge-event]", tierField ? PLEDGE_EVENT_FIELDS_WITH_TIER : PLEDGE_EVENT_FIELDS);
     url.searchParams.set("page[count]", String(PATREON_PAGE_COUNT));
     if (cursor) url.searchParams.set("page[cursor]", cursor);
     let response: Response;
     try {
-      response = await fetch(url, {
-        headers: { Authorization: `Bearer ${token}`, "User-Agent": PATREON_USER_AGENT, Accept: "application/json" },
-        redirect: "error",
-        signal: AbortSignal.timeout(PATREON_REQUEST_TIMEOUT_MS),
-      });
+      response = await this.request(url, token);
     } catch {
       throw new PatreonApiError("unavailable", UNAVAILABLE);
     }
@@ -297,6 +417,7 @@ export class PatreonClient {
     if (!response.ok) await response.body?.cancel().catch(() => undefined);
     if (response.status === 401 || response.status === 403) throw new PatreonApiError("token", PATREON_TOKEN_REJECTED);
     if (response.status === 404) throw new PatreonApiError("campaign", CAMPAIGN_NOT_FOUND);
+    if (response.status === 400 && tierField) throw new TierFieldRefused();
     if (!response.ok) throw new PatreonApiError("unavailable", UNAVAILABLE);
     let body: unknown;
     try {
@@ -328,6 +449,8 @@ export class PatreonClient {
         const event = eventSchema.safeParse(item);
         if (!event.success) throw new PatreonApiError("schema", UNEXPECTED);
         const { attributes } = event.data;
+        // A request that did not ask for the tier reads none, so it imports exactly what it always has.
+        const tierId = tierField ? tierIdOf(attributes.tier_id) : null;
         events.set(event.data.id, {
           id: event.data.id,
           date: attributes.date,
@@ -335,6 +458,7 @@ export class PatreonClient {
           currency: attributes.currency_code ?? null,
           paymentStatus: attributes.payment_status,
           type: attributes.type,
+          ...(tierId ? { tierId } : {}),
         });
       }
     }

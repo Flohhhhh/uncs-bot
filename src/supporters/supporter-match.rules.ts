@@ -11,7 +11,7 @@ import { founderBlockedMessages, type FounderBlockedReason, type PaymentView } f
  */
 export const SUPPORTER_MATCH_ACTOR = { id: "system:supporter-match", name: "Automatic supporter match" } as const;
 export const AUTO_FOUNDER_REASON =
-  "Recorded automatically: Discord account from the patron's Patreon connection, SteamID from their approved whitelist application or staff, and a first Patreon payment inside the founder window.";
+  "Recorded automatically: Discord account from Patreon and a first Patreon payment inside the founder window.";
 /** Default wait after an imported first payment before an automatic founder promise (Patreon's refund window). */
 export const AUTO_FOUNDER_HOLD_HOURS_DEFAULT = 72;
 
@@ -153,7 +153,6 @@ export type AutomaticFounderBlockedReason =
   | "discord_not_from_patreon"
   | "discord_differs"
   | "discord_reported_for_other_patron"
-  | "no_steam"
   | "source_application_revoked"
   | "steam_differs_from_application"
   | SteamMatchBlock
@@ -171,7 +170,6 @@ export const automaticBlockedMessages: Record<AutomaticFounderBlockedReason, str
     "The Discord account was entered by staff, not taken from the patron's Patreon connection, so a person must check it.",
   discord_differs: "Patreon no longer reports the linked Discord account for this patron.",
   discord_reported_for_other_patron: "Patreon reports this Discord account for another patron.",
-  no_steam: "No valid SteamID is linked.",
   source_application_revoked: "The whitelist application the SteamID was copied from is no longer approved.",
   steam_differs_from_application:
     "The SteamID differs from the one on this Discord account's approved whitelist application.",
@@ -196,11 +194,11 @@ export const automaticBlockedMessages: Record<AutomaticFounderBlockedReason, str
 /**
  * Why automatic matching will not record a founder promise for this Patreon record, apart from the staff founder rule
  * (founderCheck, or founderBlocker on the same facts), which runs after this. It is stricter than staff awards: the
- * Discord account must come from the patron's Patreon connection and still be the one Patreon reports, a valid SteamID
- * must be linked with no SteamID alert (one copied from an application must still pass the SteamID rule; one staff
- * entered must not differ from the approved application's), no other Discord account may have applied with it, and the
- * payment must be a verified first Patreon API payment whose latest charge was not reversed, that has passed the
- * waiting period, and that has no earlier payment on another record for the same person.
+ * Discord account must come from the patron's Patreon connection and still be the one Patreon reports, and the payment
+ * must be a verified first Patreon API payment whose latest charge was not reversed, that has passed the waiting
+ * period, and that has no earlier payment on another record for the same person. No SteamID is needed. One that is
+ * linked must be valid with no SteamID alert: one copied from an application must still pass the SteamID rule, one
+ * staff entered must not differ from the approved application's, and no other Discord account may have applied with it.
  */
 export function automaticFounderBlocker(
   member: MatchMember,
@@ -212,16 +210,20 @@ export function automaticFounderBlocker(
   if (member.discordSource !== "patreon") return "discord_not_from_patreon";
   if (member.patreonDiscordId !== member.discordId) return "discord_differs";
   if (facts.discordReportedForOtherPatron) return "discord_reported_for_other_patron";
-  if (!isPublicIndividualSteamId(member.steamId)) return "no_steam";
-  if (member.steamSource === "application") {
-    if (sourceApplicationRevoked(member, facts)) return "source_application_revoked";
-    // An approved application still names this SteamID, so the SteamID rule decides; with no refusal, every approved
-    // application names this same SteamID.
-    const steam = applicationSteamMatch(facts.applications);
-    if (steam.reason) return steam.reason;
-  } else if (steamDiffersFromApplication(member, applicationSteamMatch(facts.applications)))
-    return "steam_differs_from_application";
-  if (facts.linkedSteamShared) return "steam_shared";
+  // A founder needs no SteamID: the Discord account is the identity. A linked SteamID is still checked in full.
+  if (member.steamId) {
+    // The staff founder rule refuses an invalid SteamID with this same reason.
+    if (!isPublicIndividualSteamId(member.steamId)) return "no_identity";
+    if (member.steamSource === "application") {
+      if (sourceApplicationRevoked(member, facts)) return "source_application_revoked";
+      // An approved application still names this SteamID, so the SteamID rule decides; with no refusal, every
+      // approved application names this same SteamID.
+      const steam = applicationSteamMatch(facts.applications);
+      if (steam.reason) return steam.reason;
+    } else if (steamDiffersFromApplication(member, applicationSteamMatch(facts.applications)))
+      return "steam_differs_from_application";
+    if (facts.linkedSteamShared) return "steam_shared";
+  }
   const automatic = facts.automatic;
   if (!automatic) return "no_patreon_payment";
   // Any reversed latest charge stops automation. The latest charge can only look older than the first payment when
@@ -359,7 +361,7 @@ export function supporterNextSteps(record: NextStepRecord, context: NextStepCont
         "connect_discord_in_patreon",
         record.patreonDiscordId
           ? `Patreon reports Discord account ${record.patreonDiscordId}; the next sync links it.`
-          : "Ask the patron to connect Discord on Patreon; the next sync fills it in. Or link it here after confirming who they are.",
+          : "Ask the patron to connect Discord on Patreon, or link it here.",
       );
     else
       discord(
@@ -423,8 +425,10 @@ export function supporterNextSteps(record: NextStepRecord, context: NextStepCont
   if (reason) {
     const payment = record.founderEligiblePayment ?? record.latestPayment;
     const otherCurrency = reason === "below_minimum" && payment?.currency && payment.currency !== "USD";
+    // The import counts a Patreon payment in another currency by its tier's price, so only a tier under US$5, or one
+    // Patreon did not report, is left here.
     const message = otherCurrency
-      ? `This ${payment.currency} payment has not been confirmed to be worth at least US$5. An imported Patreon payment in another currency cannot be confirmed here, so it needs a staff decision.`
+      ? `This ${payment.currency} payment is not confirmed as US$5 or more.${record.provider === "patreon" ? " Check the patron's tier on Patreon." : ""}`
       : founderBlockedMessages[reason];
     // Outside the window, below the minimum in US dollars, or a founder elsewhere: nothing staff can do here.
     const area =

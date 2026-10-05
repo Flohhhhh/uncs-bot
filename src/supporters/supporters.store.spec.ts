@@ -665,6 +665,15 @@ describe("supporter persistence and founder eligibility", () => {
       automaticBlockedReason: "source_application_revoked",
       match: { steam: { reason: "no_application" }, sourceApplicationRevoked: true, sourceApplication: null },
     });
+    // No SteamID is needed: with none linked, the application's SteamID is only offered for the fill.
+    expect(await read(stored({ steamId: null, steamSource: null, steamApplicationId: null }))).toMatchObject({
+      automaticBlockedReason: null,
+      automaticBlockedMessage: null,
+      match: { steam: { reason: null, steamId: "76561198000000001" }, sourceApplicationRevoked: false },
+    });
+    expect(
+      await read(stored({ steamId: null, steamSource: null, steamApplicationId: null }, { applications: [] })),
+    ).toMatchObject({ automaticBlockedReason: null, match: { steam: { reason: "no_application" } } });
     // A founder needs no automatic verdict, and a record without a Discord account has no SteamID match.
     expect(
       await read(
