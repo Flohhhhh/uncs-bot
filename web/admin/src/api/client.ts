@@ -2,6 +2,8 @@ export class ApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    /** The rule a refusal names, such as `outside_window` for a founder, when the server sends one. */
+    readonly blockedReason?: string,
     /** Seconds the server asked the caller to wait (its Retry-After header), when it sent one. */
     readonly retryAfter?: number,
   ) {
@@ -126,8 +128,12 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
         data && typeof data === "object" && "message" in data && typeof data.message === "string"
           ? data.message
           : "The request could not be completed.";
+      const blockedReason =
+        data && typeof data === "object" && "blockedReason" in data && typeof data.blockedReason === "string"
+          ? data.blockedReason
+          : undefined;
       // This client never repeats a request. A caller that knows a refusal changed nothing can wait this long.
-      throw new ApiError(message, response.status, retryAfterSeconds(response));
+      throw new ApiError(message, response.status, blockedReason, retryAfterSeconds(response));
     }
     if (data === null)
       throw new ApiError("The response could not be read. Refresh before repeating any action.", response.status);
