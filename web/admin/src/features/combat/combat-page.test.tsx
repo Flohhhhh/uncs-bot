@@ -474,14 +474,46 @@ describe("CombatPage", () => {
     expect((screen.getAllByRole("button", { name: "Alice" })[0] as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("shows weapons without the item prefix and still filters by the reported cause", async () => {
+  it("shows weapons by their readable name and still filters by the reported cause", async () => {
     request.mockResolvedValue(server({ events: [event({ cause: "Id.Item.AK74M" }), event({ eventId: "two" })] }));
     render(page());
     const events = await screen.findByRole("table", { name: "Combat events" });
-    expect(within(events).getByText("AK74M")).toHaveAttribute("title", "Id.Item.AK74M");
+    expect(within(events).getByText("AK-74M")).toHaveAttribute("title", "Id.Item.AK74M");
     const cause = screen.getByLabelText("Weapon / cause");
-    expect(within(cause).getByRole("option", { name: "AK74M" })).toHaveValue("Id.Item.AK74M");
-    fireEvent.change(cause, { target: { value: "Id.Item.AK74M" } });
+    expect(within(cause).getByRole("option", { name: "AK-74M" })).toHaveValue("AK-74M");
+    fireEvent.change(cause, { target: { value: "AK-74M" } });
     expect(within(screen.getByRole("table", { name: "Combat events" })).getAllByRole("row")).toHaveLength(2);
+  });
+
+  it("offers one option per readable weapon, keeps unnamed causes apart and searches the shown name", async () => {
+    request.mockResolvedValue(
+      server({
+        events: [
+          event({ eventId: "one", cause: "Id.Item.AK74M" }),
+          event({ eventId: "two", cause: "ID.Item.AK74M" }),
+          event({ eventId: "three", cause: "Weapon.Rifle" }),
+          event({ eventId: "four", cause: "Some.Other" }),
+        ],
+      }),
+    );
+    render(page());
+    const rows = () => within(screen.getByRole("table", { name: "Combat events" })).getAllByRole("row");
+    await screen.findByRole("table", { name: "Combat events" });
+    const cause = screen.getByLabelText("Weapon / cause");
+    // Both casings read "AK-74M", so they are one option that matches both events.
+    expect(within(cause).getAllByRole("option", { name: "AK-74M" })).toHaveLength(1);
+    expect(within(cause).getByRole("option", { name: "Unknown weapon (Weapon.Rifle)" })).toHaveValue("Weapon.Rifle");
+    expect(within(cause).getByRole("option", { name: "Unknown weapon (Some.Other)" })).toHaveValue("Some.Other");
+    fireEvent.change(cause, { target: { value: "AK-74M" } });
+    expect(rows()).toHaveLength(3);
+    fireEvent.change(cause, { target: { value: "Weapon.Rifle" } });
+    expect(rows()).toHaveLength(2);
+    fireEvent.change(cause, { target: { value: "" } });
+    // The table shows "AK-74M", so searching for it finds both casings; the raw id still matches too.
+    const search = screen.getByLabelText("Search player, SteamID, or weapon");
+    fireEvent.change(search, { target: { value: "ak-74m" } });
+    expect(rows()).toHaveLength(3);
+    fireEvent.change(search, { target: { value: "ID.Item.AK74M" } });
+    expect(rows()).toHaveLength(3);
   });
 });

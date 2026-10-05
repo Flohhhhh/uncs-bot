@@ -59,6 +59,10 @@ export class TelemetryPublicController {
   leaderboard(@Query("period") period: unknown, @Param("serverId") serverId?: string) {
     return this.service.leaderboard(period, serverId);
   }
+  @Get(["stats", "servers/:serverId/stats"])
+  stats(@Query("period") period: unknown, @Param("serverId") serverId?: string) {
+    return this.service.stats(period, serverId);
+  }
 }
 
 @Controller(["admin/api/combat", "admin/api/servers/:serverId/combat"])

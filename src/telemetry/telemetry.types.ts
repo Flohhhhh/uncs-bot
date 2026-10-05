@@ -1,6 +1,7 @@
 import { BadRequestException } from "@nestjs/common";
 import { isIP } from "node:net";
 import { z } from "zod";
+import type { CauseKind } from "../common/cause-labels";
 import { isPublicIndividualSteamId } from "../common/steam-id";
 
 export const MAX_FEED_BYTES = 65_536;
@@ -132,8 +133,14 @@ export type CombatStats = {
   headshotKills: number;
   kd: number | null;
 };
+/**
+ * Optional per-row extras on the public leaderboard, each omitted when unknown (never null): the player's
+ * most-used named weapon, their longest kill within the public distance cap, and their most kills without
+ * dying within one server session.
+ */
+export type RowExtras = { topWeapon?: string; longestKillMeters?: number; bestStreak?: number };
 // Public leaderboard rows carry game statistics only: no SteamID and no other account identifier.
-export type PublicCombatStats = Omit<CombatStats, "steamId">;
+export type PublicCombatStats = Omit<CombatStats, "steamId"> & RowExtras;
 export type CombatTotals = { events: number; kills: number; deaths: number; headshotKills: number; players: number };
 export type CombatAggregate = { leaderboard: CombatStats[]; totals: CombatTotals };
 export type TrackingRecord = { firstReceivedAt: Date; lastReceivedAt: Date } | null;
@@ -163,6 +170,78 @@ export type WeeklyHighlights = {
   topCause: { cause: string; kills: number } | null;
   /** Kills per stored map name, most first, at most 50. */
   maps: Array<{ mapName: string; kills: number }>;
+};
+/** 2 km sanity cap on every public distance, the same 2,000 m the weekly post uses. */
+export const PUBLIC_MAX_DISTANCE_CENTIMETERS = 200_000;
+/** Kill-context tags with a public top-5 list, by the short name the feed's tags end in. */
+export const LEADER_TAGS = {
+  melee: "WeaponMelee",
+  roadkill: "RoadKill",
+  vehicleExplosion: "VehicleExplosion",
+  penetration: "Penetration",
+  ricochet: "Ricochet",
+  falling: "Falling",
+} as const;
+export type LeaderTag = keyof typeof LEADER_TAGS;
+/** Self-inflicted deaths are counted, never listed by name. */
+export type StatTag = LeaderTag | "suicide";
+export type StatsTotals = CombatTotals & { suicides: number };
+/** Server-wide public stats: names and game statistics only, never a SteamID or any account identifier. */
+export type PublicServerStats = {
+  totals: StatsTotals;
+  /** At most 25, by kills. */
+  weapons: Array<{
+    label: string;
+    kind: CauseKind;
+    kills: number;
+    headshotKills: number;
+    longestMeters: number | null;
+  }>;
+  /** At most 10, by kills. */
+  maps: Array<{ label: string; kills: number }>;
+  /** At most 10, each player's own longest kill. */
+  longestKills: Array<{ name: string; weapon: string | null; meters: number; map: string | null }>;
+  /** Kills per UTC hour of receipt; index 0 is 00:00-00:59 UTC. */
+  hours: number[];
+  tags: Record<StatTag, number>;
+  /** At most 5 names per tag. */
+  tagLeaders: Record<LeaderTag, Array<{ name: string; count: number }>>;
+};
+/**
+ * Store-internal stats inputs. These still carry SteamIDs for name lookups; only
+ * publicServerStats() turns them into the public shape.
+ */
+export type ServerStatsAggregate = {
+  /** S1 grouping-set rows: set 3 = by cause, 5 = by map, 6 = by UTC hour, 7 = all kills. */
+  groups: Array<{
+    set: number;
+    causeKey: string | null;
+    cause: string | null;
+    mapName: string | null;
+    hour: number | null;
+    kills: number;
+    headshotKills: number;
+    longestCentimeters: number | null;
+    melee: number;
+    roadkill: number;
+    vehicleExplosion: number;
+    penetration: number;
+    ricochet: number;
+  }>;
+  totals: { events: number; deaths: number; suicides: number; falling: number; players: number };
+  longest: Array<{
+    steamId: string;
+    name: string | null;
+    cause: string | null;
+    mapName: string | null;
+    distanceCentimeters: number;
+  }>;
+  leaders: Array<{ tag: string; steamId: string; name: string | null; count: number }>;
+};
+/** Store-internal leaderboard row inputs, keyed by SteamID for the service to attach. */
+export type RowExtrasAggregate = {
+  weapons: Array<{ steamId: string; cause: string | null; kills: number; longestCentimeters: number | null }>;
+  streaks: Array<{ steamId: string; bestStreak: number }>;
 };
 export const emptyHighlights = (): WeeklyHighlights => ({
   bestKd: null,
