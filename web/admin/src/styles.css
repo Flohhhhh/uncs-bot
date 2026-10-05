@@ -1287,6 +1287,49 @@ td strong {
   font-size: var(--text-sm);
   line-height: 1.6;
 }
+.combat-event-types {
+  margin-top: var(--space-5);
+}
+.combat-event-types ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.combat-event-types li {
+  padding: var(--space-3) var(--space-5);
+  border-bottom: 1px solid var(--line);
+  min-width: 0;
+}
+.combat-event-types li:last-child {
+  border-bottom: 0;
+}
+.combat-event-types li p {
+  margin: 0;
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+.combat-event-types code {
+  font: var(--text-sm) monospace;
+}
+.combat-event-types summary {
+  margin-top: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--muted);
+  cursor: pointer;
+}
+.combat-event-types pre {
+  margin: var(--space-2) 0 0;
+  padding: var(--space-3);
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font: var(--text-xs) monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 @media (max-width: 740px) {
   .combat-filters {
     flex-wrap: wrap;

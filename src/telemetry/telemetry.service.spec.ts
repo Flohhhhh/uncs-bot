@@ -31,6 +31,7 @@ function fixture(enabled = true, secret = token, rcon = "different-rcon-password
     snapshot: jest.fn().mockResolvedValue({ leaderboard: [], totals: emptyTotals() }),
     tracking: jest.fn().mockResolvedValue(null),
     events: jest.fn().mockResolvedValue([]),
+    eventTypes: jest.fn().mockResolvedValue([]),
   };
   const servers = fixtureServers({});
   servers.feedToken = () => (secret !== rcon ? secret : undefined);
@@ -450,11 +451,9 @@ describe("telemetry authorization and reporting", () => {
       events: [1, 2, 3].map(() => ({ ...event, eventId: randomUUID(), eventTime: "12.5" })),
     };
     await expect(service.ingest(`Bearer ${token}`, invalid)).rejects.toMatchObject({ status: 400 });
+    // The refusal names the malformed entry, not an earlier badly named type.
     await expect(
-      service.ingest(`Bearer ${token}`, {
-        ...payload,
-        events: [{ eventId: randomUUID(), type: "player-joined" }, null],
-      }),
+      service.ingest(`Bearer ${token}`, { ...payload, events: [{ type: "Round Ended" }, null] }),
     ).rejects.toMatchObject({ status: 400 });
     // Nothing reached storage, so receipt tracking did not advance.
     expect(store.ingest).not.toHaveBeenCalled();
@@ -473,6 +472,33 @@ describe("telemetry authorization and reporting", () => {
     for (const events of [[], [{ eventId: randomUUID(), type: "player-joined" }]])
       await expect(service.ingest(`Bearer ${token}`, { ...payload, events })).resolves.toMatchObject({ ok: true });
     expect(store.ingest).toHaveBeenCalledTimes(2);
+  });
+  it("stores the event type counts of a batch with no killed event beside badly named or malformed entries", async () => {
+    const { service, store, payload } = fixture();
+    store.ingest.mockResolvedValue({ inserted: 0, duplicates: 0, skipped: 2 });
+    await expect(
+      service.ingest(`Bearer ${token}`, {
+        ...payload,
+        events: [{ type: "playerSpawned", steamId }, { type: "Round Ended" }],
+      }),
+    ).resolves.toEqual({ ok: true, inserted: 0, duplicates: 0, skipped: 2 });
+    expect(store.ingest.mock.calls[0][0].types).toEqual([
+      { type: "playerSpawned", count: 1, sample: { type: "playerSpawned", steamId } },
+    ]);
+    await expect(service.combat()).resolves.toMatchObject({
+      lastBatch: { accepted: 0, skipped: 2, invalid: 1, firstInvalid: "events.1.type (bad format)", types: 1 },
+      lastRejected: null,
+      rejectedCount: 0,
+    });
+    // Badly named types alone were skipped, not refused, before names were checked; a valid type is
+    // kept beside a malformed entry.
+    for (const events of [[{ type: "Round Ended" }], [{ type: "playerSpawned" }, null]])
+      await expect(service.ingest(`Bearer ${token}`, { ...payload, events })).resolves.toMatchObject({ ok: true });
+    expect(store.ingest).toHaveBeenCalledTimes(3);
+    await expect(service.combat()).resolves.toMatchObject({
+      lastBatch: { accepted: 0, invalid: 1, firstInvalid: "events.1 (not an object)", types: 1 },
+      rejectedCount: 0,
+    });
   });
   it("stores the valid events of a partly invalid batch and shows staff what was skipped", async () => {
     const { service, store, payload } = fixture();
@@ -523,6 +549,77 @@ describe("telemetry authorization and reporting", () => {
     );
     const publicView = await service.leaderboard();
     expect(publicView).not.toHaveProperty("lastBatch");
+  });
+  it("counts every event type for staff without changing the game's receipt", async () => {
+    const { service, store, payload } = fixture();
+    store.ingest.mockResolvedValueOnce({ inserted: 1, duplicates: 0, skipped: 3, typesOverLimit: 1 });
+    await expect(
+      service.ingest(`Bearer ${token}`, {
+        ...payload,
+        events: [
+          ...payload.events,
+          { type: "spawn", steamId },
+          { type: "spawn", steamId, name: "Latest" },
+          { type: "Secret.Type" },
+        ],
+      }),
+    ).resolves.toEqual({ ok: true, inserted: 1, duplicates: 0, skipped: 3 });
+    // One parsed batch reaches storage, which writes the per-type counts with the killed events.
+    expect(store.ingest).toHaveBeenCalledTimes(1);
+    expect(store.ingest.mock.calls[0][0].types).toEqual([
+      { type: "killed", count: 1, sample: null },
+      { type: "spawn", count: 2, sample: { type: "spawn", steamId, name: "Latest" } },
+      { type: "Secret.Type", count: 1, sample: { type: "Secret.Type" } },
+    ]);
+    const staff = await service.combat();
+    expect(staff.lastBatch).toEqual({
+      at: now.toISOString(),
+      accepted: 1,
+      skipped: 3,
+      invalid: 0,
+      firstInvalid: null,
+      types: 3,
+      typesOverLimit: 1,
+    });
+    // The warning gives counts only, never the feed's type names or payload.
+    expect(Logger.prototype.warn).toHaveBeenCalledWith(
+      "Accepted a game feed batch for server primary but did not count 1 new event type: the daily limit of event types was reached.",
+    );
+    expect(JSON.stringify(jest.mocked(Logger.prototype.warn).mock.calls)).not.toMatch(/Secret|spawn|Latest/);
+  });
+  it("shows staff the event types received in the window, never the public leaderboard", async () => {
+    const { service, store } = fixture();
+    const otherEvents = [
+      {
+        type: "spawn",
+        count: 12,
+        firstReceivedAt: now,
+        lastReceivedAt: now,
+        sample: { type: "spawn", steamId, name: "Player" },
+      },
+    ];
+    store.eventTypes.mockResolvedValue(otherEvents);
+    const staff = await service.combat("day");
+    const since = new Date(now.getTime() - periodMilliseconds.day);
+    expect(store.eventTypes).toHaveBeenCalledWith(since, now, "primary");
+    expect(staff.otherEvents).toEqual(otherEvents);
+    store.eventTypes.mockClear();
+    const publicView = await service.leaderboard("day");
+    expect(publicView).not.toHaveProperty("otherEvents");
+    expect(JSON.stringify(publicView)).not.toMatch(/spawn|sample/);
+    expect(store.eventTypes).not.toHaveBeenCalled();
+    // A player's history does not include them either.
+    const player = await service.player(steamId, "day");
+    expect(player).not.toHaveProperty("otherEvents");
+    expect(store.eventTypes).not.toHaveBeenCalled();
+  });
+  it("still shows staff the combat view when event type counts cannot be read", async () => {
+    const { service, store } = fixture();
+    store.eventTypes.mockRejectedValueOnce(new Error('relation "game_feed_event_types" does not exist'));
+    await expect(service.combat("day")).resolves.toMatchObject({ enabled: true, events: [], otherEvents: null });
+    expect(store.events).toHaveBeenCalledTimes(1);
+    expect(Logger.prototype.warn).toHaveBeenCalledWith("Could not read game event type counts for server primary.");
+    expect(JSON.stringify(jest.mocked(Logger.prototype.warn).mock.calls)).not.toContain("relation");
   });
   it("does not record a batch that storage failed to save", async () => {
     const { service, store, payload } = fixture();

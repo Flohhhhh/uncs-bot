@@ -2,6 +2,7 @@ import {
   BadRequestException,
   HttpException,
   Injectable,
+  Logger,
   ServiceUnavailableException,
   UnauthorizedException,
 } from "@nestjs/common";
@@ -42,6 +43,7 @@ export function publicStats({ steamId, name, kills, deaths, headshotKills, kd }:
 
 @Injectable()
 export class TelemetryService {
+  private readonly logger = new Logger(TelemetryService.name);
   private readonly snapshots = new Map<
     string,
     { until: number; value: Promise<{ aggregate: CombatAggregate; tracking: TrackingRecord; since: Date; asOf: Date }> }
@@ -110,10 +112,11 @@ export class TelemetryService {
         true,
       );
     }
-    // Invalid entries and nothing to store: refuse the batch, so the game, staff and logs see a 400
-    // and the feed does not read as receiving while every event is dropped.
-    if (!parsed.events.length && parsed.invalid) {
-      const reason = `invalid payload: ${parsed.firstInvalid ?? "events"}`;
+    // Malformed entries and nothing valid to store, not even an event type count: refuse the batch,
+    // so the game, staff and logs see a 400 and the feed does not read as receiving while every event
+    // is dropped. A badly named type alone does not refuse a batch; it was skipped before names were checked.
+    if (!parsed.types.length && parsed.firstMalformed) {
+      const reason = `invalid payload: ${parsed.firstMalformed}`;
       throw this.refuse(serverId, reason, new FeedRejectedException("Invalid killed event fields.", reason), true);
     }
     let result: Awaited<ReturnType<TelemetryStore["ingest"]>>;
@@ -122,14 +125,18 @@ export class TelemetryService {
     } catch (error) {
       throw this.refuse(serverId, "storage unavailable", error, true);
     }
+    const { typesOverLimit = 0, ...receipt } = result;
     this.deliveries.accepted(serverId, {
       accepted: parsed.events.length,
       skipped: parsed.skipped,
       invalid: parsed.invalid,
       firstInvalid: parsed.firstInvalid,
+      types: parsed.types.length,
+      typesOverLimit,
     });
     for (const key of this.snapshots.keys()) if (key.startsWith(`${serverId}:`)) this.snapshots.delete(key);
-    return { ok: true, ...result };
+    // The game's receipt is unchanged: event type counts are for staff.
+    return { ok: true, ...receipt };
   }
 
   private period(input: unknown): TelemetryPeriod {
@@ -233,11 +240,21 @@ export class TelemetryService {
 
   async combat(input?: unknown, id?: string) {
     const result = await this.ranking(input, id);
-    const events = result.enabled
-      ? await this.store.events(new Date(result.windowStartedAt), new Date(result.asOf), undefined, result.serverId)
-      : [];
-    // Delivery diagnostics are staff-only; the public leaderboard never includes them.
-    return { ...result, ...this.deliveries.status(result.serverId), events };
+    const since = new Date(result.windowStartedAt),
+      until = new Date(result.asOf);
+    const [events, otherEvents] = result.enabled
+      ? await Promise.all([
+          this.store.events(since, until, undefined, result.serverId),
+          // A diagnostic: if its counts cannot be read, the rest of the staff view still loads.
+          this.store.eventTypes(since, until, result.serverId).catch(() => {
+            this.logger.warn(`Could not read game event type counts for server ${result.serverId}.`);
+            return null;
+          }),
+        ])
+      : [[], []];
+    // Delivery diagnostics and feed event types, with their raw samples, are staff-only; the public
+    // leaderboard never includes them.
+    return { ...result, ...this.deliveries.status(result.serverId), events, otherEvents };
   }
 
   async player(id: unknown, input?: unknown, selected?: string) {
