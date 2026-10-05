@@ -63,7 +63,7 @@ export interface Supporter {
   observedAt: string;
   reviewState: "pending" | "verified" | "unverified";
   discordId: string | null;
-  discordSource: "staff" | "patreon" | null;
+  discordSource: "staff" | "patreon" | "patron_signin" | null;
   patreonDiscordId: string | null;
   steamId: string | null;
   steamSource: "staff" | "application" | null;

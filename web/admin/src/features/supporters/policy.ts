@@ -55,6 +55,8 @@ export function discordDescription(record: Supporter) {
           ? " Patreon reports the same account."
           : ` Patreon now reports a different account: ${reported}.`;
   if (record.discordSource === "patreon") return `From Patreon (the patron connected it).${patreon}`;
+  if (record.discordSource === "patron_signin")
+    return `Linked by patron through Discord and Patreon sign-in.${patreon}`;
   if (record.discordSource === "staff") return `Entered by staff; not verified through Discord sign-in.${patreon}`;
   return `Linked before match sources were recorded.${patreon}`;
 }
@@ -76,8 +78,13 @@ export const identityLabels: Record<Supporter["identityState"], string> = {
   partial: "Partly matched",
   unlinked: "Not linked",
 };
+const SOURCE_LABELS: Record<string, string> = {
+  patreon: "Patreon",
+  patron_signin: "patron",
+  application: "application",
+};
 const sourceLabel = (value: string | null, source: string | null) =>
-  !value ? "not linked" : source === "patreon" ? "Patreon" : source === "application" ? "application" : "staff";
+  !value ? "not linked" : (SOURCE_LABELS[source ?? ""] ?? "staff");
 /** One line for the table: where each identity came from. */
 export function matchSummary(record: Supporter) {
   return `Discord: ${sourceLabel(record.discordId, record.discordSource)} · SteamID: ${sourceLabel(record.steamId, record.steamSource)}`;
