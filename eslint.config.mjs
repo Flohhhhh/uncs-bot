@@ -2,18 +2,40 @@ import js from "@eslint/js";
 import eslintConfigPrettier from "eslint-config-prettier";
 import prettierPlugin from "eslint-plugin-prettier";
 import tseslint from "typescript-eslint";
+import { existsSync } from "node:fs";
+import process from "node:process";
+import { URL } from "node:url";
+
+const webInstalled = existsSync(new URL("./apps/web/node_modules/eslint-config-next/package.json", import.meta.url));
+const checkingWebFiles = process.argv.some((argument) => argument.replaceAll("\\", "/").includes("apps/web"));
+if (checkingWebFiles && !webInstalled) {
+  throw new Error("Install the standalone web dependencies with npm --prefix apps/web ci before linting web files.");
+}
+const webConfigs = webInstalled ? (await import("./apps/web/eslint.config.mjs")).default : [];
+const webPrefix = (pattern) => (pattern.startsWith("!") ? `!apps/web/${pattern.slice(1)}` : `apps/web/${pattern}`);
+const scopedWebConfigs = webConfigs.map((config) => ({
+  ...config,
+  ...(config.ignores ? { ignores: config.ignores.map(webPrefix) } : {}),
+  ...(!config.files && config.ignores && Object.keys(config).every((key) => ["ignores", "name"].includes(key))
+    ? {}
+    : {
+        files: config.files
+          ? config.files.map((pattern) => (Array.isArray(pattern) ? pattern.map(webPrefix) : webPrefix(pattern)))
+          : ["apps/web/**/*.{js,jsx,mjs,cjs,ts,tsx,mts,cts}"],
+      }),
+}));
 
 /**
  * A shared ESLint configuration for the repository.
  *
  * @type {import("eslint").Linter.Config}
  * */
-export default [
+const backendConfigs = [
   js.configs.recommended,
   eslintConfigPrettier,
   ...tseslint.configs.recommended,
   {
-    ignores: ["dist/**", "eslint.config.mjs"],
+    ignores: ["dist/**"],
   },
   {
     plugins: {
@@ -39,4 +61,14 @@ export default [
       "no-console": ["warn", { allow: ["warn", "error", "info", "table", "trace"] }],
     },
   },
+];
+
+export default [
+  { ignores: ["apps/web/node_modules/**", "apps/web/.next/**", ...(!webInstalled ? ["apps/web/**"] : [])] },
+  ...backendConfigs.map((config) =>
+    Object.keys(config).every((key) => ["ignores", "name"].includes(key))
+      ? config
+      : { ...config, ignores: [...(config.ignores ?? []), "apps/web/**"] },
+  ),
+  ...scopedWebConfigs,
 ];

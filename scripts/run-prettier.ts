@@ -1,4 +1,7 @@
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { ROOT } from "./utils/scripts.constants";
 
 const [mode, ...requestedFiles] = process.argv.slice(2);
 
@@ -7,16 +10,32 @@ if (mode !== "--write" && mode !== "--check") {
   process.exit(1);
 }
 
-const files =
-  requestedFiles.length > 0
-    ? requestedFiles
-    : ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "web/admin/**/*.{ts,tsx,mts,css,html,json}"];
+const webRoot = path.join(ROOT, "apps", "web");
+const isWebFile = (file: string) => path.resolve(process.cwd(), file).startsWith(`${webRoot}${path.sep}`);
+const backendFiles = requestedFiles.length
+  ? requestedFiles.filter((file) => !isWebFile(file))
+  : ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "web/admin/**/*.{ts,tsx,mts,css,html,json}"];
+const webFiles = requestedFiles.length
+  ? requestedFiles.filter(isWebFile).map((file) => path.relative(webRoot, path.resolve(process.cwd(), file)))
+  : ["src/**/*.{ts,tsx,css}", "*.{ts,mjs,json,md}", "!package-lock.json", "!next-env.d.ts"];
 const prettierCli = require.resolve("prettier/bin/prettier.cjs");
-const result = spawnSync(process.execPath, [prettierCli, mode, ...files], { stdio: "inherit" });
 
-if (result.error) {
-  console.error(`Unable to run Prettier: ${result.error.message}`);
-  process.exit(1);
+function run(cli: string, files: string[], cwd: string, extra: string[] = []) {
+  if (!files.length) return;
+  const result = spawnSync(process.execPath, [cli, mode, ...extra, ...files], { cwd, stdio: "inherit" });
+  if (result.error) {
+    console.error(`Unable to run Prettier: ${result.error.message}`);
+    process.exit(1);
+  }
+  if (result.status !== 0) process.exit(result.status ?? 1);
 }
 
-process.exit(result.status ?? 1);
+run(prettierCli, backendFiles, process.cwd());
+const webCli = path.join(webRoot, "node_modules", "prettier", "bin", "prettier.cjs");
+// Backend-only installs can check basic web formatting without loading its Tailwind plugin.
+run(
+  existsSync(webCli) ? webCli : prettierCli,
+  webFiles,
+  webRoot,
+  existsSync(webCli) ? [] : ["--config", path.join(ROOT, ".prettierrc")],
+);
