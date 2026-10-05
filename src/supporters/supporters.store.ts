@@ -11,12 +11,14 @@ import {
   type SupporterProvider,
 } from "../database/supporters.schema";
 import type { Staff } from "../admin/admin.types";
-import { firstPaidEventId, type PatreonMemberSnapshot } from "./patreon.client";
+import { firstPaidEventId, type PatreonMemberSnapshot, type PatreonPledgeEvent } from "./patreon.client";
 import {
   earlierPayment,
   type Executor,
+  founderAppliedWithSteam,
   founderCheck,
   type FounderIdentity,
+  founderTieReason,
   identityKeys,
   lockKeys,
   matchFactsSql,
@@ -36,6 +38,7 @@ import {
   sourceApplicationRevoked,
 } from "./supporter-match.rules";
 import {
+  FOUNDER_MINIMUM,
   founderBlockedMessages,
   founderBlocker,
   founderIdentity,
@@ -57,6 +60,12 @@ export type ApiImportResult = {
   updated: boolean;
   payments: number;
   revoked: number;
+  /** This member's completed payments in another currency that count as US$5 or more by their tier's price. */
+  tierConfirmed: number;
+  /** How many of those this import counted for the first time. */
+  tierConfirmedNew: number;
+  /** This member's completed payments in another currency that are still not confirmed as US$5 or more. */
+  tierUnconfirmed: number;
   discordLinked: boolean;
   conflict: "discord-in-use" | "discord-differs" | null;
   /** The record's Discord account after the import, or null; used only to queue a Discord role check. */
@@ -92,6 +101,7 @@ type StoredSupporter = Omit<
 > & {
   founderCandidate: { payment: PaymentView; earlier: boolean; copyUnverified: boolean } | null;
   otherFounder: boolean;
+  founderAppliedWithSteam: boolean;
   matchFacts: MatchFacts;
 };
 type ObservedFields = Pick<PatreonObservation, "displayName" | "patronStatus" | "lastChargeStatus" | "lastChargeAt">;
@@ -133,6 +143,23 @@ export function apiSnapshotHash(campaignId: string, snapshot: PatreonMemberSnaps
         event.type,
       ]),
   });
+}
+
+/** A completed payment in a currency other than the founder minimum's, which only a tier price can confirm. */
+const otherCurrencyPaid = (event: PatreonPledgeEvent) =>
+  event.paymentStatus === "Paid" && event.currency !== null && event.currency !== FOUNDER_MINIMUM.currency;
+/**
+ * Whether a completed payment in another currency counts as US$5 or more: Patreon named its tier, and that tier costs
+ * at least the founder minimum in US cents. The amount paid is in the patron's currency and is not compared.
+ */
+export function tierMeetsMinimum(event: PatreonPledgeEvent) {
+  return (
+    otherCurrencyPaid(event) &&
+    event.amountCents !== null &&
+    event.amountCents > 0 &&
+    typeof event.tierAmountCents === "number" &&
+    event.tierAmountCents >= FOUNDER_MINIMUM.amountCents
+  );
 }
 
 export function paymentView(row: PaymentRow): PaymentView {
@@ -289,7 +316,9 @@ export class SupportersStore {
   /**
    * Imports one authenticated Patreon API member. Each Paid pledge event becomes one verified
    * patreon_api payment keyed by its event ID; a later non-Paid status marks that payment unverified.
-   * Founder records are never touched here.
+   * A Paid event in another currency is marked `minimumConfirmed` when its tier costs US$5 or more, on a new
+   * payment or one imported earlier, with an audit row. That mark is never removed here. Founder records are never
+   * touched here.
    */
   async importApiMember(campaignId: string, snapshot: PatreonMemberSnapshot, receivedAt: Date) {
     const hash = apiSnapshotHash(campaignId, snapshot);
@@ -338,6 +367,9 @@ export class SupportersStore {
         updated: (!!observed || stale) && !created,
         payments: 0,
         revoked: 0,
+        tierConfirmed: 0,
+        tierConfirmedNew: 0,
+        tierUnconfirmed: 0,
         discordLinked: false,
         conflict: null,
         discordId: member.discordId,
@@ -356,9 +388,35 @@ export class SupportersStore {
             .where(and(eq(supporterPayments.memberId, member.id), eq(supporterPayments.source, "patreon_api")))
         ).map((row) => [row.reference, row]),
       );
-      for (const event of [...snapshot.events].sort((a, b) => a.date.getTime() - b.date.getTime())) {
+      // The audit row for a payment this import counts as US$5 or more by its tier's price.
+      const confirmByTier = (paymentId: string, event: PatreonPledgeEvent) => {
+        result.tierConfirmedNew++;
+        actions.push({
+          id: randomUUID(),
+          memberId: member.id,
+          actorId: PATREON_SYNC_ACTOR.id,
+          actorName: PATREON_SYNC_ACTOR.name,
+          kind: "patreon-payment-minimum",
+          reason: "The tier this payment paid for costs US$5 or more.",
+          fingerprint: sha256({ kind: "patreon-payment-minimum", paymentId }),
+          details: {
+            paymentId,
+            reference: event.id,
+            amountCents: event.amountCents,
+            currency: event.currency,
+            tierId: event.tierId ?? null,
+            tierAmountCents: event.tierAmountCents ?? null,
+            minimumConfirmed: 1,
+          },
+          createdAt: receivedAt,
+        });
+      };
+      // One pass per event: a history that lists an event twice must not write or count it twice.
+      const events = [...new Map(snapshot.events.map((event) => [event.id, event])).values()];
+      for (const event of events.sort((a, b) => a.date.getTime() - b.date.getTime())) {
         const row = existing.get(event.id);
         const paid = event.paymentStatus === "Paid";
+        const meets = tierMeetsMinimum(event);
         if (paid && !row) {
           const [inserted] = await tx
             .insert(supporterPayments)
@@ -373,25 +431,38 @@ export class SupportersStore {
               reference: event.id,
               verificationState: "verified",
               firstSuccessfulPaymentVerified: event.id === firstId,
+              minimumConfirmed: meets,
               verifiedBy: PATREON_SYNC_ACTOR.id,
               recordedBy: PATREON_SYNC_ACTOR.id,
               recordedAt: receivedAt,
             })
             .onConflictDoNothing()
             .returning({ id: supporterPayments.id });
-          if (inserted) result.payments++;
+          if (inserted) {
+            result.payments++;
+            if (meets) confirmByTier(inserted.id, event);
+            if (otherCurrencyPaid(event)) result[meets ? "tierConfirmed" : "tierUnconfirmed"]++;
+          }
           continue;
         }
         if (!row) continue;
+        // Only ever false to true: a payment counted once stays counted, whatever Patreon reports later.
+        const confirm = meets && !row.minimumConfirmed;
+        if (otherCurrencyPaid(event)) result[row.minimumConfirmed || confirm ? "tierConfirmed" : "tierUnconfirmed"]++;
         // A truncated history cannot prove or disprove the first payment, so it keeps the earlier answer.
         const first = paid && (snapshot.historyComplete ? event.id === firstId : row.firstSuccessfulPaymentVerified);
         const state = paid ? "verified" : "unverified";
-        if (row.verificationState === state && row.firstSuccessfulPaymentVerified === first) continue;
+        if (row.verificationState === state && row.firstSuccessfulPaymentVerified === first && !confirm) continue;
         await tx
           .update(supporterPayments)
-          .set({ verificationState: state, firstSuccessfulPaymentVerified: first })
+          .set({
+            verificationState: state,
+            firstSuccessfulPaymentVerified: first,
+            ...(confirm ? { minimumConfirmed: true } : {}),
+          })
           .where(eq(supporterPayments.id, row.id));
         paymentsChanged = true;
+        if (confirm) confirmByTier(row.id, event);
         if (row.verificationState === state) continue;
         if (!paid) result.revoked++;
         actions.push({
@@ -553,6 +624,7 @@ export class SupportersStore {
           JOIN supporter_members other_member ON other_member.id = other_founder.member_id
           WHERE other_member.id <> m.id AND ((m.discord_id IS NOT NULL AND other_member.discord_id = m.discord_id)
             OR (m.steam_id IS NOT NULL AND other_member.steam_id = m.steam_id))),
+        'founderAppliedWithSteam', ${founderAppliedWithSteam(sql.raw("m.id"), sql.raw("m.steam_id"))},
         'matchFacts', ${matchFactsSql(campaignId)},
         'founder', (SELECT json_build_object('awardedAt', f.awarded_at, 'paymentId', f.payment_id, 'source', founder_payment.source,
             'automatic', f.awarded_by LIKE 'system:%')
@@ -581,7 +653,7 @@ export class SupportersStore {
   }
 
   private view(stored: StoredSupporter, policy: FounderPolicy, now: number): SupporterView {
-    const { founderCandidate, otherFounder, matchFacts, ...supporter } = stored;
+    const { founderCandidate, otherFounder, founderAppliedWithSteam, matchFacts, ...supporter } = stored;
     const facts: MatchFacts = {
       applications: matchFacts?.applications ?? [],
       automatic: matchFacts?.automatic ?? null,
@@ -602,6 +674,7 @@ export class SupportersStore {
               importedCopyUnverified: eligible ? false : Boolean(founderCandidate?.copyUnverified),
               hasIdentity: founderIdentity(supporter),
               otherFounder,
+              founderAppliedWithSteam,
             });
     }
     // The same verdict automatic matching reaches: its own rules, then the staff founder rule on its payment.
@@ -615,6 +688,7 @@ export class SupportersStore {
           earlierPayment: facts.automatic!.earlier,
           hasIdentity: founderIdentity(supporter),
           otherFounder,
+          founderAppliedWithSteam,
         }));
     const source = supporter.steamApplicationId
       ? facts.applications.find((application) => application.id === supporter.steamApplicationId)
@@ -713,7 +787,8 @@ export class SupportersStore {
           };
           if (founder) {
             await lockKeys(tx, identityKeys("founder", added));
-            if (await otherFounder(tx, added)) throw founderConflict("already_founder");
+            const tie = await otherFounder(tx, added);
+            if (tie) throw founderConflict(founderTieReason[tie]);
           }
         }
         details.previousDiscordId = member.discordId;

@@ -282,7 +282,7 @@ describe("supporter reviews", () => {
         patreonDiscordId: "123456789012345678",
         identityState: "partial",
         founderBlockedReason: null,
-        automaticBlockedReason: "no_steam",
+        automaticBlockedReason: null,
         steamApplicationId: null,
         match: {
           ...supporterFixture().match,
@@ -555,6 +555,9 @@ describe("provider-neutral founder window", () => {
     [{}, { earlierPayment: true }, "earlier_payment"],
     [{}, { hasIdentity: false }, "no_identity"],
     [{}, { otherFounder: true }, "already_founder"],
+    [{}, { founderAppliedWithSteam: true }, "steam_applied_by_founder"],
+    [{}, { otherFounder: true, founderAppliedWithSteam: true }, "already_founder"],
+    [{}, { hasIdentity: false, founderAppliedWithSteam: true }, "no_identity"],
   ])("applies one founder rule to every provider: %p %p", (change, contextChange, reason) => {
     expect(founderBlocker({ ...payment, ...change }, policy, { ...context, ...contextChange })).toBe(reason);
   });

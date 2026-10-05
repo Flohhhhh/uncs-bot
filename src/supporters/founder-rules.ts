@@ -5,6 +5,7 @@ import {
   FOUNDER_PAYMENT_SOURCES,
   founderBlocker,
   founderIdentity,
+  type FounderBlockedReason,
   type FounderPaymentFacts,
   type FounderPolicy,
 } from "./supporters.types";
@@ -122,20 +123,51 @@ export function identityKeys(prefix: string, identity: { discordId?: string | nu
   ];
 }
 
-/** Another supporter record for the same Discord account or SteamID already holds a founder promise. */
-export async function otherFounder(db: Executor, member: FounderIdentity) {
+/**
+ * How another founder record is the same person. `identity`: it holds the same Discord account or SteamID.
+ * `application`: it has no SteamID linked, and its Discord account applied for the whitelist with this SteamID.
+ */
+export type FounderTie = "identity" | "application";
+export const founderTieReason = {
+  identity: "already_founder",
+  application: "steam_applied_by_founder",
+} as const satisfies Record<FounderTie, FounderBlockedReason>;
+
+/**
+ * A founder record other than `memberId` has no SteamID linked, and its Discord account applied for the whitelist
+ * with `steamId` (an application not declined or revoked). A founder recorded on a Discord account alone is one
+ * person by that account, so the application is all that ties them to the SteamID. Linking that founder's SteamID
+ * settles it: the plain comparison then applies. otherFounder and list() select this one expression.
+ */
+export const founderAppliedWithSteam = (memberId: SQL, steamId: SQL) =>
+  sql`EXISTS (SELECT 1 FROM supporter_founders applied_founder
+      JOIN supporter_members applied_member ON applied_member.id = applied_founder.member_id
+      JOIN whitelist_applications applied ON applied.discord_user_id = applied_member.discord_id
+      WHERE applied_member.id <> ${memberId} AND applied_member.steam_id IS NULL AND applied.steam_id = ${steamId}
+        AND applied.status NOT IN ('declined', 'revoked'))`;
+
+/**
+ * Another supporter record that already holds a founder promise is the same person: it has the same Discord account
+ * or SteamID, or it has no SteamID and its Discord account applied for the whitelist with this one.
+ */
+export async function otherFounder(db: Executor, member: FounderIdentity): Promise<FounderTie | null> {
   const identity = [
     member.discordId ? eq(supporterMembers.discordId, member.discordId) : undefined,
     member.steamId ? eq(supporterMembers.steamId, member.steamId) : undefined,
   ].filter((condition): condition is SQL => condition !== undefined);
-  if (!identity.length) return false;
+  if (!identity.length) return null;
   const [other] = await db
     .select({ memberId: supporterFounders.memberId })
     .from(supporterFounders)
     .innerJoin(supporterMembers, eq(supporterMembers.id, supporterFounders.memberId))
     .where(and(ne(supporterMembers.id, member.id), or(...identity)))
     .limit(1);
-  return Boolean(other);
+  if (other) return "identity";
+  if (!member.steamId) return null;
+  const applied = await db.execute<{ applied: boolean }>(
+    sql`SELECT ${founderAppliedWithSteam(sql`${member.id}`, sql`${member.steamId}`)} AS applied`,
+  );
+  return applied.rows[0]?.applied ? "application" : null;
 }
 
 /** The founder rule for one payment of any provider; list() applies the same rule in SQL. */
@@ -169,10 +201,12 @@ export async function founderCheck(
       ),
     )
     .limit(1);
+  const tie = await otherFounder(db, member);
   return founderBlocker(payment, policy, {
     earlierPayment: Boolean(earlier),
     importedCopyUnverified: Boolean(copy && copy.verification_state !== "verified"),
     hasIdentity: founderIdentity(member),
-    otherFounder: await otherFounder(db, member),
+    otherFounder: tie === "identity",
+    founderAppliedWithSteam: tie === "application",
   });
 }
