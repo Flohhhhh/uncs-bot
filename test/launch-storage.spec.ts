@@ -33,6 +33,7 @@ import { DiscordRolesStore } from "../src/discord-roles/discord-roles.store";
 import { PATRON_LINK_ACTOR, PatronLinkStore, type PatronLinkResult } from "../src/patron-link/patron-link.store";
 import { PATRON_LINK_FOUNDER_REASON } from "../src/supporters/supporter-match.rules";
 import { parseFeed } from "../src/telemetry/telemetry.types";
+import { describeCause } from "../src/common/cause-labels";
 import { defaultVotingPolicy, defaultVotingSettings } from "../src/common/voting-policy";
 
 // Only the port is configurable. Never load the application's configuration or
@@ -844,6 +845,159 @@ describe("launch storage on isolated PostgreSQL", () => {
       ],
     );
     expect(stats.totals).toEqual({ events: 213, deaths: 213, suicides: 0, falling: 0, players: 13 });
+  });
+
+  it("counts only firearm kills as long shots in stats, row extras and the weekly highlight", async () => {
+    const telemetry = new TelemetryStore(drizzle({ client, schema }));
+    const now = new Date(),
+      since = new Date(now.getTime() - 60_000);
+    const [ricky, annie, rita, tom, target] = [
+      "76561198000000301",
+      "76561198000000302",
+      "76561198000000303",
+      "76561198000000304",
+      "76561198000000305",
+    ];
+    const names: Record<string, string> = {
+      [ricky]: "RifleRicky",
+      [annie]: "ArtilleryAnnie",
+      [rita]: "RocketRita",
+      [tom]: "TankTom",
+      [target]: "Target",
+    };
+    let eventTime = 0;
+    const kill = (killer: string, cause: string, distance: number) => ({
+      eventId: randomUUID(),
+      type: "killed",
+      eventTime: ++eventTime,
+      mapName: "Bakurani",
+      killerSteamId: killer,
+      killerName: names[killer],
+      victimSteamId: target,
+      victimName: names[target],
+      cause,
+      distance,
+    });
+    const feed = parseFeed({
+      serverId: randomUUID(),
+      serverName: "Game label",
+      events: [
+        // Artillery, rocket pods, a tank gun, a grenade and an unlabelled bare code all reach farther than
+        // any rifle here, and none of them is a long shot.
+        kill(annie, "Id.Vehicle.WeaponExtension.Artillery", 200_000),
+        kill(rita, "Id.Vehicle.WeaponExtension.ROT_04.RocketPods", 150_000),
+        kill(tom, "Id.Vehicle.WeaponExtension.MBT_01.MainBarrel", 180_000),
+        kill(tom, "ID.Item.M67Grenade", 90_000),
+        kill(tom, "Mortar", 199_000),
+        kill(ricky, "Id.Item.SVDM", 60_000),
+        kill(annie, "ID.Item.AK74M", 5_000),
+        // An item without a label reads "New Rifle" but its kind is unknown, not firearm, so it does not count.
+        kill(rita, "Id.Item.NewRifle", 1_000),
+      ],
+    });
+    expect((await telemetry.ingest(feed, now, "east")).inserted).toBe(8);
+
+    const result = publicServerStats(await telemetry.serverStats(since, now, "east"));
+    expect(result.longestKills).toEqual([
+      { name: "RifleRicky", weapon: "SVDM", meters: 600, map: "Bakurani" },
+      { name: "ArtilleryAnnie", weapon: "AK-74M", meters: 50, map: "Bakurani" },
+    ]);
+    // Each weapon's own longest kill still covers every kind.
+    expect(result.weapons).toEqual(
+      expect.arrayContaining([
+        { label: "Artillery", kind: "vehicle_weapon", kills: 1, headshotKills: 0, longestMeters: 2_000 },
+        { label: "Rocket Pods", kind: "vehicle_weapon", kills: 1, headshotKills: 0, longestMeters: 1_500 },
+        { label: "SVDM", kind: "firearm", kills: 1, headshotKills: 0, longestMeters: 600 },
+      ]),
+    );
+
+    const extras = await telemetry.rowExtras(since, now, [ricky, annie, rita, tom], "east");
+    expect(rowExtrasByPlayer(extras)).toEqual(
+      new Map([
+        [ricky, { topWeapon: "SVDM", longestKillMeters: 600, bestStreak: 1 }],
+        [annie, { topWeapon: "AK-74M", longestKillMeters: 50, bestStreak: 2 }],
+        // No firearm kill, so no longest kill at all.
+        [rita, { topWeapon: "New Rifle", bestStreak: 2 }],
+        [tom, { topWeapon: "M67 grenade", bestStreak: 3 }],
+      ]),
+    );
+
+    expect((await telemetry.weeklyHighlights(since, now, "east")).longestKill).toEqual({
+      steamId: ricky,
+      name: "RifleRicky",
+      distanceCentimeters: 60_000,
+      cause: "Id.Item.SVDM",
+      mapName: "Bakurani",
+    });
+  });
+
+  it("matches describeCause()'s firearm kind in SQL for every cause shape the labels handle", async () => {
+    const telemetry = new TelemetryStore(drizzle({ client, schema }));
+    const now = new Date(),
+      since = new Date(now.getTime() - 60_000);
+    const [asSent, lowered, target] = ["76561198000000311", "76561198000000312", "76561198000000313"];
+    const firearms = [
+      ...["Id.Item.AK74M", "ID.Item.SVDM", "ID.ITEM.MOSIN", "Id.Item.SR_04", "Id.Item.Mosin.Nagant", "Id.Item.M500"],
+      ...["Id.Item.A91", "Id.Item.MK22", "Id.Item.Vector", "Id.Item.WEPN_029", "ID.Item.WEPN7", "AK-47", "SVD"],
+      ...["Compound Bow", "WEPN_030"],
+    ];
+    const others = [
+      // Unlabelled items and family codes read as names but are not firearms until they are labelled.
+      ...["Id.Item.SMG_03", "SMG_03", "Id.Item.NewRifle", "Id.Item.NewThing.Variant", "Id.Item.Foo.WEPN_029"],
+      ...["Id.Item.WEPN_", "Id.Item.WEPN_12345", "Id.Item.", "Id.Item.76561198000000009", "Id.Item.Free_Gun", "Mortar"],
+      ...[
+        "ID.Item.M67Grenade",
+        "Id.Item.M67",
+        "Id.Item.RPG7",
+        "Id.Item.CGM4",
+        "ID.Item.ATMine",
+        "RPG7",
+        "ID.Item.Fists",
+      ],
+      ...["Id.Item.Knife", "ID.Item.Defibrillator", "ID.Item.SupplyPallet", "BP_AK74M", "AK74M_C"],
+      ...["ID.Item.BuildTool.Hammer.Large", "Id.Item.BuildTool.SVDM", "Id.Item.Buildables.SandBags"],
+      ...[
+        "Id.Item.Buildable.AK74M",
+        "Id.Vehicle.WeaponExtension.Artillery",
+        "Id.Vehicle.WeaponExtension.ROT_04.RocketPods",
+      ],
+      ...["Id.Vehicle.WeaponExtension.MBT_01.MainBarrel", "Vehicle.Variant.Air.Rotary.ROT_04.Default"],
+      ...[
+        "Id.Vehicle.Humvee",
+        "Id.Vehicle.Item.AK74M",
+        "Item.AK74M",
+        "Id.Items.AK74M",
+        "Weapons/AK74M",
+        "Weapons\\AK74M",
+      ],
+    ];
+    let eventTime = 0;
+    const kill = (killer: string, cause: string) => ({
+      eventId: randomUUID(),
+      type: "killed",
+      eventTime: ++eventTime,
+      killerSteamId: killer,
+      victimSteamId: target,
+      cause,
+      distance: 10_000,
+    });
+    const causes = [...firearms, ...others];
+    const events = [
+      ...causes.map((cause) => kill(asSent, cause)),
+      ...causes.map((cause) => kill(lowered, cause.toLowerCase())),
+    ];
+    const feed = parseFeed({ serverId: randomUUID(), serverName: "Game label", events });
+    expect((await telemetry.ingest(feed, now, "east")).inserted).toBe(events.length);
+
+    // Row extras keep each cause's longest kill only when the SQL calls it a long shot.
+    const { weapons } = await telemetry.rowExtras(since, now, [asSent, lowered], "east");
+    expect(weapons).toHaveLength(events.length);
+    const firearm = new Set(firearms.map((cause) => cause.toLowerCase()));
+    for (const { cause, longestCentimeters } of weapons) {
+      const expected = firearm.has(cause!.toLowerCase());
+      expect({ cause, longShot: longestCentimeters !== null }).toEqual({ cause, longShot: expected });
+      expect({ cause, firearm: describeCause(cause).kind === "firearm" }).toEqual({ cause, firearm: expected });
+    }
   });
 
   it("stores game GUIDs that are not RFC 4122 UUIDs and deduplicates them across letter case", async () => {

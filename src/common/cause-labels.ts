@@ -53,6 +53,10 @@ const ITEMS = table({
   tar21: ["TAR-21", "firearm"],
   mp9: ["MP9", "firearm"],
   mp5: ["MP5", "firearm"],
+  m500: ["M500 shotgun", "firearm"],
+  a91: ["A-91", "firearm"],
+  mk22: ["MK22", "firearm"],
+  vector: ["Vector", "firearm"],
   // Unconfirmed: a generic name only.
   sr04: ["SR-04", "firearm"],
   compoundbow: ["Compound bow", "firearm"],
@@ -61,6 +65,7 @@ const ITEMS = table({
   cgm4: ["Carl Gustaf M4", "explosive"],
   rpg7: ["RPG-7", "explosive"],
   m67: ["M67 grenade", "explosive"],
+  m67grenade: ["M67 grenade", "explosive"],
   c4: ["C4", "explosive"],
   ied: ["IED", "explosive"],
   atmine: ["AT mine", "explosive"],
@@ -81,6 +86,18 @@ const TOOLS = labels({ hammerlarge: "Big hammer", hammersmall: "Hammer", hammer:
 const VEHICLES = labels({ humvee: "Humvee", rot04: "ROT-04 helicopter" });
 const MOUNTS = labels({ ringturret: "Ring turret" });
 const BUILDABLES = labels({ barbedwire: "Barbed wire", bremerwall: "Bremer wall", hblock: "H-block" });
+
+/**
+ * The labelled firearms' norm() keys. Long shots count firearms only and the store picks the longest kills
+ * in SQL, so it mirrors describeCause() there: a cause is a firearm exactly when its item code (the text
+ * after `Id.Item.`, or a whole bare code) has one of these keys or is a `WEPN_` code. Unlabelled items,
+ * family codes such as SMG_03 and every other kind never count. Built from ITEMS, so a new label updates it.
+ */
+export const FIREARM_ITEM_KEYS: readonly string[] = [...ITEMS]
+  .filter(([, [, kind]]) => kind === "firearm")
+  .map(([key]) => key);
+/** Every labelled item's norm() key, for the tests that keep the store's SQL mirror exact. */
+export const ITEM_KEYS: readonly string[] = [...ITEMS.keys()];
 
 const STEAM_ID_LIKE = /\p{Nd}{17}/u;
 /** Unreal blueprint prefixes and generated class suffixes. Paths and dotted names never reach step 8. */
