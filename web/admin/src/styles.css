@@ -3920,7 +3920,7 @@ tr.audit-more[hidden] {
     max-width: none;
   }
   .supporter-search .button,
-  .supporter-search + .button {
+  .supporter-search ~ .button {
     flex: 1 1 auto;
     margin-left: 0;
   }
