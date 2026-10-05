@@ -1,4 +1,11 @@
-import { Injectable, Logger, type OnApplicationBootstrap, type OnModuleDestroy } from "@nestjs/common";
+import {
+  Inject,
+  Injectable,
+  Logger,
+  Optional,
+  type OnApplicationBootstrap,
+  type OnModuleDestroy,
+} from "@nestjs/common";
 import { Client } from "discord.js";
 import { createHash, randomUUID } from "node:crypto";
 import { AdminStore, COMMUNITY_MESSAGES_ACTOR_ID } from "../admin/admin.store";
@@ -10,6 +17,14 @@ import type { GameServerSummary } from "../common/game-server";
 import type { CommunityMessagesStatus } from "../common/community-messages";
 import { CommunityRotation, type WelcomePool } from "./community-rotation";
 import { initialCommunityState, observeCommunity, statusCard, type CommunitySnapshot } from "./community-state";
+import {
+  CommunitySenderLock,
+  directSenderConnection,
+  EVERY_PROCESS_SENDS,
+  SENDER_LOCK_CONNECTION,
+  type CommunitySender,
+  type ConnectSenderLock,
+} from "./community-sender";
 
 const SYSTEM_ACTOR: Staff = {
   id: COMMUNITY_MESSAGES_ACTOR_ID,
@@ -66,12 +81,17 @@ function roundMessages(env: EnvService): string[] {
 export class ServerCommunityService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(ServerCommunityService.name);
   private readonly workers = new Map<string, ServerCommunityWorker>();
+  private readonly connectSenderLock: (url: string) => ConnectSenderLock;
+  private senderLock?: CommunitySenderLock;
   constructor(
     private readonly servers: GameServers,
     private readonly store: AdminStore,
     private readonly env: EnvService,
     private readonly discord: Client,
-  ) {}
+    @Optional() @Inject(SENDER_LOCK_CONNECTION) connectSenderLock?: (url: string) => ConnectSenderLock,
+  ) {
+    this.connectSenderLock = connectSenderLock ?? directSenderConnection;
+  }
   private cardTarget(serverId: string): StatusCardTarget {
     const configured = this.env.get("WARDOGS_SERVERS");
     // Explicit registries must not reuse the legacy shared status message.
@@ -120,7 +140,21 @@ export class ServerCommunityService implements OnApplicationBootstrap, OnModuleD
   }
   onApplicationBootstrap() {
     if (!this.env.get("SERVER_COMMUNITY_ENABLED")) return;
-    for (const server of this.servers.list()) {
+    // Opt-in: with DATABASE_URL_UNPOOLED set, only the process holding a server's lock sends in-game messages.
+    // A status card alone sends nothing in game, so it needs no lock.
+    const url = this.env.get("DATABASE_URL_UNPOOLED");
+    const inGame =
+      this.env.get("SERVER_COMMUNITY_WELCOME_ENABLED") === true ||
+      this.env.get("SERVER_COMMUNITY_ROUND_ENABLED") === true;
+    const servers = this.servers.list();
+    const lock =
+      url && inGame
+        ? new CommunitySenderLock(
+            servers.map(({ id }) => id),
+            this.connectSenderLock(url),
+          )
+        : undefined;
+    for (const server of servers) {
       try {
         const worker = new ServerCommunityWorker(
           this.servers.get(server.id),
@@ -129,6 +163,8 @@ export class ServerCommunityService implements OnApplicationBootstrap, OnModuleD
           this.discord,
           server,
           this.cardTarget(server.id),
+          undefined,
+          lock ?? EVERY_PROCESS_SENDS,
         );
         this.workers.set(server.id, worker);
         worker.onApplicationBootstrap();
@@ -136,10 +172,18 @@ export class ServerCommunityService implements OnApplicationBootstrap, OnModuleD
         this.logger.warn(`Community messages for ${server.id} need connection setup. Other servers remain available.`);
       }
     }
+    if (lock && this.workers.size) {
+      this.senderLock = lock;
+      lock.start();
+    }
   }
-  onModuleDestroy() {
+  /** Stops every worker first, then closes the lock connection so the next process takes over at once. */
+  async onModuleDestroy() {
     for (const worker of this.workers.values()) worker.onModuleDestroy();
     this.workers.clear();
+    const lock = this.senderLock;
+    this.senderLock = undefined;
+    await lock?.stop();
   }
 }
 
@@ -162,6 +206,8 @@ export class ServerCommunityWorker implements OnApplicationBootstrap, OnModuleDe
   private whitelistLoadedAt: string | null = null;
   private whitelistFailedAt: string | null = null;
   private whitelistRetryAt = 0;
+  /** The sender lease seen at the previous observation; see `tick`. */
+  private lease: number | null;
 
   constructor(
     private readonly game: WardogsClient,
@@ -171,10 +217,18 @@ export class ServerCommunityWorker implements OnApplicationBootstrap, OnModuleDe
     private readonly server: GameServerSummary = { id: "primary", name: "The UNCs", version: "0".repeat(64) },
     private readonly card?: StatusCardTarget,
     private readonly rotation = new CommunityRotation(),
-  ) {}
+    private readonly sender: CommunitySender = EVERY_PROCESS_SENDS,
+  ) {
+    this.lease = sender.lease(server.id);
+  }
 
   private options() {
     return communityOptions(this.env, this.card);
+  }
+
+  /** True while this process still holds the sender lease it held at the latest observation. */
+  private holdsLease() {
+    return this.lease !== null && this.sender.lease(this.server.id) === this.lease;
   }
 
   observations() {
@@ -241,7 +295,13 @@ export class ServerCommunityWorker implements OnApplicationBootstrap, OnModuleDe
       this.state = observation.state;
       this.snapshot = current;
       const options = this.options();
-      if (observation.baseline) this.queue = [];
+      // Only the process holding this server's sender lease queues or sends in-game messages; another keeps
+      // observing so its baseline is ready. The first observation under a new lease sends nothing, because
+      // what it reveals was the previous holder's to announce, and nothing queued before then is kept.
+      const lease = this.sender.lease(this.server.id);
+      const sending = lease !== null && lease === this.lease;
+      this.lease = lease;
+      if (observation.baseline || !sending) this.queue = [];
       const connected = new Set(
         current.status.players.current > 0 ? current.players.map((player) => player.steamId) : [],
       );
@@ -250,11 +310,11 @@ export class ServerCommunityWorker implements OnApplicationBootstrap, OnModuleDe
           expiresAt > now &&
           (action.action === "message" ? options.welcome && connected.has(action.steamId) : options.round),
       );
-      if (options.round && observation.round) {
+      if (sending && options.round && observation.round) {
         const messages = roundMessages(this.env);
         this.enqueue({ action: "broadcast", message: messages[this.rotation.round(messages.length)] }, now, true);
       }
-      if (options.welcome) {
+      if (sending && options.welcome) {
         const variants = welcomeVariants(this.env);
         const whitelistedVariants = whitelistedWelcomeVariants(this.env);
         const readyAt = now + this.env.get("SERVER_COMMUNITY_WELCOME_DELAY_SECONDS") * 1000;
@@ -274,7 +334,7 @@ export class ServerCommunityWorker implements OnApplicationBootstrap, OnModuleDe
           this.enqueue({ action: "message", steamId, message }, readyAt, false, followUps);
         }
       }
-      for (let sent = 0; sent < MAX_SENDS_PER_TICK && this.queue.length && !this.stopped; sent++) {
+      for (let sent = 0; sent < MAX_SENDS_PER_TICK && this.queue.length && !this.stopped && this.holdsLease(); sent++) {
         // A future welcome must not hold up another recipient or a ready round message.
         const index = this.queue.findIndex((item) => item.readyAt <= Date.now() && item.expiresAt > Date.now());
         if (index < 0) break;
@@ -345,13 +405,16 @@ export class ServerCommunityWorker implements OnApplicationBootstrap, OnModuleDe
         requestHash,
       );
       if (!started.created) return false;
-      if (this.stopped) {
-        // Shutdown began while the receipt was being saved. Close it so it does not read as Unconfirmed.
+      if (this.stopped || !this.holdsLease()) {
+        // Shutdown began, or this process lost its sender lock, while the receipt was being saved. Close it
+        // so it does not read as Unconfirmed.
         try {
           await this.store.finish(action.id, {
             state: "failed",
             changed: false,
-            message: "Gramps stopped before sending this automatic message. Nothing was sent.",
+            message: this.stopped
+              ? "Gramps stopped before sending this automatic message. Nothing was sent."
+              : "This Gramps process lost the community sender lock before sending this automatic message. Nothing was sent.",
           });
         } catch {
           this.logger.warn(
