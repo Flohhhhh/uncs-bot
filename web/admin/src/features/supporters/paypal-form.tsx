@@ -41,10 +41,10 @@ const printable = (value: string) =>
 
 /**
  * Reads the form into a request body, or throws what to fix. Every check is the server's own, so a body this returns
- * passes paypalSchema and the server's future-date check. `awardFounder` asks the server to make the donor a founder;
- * the server alone decides whether they are one.
+ * passes paypalSchema and the server's future-date check. `askFounder` is false only when staff chose to save the
+ * payment alone after the server refused a founder.
  */
-export function paypalEntry(values: FormData, awardFounder: boolean, now = Date.now()): PaypalEntry {
+export function paypalEntry(values: FormData, askFounder: boolean, now = Date.now()): PaypalEntry {
   const text = (name: string) => String(values.get(name) ?? "").trim();
   const displayName = text("displayName");
   if (!displayName || displayName.length > 120 || !printable(displayName))
@@ -90,7 +90,10 @@ export function paypalEntry(values: FormData, awardFounder: boolean, now = Date.
     completedPaymentVerified: true,
     firstSuccessfulPaymentVerified: firstPayment === "yes",
     minimumConfirmed: values.get("minimumConfirmed") === "on",
-    awardFounder,
+    // A founder is asked for only when staff say this is the first payment. The server refuses a founder on any other
+    // payment and saves nothing, so asking would only cost staff a second save. Whether a first payment makes a
+    // founder is the server's decision alone.
+    awardFounder: askFounder && firstPayment === "yes",
     reason,
   };
 }
@@ -159,13 +162,11 @@ function SavedRecord({ saved }: { saved: Saved }) {
 }
 
 function PaypalForm({
-  unavailable,
   policy,
   onClose,
   onRecorded,
   onOpen,
 }: {
-  unavailable: boolean;
   policy: FounderPolicy;
   onClose: () => void;
   onRecorded: () => void;
@@ -175,13 +176,19 @@ function PaypalForm({
   // Each entry starts from a fresh form: USD, paid this minute.
   const [entry, setEntry] = useState(() => ({ round: 0, paidAt: localMinute() }));
   const [currency, setCurrency] = useState<string>(policy.currency);
-  const [sending, setSending] = useState(false);
+  // The save in flight: "entry" from Save supporter, "alone" from Save without founder.
+  const [sending, setSending] = useState<"entry" | "alone" | null>(null);
   const [problem, setProblem] = useState("");
-  // The server refused to make this entry a founder and saved nothing, so staff may save the payment alone.
+  // The server refused to make this entry a founder and saved nothing, so staff may save the payment alone. The
+  // refusal was for the entry as sent, so it stands until the entry is edited.
   const [founderRefused, setFounderRefused] = useState(false);
   const [saved, setSaved] = useState<Saved | null>(null);
   const form = useRef<HTMLFormElement>(null);
   const name = useRef<HTMLInputElement>(null);
+  const saveButton = useRef<HTMLButtonElement>(null);
+  const aloneButton = useRef<HTMLButtonElement>(null);
+  // The button for the next step after a save that did not finish.
+  const nextStep = useRef<"entry" | "alone" | null>(null);
   const inFlight = useRef(false);
   const mounted = useRef(true);
   // One request ID per distinct entry, so saving the same entry again is a repeat the server recognises.
@@ -195,26 +202,35 @@ function PaypalForm({
   }, [setBusy]);
   // Staff start typing straight away, on opening and on each further entry.
   useEffect(() => name.current?.focus(), [entry.round]);
+  // Saving disables every control, which drops focus. A save that did not finish puts focus on its next step once
+  // the buttons can be pressed again, so one more Enter carries on.
+  useEffect(() => {
+    if (sending || !nextStep.current) return;
+    (nextStep.current === "alone" ? aloneButton : saveButton).current?.focus();
+    nextStep.current = null;
+  }, [sending]);
 
   /**
-   * Saves the entry. Every entry first asks for a founder, and the server decides. When it refuses, it saves nothing
-   * and says why; only then can staff save the payment without a founder.
+   * Saves the entry. A first payment asks for a founder, and the server decides. When it refuses, it saves nothing
+   * and says why; staff can then save the payment alone (`askFounder` false). The save never waits for the page's
+   * list: the request names no record, and saving again after an unconfirmed save must stay possible while the list
+   * cannot be read.
    */
-  async function save(awardFounder: boolean) {
-    if (busy || unavailable || inFlight.current || !form.current) return;
+  async function save(askFounder: boolean) {
+    if (busy || inFlight.current || !form.current) return;
     let input: PaypalEntry;
     try {
       // Read before the fields are disabled for sending: a disabled field is left out of the form data.
-      input = paypalEntry(new FormData(form.current), awardFounder);
+      input = paypalEntry(new FormData(form.current), askFounder);
     } catch (error) {
       setProblem(errorMessage(error));
       return;
     }
+    const pressed = askFounder ? "entry" : "alone";
     inFlight.current = true;
-    setSending(true);
+    setSending(pressed);
     setBusy(true);
     setProblem("");
-    setFounderRefused(false);
     let refresh = true;
     try {
       const key = JSON.stringify(input);
@@ -232,6 +248,7 @@ function PaypalForm({
         !response.founder
       )
         throw new Error("The save could not be confirmed.");
+      setFounderRefused(false);
       setSaved({
         record: response.supporter,
         payment: response.payment,
@@ -241,20 +258,25 @@ function PaypalForm({
     } catch (error) {
       if (!mounted.current) return;
       const status = errorField(error, "status");
+      nextStep.current = pressed;
       // A 4xx is the server's refusal: nothing was saved, and its own words say what to fix. A 404 is not one, because
       // the server sends it when a saved record could not be read back.
       if (typeof status === "number" && status >= 400 && status < 500 && status !== 404) {
         refresh = false;
         setProblem(errorMessage(error));
-        setFounderRefused(awardFounder && status === 409 && typeof errorField(error, "blockedReason") === "string");
+        if (input.awardFounder && status === 409 && typeof errorField(error, "blockedReason") === "string") {
+          setFounderRefused(true);
+          nextStep.current = "alone";
+        }
       } else
+        // Saving again repeats this request under the same ID, so the server answers with what it saved.
         setProblem(
           `${typeof status === "number" && status >= 500 ? errorMessage(error) : "The save could not be confirmed."} Save again to check. The same payment never saves twice.`,
         );
     } finally {
       inFlight.current = false;
       if (mounted.current) {
-        setSending(false);
+        setSending(null);
         setBusy(false);
         if (refresh) onRecorded();
       }
@@ -274,7 +296,7 @@ function PaypalForm({
           : "Check the payment in PayPal first."
       }
       eyebrow={saved ? null : undefined}
-      busy={sending}
+      busy={sending !== null}
       onClose={onClose}
     >
       {saved ? (
@@ -312,7 +334,7 @@ function PaypalForm({
             void save(true);
           }}
         >
-          <fieldset disabled={sending} className="review-fields">
+          <fieldset disabled={sending !== null} className="review-fields">
             <div className="supporter-form-grid">
               <label>
                 Name
@@ -369,6 +391,7 @@ function PaypalForm({
                   <option value="yes">Yes</option>
                   <option value="no">No</option>
                 </select>
+                <small>No saves it without a founder.</small>
               </label>
               <label>
                 SteamID64 (optional)
@@ -393,23 +416,35 @@ function PaypalForm({
             </p>
           )}
           <div className="dialog-footer">
-            <button type="button" className="button secondary" disabled={sending} onClick={onClose}>
+            <button type="button" className="button secondary" disabled={sending !== null} onClick={onClose}>
               Cancel
             </button>
+            {/* While the refusal stands this is the next step, so it is the primary button and takes focus. That happens
+                right after a press meant for Save supporter, so a held Enter key or the second click of a double click
+                does not press it. */}
             {founderRefused && (
               <button
+                ref={aloneButton}
                 type="button"
-                className="button secondary"
-                disabled={sending || busy || unavailable}
-                onClick={() => {
-                  if (form.current?.reportValidity()) void save(false);
+                className="button primary"
+                disabled={sending !== null || busy}
+                onKeyDown={(event) => {
+                  if (event.repeat && event.key === "Enter") event.preventDefault();
+                }}
+                onClick={(event) => {
+                  if (event.detail < 2 && form.current?.reportValidity()) void save(false);
                 }}
               >
-                Save without founder
+                {sending === "alone" ? "Saving…" : "Save without founder"}
               </button>
             )}
-            <button type="submit" className="button primary" disabled={sending || busy || unavailable}>
-              {sending ? "Saving…" : "Save supporter"}
+            <button
+              ref={saveButton}
+              type="submit"
+              className={`button ${founderRefused ? "secondary" : "primary"}`}
+              disabled={sending !== null || busy}
+            >
+              {sending === "entry" ? "Saving…" : "Save supporter"}
             </button>
           </div>
         </form>
@@ -420,7 +455,8 @@ function PaypalForm({
 
 /**
  * The Supporters page's "Add PayPal supporter" button and its dialog. PayPal records need no Patreon connection, so
- * the button only waits for the page's records to be current, like every other supporter write action.
+ * the button only waits for the page's records to be current, like every other supporter write action. Once the
+ * dialog is open its saves do not wait for the list, so an entry can be saved again while the list cannot be read.
  */
 export function AddPaypalSupporter({
   unavailable,
@@ -449,7 +485,6 @@ export function AddPaypalSupporter({
       {open &&
         createPortal(
           <PaypalForm
-            unavailable={unavailable}
             policy={policy}
             onClose={() => setOpen(false)}
             onRecorded={onRecorded}

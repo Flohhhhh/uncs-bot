@@ -1,6 +1,6 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, createEvent, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { paypalSchema } from "../../../../../src/supporters/supporters.types";
+import { founderBlocker, paypalSchema } from "../../../../../src/supporters/supporters.types";
 import { api } from "../../api/client";
 import { AdminContext, type AdminContextValue } from "../../app/context";
 import { SupportersPage } from "./index";
@@ -195,6 +195,33 @@ describe("the PayPal entry the form builds", () => {
     expect(serverAccepts(entry)).toBe(true);
   });
 
+  it("asks for a founder only on a first payment, the only kind the server makes a founder from", () => {
+    expect(paypalEntry(formData(), true, now).awardFounder).toBe(true);
+    expect(paypalEntry(formData({ firstPayment: "no" }), true, now)).toMatchObject({
+      firstSuccessfulPaymentVerified: false,
+      awardFounder: false,
+    });
+    // Staff chose to save the payment alone after the server refused a founder.
+    expect(paypalEntry(formData(), false, now)).toMatchObject({
+      firstSuccessfulPaymentVerified: true,
+      awardFounder: false,
+    });
+    // Skipping the request is right only while the server's own rule refuses every payment that is not the first.
+    const facts = {
+      source: "paypal",
+      verificationState: "verified",
+      paidAt: "2026-10-01T16:00:00Z",
+      amountCents: 500,
+      currency: "USD",
+    };
+    const serverPolicy = { ...policy, source: "SUPPORTER_FOUNDER" as const };
+    const others = { earlierPayment: false, hasIdentity: true, otherFounder: false };
+    expect(founderBlocker({ ...facts, firstSuccessfulPaymentVerified: true }, serverPolicy, others)).toBeNull();
+    expect(founderBlocker({ ...facts, firstSuccessfulPaymentVerified: false }, serverPolicy, others)).toBe(
+      "not_first_payment",
+    );
+  });
+
   it.each([
     ["a 120-character name", { displayName: "n".repeat(120) }],
     ["a 17-digit Discord ID", { discordId: "1".repeat(17) }],
@@ -318,6 +345,7 @@ describe("Add PayPal supporter", () => {
     expect(field("Currency")).toHaveValue("USD");
     expect(field("Paid on")).toHaveValue(localMinute(new Date(now)));
     expect(field("First payment?")).toHaveValue("");
+    expect(within(dialog).getByText("No saves it without a founder.")).toBeInTheDocument();
     expect(screen.getByLabelText("Reason")).toHaveValue("Checked the payment in PayPal.");
     expect(screen.getByLabelText("Shows Completed in PayPal")).not.toBeChecked();
     // A founder is the server's decision, so the form has nothing to tick for it.
@@ -419,10 +447,25 @@ describe("Add PayPal supporter", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(`${outsideWindow} Nothing was recorded.`);
     expect(onRecorded).not.toHaveBeenCalled();
     expect(screen.getByRole("dialog", { name: "Add PayPal supporter" })).toBeInTheDocument();
+    // Saving the payment alone is the next step, so it is the main button and one more Enter finishes the entry.
+    const alone = screen.getByRole("button", { name: "Save without founder" });
+    expect(alone).toBeEnabled();
+    await waitFor(() => expect(alone).toHaveFocus());
+    expect(alone).toHaveClass("primary");
+    expect(screen.getByRole("button", { name: "Save supporter" })).toHaveClass("secondary");
+    // It takes focus right after a press meant for Save supporter. A held Enter or a double click does not press it.
+    const held = createEvent.keyDown(alone, { key: "Enter", repeat: true });
+    fireEvent(alone, held);
+    expect(held.defaultPrevented).toBe(true);
+    const pressed = createEvent.keyDown(alone, { key: "Enter" });
+    fireEvent(alone, pressed);
+    expect(pressed.defaultPrevented).toBe(false);
+    fireEvent.click(alone, { detail: 2 });
+    expect(posted()).toHaveLength(1);
     // The refusal was for that entry. An edited entry asks the server for a founder again.
-    expect(screen.getByRole("button", { name: "Save without founder" })).toBeEnabled();
     fireEvent.change(field("Paid on"), { target: { value: "2026-10-02T12:00" } });
     expect(screen.queryByRole("button", { name: "Save without founder" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save supporter" })).toHaveClass("primary");
     save();
     await waitFor(() => expect(posted()).toHaveLength(2));
     expect(posted()[1]).toMatchObject({ awardFounder: true, paidAt: new Date("2026-10-02T12:00").toISOString() });
@@ -437,6 +480,82 @@ describe("Add PayPal supporter", () => {
     expect(screen.getByText("Not a founder")).toBeInTheDocument();
     expect(screen.getByText(outsideWindow)).toBeInTheDocument();
     expect(onRecorded).toHaveBeenCalledTimes(1);
+    // The refusal belonged to that entry, so the next one starts without it.
+    fireEvent.click(screen.getByRole("button", { name: "Add another" }));
+    expect(screen.queryByRole("button", { name: "Save without founder" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save supporter" })).toHaveClass("primary");
+  });
+
+  it("saves a payment that is not the first in one step, without asking for a founder", async () => {
+    const notFirst = "Staff have not confirmed this was the supporter's first successful payment.";
+    request.mockResolvedValue(
+      saved({
+        supporter: {
+          ...notFounder,
+          founderBlockedReason: "not_first_payment",
+          founderBlockedMessage: notFirst,
+          nextSteps: [{ code: "founder_not_first_payment", area: "payment", message: notFirst }],
+        },
+        payment: { ...payment, firstSuccessfulPaymentVerified: false },
+        founder: { awarded: false, eligible: false, blockedReason: "not_first_payment" },
+      }),
+    );
+    open();
+    fill({ "First payment?": "no" });
+    save();
+    expect(await screen.findByRole("status")).toHaveTextContent(/^Saved\.$/);
+    expect(posted()).toHaveLength(1);
+    expect(posted()[0]).toMatchObject({ firstSuccessfulPaymentVerified: false, awardFounder: false });
+    expect(paypalSchema.safeParse(posted()[0]).success).toBe(true);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    // The founder verdict and the next step are the server's, shown as it sent them.
+    expect(screen.getByText("Not a founder")).toBeInTheDocument();
+    expect(screen.getByText(notFirst)).toBeInTheDocument();
+    expect(onRecorded).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps Save without founder until the entry is saved, and repeats an unconfirmed save as the same request", async () => {
+    request.mockRejectedValueOnce(failure(`${outsideWindow} Nothing was recorded.`, 409, "outside_window"));
+    open();
+    fill();
+    save();
+    const alone = () => screen.getByRole("button", { name: "Save without founder" });
+    await waitFor(() => expect(alone()).toHaveFocus());
+    // A refusal that is not about the founder leaves the payment still to save alone.
+    request.mockRejectedValueOnce(failure("Too many requests. Try again shortly.", 429));
+    fireEvent.click(alone());
+    expect(await screen.findByText("Too many requests. Try again shortly.")).toBeInTheDocument();
+    await waitFor(() => expect(alone()).toHaveFocus());
+    expect(onRecorded).not.toHaveBeenCalled();
+    // The server may have saved the payment before the answer was lost.
+    request.mockRejectedValueOnce(failure("The request timed out before confirmation.", 0));
+    fireEvent.click(alone());
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /^The save could not be confirmed\. Save again to check\. The same payment never saves twice\.$/,
+    );
+    expect(alone()).toBeEnabled();
+    await waitFor(() => expect(alone()).toHaveFocus());
+    expect(alone()).toHaveClass("primary");
+    expect(onRecorded).toHaveBeenCalledTimes(1);
+    // Save supporter asks for the founder again and is refused. Save without founder stays.
+    request.mockRejectedValueOnce(failure("Already recorded; use the founder action.", 409));
+    save();
+    expect(await screen.findByRole("alert")).toHaveTextContent(/^Already recorded; use the founder action\.$/);
+    expect(alone()).toBeEnabled();
+    request.mockResolvedValueOnce({ ...savedWithoutFounder, replayed: true });
+    fireEvent.click(alone());
+    expect(await screen.findByRole("dialog", { name: "Already saved" })).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("This payment was already on record.");
+    expect(screen.getByText("Not a founder")).toBeInTheDocument();
+    const bodies = posted();
+    expect(bodies.map((body) => body.awardFounder)).toEqual([true, false, false, true, false]);
+    // Each choice keeps its own request ID, so the server sees every repeat as the request it already had.
+    expect(bodies[2]).toEqual(bodies[1]);
+    expect(bodies[4]).toEqual(bodies[1]);
+    expect(bodies[3]).toEqual(bodies[0]);
+    expect(bodies[1]).toEqual({ ...bodies[0], id: expect.stringMatching(uuid), awardFounder: false });
+    expect(bodies[1].id).not.toBe(bodies[0].id);
+    expect(onRecorded).toHaveBeenCalledTimes(2);
   });
 
   it.each([
@@ -474,6 +593,8 @@ describe("Add PayPal supporter", () => {
     );
     // The payment may be saved, so the page reads its records again.
     expect(onRecorded).toHaveBeenCalledTimes(1);
+    // Saving took focus off the button. It is back, so Enter saves again.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save supporter" })).toHaveFocus());
     request.mockRejectedValueOnce(failure("Supporter records are temporarily unavailable.", 503));
     save();
     await waitFor(() =>
@@ -560,52 +681,54 @@ describe("Add PayPal supporter", () => {
 });
 
 describe("the Supporters page", () => {
+  const list: SupportersResponse = {
+    enabled: false,
+    configured: false,
+    webhookConfigured: false,
+    founderPolicy: policy,
+    supporters: [],
+    note: "Private records",
+    sync: {
+      configured: false,
+      running: false,
+      lastAttemptAt: null,
+      lastSuccessAt: null,
+      lastError: null,
+      tokenRejected: false,
+      members: 0,
+      newMembers: 0,
+      updated: 0,
+      payments: 0,
+      discordLinks: 0,
+      conflicts: 0,
+      truncated: 0,
+      revokedPayments: 0,
+      memberListComplete: true,
+      intervalMinutes: 30,
+      nextAttemptAt: null,
+      conflictDetails: [],
+      founderReviews: [],
+    },
+  };
+  const page = () =>
+    render(
+      <AdminContext.Provider value={context}>
+        <SupportersPage />
+      </AdminContext.Provider>,
+    );
   beforeEach(() => {
     vi.clearAllMocks();
     request.mockReset();
   });
 
   it("adds a PayPal supporter without Patreon, reads the records again and opens the new record", async () => {
-    const list: SupportersResponse = {
-      enabled: false,
-      configured: false,
-      webhookConfigured: false,
-      founderPolicy: policy,
-      supporters: [],
-      note: "Private records",
-      sync: {
-        configured: false,
-        running: false,
-        lastAttemptAt: null,
-        lastSuccessAt: null,
-        lastError: null,
-        tokenRejected: false,
-        members: 0,
-        newMembers: 0,
-        updated: 0,
-        payments: 0,
-        discordLinks: 0,
-        conflicts: 0,
-        truncated: 0,
-        revokedPayments: 0,
-        memberListComplete: true,
-        intervalMinutes: 30,
-        nextAttemptAt: null,
-        conflictDetails: [],
-        founderReviews: [],
-      },
-    };
     let recorded = false;
     request.mockImplementation(async (path, options) => {
       if (options?.method !== "POST") return recorded ? { ...list, supporters: [founder] } : list;
       recorded = true;
       return saved();
     });
-    render(
-      <AdminContext.Provider value={context}>
-        <SupportersPage />
-      </AdminContext.Provider>,
-    );
+    page();
     fireEvent.click(await screen.findByRole("button", { name: "Add PayPal supporter" }));
     expect(screen.getByRole("button", { name: "Record existing Patreon member" })).toBeDisabled();
     fill({ "Paid on": localMinute(new Date(Date.now() - 3_600_000)) });
@@ -620,5 +743,60 @@ describe("the Supporters page", () => {
     expect(within(review).getByText("PAYPAL SUPPORTER RECORD")).toBeInTheDocument();
     expect(within(review).getByText("Dana Donor")).toBeInTheDocument();
     expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  });
+
+  it("saves again from the open dialog while the list behind it cannot be read", async () => {
+    const down = "Supporter records are temporarily unavailable.";
+    const refreshFailed = "Supporter records could not be refreshed. Refresh before recording another review.";
+    const reads = () => request.mock.calls.filter(([path]) => path === "supporters").length;
+    request.mockImplementation(async (path, options) => {
+      if (options?.method === "POST") {
+        // The first save is lost with the server. The repeat finds the payment saved.
+        const sent = posted();
+        if (sent.length === 1) throw failure(down, 503);
+        const reference = String(sent[sent.length - 1].transactionId);
+        return saved({ replayed: sent.length === 2, payment: { ...payment, reference } });
+      }
+      // Only the first read of the list works.
+      if (reads() > 1) throw failure(down, 503);
+      return list;
+    });
+    page();
+    fireEvent.click(await screen.findByRole("button", { name: "Add PayPal supporter" }));
+    fill({ "Paid on": localMinute(new Date(Date.now() - 3_600_000)) });
+    save();
+    const dialog = screen.getByRole("dialog", { name: "Add PayPal supporter" });
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      `${down} Save again to check. The same payment never saves twice.`,
+    );
+    // The page read its records again and could not, so its own buttons wait. The open entry does not.
+    expect(await screen.findByText(refreshFailed)).toBeInTheDocument();
+    expect(reads()).toBe(2);
+    expect(screen.getByRole("button", { name: "Add PayPal supporter" })).toBeDisabled();
+    const again = within(dialog).getByRole("button", { name: "Save supporter" });
+    expect(again).toBeEnabled();
+    await waitFor(() => expect(again).toHaveFocus());
+    expect(field("Name")).toHaveValue("Dana Donor");
+    fireEvent.click(again);
+    expect(await screen.findByRole("dialog", { name: "Already saved" })).toBeInTheDocument();
+    const bodies = posted();
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]).toEqual(bodies[0]);
+    expect(bodies[0].id).toMatch(uuid);
+    // The next entry can be saved too, although the list still cannot be read.
+    await waitFor(() => expect(reads()).toBe(3));
+    fireEvent.click(screen.getByRole("button", { name: "Add another" }));
+    expect(screen.getByText(refreshFailed)).toBeInTheDocument();
+    fill({
+      Name: "Eli Example",
+      "Paid on": localMinute(new Date(Date.now() - 3_600_000)),
+      "PayPal transaction ID": "9zy98765xw432109v",
+    });
+    expect(screen.getByRole("button", { name: "Save supporter" })).toBeEnabled();
+    save();
+    expect(await screen.findByRole("dialog", { name: "Supporter saved" })).toBeInTheDocument();
+    expect(posted()).toHaveLength(3);
+    expect(posted()[2]).toMatchObject({ displayName: "Eli Example", transactionId: "9ZY98765XW432109V" });
+    expect(posted()[2].id).not.toBe(bodies[0].id);
   });
 });
