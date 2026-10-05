@@ -1,9 +1,8 @@
 "use client";
 
-import { MonitorIcon, MoonIcon, SunIcon } from "lucide-react";
+import { ChevronUpIcon, MonitorIcon, MoonIcon, SunIcon } from "lucide-react";
 import { useTheme } from "next-themes";
 
-import { Button } from "~/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -13,6 +12,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
+import { SidebarMenuButton } from "~/components/ui/sidebar";
 
 export function ThemeSelector() {
   const { theme, setTheme } = useTheme();
@@ -20,12 +20,13 @@ export function ThemeSelector() {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="outline" size="sm">
-          <SunIcon data-icon="inline-start" />
-          Appearance
-        </Button>
+        <SidebarMenuButton title="Appearance" aria-label="Appearance">
+          <SunIcon aria-hidden="true" />
+          <span>Appearance</span>
+          <ChevronUpIcon className="ml-auto" aria-hidden="true" />
+        </SidebarMenuButton>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">
+      <DropdownMenuContent side="top" align="start" className="min-w-48">
         <DropdownMenuLabel>Appearance</DropdownMenuLabel>
         <DropdownMenuSeparator />
         <DropdownMenuRadioGroup value={theme ?? "system"} onValueChange={setTheme}>
