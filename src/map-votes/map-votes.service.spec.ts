@@ -1714,8 +1714,9 @@ describe("automatic ballots that follow the round, not the clock", () => {
     );
     const off = await openBallot();
     off.environment.MAP_VOTES_ENABLED = false;
+    off.store.history.mockClear();
     expect(await registeredQueueListener(off)(staff, "primary")).toBeNull();
-    expect(off.store.automaticOpen).not.toHaveBeenCalled();
+    expect(off.store.history).not.toHaveBeenCalled();
   });
   it("tells staff about a ballot opening or closing when they queue the entry already next", async () => {
     const f = await openBallot();
@@ -1729,10 +1730,57 @@ describe("automatic ballots that follow the round, not the clock", () => {
       "A community vote on this server is opening now. Close it in Map votes to keep this choice.",
     );
     expect(f.store.cancel).not.toHaveBeenCalled();
-    // A manual ballot keeps its original revision rule and is not mentioned.
+    // A closing manual ballot is mentioned too: its revision is unchanged, so only its staff-queue check stops it.
     f.record.state = "closing";
     f.record.automation = null;
-    expect(await staffQueued(staff, "primary")).toBeNull();
+    expect(await staffQueued(staff, "primary")).toBe(
+      "A community vote on this server is closing now and may still change the next map. Check Map votes.",
+    );
+  });
+  it("closes an open manual ballot when staff queue the entry that is already next", async () => {
+    // The rotation is [Kavkazi (running), Europe, Islands]; the manual ballot offers Europe and Islands.
+    const f = fixture();
+    f.record.state = "open";
+    f.record.winner = null;
+    f.store.cancel.mockImplementation(async (_id: string, _request: string, _actor: Staff, reason: string) => {
+      f.record.state = "cancelled";
+      f.record.message = reason;
+      return { ...f.record };
+    });
+    const staffQueued = registeredQueueListener(f);
+    const queuer: Staff = { ...staff, id: "987654321098765432", name: "Queuing admin", serverId: "primary" };
+    expect(await staffQueued(queuer, "primary")).toBe(
+      "The open community vote was closed, so it cannot replace this choice.",
+    );
+    expect(f.store.cancel).toHaveBeenCalledWith(
+      f.record.id,
+      expect.any(String),
+      expect.objectContaining({ id: queuer.id, name: "Queuing admin", serverId: "primary" }),
+      "Staff queued the next map. Votes were not applied.",
+      "Staff queued the next map. Votes were not applied.",
+    );
+    // The existing ballot message is edited; nothing new is posted and the game is not touched.
+    expect(f.discord.update).toHaveBeenCalledWith(expect.objectContaining({ id: f.record.id, state: "cancelled" }));
+    expect(f.discord.publish).not.toHaveBeenCalled();
+    expect(f.admin.act).not.toHaveBeenCalled();
+  });
+  it("finishes a manual ballot without its winner when staff queued a map since it opened", async () => {
+    // Islands wins, but staff queued Europe (already next) while the ballot was open: the revision is unchanged.
+    const f = fixture();
+    f.closing();
+    f.admin.staffQueuedSince.mockResolvedValue(true);
+    await f.service.tick();
+    expect(f.admin.staffQueuedSince).toHaveBeenCalledWith("primary", f.record.createdAt);
+    expect(f.admin.act).not.toHaveBeenCalled();
+    expect(f.store.finish).toHaveBeenCalledWith(
+      f.record.id,
+      "cancelled",
+      "Staff queued the next map. Votes were not applied.",
+    );
+    expect(f.discord.update).toHaveBeenCalledWith(
+      expect.objectContaining({ state: "cancelled", message: "Staff queued the next map. Votes were not applied." }),
+    );
+    expect(f.discord.publish).not.toHaveBeenCalled();
   });
   it("finishes a closing ballot without its winner when staff queued the entry already next", async () => {
     const f = await openBallot();
@@ -2037,6 +2085,15 @@ describe("automatic ballots that follow the round, not the clock", () => {
       "Vote tied: the rotation continues with Ozeti Normal.",
     ]);
   });
+  it("never announces the result of a ballot stored without settings by an earlier build", async () => {
+    const f = await openBallot({ settings: { announce: { resultInGame: true } } });
+    // Read without stored settings, the defaults would announce the result in game.
+    delete f.automation.settings;
+    f.score(95);
+    await f.service.tick();
+    expect(f.store.finish).toHaveBeenCalledWith(f.record.id, "queued", expect.any(String));
+    expect(broadcasts(f.admin)).toEqual([]);
+  });
   it("records a winner that is already next without a game write", async () => {
     const f = await openBallot();
     f.store.claimClose.mockImplementation(async () => {
@@ -2275,11 +2332,11 @@ describe("ballots that need review", () => {
     const history = [refused(20), refused(60), refused(100)];
     f.store.history.mockResolvedValue(history);
     await f.service.tick();
-    expect((await f.service.list(staff)).automatic).toMatchObject({
-      phase: "paused",
-      message:
-        "Paused after 3 refused results (Not queued: The current round changed. The rotation continues.). Save the voting controls to resume.",
-    });
+    const paused =
+      "Paused after 3 refused results (Not queued: The current round changed. The rotation continues.). Save the voting controls to resume.";
+    expect((await f.service.list(staff)).automatic).toMatchObject({ phase: "paused", message: paused });
+    // The dashboard's controls carry the pause, so staff can save them unchanged to resume.
+    expect((await f.service.controls(staff)).paused).toBe(paused);
     expect(f.alerts.send).toHaveBeenCalledTimes(1);
     expect(f.store.patchAutomation).toHaveBeenCalledWith(
       history[0].id,
@@ -2290,8 +2347,49 @@ describe("ballots that need review", () => {
     await f.service.tick();
     expect(f.alerts.send).toHaveBeenCalledTimes(1);
     f.saved.version = 2;
+    // A save of any kind, even of unchanged controls, ends the pause before the next pass.
+    expect((await f.service.controls(staff)).paused).toBeNull();
     await f.service.tick();
     expect((await f.service.list(staff)).automatic?.phase).not.toBe("paused");
+    expect((await f.service.controls(staff)).paused).toBeNull();
+  });
+  it("asks for a save when the administrator who saved the controls loses access", async () => {
+    const f = automatic();
+    f.auth.role.mockResolvedValue("viewer");
+    await observeForWindow(f);
+    const paused =
+      "The administrator who saved the voting controls no longer has access to this server. Save the voting controls to resume.";
+    expect((await f.service.list(staff)).automatic).toMatchObject({ phase: "paused", message: paused });
+    expect((await f.service.controls(staff)).paused).toBe(paused);
+    expect(f.discord.publish).not.toHaveBeenCalled();
+    // Saved again by an administrator with access: a new version, so the pause is over.
+    f.saved.version = 2;
+    f.auth.role.mockResolvedValue("admin");
+    expect((await f.service.controls(staff)).paused).toBeNull();
+  });
+  it("offers no unchanged save to resume once voting cannot run on these controls", async () => {
+    const f = automatic();
+    f.auth.role.mockResolvedValue("viewer");
+    await observeForWindow(f);
+    expect((await f.service.controls(staff)).paused).toMatch(/Save the voting controls to resume/);
+    // The connection changed: an enabled save is refused until voting is switched off, so no resume is offered.
+    const connection = f.saved.connectionHash;
+    f.saved.connectionHash = "different endpoint";
+    await f.service.tick();
+    const moved = await f.service.controls(staff);
+    expect(moved.message).toMatch(/server connection changed/);
+    expect(moved.paused).toBeNull();
+    // Invalid saved settings must be corrected, not saved unchanged.
+    f.saved.connectionHash = connection;
+    const settings = f.saved.policy.settings;
+    f.saved.policy.settings = { ...settings, closeAtScore: 120 };
+    expect((await f.service.controls(staff)).paused).toBeNull();
+    f.saved.policy.settings = settings;
+    // Live voting switched off in Gramps.
+    f.environment.MAP_VOTES_ENABLED = false;
+    expect((await f.service.controls(staff)).paused).toBeNull();
+    f.environment.MAP_VOTES_ENABLED = true;
+    expect((await f.service.controls(staff)).paused).toMatch(/Save the voting controls to resume/);
   });
   it("keeps voting automatic after 50v50 winners that could not start", async () => {
     const f = automatic();

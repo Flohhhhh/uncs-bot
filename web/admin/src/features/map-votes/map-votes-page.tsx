@@ -93,7 +93,7 @@ function VoteReview({
           </p>
           <p className="muted">
             The winner queues for the next round only if the rotation position, settings and your administrator access
-            still match. The current match continues.
+            still match and no staff member queued the next map while it was open. The current match continues.
           </p>
         </>
       )}

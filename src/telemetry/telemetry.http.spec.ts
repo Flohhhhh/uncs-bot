@@ -44,6 +44,9 @@ describe("telemetry HTTP boundaries", () => {
     snapshot: jest.fn(),
     tracking: jest.fn(),
     events: jest.fn(),
+    eventTypes: jest.fn(),
+    serverStats: jest.fn(),
+    rowExtras: jest.fn(),
   };
   const adminStore = { session: jest.fn() };
   const config = {
@@ -71,6 +74,14 @@ describe("telemetry HTTP boundaries", () => {
     store.snapshot.mockResolvedValue({ leaderboard: [], totals: emptyTotals() });
     store.tracking.mockResolvedValue(null);
     store.events.mockResolvedValue([]);
+    store.eventTypes.mockResolvedValue([]);
+    store.serverStats.mockResolvedValue({
+      groups: [],
+      totals: { events: 0, deaths: 0, suicides: 0, falling: 0, players: 0 },
+      longest: [],
+      leaders: [],
+    });
+    store.rowExtras.mockResolvedValue({ weapons: [], streaks: [] });
     adminStore.session.mockImplementation(async (key) =>
       key === hash(sessionToken)
         ? {
@@ -281,6 +292,23 @@ describe("telemetry HTTP boundaries", () => {
     const publicView = await request(app.getHttpServer()).get("/community/api/leaderboard").expect(200);
     expect(publicView.body).not.toHaveProperty("lastBatch");
   });
+  it("accepts a batch of other event types beside a badly named type and stores their counts", async () => {
+    store.ingest.mockResolvedValueOnce({ inserted: 0, duplicates: 0, skipped: 2 });
+    const result = await request(app.getHttpServer())
+      .post("/api/ingest/events")
+      .set("Authorization", `Bearer ${feedToken}`)
+      .send({ ...batch(), events: [{ type: "playerSpawned" }, { type: "Round Ended" }] })
+      .expect(201);
+    expect(result.body).toEqual({ ok: true, inserted: 0, duplicates: 0, skipped: 2 });
+    expect(store.ingest.mock.calls[0][0].types).toEqual([
+      { type: "playerSpawned", count: 1, sample: { type: "playerSpawned" } },
+    ]);
+    await expect(staffCombat()).resolves.toMatchObject({
+      lastBatch: { accepted: 0, invalid: 1, firstInvalid: "events.1.type (bad format)", types: 1 },
+      lastRejected: null,
+      rejectedCount: 0,
+    });
+  });
   it("keeps the game's deliveries flowing while traffic without the token is rate limited", async () => {
     for (let count = 0; count < 300; count++)
       await request(app.getHttpServer()).post("/api/ingest/servers/primary/events").send(batch()).expect(401);
@@ -368,6 +396,44 @@ describe("telemetry HTTP boundaries", () => {
     // Read refusals are never filed as feed refusals.
     expect(rejected).not.toHaveBeenCalled();
   });
+  it("shows staff the game event types received with their latest sample, never the public", async () => {
+    const at = new Date("2026-10-04T18:00:00.000Z");
+    const steamId = "76561198000000001";
+    store.eventTypes.mockResolvedValue([
+      { type: "killed", count: 40, firstReceivedAt: at, lastReceivedAt: at, sample: null },
+      {
+        type: "playerJoined",
+        count: 7,
+        firstReceivedAt: at,
+        lastReceivedAt: at,
+        sample: { type: "playerJoined", steamId, name: "<b>Player</b>" },
+      },
+    ]);
+    const staff = await staffCombat();
+    expect(staff.otherEvents).toEqual([
+      { type: "killed", count: 40, firstReceivedAt: at.toISOString(), lastReceivedAt: at.toISOString(), sample: null },
+      {
+        type: "playerJoined",
+        count: 7,
+        firstReceivedAt: at.toISOString(),
+        lastReceivedAt: at.toISOString(),
+        sample: { type: "playerJoined", steamId, name: "<b>Player</b>" },
+      },
+    ]);
+    expect(store.eventTypes).toHaveBeenCalledWith(expect.any(Date), expect.any(Date), "primary");
+    store.eventTypes.mockClear();
+    for (const path of ["/community/api/leaderboard", "/community/api/servers/primary/leaderboard"]) {
+      const publicView = await request(app.getHttpServer()).get(`${path}?period=week`).expect(200);
+      expect(publicView.body).not.toHaveProperty("otherEvents");
+      expect(publicView.body).not.toHaveProperty("events");
+      expect(publicView.text).not.toMatch(/playerJoined|sample|<b>|7656119/);
+    }
+    await request(app.getHttpServer()).get("/community/api/events").expect(404);
+    expect(store.eventTypes).not.toHaveBeenCalled();
+    // Staff only: no session, no event types.
+    await request(app.getHttpServer()).get("/admin/api/combat").expect(401);
+    expect(store.eventTypes).not.toHaveBeenCalled();
+  });
   it("returns safe errors when the database is unavailable", async () => {
     store.snapshot.mockRejectedValueOnce(new Error("postgres://user:password@private-db applications.email"));
     const result = await request(app.getHttpServer()).get("/community/api/leaderboard").expect(503);
@@ -379,5 +445,150 @@ describe("telemetry HTTP boundaries", () => {
       .send(batch())
       .expect(503);
     expect(store.ingest).not.toHaveBeenCalled();
+  });
+  const ids = ["76561198000000001", "76561198000000002", "76561198000000003", "76561198000000004"];
+  /** Storage rows that still carry SteamIDs, as the real store's do, including SteamID-like names. */
+  function storeWithSteamIds() {
+    store.snapshot.mockResolvedValue({
+      leaderboard: [
+        { steamId: ids[0], name: "Player", kills: 4, deaths: 1, headshotKills: 2, kd: 4 },
+        { steamId: ids[1], name: ids[1], kills: 2, deaths: 2, headshotKills: 0, kd: 1 },
+        { steamId: ids[2], name: `Tag ${ids[2]}`, kills: 1, deaths: 3, headshotKills: 0, kd: 0.33 },
+        // Another player's SteamID inside a name: the own-ID check alone would let it through.
+        { steamId: ids[3], name: `Clan ${ids[1]}`, kills: 0, deaths: 1, headshotKills: 0, kd: 0 },
+      ],
+      totals: { ...emptyTotals(), events: 7, kills: 7, deaths: 6, headshotKills: 2, players: 4 },
+    });
+    store.rowExtras.mockResolvedValue({
+      weapons: [
+        { steamId: ids[0], cause: "Id.Item.AK74M", kills: 3, longestCentimeters: 41_200 },
+        { steamId: ids[1], cause: "76561198000000009", kills: 2, longestCentimeters: null },
+      ],
+      streaks: [{ steamId: ids[0], bestStreak: 3 }],
+    });
+    store.serverStats.mockResolvedValue({
+      groups: [
+        {
+          set: 3,
+          causeKey: "id.item.ak74m",
+          cause: "Id.Item.AK74M",
+          mapName: null,
+          hour: null,
+          kills: 3,
+          headshotKills: 2,
+          longestCentimeters: 41_200,
+          melee: 0,
+          roadkill: 0,
+          vehicleExplosion: 0,
+          penetration: 1,
+          ricochet: 0,
+        },
+        {
+          set: 5,
+          causeKey: null,
+          cause: null,
+          mapName: "76561198000000008",
+          hour: null,
+          kills: 3,
+          headshotKills: 2,
+          longestCentimeters: null,
+          melee: 0,
+          roadkill: 0,
+          vehicleExplosion: 0,
+          penetration: 0,
+          ricochet: 0,
+        },
+      ],
+      totals: { events: 7, deaths: 6, suicides: 1, falling: 1, players: 3 },
+      longest: [
+        { steamId: ids[1], name: ids[1], cause: "ID.Item.AK74M", mapName: "Kavkazi", distanceCentimeters: 41_200 },
+      ],
+      leaders: [
+        { tag: "penetration", steamId: ids[2], name: `Tag ${ids[2]}`, count: 1 },
+        { tag: "falling", steamId: ids[0], name: "Player", count: 1 },
+      ],
+    });
+  }
+  it("serves public server stats on both routes without SteamIDs or 17-digit runs", async () => {
+    storeWithSteamIds();
+    for (const path of ["/community/api/stats", "/community/api/servers/primary/stats"]) {
+      const result = await request(app.getHttpServer()).get(`${path}?period=week`).expect(200);
+      expect(result.text).not.toMatch(/steamId|\d{17}/i);
+      expect(result.headers["cache-control"]).toBe("no-store");
+      expect(result.headers["cdn-cache-control"]).toBe("no-store");
+      expect(result.body).toMatchObject({
+        serverId: "primary",
+        period: "week",
+        totals: { events: 7, kills: 0, deaths: 6, headshotKills: 0, players: 3, suicides: 1 },
+        weapons: [{ label: "AK-74M", kind: "firearm", kills: 3, headshotKills: 2, longestMeters: 412 }],
+        maps: [],
+        longestKills: [{ name: "Unnamed player", weapon: "AK-74M", meters: 412, map: "Bakurani" }],
+        tagLeaders: { penetration: [{ name: "Unnamed player", count: 1 }], falling: [{ name: "Player", count: 1 }] },
+      });
+      expect(result.body.hours).toHaveLength(24);
+    }
+    // One recompute served both routes.
+    expect(store.serverStats).toHaveBeenCalledTimes(1);
+  });
+  it("refuses a bad period or unknown server on the stats routes before reading storage", async () => {
+    for (const path of ["/community/api/stats", "/community/api/servers/primary/stats"]) {
+      const result = await request(app.getHttpServer()).get(`${path}?period=year`).expect(400);
+      expect(result.body).toEqual({ message: "Choose day, week or month." });
+    }
+    await request(app.getHttpServer()).get("/community/api/servers/nope/stats?period=week").expect(404);
+    await request(app.getHttpServer()).get("/community/api/stats/x").expect(404);
+    expect(store.serverStats).not.toHaveBeenCalled();
+  });
+  it("counts stats reads in the public leaderboard's read bucket", async () => {
+    for (let count = 0; count < 150; count++) {
+      await request(app.getHttpServer()).get("/community/api/leaderboard").expect(200);
+      await request(app.getHttpServer()).get("/community/api/stats").expect(200);
+    }
+    await request(app.getHttpServer()).get("/community/api/stats").expect(429);
+    await request(app.getHttpServer()).get("/community/api/servers/primary/stats").expect(429);
+  });
+  it("returns a safe error when stats storage is unavailable", async () => {
+    store.serverStats.mockRejectedValueOnce(new Error(`postgres://user:password@private-db ${ids[0]}`));
+    const result = await request(app.getHttpServer()).get("/community/api/stats").expect(503);
+    expect(result.text).not.toMatch(/postgres|password|private-db|7656119/);
+  });
+  it("never puts a steamId key or a 17-digit run in any public response, on any route or period", async () => {
+    storeWithSteamIds();
+    const paths = ["/community/api/servers"];
+    for (const period of ["day", "week", "month"])
+      for (const route of ["leaderboard", "stats"])
+        paths.push(
+          `/community/api/${route}?period=${period}`,
+          `/community/api/servers/primary/${route}?period=${period}`,
+        );
+    const keys = (value: unknown): string[] =>
+      Array.isArray(value)
+        ? value.flatMap(keys)
+        : value && typeof value === "object"
+          ? Object.entries(value).flatMap(([key, child]) => [key, ...keys(child)])
+          : [];
+    for (const path of paths) {
+      const result = await request(app.getHttpServer()).get(path).expect(200);
+      expect(keys(result.body).filter((key) => /steam/i.test(key))).toEqual([]);
+      expect(result.text).not.toMatch(/\d{17}/);
+      expect(result.text).not.toMatch(/\p{Nd}{17}/u);
+    }
+    // The extras are on the public rows, so the leaderboard path above did carry them.
+    const board = await request(app.getHttpServer()).get("/community/api/leaderboard?period=week").expect(200);
+    expect(board.body.leaderboard[0]).toEqual({
+      name: "Player",
+      kills: 4,
+      deaths: 1,
+      headshotKills: 2,
+      kd: 4,
+      topWeapon: "AK-74M",
+      longestKillMeters: 412,
+      bestStreak: 3,
+    });
+    expect(board.body.leaderboard.slice(1).map((row: { name: string }) => row.name)).toEqual([
+      "Unnamed player",
+      "Unnamed player",
+      "Unnamed player",
+    ]);
   });
 });

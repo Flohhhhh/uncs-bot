@@ -88,11 +88,13 @@ Stretch, hydrate, run it back. Full board: https://theuncsgaming.com/leaderboard
 | ---------------------------- | ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
 | Still got it                 | Best `kills / max(deaths, 1)`, then more kills               | Among players with at least 10 kills                                                                     |
 | Reading glasses not required | Most headshot kills                                          | At least 3                                                                                               |
-| Long-distance call           | Longest single kill; the earliest wins a tie                 | 10–2,000 m. Above 2,000 m the line is left out, because the source's distance units are not yet verified |
+| Long-distance call           | Longest single firearm kill; the earliest wins a tie         | 10–2,000 m. Above 2,000 m the line is left out, because the source's distance units are not yet verified |
 | Old faithful                 | Most-used weapon/cause across all kills                      | A cause on at least half of the kills, at least 5 uses, and a readable name                              |
 | Where the knees hurt most    | Map with the most kills (catalog ID and in-game name merged) | Kills on at least 2 maps, and at least 5 on the top map                                                  |
 
-A weapon or cause that looks like an internal identifier (containing `/`, `.` or `\`, a `BP_` prefix or a `_C` suffix) is never shown. Team kills are not excluded, because no team-kill tag has been observed yet; add an exclusion once the first real batch shows one.
+The longest kill counts infantry weapons only: artillery, rocket pods, vehicle guns, explosives, melee and tools never take the long-distance call, by the same [long-shot rule](COMBAT_HISTORY.md#long-shots) as the website's longest kills.
+
+Weapons use the shared labels in `src/common/cause-labels.ts`, the same ones as the website's server stats and the staff dashboard. `Id.Item.AK74M` and `ID.Item.AK74M` both read "AK-74M", and Old faithful counts them together. Unnamed codes get a tidy generic name, such as "Weapon 029" for `WEPN_029`. A cause the labels cannot name (an unknown dotted id, a path, a `BP_` prefix or `_C` suffix, or anything SteamID-like) is never shown, raw or otherwise; the line simply leaves the weapon out. Team kills are not excluded, because no team-kill tag has been observed yet; add an exclusion once the first real batch shows one.
 
 **Copy rules.** Banter only. The post never mentions rewards, prizes, points, the whitelist or queue priority, and the word "free" is not used. Nothing is offered for placing, so a place on the board can never read as earning whitelist access. A test (`weekly-render.spec.ts`) enforces this on the template text.
 
@@ -128,7 +130,7 @@ The dashboard has no page for these routes yet.
 
 1. Native feed delivery is observed after genuine combat, per the acceptance check in [Combat history](COMBAT_HISTORY.md#retention-and-connection).
 2. The names-only website is live in production (see the release order in the combat history guide).
-3. The first real batch is checked for `cause` and `mapName` values, distance units and any team-kill tag; adjust `causeLabel()`, the distance cap or add a team-kill exclusion.
+3. The first real batch is checked for `cause` and `mapName` values, distance units and any team-kill tag; adjust the label tables in `src/common/cause-labels.ts`, the distance cap or add a team-kill exclusion. As of October 5 the causes seen live all have labels; CGM4 ("Carl Gustaf M4"), SR_04, the `WEPN_0xx` codes, ROT_04 and WHL_05 still want an in-game check.
 4. The owner approves the labels and copy above.
 
 Then set `WEEKLY_LEADERBOARD_CHANNEL_ID`, leave `WEEKLY_LEADERBOARD_ENABLED=false`, and restart. Preview the week that will post next and check the rendered board, `eligible` and `reason`; preview does not need the feature on, and `postable` stays false until it is. Before the first slot, or when turning it on outside the catch-up window below, that is `preview?week=current`: the week so far, which posts at the next slot, so `eligible` can still change before then. Run `preview?week=last` only when turning it on inside the window, where it is the week that posts about a minute after the restart. When the preview looks right, set `WEEKLY_LEADERBOARD_ENABLED=true` and restart.

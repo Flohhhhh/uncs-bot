@@ -1,5 +1,7 @@
 import {
+  bigint,
   boolean,
+  date,
   doublePrecision,
   index,
   jsonb,
@@ -8,6 +10,7 @@ import {
   text,
   timestamp,
   uuid,
+  varchar,
 } from "drizzle-orm/pg-core";
 
 // serverId is the configured connection. serverInstanceId is a per-boot deduplication
@@ -47,3 +50,23 @@ export const combatTracking = pgTable("combat_tracking", {
   lastReceivedAt: timestamp("last_received_at", { withTimezone: true }).notNull(),
   lastCleanupAt: timestamp("last_cleanup_at", { withTimezone: true }),
 });
+
+// One row per configured server, feed event type and UTC receipt day: a running count and the latest
+// entry of that type (at most 4 KiB as stored, never kept for killed events), so staff can learn what the
+// game sends without storing each event. Repeat deliveries can count twice. Purged after 90 days.
+export const gameFeedEventTypes = pgTable(
+  "game_feed_event_types",
+  {
+    serverId: text("server_id").notNull(),
+    type: varchar("type", { length: 64 }).notNull(),
+    day: date("day", { mode: "string" }).notNull(),
+    count: bigint("count", { mode: "number" }).notNull(),
+    firstReceivedAt: timestamp("first_received_at", { withTimezone: true }).notNull(),
+    lastReceivedAt: timestamp("last_received_at", { withTimezone: true }).notNull(),
+    sample: jsonb("sample"),
+  },
+  (table) => [
+    primaryKey({ columns: [table.serverId, table.type, table.day] }),
+    index("game_feed_event_types_day_idx").on(table.serverId, table.day),
+  ],
+);

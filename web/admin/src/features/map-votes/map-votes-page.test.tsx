@@ -109,6 +109,17 @@ it("allows a ballot at a confirmed position without demanding an unreported game
   expect(screen.queryByRole("link", { name: /Match & maps/ })).not.toBeInTheDocument();
   expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
 });
+it("says in review that a staff queue while the ballot is open keeps its winner from queuing", async () => {
+  show();
+  await choose("Europe");
+  await choose("Islands");
+  fireEvent.click(screen.getByRole("button", { name: "Review ballot" }));
+  // The close checks for a person's queue since the ballot opened, even of the entry already next.
+  expect(within(screen.getByRole("dialog")).getByText(/only if/)).toHaveTextContent(
+    "only if the rotation position, settings and your administrator access still match and no staff member queued the next map while it was open.",
+  );
+  expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+});
 it("shows automatic progress and keeps manual publication under staff override", async () => {
   const fallback = request.getMockImplementation()!;
   request.mockImplementation(async (path, options) =>
@@ -315,7 +326,7 @@ it("checks voting setup only on request, clears stale results on retry, and neve
   show();
   await screen.findByRole("heading", { name: "Discord map voting is off" });
   expect(document.querySelector("details")).toBeNull();
-  expect(request.mock.calls.map(([path]) => path)).toEqual(["map-votes", "map-votes/controls"]);
+  await waitFor(() => expect(request.mock.calls.map(([path]) => path)).toEqual(["map-votes", "map-votes/controls"]));
   fireEvent.click(screen.getByRole("button", { name: "Check voting setup" }));
   expect(screen.getByRole("button", { name: "Checking setup…" })).toBeDisabled();
   resolveSetup({
@@ -509,7 +520,7 @@ it("shows saved results and closes an active ballot with a separate recorded req
   votes = [ballot];
   show();
   await screen.findByText(/An active ballot/);
-  expect(request.mock.calls.map(([path]) => path)).toEqual(["map-votes", "map-votes/controls"]);
+  await waitFor(() => expect(request.mock.calls.map(([path]) => path)).toEqual(["map-votes", "map-votes/controls"]));
   expect(screen.queryByRole("button", { name: "Review ballot" })).not.toBeInTheDocument();
   expect(screen.getByRole("link", { name: /View in Discord/ })).toHaveAttribute("href", ballot.messageUrl);
   fireEvent.click(screen.getByRole("button", { name: "Close ballot" }));

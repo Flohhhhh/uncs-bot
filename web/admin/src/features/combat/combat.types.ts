@@ -56,6 +56,20 @@ export interface CombatFeedBatch {
   invalid: number;
   /** Schema location of the first invalid entry, never its value. */
   firstInvalid: string | null;
+  /** Distinct valid event types in the batch. Absent before Gramps counted them. */
+  types?: number;
+  /** Types new today that were not counted because the daily limit of types was reached. */
+  typesOverLimit?: number;
+}
+
+/** One game feed event type counted over whole UTC days in the window: staff only. */
+export interface CombatFeedEventType {
+  type: string;
+  count: number;
+  firstReceivedAt: string;
+  lastReceivedAt: string;
+  /** The latest kept entry of this type as sent, a size marker, or null (always for killed). */
+  sample: unknown;
 }
 
 /** In-memory delivery record since Gramps last started; the server combat view only. */
@@ -71,6 +85,11 @@ export interface CombatFeedDeliveries {
 
 export interface CombatServerResponse extends CombatBase, CombatFeedDeliveries {
   leaderboard: CombatPlayer[];
+  /**
+   * Every feed event type received in the window, killed included. Null when the counts could not be
+   * read; absent from older Gramps builds.
+   */
+  otherEvents?: CombatFeedEventType[] | null;
   steamId?: never;
   player?: never;
 }

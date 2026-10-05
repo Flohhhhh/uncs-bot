@@ -174,6 +174,8 @@ export class MapVotesService implements OnModuleInit, OnApplicationBootstrap, On
   /** Voted 50v50 events that need staff review, by server, and their alert counts. */
   private readonly eventReviews = new Map<string, { id: string; at: string; message: string }>();
   private readonly eventAlerts = new Map<string, { count: number; at: number }>();
+  /** Automatic voting paused until its controls are saved again, with the saved version that paused it. */
+  private readonly savePauses = new Map<string, { version: number; message: string }>();
   constructor(
     private readonly store: MapVotesStore,
     private readonly servers: GameServers,
@@ -299,11 +301,13 @@ export class MapVotesService implements OnModuleInit, OnApplicationBootstrap, On
         } catch {
           valid = false;
         }
+      const policy = saved ? pickPolicy(saved.policy) : defaultVotingPolicy;
+      const pause = this.savePauses.get(serverId);
       controls = {
         serverId,
         version: saved?.version ?? 0,
         // Only the five switches: an older dashboard posts this object back unchanged.
-        policy: saved ? pickPolicy(saved.policy) : defaultVotingPolicy,
+        policy,
         available: true,
         ready: this.options().enabled && connectionMatches,
         message: !connectionMatches
@@ -315,6 +319,18 @@ export class MapVotesService implements OnModuleInit, OnApplicationBootstrap, On
               : "Live voting is disabled in Gramps. You can prepare these settings without opening a ballot.",
         settings,
         limits: votingSettingLimits,
+        // Any save starts a new version, which resumes it; a pause recorded under an older version is over.
+        // Like the voting status, only while voting can run: a changed connection or invalid settings need
+        // their own save (voting off, or corrected settings), which an unchanged save would not be.
+        paused:
+          this.options().enabled &&
+          connectionMatches &&
+          valid &&
+          policy.enabled &&
+          pause &&
+          pause.version === saved?.version
+            ? pause.message
+            : null,
       };
     } catch {
       return {
@@ -811,27 +827,26 @@ export class MapVotesService implements OnModuleInit, OnApplicationBootstrap, On
     if (this.options().enabled) this.schedule();
   }
   /**
-   * A person queued the entry that is already next. The rotation, and so the ballot's fingerprint, did not
-   * change, so the open automatic ballot on that server is closed here; its result would replace the choice.
-   * A ballot already closing cannot be closed: its close checks for this queue before sending a winner.
-   * Returns a note for the staff member's result, or null when no automatic ballot is active.
+   * A person queued the entry that is already next. The rotation, its fingerprint and the configuration
+   * revision did not change, so the open ballot on that server, automatic or manual, is closed here; its
+   * result would replace the choice. A ballot already closing cannot be closed: its close checks for this
+   * queue before sending a winner. Returns a note for the staff member's result, or null when no ballot is active.
    */
   private async staffQueuedNext(staff: Staff, serverId: string): Promise<string | null> {
     if (!this.options().enabled) return null;
-    const open = (await this.store.automaticOpen()).filter((vote) => vote.serverId === serverId);
+    const ballots = async () => (await this.store.history(serverId)).filter((vote) => vote.serverId === serverId);
+    const open = (await ballots()).filter((vote) => vote.state === "open");
     let closed = 0;
     for (const vote of open)
       try {
         await this.cancelAutomatic(vote, STAFF_QUEUED, staff);
         closed++;
       } catch {
-        this.logger.warn(`Automatic map vote ${vote.id} could not be closed after staff queued the next map.`);
+        this.logger.warn(`Map vote ${vote.id} could not be closed after staff queued the next map.`);
       }
     if (closed) return "The open community vote was closed, so it cannot replace this choice.";
     // Read again: a ballot read as open may have started closing before it could be closed.
-    const busy = (await this.store.history(serverId)).find(
-      (vote) => vote.automation && (vote.state === "publishing" || vote.state === "closing"),
-    );
+    const busy = (await ballots()).find((vote) => vote.state === "publishing" || vote.state === "closing");
     if (busy?.state === "closing")
       return "A community vote on this server is closing now and may still change the next map. Check Map votes.";
     if (busy) return "A community vote on this server is opening now. Close it in Map votes to keep this choice.";
@@ -1039,6 +1054,7 @@ export class MapVotesService implements OnModuleInit, OnApplicationBootstrap, On
   }
   private async openAutomatic(recipe: PolicyRow) {
     const serverId = this.servers.resolve(recipe.serverId);
+    this.savePauses.delete(serverId);
     const { policy, settings } = readStoredPolicy(recipe.policy);
     const connection = this.servers.connectionHash(serverId);
     const history = await this.store.history(serverId);
@@ -1077,6 +1093,7 @@ export class MapVotesService implements OnModuleInit, OnApplicationBootstrap, On
     ) {
       const message = `Paused after 3 refused results (${recent[0].message}). Save the voting controls to resume.`;
       this.note(serverId, message, { phase: "paused" });
+      this.savePauses.set(serverId, { version: recipe.version, message });
       if (!recent[0].automation?.alert) {
         await this.alerts.send(serverId, `map-vote-brake:${recent[0].id}`, `${recent[0].serverName}: ${message}`);
         const at = new Date().toISOString();
@@ -1093,10 +1110,10 @@ export class MapVotesService implements OnModuleInit, OnApplicationBootstrap, On
       true,
     );
     if (actor.role !== "admin") {
-      this.note(serverId, "The administrator who saved the voting controls no longer has access to this server.", {
-        ...evaluation.detail,
-        phase: "paused",
-      });
+      const message =
+        "The administrator who saved the voting controls no longer has access to this server. Save the voting controls to resume.";
+      this.note(serverId, message, { ...evaluation.detail, phase: "paused" });
+      this.savePauses.set(serverId, { version: recipe.version, message });
       return;
     }
     if (this.stopped) return;
@@ -1339,7 +1356,7 @@ export class MapVotesService implements OnModuleInit, OnApplicationBootstrap, On
       sameRound(clock, { map: latest.currentMap, startedAt: latest.roundStartedAt.getTime() })
     );
   }
-  /** Closes an automatic ballot without a game change, as Gramps or as the staff member `by`. */
+  /** Closes a ballot without a game change, as Gramps or as the staff member `by`. */
   private async cancelAutomatic(vote: MapVoteRecord, reason: string, by?: Staff) {
     this.lastScores.delete(vote.id);
     const cancelled = await this.store.cancel(
@@ -1640,9 +1657,10 @@ export class MapVotesService implements OnModuleInit, OnApplicationBootstrap, On
         if ((await this.store.get(vote.id))?.state !== "closing" || this.stopped) return;
         const winner = vote.choices[vote.winner];
         const entry = stripEvent(winner);
-        // A person's queue since the ballot opened wins. Queuing the entry already next leaves the rotation,
-        // and so every check above, unchanged, and a ballot already closing cannot be closed by it.
-        if (automation && (await this.admin.staffQueuedSince(vote.serverId, vote.createdAt))) {
+        // A person's queue since the ballot opened wins, for automatic and manual ballots alike. Queuing the
+        // entry already next leaves the rotation and its revision, and so every check above, unchanged, and a
+        // ballot already closing cannot be closed by it.
+        if (await this.admin.staffQueuedSince(vote.serverId, vote.createdAt)) {
           state = "cancelled";
           message = STAFF_QUEUED;
         } else if (winner.event === "50v50") {
@@ -1768,10 +1786,14 @@ export class MapVotesService implements OnModuleInit, OnApplicationBootstrap, On
       };
     }
   }
-  /** One in-game result notice for queued, tied or no-vote automatic ballots. Never retried. */
+  /**
+   * One in-game result notice for queued, tied or no-vote automatic ballots. Never retried. Like the opening
+   * notice, a ballot stored without settings (opened by an earlier build) never gains one.
+   */
   private async announceResult(vote: MapVoteRecord, verified: Staff | null) {
     const settings = automationSettings(vote.automation!);
-    if (!settings.announce.resultInGame || !["queued", "tied", "no_votes"].includes(vote.state)) return;
+    if (!vote.automation!.settings || !settings.announce.resultInGame) return;
+    if (!["queued", "tied", "no_votes"].includes(vote.state)) return;
     // A voted 50v50 is announced by its event's own notice.
     if (vote.state === "queued" && isFiftyWinner(vote)) return;
     try {

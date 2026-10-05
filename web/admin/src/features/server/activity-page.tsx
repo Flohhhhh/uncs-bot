@@ -8,6 +8,7 @@ import { CombatPage } from "../combat/combat-page";
 import { PlayerSheet, type SheetPlayer } from "../players/player-actions";
 import { DashboardHistory, actionIdPattern } from "./pages";
 import { GameLogView } from "./game-log";
+import { RepeatOffenders } from "./repeat-offenders";
 import {
   ActivityLine,
   When,
@@ -214,7 +215,11 @@ export function ActivityPage() {
         selected === "combat" ? (
           <CombatPage playerId={player} onPlayerChange={(id) => update({ player: id })} />
         ) : selected === "actions" ? (
-          <DashboardHistory key={receipt || player} initialQuery={receipt || player} />
+          <>
+            {/* A linked receipt or player is a lookup; the list is for browsing Action history. */}
+            {!receipt && !player && <RepeatOffenders />}
+            <DashboardHistory key={receipt || player} initialQuery={receipt || player} />
+          </>
         ) : selected === "commands" ? (
           <GameLogView />
         ) : (

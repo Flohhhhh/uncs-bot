@@ -379,6 +379,90 @@ describe("CombatPage", () => {
     expect(screen.queryByText("Latest game feed delivery refused.")).toBeNull();
   });
 
+  it("lists the game events received by type with an escaped latest sample", async () => {
+    const markup = "<img src=x onerror=alert(1)>";
+    const response = server({
+      otherEvents: [
+        { type: "killed", count: 9500, firstReceivedAt: observedAt, lastReceivedAt: observedAt, sample: null },
+        {
+          type: "playerJoined",
+          count: 12,
+          firstReceivedAt: "2026-09-29T18:00:00.000Z",
+          lastReceivedAt: observedAt,
+          sample: { type: "playerJoined", steamId: aliceId, name: markup },
+        },
+        {
+          type: "bulk",
+          count: 1,
+          firstReceivedAt: observedAt,
+          lastReceivedAt: observedAt,
+          sample: { tooLarge: true, bytes: 5120 },
+        },
+      ],
+    });
+    const { leaderboard, otherEvents: _otherEvents, ...base } = response;
+    request.mockImplementation(async (path) =>
+      path.startsWith("combat/players/") ? { ...base, steamId: aliceId, player: leaderboard[0] } : response,
+    );
+    render(page());
+    const list = await screen.findByRole("list", { name: "Game events received" });
+    const rows = within(list).getAllByRole("listitem");
+    expect(rows.map((row) => row.querySelector("p")?.textContent?.replace(/ last seen .*/, ""))).toEqual([
+      `killed · ${(9500).toLocaleString()} ·`,
+      "playerJoined · 12 ·",
+      "bulk · 1 ·",
+    ]);
+    expect(
+      within(rows[0])
+        .getByText(/last seen/)
+        .querySelector("time"),
+    ).toHaveAttribute("dateTime", observedAt);
+    // Killed events are stored in full, so they carry no sample.
+    expect(within(rows[0]).queryByText("Latest sample")).toBeNull();
+    const sample = within(rows[1]).getByText("Latest sample").closest("details")!;
+    expect(sample).not.toHaveAttribute("open");
+    fireEvent.click(within(sample).getByText("Latest sample"));
+    expect(sample).toHaveAttribute("open");
+    const pre = sample.querySelector("pre")!;
+    expect(JSON.parse(pre.textContent!)).toEqual({ type: "playerJoined", steamId: aliceId, name: markup });
+    expect(pre.children).toHaveLength(0);
+    expect(document.querySelector("img")).toBeNull();
+    expect(JSON.parse(rows[2].querySelector("pre")!.textContent!)).toEqual({ tooLarge: true, bytes: 5120 });
+    // Server view only: a player's history does not show feed event types.
+    fireEvent.click(
+      within(screen.getByRole("table", { name: "Server leaderboard" })).getByRole("button", { name: "Alice" }),
+    );
+    expect(await screen.findByRole("heading", { name: "Alice" })).toBeTruthy();
+    expect(screen.queryByText("Game events received")).toBeNull();
+  });
+
+  it("says when no game events were counted and omits the section for an older Gramps", async () => {
+    request.mockResolvedValueOnce(server({ otherEvents: [] }));
+    const { unmount } = render(page());
+    expect(await screen.findByText("No game events counted in this period")).toBeInTheDocument();
+    expect(screen.getByText("Game events received")).toBeInTheDocument();
+    unmount();
+    request.mockResolvedValueOnce(server());
+    render(page());
+    await screen.findByRole("table", { name: "Server leaderboard" });
+    expect(screen.queryByText("Game events received")).toBeNull();
+  });
+
+  it("warns when the last batch had new event types over the daily limit", async () => {
+    const batch = { at: observedAt, accepted: 3, skipped: 7, invalid: 0, firstInvalid: null, types: 9 };
+    request.mockResolvedValueOnce(server({ lastBatch: { ...batch, typesOverLimit: 2 } }));
+    const { unmount } = render(page());
+    await screen.findByRole("table", { name: "Server leaderboard" });
+    const notice = screen.getByText("Daily event type limit reached.").closest(".notice");
+    expect(notice).toHaveClass("warning");
+    expect(notice).toHaveTextContent("2 new event types not counted.");
+    unmount();
+    request.mockResolvedValueOnce(server({ lastBatch: { ...batch, typesOverLimit: 0 } }));
+    render(page());
+    await screen.findByRole("table", { name: "Server leaderboard" });
+    expect(screen.queryByText("Daily event type limit reached.")).toBeNull();
+  });
+
   it("blocks navigation while another staff action is in progress", async () => {
     request.mockResolvedValue(server());
     render(page({ ...context, busy: true }));
@@ -390,14 +474,46 @@ describe("CombatPage", () => {
     expect((screen.getAllByRole("button", { name: "Alice" })[0] as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("shows weapons without the item prefix and still filters by the reported cause", async () => {
+  it("shows weapons by their readable name and still filters by the reported cause", async () => {
     request.mockResolvedValue(server({ events: [event({ cause: "Id.Item.AK74M" }), event({ eventId: "two" })] }));
     render(page());
     const events = await screen.findByRole("table", { name: "Combat events" });
-    expect(within(events).getByText("AK74M")).toHaveAttribute("title", "Id.Item.AK74M");
+    expect(within(events).getByText("AK-74M")).toHaveAttribute("title", "Id.Item.AK74M");
     const cause = screen.getByLabelText("Weapon / cause");
-    expect(within(cause).getByRole("option", { name: "AK74M" })).toHaveValue("Id.Item.AK74M");
-    fireEvent.change(cause, { target: { value: "Id.Item.AK74M" } });
+    expect(within(cause).getByRole("option", { name: "AK-74M" })).toHaveValue("AK-74M");
+    fireEvent.change(cause, { target: { value: "AK-74M" } });
     expect(within(screen.getByRole("table", { name: "Combat events" })).getAllByRole("row")).toHaveLength(2);
+  });
+
+  it("offers one option per readable weapon, keeps unnamed causes apart and searches the shown name", async () => {
+    request.mockResolvedValue(
+      server({
+        events: [
+          event({ eventId: "one", cause: "Id.Item.AK74M" }),
+          event({ eventId: "two", cause: "ID.Item.AK74M" }),
+          event({ eventId: "three", cause: "Weapon.Rifle" }),
+          event({ eventId: "four", cause: "Some.Other" }),
+        ],
+      }),
+    );
+    render(page());
+    const rows = () => within(screen.getByRole("table", { name: "Combat events" })).getAllByRole("row");
+    await screen.findByRole("table", { name: "Combat events" });
+    const cause = screen.getByLabelText("Weapon / cause");
+    // Both casings read "AK-74M", so they are one option that matches both events.
+    expect(within(cause).getAllByRole("option", { name: "AK-74M" })).toHaveLength(1);
+    expect(within(cause).getByRole("option", { name: "Unknown weapon (Weapon.Rifle)" })).toHaveValue("Weapon.Rifle");
+    expect(within(cause).getByRole("option", { name: "Unknown weapon (Some.Other)" })).toHaveValue("Some.Other");
+    fireEvent.change(cause, { target: { value: "AK-74M" } });
+    expect(rows()).toHaveLength(3);
+    fireEvent.change(cause, { target: { value: "Weapon.Rifle" } });
+    expect(rows()).toHaveLength(2);
+    fireEvent.change(cause, { target: { value: "" } });
+    // The table shows "AK-74M", so searching for it finds both casings; the raw id still matches too.
+    const search = screen.getByLabelText("Search player, SteamID, or weapon");
+    fireEvent.change(search, { target: { value: "ak-74m" } });
+    expect(rows()).toHaveLength(3);
+    fireEvent.change(search, { target: { value: "ID.Item.AK74M" } });
+    expect(rows()).toHaveLength(3);
   });
 });

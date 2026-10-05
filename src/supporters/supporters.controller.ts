@@ -24,6 +24,12 @@ import { SupportersService } from "./supporters.service";
 @Injectable()
 export class SupportersExceptionFilter implements ExceptionFilter {
   catch(error: unknown, host: ArgumentsHost) {
+    const body = error instanceof HttpException ? error.getResponse() : null;
+    // A founder refusal names its rule (for example "outside_window") so the dashboard can explain it.
+    const blockedReason =
+      body && typeof body === "object" && "blockedReason" in body && typeof body.blockedReason === "string"
+        ? { blockedReason: body.blockedReason }
+        : {};
     host
       .switchToHttp()
       .getResponse<Response>()
@@ -33,6 +39,7 @@ export class SupportersExceptionFilter implements ExceptionFilter {
           error instanceof HttpException
             ? error.message
             : "Supporter records are temporarily unavailable. No access change was sent.",
+        ...blockedReason,
       });
   }
 }
@@ -55,8 +62,8 @@ export class PatreonWebhookController {
 export class SupportersAdminController {
   constructor(private readonly service: SupportersService) {}
   @Get()
-  list(@Req() req: StaffRequest, @Query("search") search: unknown) {
-    return this.service.list(req.staff, search);
+  list(@Req() req: StaffRequest, @Query("search") search: unknown, @Query("provider") provider: unknown) {
+    return this.service.list(req.staff, search, provider);
   }
   @Post("sync")
   sync(@Req() req: StaffRequest) {
@@ -65,6 +72,10 @@ export class SupportersAdminController {
   @Post("manual-member")
   register(@Req() req: StaffRequest, @Body() body: unknown) {
     return this.service.register(req.staff, body);
+  }
+  @Post("paypal")
+  paypal(@Req() req: StaffRequest, @Body() body: unknown) {
+    return this.service.paypal(req.staff, body);
   }
   @Post(":id/link")
   link(@Req() req: StaffRequest, @Param("id") id: string, @Body() body: unknown) {

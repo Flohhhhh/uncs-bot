@@ -9,6 +9,11 @@ type Column<T> = {
   firstDirection?: Direction;
   /** Keep the heading for screen readers only, such as a selection column. */
   hideLabel?: boolean;
+  /**
+   * Plain words for this column's orders in the phone "Sort by" list, such as "Name A to Z". Null leaves that order
+   * out of the list, for one that matches the default order. Without them the list says "Name (ascending)".
+   */
+  sortLabels?: Partial<Record<Direction, string | null>>;
 };
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 const missing = (value: SortValue) =>
@@ -48,6 +53,7 @@ export function DataTable<T>({
   rows,
   renderRow,
   cards = true,
+  defaultOrder = "Server order",
 }: {
   label: string;
   columns: Column<T>[];
@@ -55,6 +61,8 @@ export function DataTable<T>({
   renderRow: (row: T) => ReactNode;
   /** Card rows on phones. Turn off only for a table that must keep its columns. */
   cards?: boolean;
+  /** The phone "Sort by" list's name for the rows' own order, for a page that orders its rows itself. */
+  defaultOrder?: string;
 }) {
   // Keep the server's original order until a heading is selected. The third click restores it.
   const [sort, setSort] = useState<{ index: number; direction: Direction } | null>(null);
@@ -84,9 +92,15 @@ export function DataTable<T>({
       ? (column.firstDirection === "descending"
           ? (["descending", "ascending"] as const)
           : (["ascending", "descending"] as const)
-        ).map((direction) => ({ index, direction, label: `${column.label} (${direction})` }))
+        ).flatMap((direction) => {
+          const named = column.sortLabels?.[direction];
+          return named === null ? [] : [{ index, direction, label: named ?? `${column.label} (${direction})` }];
+        })
       : [],
   );
+  // A sort left out of the list repeats the default order, so the list shows the default.
+  const selected = sort ? `${sort.index}:${sort.direction}` : "";
+  const listed = sortable.some((option) => `${option.index}:${option.direction}` === selected) ? selected : "";
   return (
     <>
       {cards && narrow && sortable.length > 0 && (
@@ -94,13 +108,13 @@ export function DataTable<T>({
         <label className="table-sort-select">
           Sort by
           <select
-            value={sort ? `${sort.index}:${sort.direction}` : ""}
+            value={listed}
             onChange={(event) => {
               const [index, direction] = event.target.value.split(":");
               setSort(index ? { index: Number(index), direction: direction as Direction } : null);
             }}
           >
-            <option value="">Server order</option>
+            <option value="">{defaultOrder}</option>
             {sortable.map((option) => (
               <option key={`${option.index}:${option.direction}`} value={`${option.index}:${option.direction}`}>
                 {option.label}
