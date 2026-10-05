@@ -334,31 +334,43 @@ export class TelemetryStore {
         ) k
         GROUP BY GROUPING SETS ((cause_key), (map_name), (hour), ())
       `);
-      // S2: event totals. Each event is read once as its killer and once as its victim.
+      // S2: event totals. Each event is read once as its killer and once as its victim. Grouping by id
+      // first lets Postgres hash about 2k players instead of sorting every row for count(DISTINCT);
+      // count(id) skips the NULL group, so players still means distinct linked killers and victims.
       const range2 = receivedWindow(serverId, since, until);
       const totals = await tx.execute<ServerStatsAggregate["totals"]>(sql`
-        SELECT (count(*) FILTER (WHERE v.n = 1))::int AS events,
-          (count(*) FILTER (WHERE v.n = 2 AND v.id IS NOT NULL))::int AS deaths,
-          (count(*) FILTER (WHERE v.n = 1 AND e.suicide))::int AS suicides,
-          (count(*) FILTER (WHERE v.n = 2 AND v.id IS NOT NULL AND ${hasTag("e.context_tags", LEADER_TAGS.falling)}))::int AS falling,
-          count(DISTINCT v.id)::int AS players
-        FROM combat_events e CROSS JOIN LATERAL (VALUES (1, e.killer_steam_id), (2, e.victim_steam_id)) AS v(n, id)
-        WHERE ${range2("e")}
+        SELECT coalesce(sum(events), 0)::int AS events, coalesce(sum(deaths), 0)::int AS deaths,
+          coalesce(sum(suicides), 0)::int AS suicides, coalesce(sum(falling), 0)::int AS falling,
+          count(id)::int AS players
+        FROM (
+          SELECT v.id, count(*) FILTER (WHERE v.n = 1) AS events,
+            count(*) FILTER (WHERE v.n = 2 AND v.id IS NOT NULL) AS deaths,
+            count(*) FILTER (WHERE v.n = 1 AND e.suicide) AS suicides,
+            count(*) FILTER (WHERE v.n = 2 AND v.id IS NOT NULL AND ${hasTag("e.context_tags", LEADER_TAGS.falling)}) AS falling
+          FROM combat_events e CROSS JOIN LATERAL (VALUES (1, e.killer_steam_id), (2, e.victim_steam_id)) AS v(n, id)
+          WHERE ${range2("e")}
+          GROUP BY v.id
+        ) g
       `);
-      // S3: named lists. Each player's longest kill from the top 200, and the top five per tag, with
-      // snapshot()'s latest non-empty name looked up only for those players.
+      // S3: named lists. The ten players with the longest capped kills, ranked by each player's own best
+      // shot so a few snipers cannot crowd the others out, and the top five per tag. Names are then read
+      // for those players only (at most 40), with one short backward index probe each.
       const range3 = receivedWindow(serverId, since, until);
       const lists = await tx.execute<Pick<ServerStatsAggregate, "longest" | "leaders">>(sql`
-        WITH longest AS (
-          SELECT DISTINCT ON (killer_steam_id) killer_steam_id AS steam_id, cause, map_name, distance_centimeters,
-            received_at, event_id
-          FROM (
-            SELECT killer_steam_id, cause, map_name, distance_centimeters, received_at, event_id FROM combat_events
-            WHERE ${range3()} AND NOT suicide AND killer_steam_id IS NOT NULL
-              AND distance_centimeters > 0 AND distance_centimeters <= ${DISTANCE_CAP}
-            ORDER BY distance_centimeters DESC, received_at, event_id LIMIT 200
-          ) top
-          ORDER BY killer_steam_id, distance_centimeters DESC, received_at, event_id
+        WITH best AS (
+          SELECT killer_steam_id AS steam_id, max(distance_centimeters) AS cm FROM combat_events
+          WHERE ${range3()} AND NOT suicide AND killer_steam_id IS NOT NULL
+            AND distance_centimeters > 0 AND distance_centimeters <= ${DISTANCE_CAP}
+          GROUP BY killer_steam_id
+          ORDER BY cm DESC, killer_steam_id LIMIT 10
+        ), longest AS (
+          SELECT best.steam_id, shot.cause, shot.map_name, shot.distance_centimeters, shot.received_at, shot.event_id
+          FROM best CROSS JOIN LATERAL (
+            SELECT c.cause, c.map_name, c.distance_centimeters, c.received_at, c.event_id FROM combat_events c
+            WHERE ${range3("c")} AND c.killer_steam_id = best.steam_id AND NOT c.suicide
+              AND c.distance_centimeters = best.cm
+            ORDER BY c.received_at, c.event_id LIMIT 1
+          ) shot
         ), tagged AS (
           SELECT t.tag, t.steam_id FROM combat_events e
           CROSS JOIN LATERAL (VALUES
@@ -380,16 +392,20 @@ export class TelemetryStore {
         ), named AS (
           SELECT steam_id FROM longest UNION SELECT steam_id FROM leaders
         ), names AS (
-          SELECT DISTINCT ON (steam_id) steam_id, name FROM (
-            SELECT killer_steam_id AS steam_id, killer_name AS name, received_at, event_id FROM combat_events
-            WHERE ${range3()} AND killer_steam_id IN (SELECT steam_id FROM named)
-              AND killer_name IS NOT NULL AND killer_name <> ''
+          -- snapshot()'s rule: the latest non-empty name seen as killer or victim in the window.
+          SELECT named.steam_id, latest.name FROM named
+          LEFT JOIN LATERAL (
+            (SELECT c.killer_name AS name, c.received_at, c.event_id FROM combat_events c
+              WHERE ${range3("c")} AND c.killer_steam_id = named.steam_id
+                AND c.killer_name IS NOT NULL AND c.killer_name <> ''
+              ORDER BY c.received_at DESC, c.event_id DESC LIMIT 1)
             UNION ALL
-            SELECT victim_steam_id, victim_name, received_at, event_id FROM combat_events
-            WHERE ${range3()} AND victim_steam_id IN (SELECT steam_id FROM named)
-              AND victim_name IS NOT NULL AND victim_name <> ''
-          ) seen
-          ORDER BY steam_id, received_at DESC, event_id DESC
+            (SELECT c.victim_name, c.received_at, c.event_id FROM combat_events c
+              WHERE ${range3("c")} AND c.victim_steam_id = named.steam_id
+                AND c.victim_name IS NOT NULL AND c.victim_name <> ''
+              ORDER BY c.received_at DESC, c.event_id DESC LIMIT 1)
+            ORDER BY received_at DESC, event_id DESC LIMIT 1
+          ) latest ON true
         )
         SELECT
           COALESCE((SELECT json_agg(row_to_json(r)) FROM (

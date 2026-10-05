@@ -801,6 +801,51 @@ describe("launch storage on isolated PostgreSQL", () => {
     expect(await telemetry.rowExtras(since, now, [], "east")).toEqual({ weapons: [], streaks: [] });
   });
 
+  it("ranks long-distance calls by each player's own best shot, so one sniper cannot crowd out the list", async () => {
+    const telemetry = new TelemetryStore(drizzle({ client, schema }));
+    const now = new Date(),
+      since = new Date(now.getTime() - 60_000),
+      earlier = new Date(now.getTime() - 30_000);
+    const sniper = "76561198000000101",
+      target = "76561198000000102";
+    const others = Array.from({ length: 11 }, (_, index) => `765611980000002${String(index).padStart(2, "0")}`);
+    let eventTime = 0;
+    const kill = (killer: string, killerName: string, distance: number, victim = target, victimName = "Target") => ({
+      eventId: randomUUID(),
+      type: "killed",
+      eventTime: ++eventTime,
+      killerSteamId: killer,
+      killerName,
+      victimSteamId: victim,
+      victimName,
+      cause: "Id.Item.SR_04",
+      distance,
+    });
+    const batch = (events: unknown[]) => parseFeed({ serverId: randomUUID(), serverName: "Game label", events });
+    // 201 sniper shots, every one longer than anyone else's best: the 200 longest kills are all his.
+    const shots = Array.from({ length: 201 }, (_, index) => kill(sniper, "LongShotLarry", 150_000 + index));
+    const spread = others.map((id, index) => kill(id, `Player ${index}`, 10_000 + index * 100));
+    for (const events of [shots.slice(0, 100), shots.slice(100, 200), [...shots.slice(200), ...spread]])
+      await telemetry.ingest(batch(events), earlier, "west");
+    // A later name, seen only as a victim, is the one shown.
+    await telemetry.ingest(batch([kill(sniper, "LongShotLarry", 500, others[10], "Renamed Ten")]), now, "west");
+
+    const stats = await telemetry.serverStats(since, now, "west");
+    expect(stats.longest).toHaveLength(10);
+    expect(publicServerStats(stats).longestKills.map(({ name, weapon, meters }) => ({ name, weapon, meters }))).toEqual(
+      [
+        { name: "LongShotLarry", weapon: "SR-04", meters: 1502 },
+        { name: "Renamed Ten", weapon: "SR-04", meters: 110 },
+        ...[9, 8, 7, 6, 5, 4, 3, 2].map((index) => ({
+          name: `Player ${index}`,
+          weapon: "SR-04",
+          meters: 100 + index,
+        })),
+      ],
+    );
+    expect(stats.totals).toEqual({ events: 213, deaths: 213, suicides: 0, falling: 0, players: 13 });
+  });
+
   it("stores game GUIDs that are not RFC 4122 UUIDs and deduplicates them across letter case", async () => {
     const telemetry = new TelemetryStore(drizzle({ client, schema }));
     const now = new Date(),

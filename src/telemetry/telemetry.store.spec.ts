@@ -306,7 +306,7 @@ describe("telemetry persistence contract", () => {
         ? [{ set: 7, kills: 3 }]
         : config.text.includes("CROSS JOIN LATERAL (VALUES (1,")
           ? [{ events: 4, deaths: 4, suicides: 1, falling: 0, players: 3 }]
-          : config.text.includes("WITH longest AS")
+          : config.text.includes("WITH best AS")
             ? [{ longest: [{ steamId: "76561198000000001" }], leaders: [] }]
             : [],
     }));
@@ -336,23 +336,52 @@ describe("telemetry persistence contract", () => {
     expect(s1[0].text).toContain(
       "?| ARRAY['Penetration','Meta.Progression.Context.Player.KillContext.Penetration','Meta.PlayerKillFlag.Player.Penetration']",
     );
-    // S2: event totals, with the e. alias.
+    // S2: event totals, with the e. alias. Players are counted from a hashable GROUP BY, never a
+    // count(DISTINCT) that sorts two rows per event.
     expect(s2[0].text).toContain("e.server_id = $1 AND e.received_at >= $2 AND e.received_at <= $3");
-    expect(s2[0].text).toContain("count(DISTINCT v.id)::int AS players");
+    expect(s2[0].text).toContain("GROUP BY v.id");
+    expect(s2[0].text).toContain("count(id)::int AS players");
+    expect(s2[0].text).not.toMatch(/count\(DISTINCT/i);
     expect(s2[0].text).toContain(
       "e.context_tags ?| ARRAY['Falling','Meta.Progression.Context.Player.KillContext.Falling','Meta.PlayerKillFlag.Player.Falling']",
     );
-    // S3: one longest kill per player from the top 200, five leaders per tag, ten rows out.
-    expect(s3[0].text).toContain("ORDER BY distance_centimeters DESC, received_at, event_id LIMIT 200");
-    expect(s3[0].text).toContain("SELECT DISTINCT ON (killer_steam_id)");
-    expect(s3[0].text).toContain("distance_centimeters <= 200000");
+    // S3: the ten players with the longest capped kills, ranked by each player's own best shot (no
+    // top-N prefilter a few snipers could fill), five leaders per tag, ten rows out.
+    const cte = (name: string, next: string) => {
+      const text = s3[0].text;
+      const start = text.indexOf(`${name} AS (`);
+      expect(start).toBeGreaterThanOrEqual(0);
+      return text.slice(start, text.indexOf(`), ${next} AS (`, start));
+    };
+    const best = cte("best", "longest");
+    expect(best).toContain("NOT suicide AND killer_steam_id IS NOT NULL");
+    expect(best).toContain("distance_centimeters > 0 AND distance_centimeters <= 200000");
+    expect(best).toContain("GROUP BY killer_steam_id");
+    // Capped at ten before any name is looked up.
+    expect(best).toContain("ORDER BY cm DESC, killer_steam_id LIMIT 10");
+    const longest = cte("longest", "tagged");
+    expect(longest).toContain("FROM best CROSS JOIN LATERAL (");
+    expect(longest).toContain(
+      "c.server_id = $1 AND c.received_at >= $2 AND c.received_at <= $3 AND c.killer_steam_id = best.steam_id",
+    );
+    expect(longest).toContain("c.distance_centimeters = best.cm");
+    expect(longest).toContain("ORDER BY c.received_at, c.event_id LIMIT 1");
+    expect(s3[0].text).not.toContain("LIMIT 200");
+    expect(s3[0].text).not.toContain("DISTINCT ON");
     expect(s3[0].text).toContain("row_number() OVER (PARTITION BY tag ORDER BY count(*) DESC, steam_id)");
     expect(s3[0].text).toContain("rank <= 5");
-    expect(s3[0].text).toContain("LIMIT 10");
     expect(s3[0].text).toContain("e.server_id = $1 AND e.received_at >= $2 AND e.received_at <= $3");
-    expect(s3[0].text).toContain("killer_steam_id IN (SELECT steam_id FROM named)");
-    expect(s3[0].text).toContain("victim_steam_id IN (SELECT steam_id FROM named)");
-    expect(s3[0].text).toContain("ORDER BY steam_id, received_at DESC, event_id DESC");
+    // Names: one latest-name probe per listed player on the killer and victim indexes, never every
+    // event those players have in the window.
+    const names = s3[0].text.slice(s3[0].text.indexOf("names AS ("));
+    expect(names).toMatch(/FROM named\s+LEFT JOIN LATERAL \(/);
+    for (const role of ["killer", "victim"])
+      expect(names).toContain(
+        `c.server_id = $1 AND c.received_at >= $2 AND c.received_at <= $3 AND c.${role}_steam_id = named.steam_id`,
+      );
+    expect(names.match(/ORDER BY c\.received_at DESC, c\.event_id DESC LIMIT 1\)/g)).toHaveLength(2);
+    expect(names).toMatch(/ORDER BY received_at DESC, event_id DESC LIMIT 1\s+\) latest ON true/);
+    expect(s3[0].text).not.toContain("IN (SELECT steam_id FROM named)");
     // Self-inflicted deaths are counted in S2 but never ranked by name.
     expect(s3[0].text).not.toContain("'suicide'");
     expect(s3[0].text).toContain("('falling', e.victim_steam_id,");
@@ -367,7 +396,7 @@ describe("telemetry persistence contract", () => {
     });
     expect(statements(query).map(([, params]) => params[0])).toEqual(["primary", "primary", "primary"]);
     query.mockImplementation(async (config) => {
-      if (config.text.includes("WITH longest AS")) throw new Error("database error");
+      if (config.text.includes("WITH best AS")) throw new Error("database error");
       return { rows: [] };
     });
     await expect(store.serverStats(new Date(0), new Date(1))).rejects.toThrow();
