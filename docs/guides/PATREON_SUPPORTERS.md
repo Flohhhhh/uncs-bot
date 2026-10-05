@@ -1,6 +1,6 @@
 # Supporter records (Patreon and PayPal)
 
-This feature keeps a private supporter ledger in the UNC dashboard. It imports the Patreon campaign's members and completed payments from the authenticated Patreon API, and records optional signed Patreon webhook observations, checked Patreon receipts, staff-checked PayPal payments, identity links, and permanent founder promises. It sends no RCON commands. When [automatic Discord roles](DISCORD_ROLES.md) are switched on, founders with a linked Discord account receive the Founder role, including a Discord account that the Patreon import filled in, and people who currently support can receive the [Supporter role](#supporter-role). Existing legacy and seeding access are separate and are never changed by this integration.
+This feature keeps a private supporter ledger in the UNC dashboard. It imports the Patreon campaign's members and completed payments from the authenticated Patreon API, and records optional signed Patreon webhook observations, checked Patreon receipts, staff-checked PayPal payments, identity links, and permanent founder promises. It sends no RCON commands. When [automatic Discord roles](DISCORD_ROLES.md) are switched on, founders with a linked Discord account receive the Founder role, including a Discord account that the Patreon import filled in or that the patron linked with [Link Patreon](#link-patreon-patrons-link-their-own-discord), and people who currently support can receive the [Supporter role](#supporter-role). Existing legacy and seeding access are separate and are never changed by this integration.
 
 ## Why the Supporters page can show 0 records
 
@@ -69,13 +69,13 @@ Nothing runs while Patreon is not configured. PayPal records are never matched a
 
 Every supporter record keeps who linked each identity:
 
-- `discordSource`: `patreon` when the Patreon import filled the Discord account from the patron's own Patreon connection, `staff` when staff entered it (on a Link or a PayPal record), or `null` for a link made before sources were recorded.
+- `discordSource`: `patreon` when the Patreon import filled the Discord account from the patron's own Patreon connection, `patron_signin` when the patron linked it by signing in to Discord and Patreon ([Link Patreon](#link-patreon-patrons-link-their-own-discord), shown as "Linked by patron"), `staff` when staff entered it (on a Link or a PayPal record), or `null` for a link made before sources were recorded.
 - `steamSource`: `application` when automatic matching copied it from an approved whitelist application (`steamApplicationId` names that application), `staff` when staff entered it, or `null` for an older link.
 - `patreonDiscordId`: the Discord account Patreon last reported for this membership, even when it is not linked (for example because another record links it). It is only updated when Patreon's answer was read; an unreadable answer never clears it.
 
 A Link marks only a value that **changes** as a staff link, so resending the current values keeps where they came from. Staff always win: automation only fills an empty SteamID and never overwrites a link. Changing the Discord account behind a SteamID copied from an application is refused (409, `blockedReason: "steam_from_application"`) unless the same request enters the SteamID again or sends `steamConfirmed: true`, so a SteamID never silently follows a different person. For the same reason, a Link that changes the Discord account and enters a SteamID the previous Discord account applied for the whitelist with (an application not declined or revoked) is refused the same way unless it sends `steamConfirmed: true`.
 
-`identityState` is `unlinked` (neither), `partial` (one of them), `patreon_linked` (both, and the Discord account came from Patreon) or `staff_linked` (both, any other source). `patreon_linked` says nothing about the SteamID: it is still a self-declared or staff-entered claim, and Steam ownership is never verified.
+`identityState` is `unlinked` (neither), `partial` (one of them), `patreon_linked` (both, and the Discord account came from Patreon or the patron's own sign-in) or `staff_linked` (both, any other source). `patreon_linked` says nothing about the SteamID: it is still a self-declared or staff-entered claim, and Steam ownership is never verified.
 
 At every startup, about five seconds in, Gramps labels links made before sources were recorded: a Patreon record's Discord account is `patreon` when the latest action that set the current account was the import's `patreon-discord-link`, and otherwise `staff`. A staff Link counts only when it changed the Discord account, because older dashboards resent it unchanged. Every unlabelled SteamID becomes `staff`. Only unlabelled rows change, no version is bumped and no audit row is written. Matching waits until labelling finishes or fails. If it fails, Gramps logs a warning and matching still runs: the SteamID fill does not use the labels, and only automatic founder recording is withheld, because it needs a Discord account labelled `patreon`. The next restart labels again. This runs even with both switches off.
 
@@ -99,21 +99,23 @@ A revoked source application never removes the SteamID. When no approved applica
 
 Gramps records a founder promise for a Patreon record only when, in order:
 
-1. the Discord account came from the patron's own Patreon connection (`discordSource: "patreon"`), Patreon still reports that same account, and Patreon reports it for no other patron;
+1. the Discord account came from the patron's own Patreon connection (`discordSource: "patreon"`) and Patreon still reports that same account, or the patron linked it with Link Patreon (`patron_signin`) and Patreon reports no account or that same one (another one is `discord_differs`). Either way, Patreon reports it for no other patron;
 2. no SteamID is needed. When one is linked, it must be a valid player ID with no SteamID alert on it. A SteamID copied from an application must still pass the SteamID fill rule above with the same SteamID. A SteamID staff entered must not differ from the one this Discord account's approved application names (`steam_differs_from_application`; a pending application or one under review does not count). No other Discord account may have an application for the linked SteamID that was not declined or revoked (`steam_shared`). With no SteamID linked, these checks do not run, including when the fill was refused. One thing still stops it: another supporter record holds a SteamID this Discord account applied with, in an application that was not declined or revoked (`steam_on_another_record`). That record may be the same person's, with its own founder promise or an earlier payment, so staff check both;
 3. its payment is the earliest verified `patreon_api` payment marked as the first successful payment. Staff receipts and PayPal payments are always left for staff;
 4. Patreon does not report the latest charge as refunded, reversed or fraudulent, whatever its date: Patreon can date a refunded first charge a few seconds before the payment it refunds;
-5. the payment is at least `SUPPORTER_AUTO_FOUNDER_HOLD_HOURS` old;
-6. no other supporter record with the same Discord account or SteamID has an earlier payment of any kind;
-7. the staff founder rule then passes for that payment, under the same advisory locks: the window, US$5 minimum (an imported payment in another currency qualifies once the import counted it by its tier's price), no earlier payment on the record, and no founder already holding the Discord account or a linked SteamID.
+5. a link the patron made with Link Patreon is at least `SUPPORTER_AUTO_FOUNDER_HOLD_HOURS` old, counted from its `patron-discord-link` audit row for the linked account (`patron_link_too_recent`). Staff can check a new self-service link before a permanent promise. Staff and import links do not wait for this;
+6. the payment is at least `SUPPORTER_AUTO_FOUNDER_HOLD_HOURS` old;
+7. no other supporter record with the same Discord account or SteamID has an earlier payment of any kind;
+8. the staff founder rule then passes for that payment, under the same advisory locks: the window, US$5 minimum (an imported payment in another currency qualifies once the import counted it by its tier's price), no earlier payment on the record, and no founder already holding the Discord account or a linked SteamID.
 
-This is stricter than staff awards: the Discord account must come from Patreon, and the payment must come from the import and pass the wait. A founder recorded without a SteamID is one person by their Discord account. Another record that holds only their SteamID is seen through their whitelist application (item 2). Without an application it is not seen until the SteamID is linked, and a link that would make one person a founder twice is refused then. A founder without a SteamID keeps a SteamID step on the Supporters page, because the whitelist promise needs one. A promise Gramps records has `awarded_by = system:supporter-match`, a `founder` audit row by `system:supporter-match` ("Automatic supporter match") with `automatic: 1`, and shows `founder.automatic: true`. It is a promise like any other: `founderReviews` lists it after a refund, and nothing removes it.
+This is stricter than staff awards: the Discord account must come from Patreon or the patron's own sign-in, and the payment must come from the import and pass the wait. A founder recorded without a SteamID is one person by their Discord account. Another record that holds only their SteamID is seen through their whitelist application (item 2). Without an application it is not seen until the SteamID is linked, and a link that would make one person a founder twice is refused then. A founder without a SteamID keeps a SteamID step on the Supporters page, because the whitelist promise needs one. A promise Gramps records has `awarded_by = system:supporter-match`, a `founder` audit row by `system:supporter-match` ("Automatic supporter match") with `automatic: 1`, and shows `founder.automatic: true`. On a Discord account the patron linked, its reason says so: "Recorded automatically: Discord account linked by the patron's own Discord and Patreon sign-in, and a first Patreon payment inside the founder window." It is a promise like any other: `founderReviews` lists it after a refund, and nothing removes it.
 
 ### When matching runs
 
 - after each Patreon sync's import, before the founder reviews (a sweep of every record automation could still change, at most 2,000 per sweep; the next sweep continues after the last one checked);
 - after a new signed webhook observation (webhooks carry no Discord account, so this rarely changes anything);
 - after an application approval, or a recheck that ends approved, for the campaign's Patreon record with that Discord account. Matching runs after the review is saved and never delays or changes the review response;
+- after a patron links their own Discord account with Link Patreon, or signs in again for the same link (trigger `patron`). A new link waits out the hold above before any founder promise;
 - after a staff Discord link, for the **SteamID only**: a staff-entered Discord account never leads straight to a permanent promise. When it copied a SteamID, the Link response carries `automatic: {steamFilled: true}` and the record as read again;
 - about five seconds after startup, after the source labels.
 
@@ -127,7 +129,8 @@ Every supporter record now has `match` (the SteamID an approved application offe
 
 | Code                                                                                                                                                                                                                                              | Meaning                                                                                                                                                                                                                                                          |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `connect_discord_in_patreon`, `link_discord_no_import`, `link_discord_paypal`                                                                                                                                                                     | No Discord account yet.                                                                                                                                                                                                                                          |
+| `patron_link_conflict`                                                                                                                                                                                                                            | A patron's own sign-in matched this record but was refused, because it would replace a link or take one from another record or founder. It names the account, and stays until a later staff link or review, or a later Discord link, settles it.                 |
+| `connect_discord_in_patreon`, `link_discord_no_import`, `link_discord_paypal`                                                                                                                                                                     | No Discord account yet. While Link Patreon is on, `connect_discord_in_patreon` asks staff to point the patron at it.                                                                                                                                             |
 | `discord_on_another_record`, `discord_differs`, `discord_reported_for_other_patron`                                                                                                                                                               | Patreon reports an account linked elsewhere, a different account than the link, or this account for another patron. Check both.                                                                                                                                  |
 | `discord_not_reported`                                                                                                                                                                                                                            | The Discord account came from Patreon, but Patreon no longer reports one for the patron (shown only while the import runs). The link was kept.                                                                                                                   |
 | `no_whitelist_application`, `application_pending`, `application_in_progress`, `no_approved_application`, `application_not_confirmed`, `several_steam_ids`, `invalid_steam_id`, `steam_shared`, `steam_rejected_before`, `steam_on_another_record` | Why no SteamID can be copied. `application_not_confirmed` gives the SteamID for staff to check.                                                                                                                                                                  |
@@ -148,7 +151,7 @@ The account-match dialog never fills in a SteamID. When the record has none and 
 1. The combined launch migration was applied to the identified production database on September 30 under the owner's explicit authorization, and post-deployment schema checks passed; see [Database prerequisite](ADMIN_DASHBOARD.md#database-prerequisite--launch-migration-applied). The import itself needs no further migration: payment `source` and observation `trigger` are plain text columns. The PayPal ledger and automatic Discord roles in this release do need one reviewed migration first (see [Recording PayPal supporters](#recording-paypal-supporters) and the [Discord roles rollout](DISCORD_ROLES.md#rollout)). Other deployments still require the reviewed schema before activation.
 2. Identify the campaign's numeric ID. The UNCs campaign ("The UNCs", vanity `TheUNCs`, created September 30, 2026) is `16880209`. Configure `PATREON_CAMPAIGN_ID`, `PATREON_FOUNDER_START_AT=2026-09-30T00:00:00-04:00` and `PATREON_FOUNDER_END_AT=2026-10-15T00:00:00-04:00`. The end is exclusive, and the dates must be exactly 15 days apart or founder awards stay disabled. Launching the website later does not move this approved window.
 3. Signed in to Patreon as the campaign's creator, open [Clients & API Keys](https://www.patreon.com/portal/registration/register-clients) and choose **Create Client**. Use an app name such as `UNCs Gramps supporter sync` and a short description such as "Private read-only import of The UNCs members for the staff dashboard". Choose Client API Version **2** and an HTTPS redirect URI on a domain you control, for example `https://theuncsgaming.com/`; the import never uses the OAuth redirect. Fill any other required fields with The UNCs' details. Do not sign in to this client with the creator account afterwards, because Patreon can then issue a new creator token.
-4. Open the new client and copy only the **Creator's Access Token**. The client secret and refresh token are not used and should not be stored in Railway.
+4. Open the new client and copy only the **Creator's Access Token**. The refresh token is not used and should not be stored in Railway. The client ID and secret are used only by [Link Patreon](#link-patreon-patrons-link-their-own-discord). Leave them out until you set that up.
 5. In Railway set `PATREON_ENABLED=true` and `PATREON_CREATOR_ACCESS_TOKEN=<the token>`. Optionally set `PATREON_SYNC_INTERVAL_MINUTES` (default 30, from 10 to 1440). The token must differ from every other configured secret; a reused or malformed value leaves the import unconfigured and the Supporters page says why.
 6. After the redeploy, the first import runs about 15 seconds after startup and then on the interval. On the private Supporters page, the sync status shows the last successful sync, the member count and new payments. Every Patreon member appears as a record pending review. An administrator can also choose **Sync from Patreon** to import immediately.
 
@@ -160,7 +163,7 @@ Patreon reports a patron's Discord account only after the creator sets up Patreo
 2. Add Discord as a benefit to each paid tier. Map it to a separate Discord role made for this, for example `Patron`. Patreon adds and removes that role itself, so do not pick the Founder, Supporter or UNC member roles: Gramps manages those.
 3. Ask patrons to connect Discord from their membership on Patreon.
 
-Gramps links each account at the next sync. "Last import" on the Supporters page counts them under "Discord accounts from Patreon". Staff can still link a Discord account by hand at any time.
+Gramps links each account at the next sync. "Last import" on the Supporters page counts them under "Discord accounts from Patreon". Staff can still link a Discord account by hand at any time. Patrons can also link their own with [Link Patreon](#link-patreon-patrons-link-their-own-discord), without Patreon's Discord integration.
 
 ### Optional webhooks
 
@@ -169,6 +172,80 @@ Webhooks are optional; the import already brings in existing and future patrons.
 Confirm a signed portal test delivery appears in the private Supporters page before relying on incoming records. Repeat the same test body to check deduplication, and inspect Patreon for failed or paused deliveries. A configured secret is not proof of working delivery. Tests create only unverified observations; do not treat them as donor payments. Webhooks never backfill existing supporters.
 
 The backend uses Nest's original raw request body and verifies Patreon's HMAC-MD5 signature in constant time before parsing. It rejects bodies above 64 KiB and campaigns other than the configured one. Requests with a valid signature are limited to 180 a minute. Requests without one have their own per-address limit, so they cannot use up Patreon's allowance. These are Patreon's documented signature rules; v1 pledge hooks retire on October 7, 2026. Use the [official Patreon v2 webhook documentation](https://docs.patreon.com/#apiv2-webhook-endpoints).
+
+## Link Patreon: patrons link their own Discord
+
+Patrons who never connected Discord on Patreon can link their own account. In The UNCs Discord a patron runs `/patreon link`, or taps **Link Patreon** on the panel an admin posted. Gramps answers privately with a one-time link button. The patron signs in to Discord, which must be the same account that asked, and then to Patreon. Gramps reads that Patreon account's membership of the configured campaign and links it to the Discord account. The Supporter and Founder roles then follow through [automatic Discord roles](DISCORD_ROLES.md). Gramps pings nobody and sends no DMs. Every reply in Discord is private.
+
+The record then shows "Linked by patron" (`discordSource: "patron_signin"`) with a `patron-discord-link` audit row by `system:patron-link` ("Linked by patron"). Matching runs for it straight away (trigger `patron`), but a founder promise waits until the link is `SUPPORTER_AUTO_FOUNDER_HOLD_HOURS` old (see [Automatic founder promises](#automatic-founder-promises)). Staff can check a new link in the meantime. A membership the import has not seen yet gets the import's minimal record, and Gramps imports that member straight away when Patreon confirms it.
+
+### Switch and settings
+
+| Setting                 | Default | Use                                                                                                                                                                          |
+| ----------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PATREON_LINK_ENABLED`  | `false` | Turns the feature on. While it is off there is no `/patreon` command, a posted panel button answers that linking is switched off, and the sign-in pages link nothing.        |
+| `PATREON_CLIENT_ID`     | unset   | Client ID of the Patreon client behind the creator token.                                                                                                                    |
+| `PATREON_CLIENT_SECRET` | unset   | That client's secret. It must differ from the creator token, the webhook secret and every other configured secret. It is sent only to Patreon, and never logged or returned. |
+
+Linking also uses the Patreon import settings, the dashboard's Discord sign-in (`ADMIN_ORIGIN`, `ADMIN_DISCORD_CLIENT_ID`, `ADMIN_DISCORD_CLIENT_SECRET`, `ADMIN_SESSION_SECRET`, `ADMIN_GUILD_ID`), `DISCORD_ROLES_ENABLED` and `DISCORD_SUPPORTER_ROLE_ID`. It does not need `ADMIN_ENABLED` or website applications. Bad values never stop the bot. `/patreon panel` names the first one that needs fixing:
+
+1. "The Patreon import isn't set up."
+2. "PATREON_CLIENT_ID is missing or malformed."
+3. "PATREON_CLIENT_SECRET is missing, malformed or reused."
+4. "ADMIN_ORIGIN or the Discord sign-in settings need attention."
+5. "Discord roles are off or the Supporter role isn't set."
+
+Patrons see only "Patreon linking isn't set up yet." until all five pass.
+
+### Owner setup
+
+Merge and deploy with the switch off. Railway's pre-deploy step applies migration `0006_link_patreon`, which only lets a Patreon record's Discord source be `patron_signin`. Then:
+
+1. **Patreon:** at [Clients & API Keys](https://www.patreon.com/portal/registration/register-clients), open the client behind the creator token and choose **Edit Client**. Add the redirect URI `https://admin.theuncsgaming.com/supporters/link/patreon/callback` and choose **Update Client**. Copy the **Client ID** and **Client Secret**. Check afterwards that the next import still succeeds, because Patreon might issue a new creator token when the client changes.
+2. **Discord Developer Portal:** in the Gramps application, open **OAuth2**, choose **Add Redirect**, enter `https://admin.theuncsgaming.com/supporters/link/discord/callback` and choose **Save Changes**. Only the application's owner (currently flohhh) can do this.
+3. **Railway:** in Gramps, open **Variables** and add `PATREON_CLIENT_ID`, `PATREON_CLIENT_SECRET` and `PATREON_LINK_ENABLED=true`, then deploy. Confirm `DISCORD_ROLES_ENABLED` and `DISCORD_SUPPORTER_ROLE_ID` are set.
+4. **Discord:** in the channel patrons should use, run `/patreon panel`. It posts the panel or names the setting to fix. Only the owner and administrators can post it.
+
+Do not sign in to Link Patreon with the creator's Patreon account. It belongs to no membership, and signing in to the client as the creator can replace the creator token.
+
+### Verify after deploy
+
+1. Before switching on: `0006` has run, there is no `/patreon` command and the Supporters page is unchanged.
+2. `/patreon panel` posts the panel, or names the fix.
+3. An admin who is not a patron runs `/patreon link` with a Patreon account that is not the creator's. It ends at "No membership found".
+4. A paying patron on a phone sees "You're linked 🎉". The Supporter role follows within a minute or two, and the record shows "Linked by patron".
+5. A link opened by another Discord account ends at "Wrong Discord account".
+6. The next Patreon sync succeeds. Logs show only `Patron link finished: <outcome>` and `Patron link failed. Nothing was linked.` lines.
+
+### What patrons see
+
+The link works once, for one Discord account, for 10 minutes. Each sign-in step also lasts at most 10 minutes, and the whole sign-in at most 20. Gramps first asks Discord to skip its **Authorize** screen and asks once more with the screen when Discord needs it. Each step ends on a result page with a **Back to Discord** button:
+
+| Result                           | When                                                                                                             |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| You're linked 🎉                 | Linked, and the record supports right now by the [Supporter role](#supporter-role)'s rule.                       |
+| You're linked                    | Linked, and roles follow once Patreon confirms a payment.                                                        |
+| Already linked                   | The record already links this Discord account. Nothing is written, and roles and matching are checked again.     |
+| No membership found              | The Patreon account has no membership of the campaign, or Patreon does not confirm it. Nothing is written.       |
+| This one needs a human           | Refused, see below.                                                                                              |
+| Wrong Discord account            | The Discord sign-in was a different account from the one that asked for the link.                                |
+| Link expired                     | The link, a sign-in step or the browser cookie ran out or was used already. Patreon's phone app can lose it too. |
+| Nothing linked                   | The patron chose **Cancel** on Discord or Patreon.                                                               |
+| Linking is off                   | The switch is off. Nothing is written.                                                                           |
+| Patreon or Discord didn't answer | A sign-in or Patreon call failed or timed out, or the settings stopped being ready. Nothing is written.          |
+| Too many tries                   | More than 60 requests a minute from one address on one page, or one of the limits below.                         |
+
+In Discord a patron can ask for 5 links per 10 minutes. A Discord account can start the Patreon step 5 times per 10 minutes. At most 5,000 links and 5,000 sign-ins wait at once.
+
+### Refusals
+
+Gramps never overwrites a Discord link. It refuses when the record already links another Discord account (`membership_linked`), when another Patreon record of the campaign links this Discord account (`discord_linked`, a PayPal record does not count), or when the record is a founder and another founder holds this Discord account (`founder_tie`). Each refusal writes a `patron-link-conflict` audit row naming both accounts, at most once a day for the same account and reason. The record's `patronLinkConflict` and the `patron_link_conflict` step show the latest refusal until a later staff link or review, or a later Discord link, settles it. Two sign-ins racing for the same account end with one link and one refusal.
+
+### Privacy and security
+
+Gramps keeps no Patreon or Discord token, email or profile. Each access token is used once in memory and discarded. A Patreon code that cannot be used is spent at once. The patron's link, sign-in state and per-account limits live only in memory, so a restart ends links in progress (a single Gramps instance is assumed). The sign-in uses a `__Host-` cookie and a fresh random state for each step, compared in constant time, and the Discord account that signs in must be the one that asked. The pages carry no script, form or image, with a strict Content-Security-Policy, and show fixed text only. Nothing a patron sends appears in a page, an address or a log.
+
+Someone who controls a patron's Patreon login can still link it to their own Discord account. The audit rows and the founder wait give staff time to notice.
 
 ## Recording PayPal supporters
 
