@@ -179,10 +179,23 @@ export class SupportersService {
       search: parsedSearch.data,
       provider: parsedProvider.data ?? null,
       limit: 100,
-      sync: this.patreonSync.status(),
+      sync: await this.syncStatus(),
       automation: this.match.status(),
       note: "Private supporter records for Patreon and PayPal. Membership changes need review; a tier or active membership is not proof of a completed payment. Founder records are permanent promises for future standard whitelist access. No game access is changed here. When Discord roles are switched on, founders with a linked Discord account receive the Founder role, and people who currently support receive the Supporter role if it is configured. The Supporter role is a Discord role only. With automatic matching switched on, Gramps copies a Patreon supporter's empty SteamID from their approved whitelist application and can record a founder promise itself under a stricter rule; each record's next steps say what is left for staff.",
     };
+  }
+  /**
+   * The Patreon sync status, without the founder payments staff have marked checked since the last import listed
+   * them. If the checks cannot be read, every payment stays listed.
+   */
+  private async syncStatus() {
+    const status = this.patreonSync.status();
+    if (!status.founderReviews?.length) return status;
+    try {
+      return { ...status, founderReviews: await this.store.uncheckedFounderReviews(status.founderReviews) };
+    } catch {
+      return status;
+    }
   }
   /** Staff-triggered Patreon import; concurrent requests join the running sync. */
   async syncNow(staff: Staff) {

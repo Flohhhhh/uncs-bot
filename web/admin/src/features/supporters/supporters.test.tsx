@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { api } from "../../api/client";
 import { AdminContext, type AdminContextValue } from "../../app/context";
 import { SupportersPage } from "./index";
@@ -325,6 +325,8 @@ it("adds a Patreon member from Details only after the campaign membership is tic
   );
   await screen.findByRole("heading", { name: "Saved" });
   expect(screen.getByRole("status")).toHaveTextContent(/^Nothing else changed\.$/);
+  // The form and its Save button are gone, so focus moves to the result.
+  expect(screen.getByRole("status")).toHaveFocus();
   expect(postCalls()).toHaveLength(1);
 });
 
@@ -351,6 +353,7 @@ it("keeps an uncertain manual entry out of the success state and never resubmits
   await screen.findByRole("heading", { name: "Not sure it saved" });
   expect(screen.getByText("Close and reload before trying again.")).toBeInTheDocument();
   expect(screen.getByRole("status")).toHaveTextContent(/^The save could not be confirmed\. Review ID: [0-9a-f-]{36}$/);
+  expect(screen.getByRole("status")).toHaveFocus();
   expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
   expect(postCalls()).toHaveLength(1);
 });
@@ -721,7 +724,7 @@ it("says making a founder now skips the refund wait, and keeps the button second
       },
     ],
   };
-  request.mockResolvedValue(data(record));
+  request.mockResolvedValue({ ...data(record), automation: { steamFill: false, founderAuto: true } });
   render(page());
   await openButton();
   expect(cell(rowOf(supporter.displayName!), "Next")).toHaveTextContent("Waiting");
@@ -1087,9 +1090,10 @@ it("says what is missing when a fact is empty, and warns about an unpaid last ch
   expect(section(dialog, "Not a founder")).toHaveTextContent("No payment yet.");
 });
 
-it("says why Gramps skipped a record that is ready for staff, but not for PayPal", async () => {
-  request.mockResolvedValue({
+it("says why Gramps skipped a record that is ready for staff, but not for PayPal or while automatic founders are off", async () => {
+  const response = {
     ...data(),
+    automation: { steamFill: false, founderAuto: true },
     supporters: [
       supporter,
       {
@@ -1102,8 +1106,9 @@ it("says why Gramps skipped a record that is ready for staff, but not for PayPal
         automaticBlockedMessage: "Only Patreon supporters are recorded automatically.",
       },
     ],
-  });
-  render(page());
+  };
+  request.mockResolvedValue(response);
+  const view = render(page());
   let dialog = await openRecord();
   const skipped = within(fact(dialog, "Founder")).getByText(
     "Gramps skipped this: The Discord account was entered by staff.",
@@ -1112,27 +1117,71 @@ it("says why Gramps skipped a record that is ready for staff, but not for PayPal
   fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
   dialog = await openRecord("PayPal donor");
   expect(fact(dialog, "Founder")).toHaveTextContent(/^No$/);
+  fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+  // With automatic founders off Gramps skipped nothing, so the Founder fact says only No.
+  view.unmount();
+  request.mockResolvedValue({ ...response, automation: { steamFill: true, founderAuto: false } });
+  render(page());
+  dialog = await openRecord();
+  expect(fact(dialog, "Founder")).toHaveTextContent(/^No$/);
+  expect(within(dialog).getByRole("button", { name: "Make founder" })).toBeInTheDocument();
 });
 
-it("offers Add payment only on a Patreon record with a payment step", async () => {
+it("offers Add payment on a Patreon record with a payment step or no paid payment, even with founder dates unset", async () => {
+  // Founder dates unset: the only step is the dates note, and the record has no payment for the Supporter role.
+  const undated: Supporter = {
+    ...supporter,
+    id: "undated",
+    displayName: "Undated patron",
+    latestPayment: null,
+    founderEligiblePayment: null,
+    founderBlockedReason: "window_not_configured",
+    founderBlockedMessage: "Founder dates are not set.",
+    nextSteps: [{ code: "founder_window_not_configured", area: "founder", message: "Founder dates are not set." }],
+  };
   request.mockResolvedValue({
     ...data(),
+    founderPolicy: { ...policy, configured: false, startsAt: null, endsAt: null },
     supporters: [
       { ...unpaid, displayName: "Unpaid patron" },
+      undated,
+      { ...undated, id: "paid", displayName: "Paid patron", latestPayment: supporter.latestPayment },
       { ...unpaid, id: "paypal", displayName: "Unpaid donor", provider: "paypal", patreonMemberId: null },
       { ...supporter, id: "ready", displayName: "Ready patron" },
     ],
   });
   render(page());
-  let dialog = await openRecord("Unpaid patron");
-  expect(within(dialog).getByRole("button", { name: "Add payment" })).toHaveClass("secondary");
-  fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
-  for (const name of ["Unpaid donor", "Ready patron"]) {
-    dialog = await openRecord(name);
+  for (const name of ["Unpaid patron", "Undated patron"]) {
+    const dialog = await openRecord(name);
+    expect(within(dialog).getByRole("button", { name: "Add payment" })).toHaveClass("secondary");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+  }
+  for (const name of ["Paid patron", "Unpaid donor", "Ready patron"]) {
+    const dialog = await openRecord(name);
     expect(within(dialog).queryByRole("button", { name: "Add payment" })).not.toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "Change accounts" })).toHaveClass("secondary");
     fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
   }
+});
+
+it("puts a payment in the founder window that may be their first under Needs you, with Add payment", async () => {
+  const message = "Check if their payment in the founder window was their first, then add it.";
+  request.mockResolvedValue(
+    data({
+      ...unpaid,
+      latestPayment: { ...payment, source: "patreon_api", firstSuccessfulPaymentVerified: false },
+      nextSteps: [{ code: "founder_not_first_payment", area: "founder", message }],
+    }),
+  );
+  render(page());
+  await openButton();
+  expect(cell(rowOf(supporter.displayName!), "Next")).toHaveTextContent(`Needs you${message}`);
+  expect(screen.getByRole("button", { name: "Needs you 1" })).toBeInTheDocument();
+  const dialog = await openRecord();
+  expect(section(dialog, "Needs you")).toHaveTextContent(message);
+  expect(within(dialog).queryByRole("heading", { name: "Not a founder" })).not.toBeInTheDocument();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Add payment" }));
+  expect(screen.getByRole("checkbox", { name: /This was their first payment/ })).not.toBeChecked();
 });
 
 it("lets staff make a PayPal record a founder, confirming with its record ID, even while Patreon is off", async () => {
@@ -1289,7 +1338,7 @@ it.each([
 });
 
 it("shows nothing from an application on a server the administrator cannot open, and keeps the new-account box", async () => {
-  const hiddenStep = "Add the SteamID (on a server you cannot open) from their application.";
+  const hiddenStep = "Their application is on a server you cannot open, so ask them for their SteamID.";
   // As the server sends it: only the reason is left of the application.
   const hidden: Supporter = {
     ...supporter,
@@ -1478,6 +1527,152 @@ it("puts founder payments to check and Discord conflicts on the row and in the r
       .map((item) => item.textContent),
   ).toEqual(["Patreon no longer shows their founder payment as paid.", "Patreon shows a different Discord account."]);
 });
+
+it("marks a founder payment checked from Needs you, naming the payment the import listed", async () => {
+  const unverified = { ...payment, id: "01234567-89ab-4cde-8fab-0123456789ae", reference: "pledge_start:9" };
+  const founder: Supporter = {
+    ...supporter,
+    founder: { awardedAt: policy.startsAt!, paymentId: payment.id, source: "manual_receipt", automatic: false },
+    founderEligiblePayment: null,
+    nextSteps: [],
+  };
+  const listed = syncStatus({
+    founderReviews: [
+      {
+        supporterId: supporter.id,
+        patreonMemberId: "patreon-member-1",
+        paymentId: payment.id,
+        paymentSource: "manual_receipt",
+        reference: payment.reference,
+        unverifiedPaymentId: unverified.id,
+        unverifiedReference: unverified.reference,
+        reviewReason: "unverified",
+      },
+    ],
+  });
+  let checked = false;
+  request.mockImplementation(async (_path, options) =>
+    options?.method === "POST"
+      ? (() => {
+          checked = true;
+          return { ok: true, replayed: false, supporter: { ...founder, version: 8 } };
+        })()
+      : data(founder, checked ? syncStatus() : listed),
+  );
+  render(page());
+  await openButton();
+  expect(cell(rowOf(supporter.displayName!), "Next")).toHaveTextContent(
+    "Needs youPatreon no longer shows their founder payment as paid.",
+  );
+  const dialog = await openRecord();
+  const needs = section(dialog, "Needs you");
+  fireEvent.click(within(needs).getByRole("button", { name: "Mark payment checked" }));
+  expect(within(dialog).getByRole("heading", { name: "Mark payment checked" })).toBeInTheDocument();
+  expect(section(dialog, "Payment")).toHaveTextContent(
+    "Patreon no longer shows their founder payment as paid.Reference pledge_start:9",
+  );
+  expect(within(dialog).getByText("They stay a founder.")).toBeInTheDocument();
+  expect(within(dialog).queryByText(/Discord roles/)).not.toBeInTheDocument();
+  expect(screen.getByLabelText("Reason")).toHaveFocus();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+  await screen.findByRole("heading", { name: "Saved" });
+  expect(postCalls()).toHaveLength(1);
+  expect(postCalls()[0][0]).toBe(`supporters/${supporter.id}/review`);
+  expect(JSON.parse(String(postCalls()[0][1]?.body))).toEqual({
+    id: expect.any(String),
+    version: 7,
+    confirm: "patreon-member-1",
+    reason: "Checked in Patreon",
+    paymentId: unverified.id,
+  });
+  expect(screen.queryByText("Gramps updates their Discord roles next.")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  // The page reads the list again, and the checked payment no longer needs staff.
+  await waitFor(() => expect(cell(rowOf(supporter.displayName!), "Next")).toHaveTextContent(/^All set$/));
+});
+
+it("keeps a Discord account Patreon no longer shows, as a staff link, from Needs you", async () => {
+  const message = "Patreon no longer shows this Discord account for them.";
+  const reported: Supporter = {
+    ...supporter,
+    discordSource: "patreon",
+    nextSteps: [{ code: "discord_not_reported", area: "discord", message }],
+  };
+  request.mockImplementation(async (_path, options) =>
+    options?.method === "POST"
+      ? { ok: true, replayed: false, supporter: { ...reported, version: 8, discordSource: "staff", nextSteps: [] } }
+      : data(reported),
+  );
+  render(page());
+  await openButton();
+  expect(cell(rowOf(supporter.displayName!), "Next")).toHaveTextContent(`Needs you${message}`);
+  const dialog = await openRecord();
+  fireEvent.click(within(section(dialog, "Needs you")).getByRole("button", { name: "Keep Discord" }));
+  expect(section(dialog, "Discord")).toHaveTextContent(
+    `Discord${supporter.discordId}Patreon no longer shows this account for them.`,
+  );
+  expect(within(dialog).getByText("It stays linked as added by staff.")).toBeInTheDocument();
+  expect(screen.getByLabelText("Reason")).toHaveValue("Checked their Discord account");
+  fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+  await screen.findByRole("heading", { name: "Saved" });
+  expect(postCalls()[0][0]).toBe(`supporters/${supporter.id}/link`);
+  expect(JSON.parse(String(postCalls()[0][1]?.body))).toEqual({
+    id: expect.any(String),
+    version: 7,
+    confirm: "patreon-member-1",
+    reason: "Checked their Discord account",
+    discordId: supporter.discordId,
+    discordConfirmed: true,
+  });
+  expect(fact(screen.getByRole("dialog"), "Discord")).toHaveTextContent(`${supporter.discordId}Added by staff`);
+});
+
+it("offers Mark payment checked only for a founder payment to check", async () => {
+  request.mockResolvedValue(
+    data({ ...supporter, nextSteps: [{ code: "steam_shared", area: "steam", message: "Shared." }] }),
+  );
+  render(page());
+  const dialog = await openRecord();
+  expect(section(dialog, "Needs you")).toHaveTextContent("Shared.");
+  expect(within(dialog).queryByRole("button", { name: "Mark payment checked" })).not.toBeInTheDocument();
+  expect(within(dialog).queryByRole("button", { name: "Keep Discord" })).not.toBeInTheDocument();
+});
+
+it("names the phone sort orders in plain words, with Needs you first as the default", async () => {
+  vi.stubGlobal(
+    "matchMedia",
+    vi.fn((query: string) => ({
+      matches: query === "(max-width: 700px)",
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })),
+  );
+  request.mockResolvedValue({
+    ...data(),
+    supporters: [
+      { ...supporter, id: "set", displayName: "Set patron", nextSteps: [] },
+      { ...supporter, id: "needs", displayName: "Needs patron" },
+    ],
+  });
+  render(page());
+  await openButton("Set patron");
+  const select = screen.getByRole("combobox", { name: "Sort by" });
+  expect([...select.querySelectorAll("option")].map((option) => option.textContent)).toEqual([
+    "Needs you first",
+    "Name A to Z",
+    "Name Z to A",
+    "Discord problems first",
+    "Discord problems last",
+    "All set first",
+  ]);
+  const names = () => screen.getAllByText(/patron$/, { selector: "td strong" }).map((name) => name.textContent);
+  expect(names()).toEqual(["Needs patron", "Set patron"]);
+  fireEvent.change(select, { target: { value: "2:descending" } });
+  expect(names()).toEqual(["Set patron", "Needs patron"]);
+  fireEvent.change(select, { target: { value: "" } });
+  expect(names()).toEqual(["Needs patron", "Set patron"]);
+});
+afterEach(() => vi.unstubAllGlobals());
 
 /** The Patreon status line. */
 function importLine() {

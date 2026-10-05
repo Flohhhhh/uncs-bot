@@ -65,6 +65,7 @@ function fixture(overrides: Record<string, unknown> = {}) {
     register: jest.fn().mockResolvedValue({ ok: true }),
     recordPaypal: jest.fn().mockResolvedValue({ ok: true }),
     get: jest.fn().mockResolvedValue(null),
+    uncheckedFounderReviews: jest.fn(async (reviews: unknown[]) => reviews),
   };
   const roles = { supporterChanged: jest.fn() };
   const match = {
@@ -230,6 +231,64 @@ describe("supporter reviews", () => {
     ]);
     expect(result.sync).toEqual({ configured: true, running: false, members: 2 });
     expect(result.automation).toEqual(match.status());
+  });
+  it("leaves founder payments staff marked checked out of the listed sync status, or keeps them all if unread", async () => {
+    const { service, store, sync } = fixture();
+    const review = (supporterId: string) => ({
+      supporterId,
+      patreonMemberId: `member-${supporterId}`,
+      paymentId: "p",
+      paymentSource: "patreon_api",
+      reference: "pledge_start:1",
+      unverifiedPaymentId: `payment-${supporterId}`,
+      unverifiedReference: "pledge_start:1",
+      reviewReason: "unverified",
+    });
+    const reviews = [review("a"), review("b")];
+    sync.status.mockReturnValue({ configured: true, members: 2, founderReviews: reviews });
+    store.uncheckedFounderReviews.mockResolvedValueOnce([reviews[1]]);
+    expect((await service.list(admin)).sync).toEqual({ configured: true, members: 2, founderReviews: [reviews[1]] });
+    expect(store.uncheckedFounderReviews).toHaveBeenCalledWith(reviews);
+    store.uncheckedFounderReviews.mockRejectedValueOnce(new Error("database unavailable"));
+    expect((await service.list(admin)).sync).toEqual({ configured: true, members: 2, founderReviews: reviews });
+    // With nothing to check, nothing is read.
+    store.uncheckedFounderReviews.mockClear();
+    sync.status.mockReturnValue({ configured: true, members: 2, founderReviews: [] });
+    await service.list(admin);
+    expect(store.uncheckedFounderReviews).not.toHaveBeenCalled();
+  });
+  it("accepts a staff confirmation of the record's Discord account with a link", async () => {
+    const { service, store } = fixture();
+    const input = { id: randomUUID(), version: 1, confirm: "member-123", reason: "Checked their Discord account" };
+    await service.mutate(admin, randomUUID(), "link", { ...input, discordId: admin.id, discordConfirmed: true });
+    expect(store.mutate).toHaveBeenCalledWith(
+      expect.any(String),
+      { ...input, discordId: admin.id, discordConfirmed: true, kind: "link" },
+      admin,
+      campaign,
+      expect.any(Object),
+    );
+    await expect(
+      service.mutate(admin, randomUUID(), "link", { ...input, discordId: admin.id, discordConfirmed: false }),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+  it("marks a founder payment checked by its ID and refuses anything else with the review", async () => {
+    const { service, store } = fixture();
+    const input = { id: randomUUID(), version: 1, confirm: "member-123", reason: "Checked in Patreon" };
+    const paymentId = randomUUID();
+    await service.mutate(admin, randomUUID(), "review", { ...input, paymentId });
+    expect(store.mutate).toHaveBeenCalledWith(
+      expect.any(String),
+      { ...input, paymentId, kind: "review" },
+      admin,
+      campaign,
+      expect.any(Object),
+    );
+    for (const body of [
+      { ...input, paymentId: "not-a-payment" },
+      { ...input, paymentId, discordId: admin.id },
+    ])
+      await expect(service.mutate(admin, randomUUID(), "review", body)).rejects.toMatchObject({ status: 400 });
   });
   it("lets only administrators start a configured Patreon sync", async () => {
     const { service, sync } = fixture();

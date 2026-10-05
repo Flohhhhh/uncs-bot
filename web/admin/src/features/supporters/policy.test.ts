@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { discordCell, paymentLine, providerLine, rowState } from "./policy";
+import { discordCell, paymentLine, paymentOffered, providerLine, reviewInput, rowState } from "./policy";
 import type { NextStep, PatreonSyncStatus, PaymentEvidence, Supporter } from "./types";
 
 const payment: PaymentEvidence = {
@@ -96,8 +96,22 @@ describe("row state", () => {
     ["a payment step", step("founder_not_first_payment", "payment")],
     ["a note", step("founder_outside_window", "info")],
     ["unset founder dates", step("founder_window_not_configured", "founder")],
+    [
+      "a PayPal payment in another currency that staff did not mark as worth US$5",
+      step("founder_below_minimum", "info"),
+    ],
   ])("keeps %s as a note, never a task", (_label, note) => {
     expect(rowState(withSteps(note))).toMatchObject({ state: "set", notes: [note.message], needs: [] });
+  });
+
+  it("waits for each sync to check a Patreon payment in another currency against its tier", () => {
+    const tier = step("founder_below_minimum", "founder");
+    expect(rowState(withSteps(tier))).toMatchObject({ state: "waiting", waiting: [tier.message], needs: [] });
+  });
+
+  it("needs staff for a payment in the founder window that may have been their first", () => {
+    const check = step("founder_not_first_payment", "founder");
+    expect(rowState(withSteps(check))).toMatchObject({ state: "needs", needs: [check.message], notes: [] });
   });
 
   it.each([
@@ -193,6 +207,64 @@ describe("row state", () => {
     });
     expect(rowState(record, lists({ conflictDetails: [conflict("discord-in-use", "another-record")] })).state).toBe(
       "set",
+    );
+  });
+});
+
+describe("Add payment", () => {
+  const patron = { ...record, founder: null };
+  it("shows on a Patreon record with a payment step or a first payment to check", () => {
+    expect(paymentOffered({ ...patron, nextSteps: [step("founder_no_payment", "payment")] })).toBe(true);
+    expect(paymentOffered({ ...patron, nextSteps: [step("founder_not_first_payment", "founder")] })).toBe(true);
+  });
+  it("shows on a Patreon record with no paid payment, whether or not the founder dates are set", () => {
+    const unset = [step("founder_window_not_configured", "founder")];
+    for (const latestPayment of [
+      null,
+      { ...payment, source: "signed_status" as const, amountCents: null, verificationState: "unverified" as const },
+      { ...payment, verificationState: "unverified" as const },
+    ])
+      expect(paymentOffered({ ...patron, latestPayment, nextSteps: unset })).toBe(true);
+    // One paid payment is enough for the Supporter role, so it stays out of the way.
+    expect(paymentOffered({ ...patron, nextSteps: unset })).toBe(false);
+    expect(paymentOffered({ ...patron, nextSteps: [step("founder_outside_window", "info")] })).toBe(false);
+  });
+  it("never shows on a PayPal record, which records its payments in the PayPal form", () => {
+    expect(
+      paymentOffered({ ...patron, provider: "paypal", latestPayment: null, nextSteps: [step("x", "payment")] }),
+    ).toBe(false);
+  });
+});
+
+describe("marking a founder payment checked", () => {
+  it("sends the payment the import listed, with the record's revision", () => {
+    const values = new FormData();
+    values.set("reason", "Checked in Patreon");
+    values.set("paymentId", payment.id);
+    expect(reviewInput(record, "review", "action-id", values)).toEqual({
+      id: "action-id",
+      version: record.version,
+      confirm: record.confirmKey,
+      reason: "Checked in Patreon",
+      paymentId: payment.id,
+    });
+  });
+});
+
+describe("keeping a Discord account", () => {
+  it("restates the record's own Discord account, and needs one to keep", () => {
+    const values = new FormData();
+    values.set("reason", "Checked their Discord account");
+    expect(reviewInput(record, "keep", "action-id", values)).toEqual({
+      id: "action-id",
+      version: record.version,
+      confirm: record.confirmKey,
+      reason: "Checked their Discord account",
+      discordId: record.discordId,
+      discordConfirmed: true,
+    });
+    expect(() => reviewInput({ ...record, discordId: null }, "keep", "action-id", values)).toThrow(
+      "This record has no Discord account to keep.",
     );
   });
 });

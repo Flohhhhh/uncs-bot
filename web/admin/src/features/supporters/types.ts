@@ -192,7 +192,7 @@ interface ReviewBase {
 }
 export type SupporterReviewInput = ReviewBase &
   (
-    | { discordId?: string; steamId?: string; steamConfirmed?: true }
+    | { discordId?: string; steamId?: string; steamConfirmed?: true; discordConfirmed?: true }
     | {
         paidAt: string;
         amountCents: number;

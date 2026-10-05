@@ -120,15 +120,19 @@ export const manualMemberSchema = z
   })
   .strict();
 export type ManualMemberInput = z.infer<typeof manualMemberSchema>;
-export const reviewSchema = z.object(base).strict();
+// `paymentId` marks a founder's payment as checked: the founder payment it names leaves the payments to check.
+export const reviewSchema = z.object({ ...base, paymentId: z.uuid().optional() }).strict();
 // Either identity may be linked alone. A field that is left out keeps its current value. `steamConfirmed` restates
 // the current SteamID as staff-checked, which a Discord change needs when the SteamID came from an application.
+// `discordConfirmed` with the current Discord ID restates that account as staff-checked, for one Patreon no longer
+// reports.
 export const linkSchema = z
   .object({
     ...base,
     discordId: discordUserId.optional(),
     steamId: playerSteamId.optional(),
     steamConfirmed: z.literal(true).optional(),
+    discordConfirmed: z.literal(true).optional(),
   })
   .strict()
   .refine((value) => value.discordId !== undefined || value.steamId !== undefined, "Enter a Discord ID or SteamID64.");
@@ -225,11 +229,24 @@ export const founderBlockedMessages: Record<FounderBlockedReason | "no_payment",
   outside_window: "Paid outside the founder window.",
   below_minimum: "Paid less than US$5.",
   no_identity: "Add a Discord account first.",
-  already_founder: "They are already a founder.",
+  // The founder rule finds this on another record. A record that is a founder itself is refused in its own words.
+  already_founder: "Another supporter with this Discord account or SteamID is already a founder.",
   steam_applied_by_founder:
     "A founder with no SteamID linked applied for the whitelist with this SteamID. Link that founder's SteamID first.",
   no_payment: "No payment yet.",
 };
+/**
+ * The founder verdict as staff read it. A payment in another currency is below the minimum only until it is confirmed
+ * as worth US$5 or more, so its sentence says that rather than what was paid.
+ */
+export function founderBlockedMessage(
+  reason: FounderBlockedReason | "no_payment",
+  payment?: { currency: string | null } | null,
+) {
+  return reason === "below_minimum" && payment?.currency && payment.currency !== FOUNDER_MINIMUM.currency
+    ? `This ${payment.currency} payment is not confirmed as US$5 or more.`
+    : founderBlockedMessages[reason];
+}
 export type FounderPaymentFacts = {
   source: string;
   verificationState: string;
@@ -382,6 +399,12 @@ export type SupporterView = {
   founder: { awardedAt: string; paymentId: string; source: SupporterPaymentSource | null; automatic: boolean } | null;
   /** Why no founder promise can be recorded yet; null for a founder or a member ready to award. */
   founderBlockedReason: FounderBlockedReason | "no_payment" | null;
+  /**
+   * Only the first-payment mark stands between this record and a founder promise: its payment is in US dollars,
+   * inside the founder window and worth US$5 or more. A checked staff receipt marked as the first payment can make
+   * it a founder, so staff check it.
+   */
+  founderFirstPaymentToCheck: boolean;
   /** The staff-facing text for `founderBlockedReason`. */
   founderBlockedMessage: string | null;
   /** A founder without a linked Discord account cannot receive the Founder role. */

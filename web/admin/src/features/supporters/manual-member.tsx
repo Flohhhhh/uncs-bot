@@ -21,6 +21,7 @@ export function ManualMember({
   const submitted = useRef(false);
   const inFlight = useRef(false);
   const mounted = useRef(true);
+  const outcome = useRef<HTMLParagraphElement>(null);
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -28,6 +29,10 @@ export function ManualMember({
       if (inFlight.current) setBusy(false);
     };
   }, [setBusy]);
+  // The form, and the Save button that sent it, are gone once the result shows, so focus moves to the result.
+  useEffect(() => {
+    if (result) outcome.current?.focus();
+  }, [result]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -100,7 +105,7 @@ export function ManualMember({
     >
       {result ? (
         <>
-          <p className={`notice ${result.saved ? "success" : "warning"}`} role="status">
+          <p ref={outcome} tabIndex={-1} className={`notice ${result.saved ? "success" : "warning"}`} role="status">
             {result.message}
           </p>
           <div className="dialog-footer">

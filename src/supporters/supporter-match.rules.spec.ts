@@ -547,7 +547,19 @@ describe("next steps on the Supporters page", () => {
     const missing = { steamId: null, steamSource: null } as const;
     const message = (record: SupporterView) =>
       supporterNextSteps(record, hidden).find((step) => step.area === "steam")!.message;
-    expect(message(ready(missing))).toBe("Add the SteamID (on a server you cannot open) from their application.");
+    // The viewer cannot take the SteamID from an application they cannot see, so they ask the supporter for it.
+    const ask = "Their application is on a server you cannot open, so ask them for their SteamID.";
+    expect(message(ready(missing))).toBe(ask);
+    expect(message(ready({ ...missing, provider: "paypal" }))).toBe(ask);
+    expect(
+      message(ready({ ...missing, match: { ...ready().match, steam: steamMatch("application_not_confirmed") } })),
+    ).toBe(ask);
+    // Gramps can still copy it, whoever is looking.
+    expect(supporterNextSteps(ready(missing), { ...on, serverVisible: hidden.serverVisible })).toContainEqual({
+      code: "steam_ready_automatic",
+      area: "steam",
+      message: "Gramps adds their SteamID at the next sync.",
+    });
     expect(message(ready({ ...missing, match: { ...ready().match, steam: steamMatch("steam_shared") } }))).toBe(
       "Another Discord account applied with this SteamID (on a server you cannot open).",
     );
@@ -689,12 +701,13 @@ describe("next steps on the Supporters page", () => {
       }),
       on,
     );
-    expect(euro.at(-1)!.message).toBe(
-      "This EUR payment is not confirmed as US$5 or more. Check the patron's tier on Patreon.",
-    );
-    // Another currency is something staff can check, so it stays a founder task rather than a note.
-    expect(euro.at(-1)!.area).toBe("founder");
-    // PayPal has no tiers to check.
+    // Every sync checks the tier's price again, so Gramps waits for it. The dashboard lists it under Waiting.
+    expect(euro.at(-1)).toEqual({
+      code: "founder_below_minimum",
+      area: "founder",
+      message: "Waiting for Patreon to confirm this EUR payment is US$5 or more.",
+    });
+    // Staff said whether a PayPal payment is worth US$5 or more when they recorded it, so it is a note.
     const paypal = supporterNextSteps(
       ready({
         provider: "paypal",
@@ -704,10 +717,46 @@ describe("next steps on the Supporters page", () => {
       }),
       on,
     );
-    expect(paypal.at(-1)).toMatchObject({
-      area: "founder",
+    expect(paypal.at(-1)).toEqual({
+      code: "founder_below_minimum",
+      area: "info",
       message: "This CAD payment is not confirmed as US$5 or more.",
     });
+  });
+  it("makes a first payment to check in the founder window a task, and leaves any other a note", () => {
+    const toCheck = supporterNextSteps(
+      ready({ founderBlockedReason: "not_first_payment", founderFirstPaymentToCheck: true }),
+      on,
+    );
+    expect(toCheck.at(-1)).toEqual({
+      code: "founder_not_first_payment",
+      area: "founder",
+      message: "Check if their payment in the founder window was their first, then add it.",
+    });
+    expect(
+      supporterNextSteps(
+        ready({ founderBlockedReason: "not_first_payment", founderFirstPaymentToCheck: false }),
+        on,
+      ).at(-1),
+    ).toEqual({ code: "founder_not_first_payment", area: "payment", message: "Not confirmed as their first payment." });
+  });
+  it("says what a missing account unlocks, leaving the asking to the Discord step", () => {
+    const none = {
+      discordId: null,
+      discordSource: null,
+      steamId: null,
+      steamSource: null,
+      founderBlockedReason: "no_identity" as const,
+    };
+    for (const provider of ["patreon", "paypal"] as const) {
+      const steps = supporterNextSteps(ready({ ...none, provider, match: { ...ready().match, steam: null } }), on);
+      expect(steps.at(-1)).toEqual({
+        code: "founder_no_identity",
+        area: "founder",
+        message: "Can be a founder once their Discord is linked.",
+      });
+      expect(steps[0].area).toBe("discord");
+    }
   });
   it("asks for a Discord account for a founder without one", () => {
     const steps = supporterNextSteps(
@@ -734,7 +783,10 @@ describe("next steps on the Supporters page", () => {
     expect(message("outside_window")).toBe("Paid outside the founder window.");
     expect(message("below_minimum")).toBe("Paid less than US$5.");
     expect(message("no_identity")).toBe("Add a Discord account first.");
-    expect(message("already_founder")).toBe("They are already a founder.");
+    // A record that is a founder itself never carries a founder reason, so this is always another record.
+    expect(message("already_founder")).toBe(
+      "Another supporter with this Discord account or SteamID is already a founder.",
+    );
     expect(message("no_payment")).toBe("No payment yet.");
   });
 });

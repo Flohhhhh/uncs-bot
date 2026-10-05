@@ -1,5 +1,5 @@
 import { ConflictException, Inject, Injectable, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
-import { and, eq, ne, sql } from "drizzle-orm";
+import { and, eq, inArray, ne, sql } from "drizzle-orm";
 import { createHash, randomUUID } from "node:crypto";
 import { DATABASE, type Database } from "../database/database.types";
 import {
@@ -39,7 +39,7 @@ import {
 } from "./supporter-match.rules";
 import {
   FOUNDER_MINIMUM,
-  founderBlockedMessages,
+  founderBlockedMessage,
   founderBlocker,
   founderIdentity,
   type FounderBlockedReason,
@@ -92,6 +92,7 @@ type PaymentRow = typeof supporterPayments.$inferSelect;
 type StoredSupporter = Omit<
   SupporterView,
   | "founderBlockedReason"
+  | "founderFirstPaymentToCheck"
   | "founderBlockedMessage"
   | "needsDiscordLink"
   | "match"
@@ -182,10 +183,19 @@ const STEAM_FROM_APPLICATION =
 const STEAM_FROM_PREVIOUS_ACCOUNT =
   "The previous Discord account applied for the whitelist with this SteamID. Confirm it belongs to the new Discord account too, or enter the right SteamID64.";
 
-/** A founder refusal names its rule so staff see why nothing was recorded. */
-function founderConflict(reason: FounderBlockedReason, suffix = "") {
-  return new ConflictException({ message: `${founderBlockedMessages[reason]}${suffix}`, blockedReason: reason });
+/** A founder refusal names its rule so staff see why nothing was recorded, in the words the record shows. */
+function founderConflict(reason: FounderBlockedReason, suffix = "", payment?: { currency: string | null }) {
+  return new ConflictException({
+    message: `${founderBlockedMessage(reason, payment)}${suffix}`,
+    blockedReason: reason,
+  });
 }
+/** The record is a founder itself. `already_founder` otherwise means another record is the founder. */
+function founderHere(suffix = "") {
+  return new ConflictException({ message: `They are already a founder.${suffix}`, blockedReason: "already_founder" });
+}
+/** A founder review staff marked checked: the record, the payment and why it was listed. */
+const reviewKey = (memberId: string, paymentId: unknown, reason: unknown) => `${memberId}:${paymentId}:${reason}`;
 
 @Injectable()
 export class SupportersStore {
@@ -575,6 +585,31 @@ export class SupportersStore {
   }
 
   /**
+   * The founder reviews staff have not marked checked. A check names the payment and why it was listed, so the same
+   * payment listed again for another reason shows again.
+   */
+  async uncheckedFounderReviews<T extends Pick<FounderReview, "supporterId" | "unverifiedPaymentId" | "reviewReason">>(
+    reviews: T[],
+  ): Promise<T[]> {
+    if (!reviews.length) return reviews;
+    const checked = await this.db
+      .select({ memberId: supporterActions.memberId, details: supporterActions.details })
+      .from(supporterActions)
+      .where(
+        and(
+          inArray(supporterActions.memberId, [...new Set(reviews.map((review) => review.supporterId))]),
+          eq(supporterActions.kind, "review"),
+        ),
+      );
+    const keys = new Set(
+      checked.map((action) => reviewKey(action.memberId, action.details.paymentId, action.details.reviewReason)),
+    );
+    return reviews.filter(
+      (review) => !keys.has(reviewKey(review.supporterId, review.unverifiedPaymentId, review.reviewReason)),
+    );
+  }
+
+  /**
    * PayPal supporters are always listed. Patreon supporters are listed only for the configured
    * campaign, so a null campaign (Patreon not configured) returns the PayPal ledger alone.
    */
@@ -662,20 +697,29 @@ export class SupportersStore {
       linkedSteamShared: Boolean(matchFacts?.linkedSteamShared),
     };
     let founderBlockedReason: SupporterView["founderBlockedReason"] = null;
+    let founderFirstPaymentToCheck = false;
+    let candidate: PaymentView | null = null;
     if (!supporter.founder) {
       const eligible = supporter.founderEligiblePayment;
-      const candidate = eligible ?? founderCandidate?.payment ?? null;
+      candidate = eligible ?? founderCandidate?.payment ?? null;
+      const context = {
+        earlierPayment: eligible ? false : Boolean(founderCandidate?.earlier),
+        importedCopyUnverified: eligible ? false : Boolean(founderCandidate?.copyUnverified),
+        hasIdentity: founderIdentity(supporter),
+        otherFounder,
+        founderAppliedWithSteam,
+      };
       founderBlockedReason = !policy.configured
         ? "window_not_configured"
         : !candidate
           ? "no_payment"
-          : founderBlocker(candidate, policy, {
-              earlierPayment: eligible ? false : Boolean(founderCandidate?.earlier),
-              importedCopyUnverified: eligible ? false : Boolean(founderCandidate?.copyUnverified),
-              hasIdentity: founderIdentity(supporter),
-              otherFounder,
-              founderAppliedWithSteam,
-            });
+          : founderBlocker(candidate, policy, context);
+      // A staff receipt is always in US dollars, so it can stand in only for a payment in US dollars. With the first
+      // payment confirmed, nothing else may stop the payment, apart from a Discord account staff can add.
+      if (founderBlockedReason === "not_first_payment" && candidate?.currency === policy.currency) {
+        const confirmed = founderBlocker({ ...candidate, firstSuccessfulPaymentVerified: true }, policy, context);
+        founderFirstPaymentToCheck = confirmed === null || confirmed === "no_identity";
+      }
     }
     // The same verdict automatic matching reaches: its own rules, then the staff founder rule on its payment.
     const automaticBlockedReason = supporter.founder
@@ -697,7 +741,8 @@ export class SupportersStore {
       ...supporter,
       payments: supporter.payments ?? [],
       founderBlockedReason,
-      founderBlockedMessage: founderBlockedReason ? founderBlockedMessages[founderBlockedReason] : null,
+      founderFirstPaymentToCheck,
+      founderBlockedMessage: founderBlockedReason ? founderBlockedMessage(founderBlockedReason, candidate) : null,
       needsDiscordLink: Boolean(supporter.founder) && !supporter.discordId,
       match: {
         steam: supporter.discordId ? applicationSteamMatch(facts.applications) : null,
@@ -709,7 +754,12 @@ export class SupportersStore {
       },
       automaticPayment: facts.automatic?.payment ?? null,
       automaticBlockedReason,
-      automaticBlockedMessage: automaticBlockedReason ? automaticBlockedMessages[automaticBlockedReason] : null,
+      automaticBlockedMessage:
+        automaticBlockedReason === "below_minimum"
+          ? founderBlockedMessage(automaticBlockedReason, facts.automatic?.payment)
+          : automaticBlockedReason
+            ? automaticBlockedMessages[automaticBlockedReason]
+            : null,
     };
   }
 
@@ -767,9 +817,16 @@ export class SupportersStore {
             });
         }
         const steamRestated = !steamChanged && input.steamConfirmed === true && member.steamId !== null;
+        // Staff vouch for the account they already have, such as one Patreon no longer reports: it becomes a staff
+        // link, and nothing else changes.
+        const discordRestated =
+          !discordChanged &&
+          input.discordConfirmed === true &&
+          member.discordId !== null &&
+          input.discordId !== undefined;
         const discordId = discordChanged ? input.discordId! : member.discordId,
           steamId = steamChanged ? input.steamId! : member.steamId;
-        const discordSource = discordChanged ? "staff" : member.discordSource,
+        const discordSource = discordChanged || discordRestated ? "staff" : member.discordSource,
           steamSource = steamChanged || steamRestated ? "staff" : member.steamSource,
           steamApplicationId = steamChanged || steamRestated ? null : member.steamApplicationId;
         if (discordChanged || steamChanged) {
@@ -801,6 +858,7 @@ export class SupportersStore {
         details.steamSource = steamSource;
         details.previousSteamApplicationId = member.steamApplicationId;
         if (input.steamConfirmed) details.steamConfirmed = 1;
+        if (discordRestated) details.discordConfirmed = 1;
         await tx
           .update(supporterMembers)
           .set({ discordId, discordSource, steamId, steamSource, steamApplicationId })
@@ -841,10 +899,10 @@ export class SupportersStore {
           .select({ memberId: supporterFounders.memberId })
           .from(supporterFounders)
           .where(eq(supporterFounders.memberId, memberId));
-        if (existing) throw founderConflict("already_founder");
+        if (existing) throw founderHere();
         await lockKeys(tx, identityKeys("founder", member));
         const blocked = await founderCheck(tx, member, payment, policy);
-        if (blocked) throw founderConflict(blocked);
+        if (blocked) throw founderConflict(blocked, "", payment);
         await tx.insert(supporterFounders).values({
           memberId,
           paymentId: payment.id,
@@ -858,6 +916,16 @@ export class SupportersStore {
         details.paymentSource = payment.source;
         details.windowStart = policy.startsAt;
         details.windowEnd = policy.endsAt;
+      }
+      if (input.kind === "review" && input.paymentId) {
+        const [payment] = await tx
+          .select()
+          .from(supporterPayments)
+          .where(and(eq(supporterPayments.id, input.paymentId), eq(supporterPayments.memberId, memberId)));
+        if (!payment) throw new ConflictException("Choose a payment recorded for this supporter.");
+        // Why the founder review lists this payment now, so a later, different change to it is listed again.
+        details.paymentId = payment.id;
+        details.reviewReason = payment.verificationState !== "verified" ? "unverified" : "not_first_payment";
       }
       await tx
         .update(supporterMembers)
@@ -1016,8 +1084,14 @@ export class SupportersStore {
           .select({ memberId: supporterFounders.memberId })
           .from(supporterFounders)
           .where(eq(supporterFounders.memberId, member.id));
-        const blocked = existing ? "already_founder" : await founderCheck(tx, identity, payment, policy);
-        if (blocked) throw founderConflict(blocked, " Nothing was recorded.");
+        if (existing) throw founderHere(" Nothing was recorded.");
+        const blocked = await founderCheck(tx, identity, payment, policy);
+        // A payment in another currency is below the minimum only because the form's box was left unticked.
+        const tick =
+          blocked === "below_minimum" && payment.currency !== FOUNDER_MINIMUM.currency
+            ? " Tick Worth US$5 or more if it is."
+            : "";
+        if (blocked) throw founderConflict(blocked, `${tick} Nothing was recorded.`, payment);
         await tx.insert(supporterFounders).values({
           memberId: member.id,
           paymentId: payment.id,

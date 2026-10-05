@@ -1,7 +1,12 @@
 import { isPublicIndividualSteamId } from "../common/steam-id";
 import type { SupporterDiscordSource, SupporterProvider, SupporterSteamSource } from "../database/supporters.schema";
 import { PATREON_REVERSED_CHARGE_STATUSES } from "./patreon.client";
-import { founderBlockedMessages, type FounderBlockedReason, type PaymentView } from "./supporters.types";
+import {
+  founderBlockedMessage,
+  founderBlockedMessages,
+  type FounderBlockedReason,
+  type PaymentView,
+} from "./supporters.types";
 
 /**
  * Automatic supporter matching fills a Patreon supporter's empty SteamID from their approved whitelist application
@@ -272,6 +277,8 @@ export type NextStep = { code: string; area: NextStepArea; message: string };
 export type NextStepRecord = MatchMember & {
   founder: { automatic: boolean } | null;
   founderBlockedReason: FounderBlockedReason | "no_payment" | null;
+  /** Only the first-payment mark keeps this record from being a founder (see SupporterView). */
+  founderFirstPaymentToCheck?: boolean;
   founderEligiblePayment: PaymentView | null;
   latestPayment: PaymentView | null;
   /** The payment automatic matching would record a founder promise on. */
@@ -327,19 +334,23 @@ const steamStepCodes: Record<SteamMatchBlock, string> = {
   steam_on_another_record: "steam_on_another_record",
 };
 
+/**
+ * The viewer cannot see the SteamID on an application on a server they cannot open, so they cannot take it from
+ * there. The supporter can still give it to them. This also covers a failed server check and a server that is no
+ * longer set up, where no administrator can open it.
+ */
+const ASK_FOR_STEAM_ID = "Their application is on a server you cannot open, so ask them for their SteamID.";
+
 function steamStep(steam: SteamMatch, record: NextStepRecord, context: NextStepContext): NextStep {
   // An application on a server the viewer cannot open is named without its SteamID.
-  const id = steamMatchHidden(steam, context)
-    ? ` (${HIDDEN_SERVER.trim()})`
-    : steam.steamId
-      ? ` (${steam.steamId})`
-      : "";
+  const hidden = steamMatchHidden(steam, context);
+  const id = hidden ? ` (${HIDDEN_SERVER.trim()})` : steam.steamId ? ` (${steam.steamId})` : "";
   const messages: Record<SteamMatchBlock, string> = {
     no_application: "No approved whitelist application yet.",
     application_pending: "Their whitelist application is waiting for review.",
     application_in_progress: "Their whitelist application is in review.",
     no_approved_application: "No approved whitelist application yet.",
-    application_not_confirmed: `Check this SteamID${id} is theirs, then add it.`,
+    application_not_confirmed: hidden ? ASK_FOR_STEAM_ID : `Check this SteamID${id} is theirs, then add it.`,
     several_steam_ids: "Their applications list different SteamIDs.",
     invalid_steam_id: `The SteamID${id} on their application is not valid.`,
     steam_shared: `Another Discord account applied with this SteamID${id}.`,
@@ -350,7 +361,11 @@ function steamStep(steam: SteamMatch, record: NextStepRecord, context: NextStepC
   // Only a Patreon record with the fill switched on is ever filled in; anything else waits for staff.
   if (record.provider === "patreon" && context.steamFill)
     return { code: "steam_ready_automatic", area: "steam", message: "Gramps adds their SteamID at the next sync." };
-  return { code: "steam_available", area: "steam", message: `Add the SteamID${id} from their application.` };
+  return {
+    code: "steam_available",
+    area: "steam",
+    message: hidden ? ASK_FOR_STEAM_ID : `Add the SteamID${id} from their application.`,
+  };
 }
 
 /**
@@ -420,17 +435,35 @@ export function supporterNextSteps(record: NextStepRecord, context: NextStepCont
   }
   const reason = record.founderBlockedReason;
   if (reason) {
+    const code = `founder_${reason}`;
     const payment = record.founderEligiblePayment ?? record.latestPayment;
     const otherCurrency = reason === "below_minimum" && payment?.currency && payment.currency !== "USD";
-    // The import counts a Patreon payment in another currency by its tier's price, so only a tier under US$5, or one
-    // Patreon did not report, is left here.
-    const message = otherCurrency
-      ? `This ${payment.currency} payment is not confirmed as US$5 or more.${record.provider === "patreon" ? " Check the patron's tier on Patreon." : ""}`
-      : founderBlockedMessages[reason];
-    // Outside the window, below the minimum in US dollars, or a founder elsewhere: nothing staff can do here.
-    const area =
-      FOUNDER_IMPOSSIBLE.has(reason) && !otherCurrency ? "info" : PAYMENT_REASONS.has(reason) ? "payment" : "founder";
-    steps.push({ code: `founder_${reason}`, area, message });
+    if (otherCurrency && record.provider === "patreon")
+      // The import counts a Patreon payment in another currency by its tier's price and checks again at every sync,
+      // so Gramps waits for a tier Patreon did not report, or could not be read.
+      steps.push({
+        code,
+        area: "founder",
+        message: `Waiting for Patreon to confirm this ${payment.currency} payment is US$5 or more.`,
+      });
+    else if (reason === "not_first_payment" && record.founderFirstPaymentToCheck)
+      // A checked receipt marked as the first payment makes them a founder, so this is a task, not a note.
+      steps.push({
+        code,
+        area: "founder",
+        message: "Check if their payment in the founder window was their first, then add it.",
+      });
+    else if (reason === "no_identity" && !record.discordId && !record.steamId)
+      // Linking an account is the Discord step's job. This says what it unlocks.
+      steps.push({ code, area: "founder", message: "Can be a founder once their Discord is linked." });
+    else
+      steps.push({
+        code,
+        // Outside the window, below the minimum, or a founder elsewhere: nothing staff can do here. Staff answered
+        // whether a PayPal payment in another currency is worth US$5 or more when they recorded it.
+        area: FOUNDER_IMPOSSIBLE.has(reason) ? "info" : PAYMENT_REASONS.has(reason) ? "payment" : "founder",
+        message: founderBlockedMessage(reason, payment),
+      });
     return steps;
   }
   // Why automation would not record it is on the record as automaticBlockedMessage, so the step stays one sentence.

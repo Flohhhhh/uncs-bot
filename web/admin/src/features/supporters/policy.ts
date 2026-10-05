@@ -88,13 +88,20 @@ export const conflictSentences: Record<string, string> = {
 };
 const conflictFor = (record: Supporter, sync: SyncLists | null | undefined) =>
   sync?.conflictDetails.find((conflict) => conflict.supporterId === record.id);
+/** The record's founder payments to check from the last import, less any staff marked checked since. */
+export const founderReviewsFor = (record: Supporter, sync: SyncLists | null | undefined) =>
+  (sync?.founderReviews ?? []).filter((review) => review.supporterId === record.id);
 
-/** Gramps, or the supporter, does these next. Nothing for staff to do. */
+/**
+ * Gramps, or the supporter, does these next. Nothing for staff to do. A below-minimum step that is not a note is a
+ * Patreon payment in another currency, which every sync checks against its tier's price again.
+ */
 const WAITING_CODES = new Set([
   "connect_discord_in_patreon",
   "steam_ready_automatic",
   "founder_ready_automatic",
   "founder_automatic_waiting",
+  "founder_below_minimum",
 ]);
 /** A missing whitelist application matters only once the whitelist promise is used, so it is shown in the record only. */
 const LATER_CODES = new Set([
@@ -134,9 +141,9 @@ export function rowState(record: Supporter, sync?: SyncLists | null): RowState {
     else if (LATER_CODES.has(step.code)) later.push(step.message);
     else tasks.push(step);
   }
-  const reviews = (sync?.founderReviews ?? [])
-    .filter((review) => review.supporterId === record.id)
-    .map((review) => founderReviewSentences[review.reviewReason] ?? "Check their founder payment in Patreon.");
+  const reviews = founderReviewsFor(record, sync).map(
+    (review) => founderReviewSentences[review.reviewReason] ?? "Check their founder payment in Patreon.",
+  );
   const needs = [...new Set(reviews)];
   const conflict = conflictFor(record, sync);
   // A Discord step already says what is wrong with the account.
@@ -171,6 +178,23 @@ export function discordCell(record: Supporter, sync?: SyncLists | null): Discord
 }
 
 /**
+ * Whether the record offers Add payment: a Patreon record with a payment step, a first payment to check, or no paid
+ * payment on record. The Supporter role needs one, whether or not the founder dates are set.
+ */
+export function paymentOffered(record: Supporter) {
+  if (record.provider !== "patreon") return false;
+  if (record.nextSteps.some((step) => step.area === "payment" || step.code === "founder_not_first_payment"))
+    return true;
+  const payment = record.latestPayment;
+  return (
+    !payment ||
+    payment.verificationState !== "verified" ||
+    payment.source === "signed_status" ||
+    typeof payment.amountCents !== "number"
+  );
+}
+
+/**
  * The SteamID an approved application offers staff to check and link when the record has none: only one the SteamID
  * rule accepts, or one approved without a recorded grant. A SteamID that is shared, was rejected before, is held by
  * another record, is invalid, or is under review is never offered. It is never filled in.
@@ -181,9 +205,13 @@ export function applicationSteamId(record: Supporter) {
   return !record.steamId && steam?.steamId && OFFERED_REASONS.has(steam.reason) ? steam.steamId : null;
 }
 
+/**
+ * The request body for a staff action. `keep` is a Link that confirms the Discord account the record already has, so
+ * it becomes a staff link.
+ */
 export function reviewInput(
   record: Supporter,
-  decision: SupporterDecision,
+  decision: SupporterDecision | "keep",
   id: string,
   values: FormData,
 ): SupporterReviewInput {
@@ -195,6 +223,10 @@ export function reviewInput(
   )
     throw new Error("Enter a single-line review reason between 3 and 200 characters.");
   const base = { id, version: record.version, confirm: record.confirmKey, reason };
+  if (decision === "keep") {
+    if (!record.discordId) throw new Error("This record has no Discord account to keep.");
+    return { ...base, discordId: record.discordId, discordConfirmed: true };
+  }
   if (decision === "link") {
     const discordId = String(values.get("discordId") ?? "").trim();
     const steamId = String(values.get("steamId") ?? "").trim();
@@ -260,7 +292,9 @@ export function reviewInput(
       throw new Error(record.founderBlockedMessage ?? "This supporter cannot be made a founder yet.");
     return { ...base, paymentId: record.founderEligiblePayment.id };
   }
-  return base;
+  // Marking a founder payment checked names the payment the import listed.
+  const paymentId = String(values.get("paymentId") ?? "");
+  return paymentId ? { ...base, paymentId } : base;
 }
 
 /** Founder dates are set and shown in New York time. */
