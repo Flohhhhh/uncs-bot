@@ -71,17 +71,14 @@ export function ManualMember({
         !Number.isInteger(response.supporter.version) ||
         response.supporter.version < 1
       ) {
-        throw new Error("The saved membership record could not be confirmed. Refresh before another entry.");
+        throw new Error("The save could not be confirmed.");
       }
-      setResult({
-        saved: true,
-        message: `Membership recorded for separate identity and payment review. Review ID: ${id}`,
-      });
+      setResult({ saved: true, message: "Nothing else changed." });
     } catch (error) {
       if (!mounted.current) return;
       setResult({
         saved: false,
-        message: `${error instanceof Error ? error.message : "The saved record could not be confirmed."} Review ID: ${id}`,
+        message: `${error instanceof Error ? error.message : "The save could not be confirmed."} Review ID: ${id}`,
       });
     } finally {
       inFlight.current = false;
@@ -95,19 +92,9 @@ export function ManualMember({
 
   return (
     <Modal
-      title={
-        result
-          ? result.saved
-            ? "Membership record saved"
-            : "Save result not confirmed"
-          : "Record existing Patreon member"
-      }
-      description={
-        result
-          ? "No payment, founder promise, game access or Discord role was granted."
-          : "Use this when an existing Patreon member is missing from this page. Check their membership on The UNCs creator page before entering it."
-      }
-      eyebrow={result ? null : undefined}
+      title={result ? (result.saved ? "Saved" : "Not sure it saved") : "Add Patreon member"}
+      description={result && !result.saved ? "Close and reload before trying again." : undefined}
+      eyebrow={result ? null : "Patreon"}
       busy={sending}
       onClose={onClose}
     >
@@ -116,15 +103,11 @@ export function ManualMember({
           <p className={`notice ${result.saved ? "success" : "warning"}`} role="status">
             {result.message}
           </p>
-          {!result.saved && (
-            <p>
-              Close and refresh the records before trying another entry. A response failure does not prove nothing was
-              saved.
-            </p>
-          )}
-          <button className="button secondary" onClick={onClose}>
-            Close record
-          </button>
+          <div className="dialog-footer">
+            <button type="button" className="button secondary" onClick={onClose}>
+              Close
+            </button>
+          </div>
         </>
       ) : (
         <form onSubmit={(event) => void submit(event)}>
@@ -132,10 +115,7 @@ export function ManualMember({
             Patreon membership ID
             <input name="patreonMemberId" required maxLength={100} autoComplete="off" />
           </label>
-          <p className="muted">
-            Use the membership ID from verified Patreon v2 member data or a signed webhook. A Patreon username, user ID,
-            campaign ID or tier ID is a different identifier. Never invent a membership ID.
-          </p>
+          <p className="muted">The member ID from Patreon, never a username or user ID.</p>
           <label>
             Display name (optional)
             <input name="displayName" maxLength={120} autoComplete="off" />
@@ -145,18 +125,19 @@ export function ManualMember({
             The UNCs Patreon page.
           </label>
           <ReasonField />
-          <p className="muted">
-            This creates an unverified record only. Check a completed receipt separately before recording any founder
-            promise.
-          </p>
           {validation && (
             <p className="notice warning" role="alert">
               {validation}
             </p>
           )}
-          <button className="button primary" disabled={sending || busy || unavailable}>
-            {sending ? "Saving record…" : "Save membership record"}
-          </button>
+          <div className="dialog-footer">
+            <button type="button" className="button secondary" disabled={sending} onClick={onClose}>
+              Cancel
+            </button>
+            <button className="button primary" disabled={sending || busy || unavailable}>
+              {sending ? "Saving…" : "Save"}
+            </button>
+          </div>
         </form>
       )}
     </Modal>

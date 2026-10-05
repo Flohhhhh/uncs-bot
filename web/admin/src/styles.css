@@ -1320,11 +1320,6 @@ td strong {
 .supporter-dialog {
   width: min(680px, calc(100vw - 32px));
 }
-.supporter-next p {
-  color: var(--muted);
-  font-size: var(--text-sm);
-  line-height: 1.7;
-}
 .supporter-form-grid small,
 .supporter-check small {
   color: var(--muted);
@@ -1332,25 +1327,42 @@ td strong {
   line-height: 1.6;
   font-weight: 400;
 }
-.supporter-next {
-  padding-top: 8px;
-}
-.supporter-next h3 {
-  margin-bottom: 8px;
+/* The member ID, or the name while a form is open, just under the dialog title. */
+.supporter-member {
+  margin: calc(-1 * var(--space-2)) 0 var(--space-3);
+  color: var(--muted);
+  font:
+    var(--text-xs) ui-monospace,
+    Consolas,
+    monospace;
+  overflow-wrap: anywhere;
 }
 .supporter-steps {
   padding: var(--space-3) 0 var(--space-1);
 }
-.supporter-steps h3,
-.supporter-steps h4 {
+.supporter-steps h3 {
   margin-bottom: var(--space-1);
+  font-size: var(--text-md);
 }
 .supporter-steps ul {
-  margin: 0 0 var(--space-3);
+  margin: 0 0 var(--space-2);
   padding-left: var(--space-4);
   line-height: 1.7;
 }
-/* Step text and match summaries run long; they wrap so the table stays usable on a phone. */
+.supporter-founder-payment {
+  margin: 0;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.supporter-founder-payment small {
+  display: block;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+.supporter-facts {
+  margin-bottom: var(--space-4);
+}
+/* Step text runs long; it wraps so the table stays usable on a phone. */
 td small.supporter-wrap {
   min-width: 120px;
   max-width: 320px;
@@ -1363,14 +1375,6 @@ td small.supporter-wrap {
     min-width: 0;
     max-width: none;
   }
-  [data-mobile="cards"] td:has(.supporter-still-needed) {
-    grid-column: 1 / -1;
-  }
-}
-/* The six-column table must fit a 1280px desktop, so the row's button wraps instead of widening the table. */
-.supporter-review {
-  max-width: 6.5rem;
-  white-space: normal;
 }
 .supporter-offer {
   display: flex;
@@ -3927,19 +3931,6 @@ tr.audit-more[hidden] {
   }
 }
 /* Supporters and applications */
-.supporter-summary {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2) var(--space-3);
-  margin-bottom: var(--space-4);
-  font-size: var(--text-sm);
-}
-.supporter-summary p {
-  flex-basis: 100%;
-  margin: 0;
-  color: var(--muted);
-}
 .sync-counts {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -3971,6 +3962,16 @@ tr.audit-more[hidden] {
   display: block;
   color: var(--muted);
   font-size: var(--text-xs);
+}
+/* The founder window's exact times are long, so they take the panel's full width. */
+.sync-counts > .supporter-window {
+  grid-column: 1 / -1;
+}
+.sync-counts > .supporter-window dd {
+  text-align: right;
+}
+.supporter-details .status-about-panel > .button {
+  margin-top: var(--space-1);
 }
 .supporter-search {
   display: flex;

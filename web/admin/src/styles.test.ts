@@ -152,11 +152,23 @@ describe("Discord roles ledger", () => {
 });
 
 describe("Supporters table", () => {
-  it("fits a 1280px desktop: narrow wrapping columns and a wrapping review button", () => {
-    // At 180px minimums with a one-line button the table needed 1129px and cut off Review supporter at 1366px.
+  it("wraps the next step in a narrow column on a 1280px desktop", () => {
     expect(declared("td small.supporter-wrap", "min-width", 1280)).toBe("120px");
-    expect(declared(".supporter-review", "white-space", 1280)).toBe("normal");
-    expect(declared(".supporter-review", "max-width", 1280)).toBe("6.5rem");
+    expect(declared("td small.supporter-wrap", "white-space", 1280)).toBe("normal");
+  });
+  it.each([320, 390, 700])("keeps card rows at %ipx, with the next step across the card's full width", (width) => {
+    // A 120px minimum in a half-width card cell would push the card into a sideways scroll.
+    expect(declared("td small.supporter-wrap", "min-width", width)).toBe("0");
+    expect(declared('[data-mobile="cards"] tbody tr', "display", width)).toBe("grid");
+    // The Next cell is marked wide, and Open sits in its own row-actions wrapper.
+    expect(declared('[data-mobile="cards"] td.wide', "grid-column", width)).toBe("1 / -1");
+    expect(
+      declared(
+        '[data-mobile="cards"] td:has(.audit-detail, .row-actions, .action-list, details)',
+        "grid-column",
+        width,
+      ),
+    ).toBe("1 / -1");
   });
 });
 

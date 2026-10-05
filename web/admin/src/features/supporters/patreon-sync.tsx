@@ -3,6 +3,7 @@ import { api } from "../../api/client";
 import { useAdmin } from "../../app/context";
 import { CopyValue } from "../../components/data-table";
 import { errorMessage } from "../actions/policy";
+import { conflictSentences } from "./policy";
 import type { PatreonSyncResponse, PatreonSyncStatus } from "./types";
 
 const plural = (count: number, one: string, many = `${one}s`) =>
@@ -43,12 +44,7 @@ function Moment({ at, children }: { at: string; children: ReactNode }) {
   );
 }
 
-const conflictReasons: Record<PatreonSyncStatus["conflictDetails"][number]["reason"], string> = {
-  "discord-in-use": "Patreon's Discord account is already on another supporter record",
-  "discord-differs": "Patreon reports a different Discord account than the one recorded",
-};
-
-/** Counts and review lists from the last successful import. */
+/** Counts and lists from the last successful import. */
 function LastImport({ sync }: { sync: PatreonSyncStatus }) {
   const counts: [string, number][] = [
     ["Members listed", sync.members],
@@ -60,7 +56,7 @@ function LastImport({ sync }: { sync: PatreonSyncStatus }) {
     ["Discord accounts linked", sync.discordLinks],
     ["Discord conflicts", sync.conflicts],
     ["Incomplete payment histories", sync.truncated],
-    ["Founder records to recheck", sync.founderReviews.length],
+    ["Founder payments to check", sync.founderReviews.length],
   ];
   // Payments in another currency count by their tier's price. Shown only when the campaign has any.
   if (sync.tierConfirmed + sync.tierUnconfirmed > 0)
@@ -69,73 +65,75 @@ function LastImport({ sync }: { sync: PatreonSyncStatus }) {
       ["Other-currency payments not confirmed", sync.tierUnconfirmed],
     );
   return (
-    <details className="status-about">
-      <summary>Last import</summary>
-      <div className="status-about-panel">
-        <dl className="sync-counts">
-          {counts.map(([label, value]) => (
-            <div key={label}>
-              <dt>{label}</dt>
-              <dd>{value.toLocaleString()}</dd>
-            </div>
-          ))}
-        </dl>
-        {sync.conflictDetails.length > 0 && (
-          <>
-            <h3>Discord conflicts</h3>
-            <ul aria-label="Discord conflicts">
-              {sync.conflictDetails.map((conflict) => (
-                <li key={`${conflict.supporterId}:${conflict.reason}`}>
-                  <CopyValue value={conflict.patreonMemberId} label="Patreon member ID" />
-                  <small>{conflictReasons[conflict.reason] ?? "Discord account needs review"}</small>
-                </li>
-              ))}
-            </ul>
-          </>
-        )}
-        {sync.founderReviews.length > 0 && (
-          <>
-            <h3>Founder records to recheck</h3>
-            <ul aria-label="Founder records to recheck">
-              {sync.founderReviews.map((review) => (
-                <li key={`${review.supporterId}:${review.unverifiedPaymentId}`}>
-                  <CopyValue value={review.patreonMemberId} label="Patreon member ID" />
-                  <small>
-                    {review.reviewReason === "not_first_payment"
-                      ? `Payment ${review.unverifiedReference} is no longer marked as the first payment`
-                      : `Payment ${review.unverifiedReference} is not verified`}
-                  </small>
-                </li>
-              ))}
-            </ul>
-          </>
-        )}
-        <p className="muted">
-          {sync.memberListComplete
-            ? "Counts are from the last successful import."
-            : "Counts are from the last successful import, which read only part of the member list."}{" "}
-          Search a member ID above to review that record.
-        </p>
-      </div>
-    </details>
+    <>
+      <dl className="sync-counts">
+        {counts.map(([label, value]) => (
+          <div key={label}>
+            <dt>{label}</dt>
+            <dd>{value.toLocaleString()}</dd>
+          </div>
+        ))}
+      </dl>
+      {sync.conflictDetails.length > 0 && (
+        <>
+          <h3>Discord conflicts</h3>
+          <ul aria-label="Discord conflicts">
+            {sync.conflictDetails.map((conflict) => (
+              <li key={`${conflict.supporterId}:${conflict.reason}`}>
+                <CopyValue value={conflict.patreonMemberId} label="Patreon member ID" />
+                <small>{conflictSentences[conflict.reason] ?? "Check their Discord account."}</small>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      {sync.founderReviews.length > 0 && (
+        <>
+          <h3>Founder payments to check</h3>
+          <ul aria-label="Founder payments to check">
+            {sync.founderReviews.map((review) => (
+              <li key={`${review.supporterId}:${review.unverifiedPaymentId}`}>
+                <CopyValue value={review.patreonMemberId} label="Patreon member ID" />
+                <small>
+                  {review.reviewReason === "not_first_payment"
+                    ? `Payment ${review.unverifiedReference} is no longer their first payment`
+                    : `Patreon no longer shows payment ${review.unverifiedReference} as paid`}
+                </small>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      <p className="muted">
+        {sync.memberListComplete
+          ? "Counts are from the last successful import."
+          : "Counts are from the last successful import, which read only part of the member list."}
+      </p>
+    </>
   );
 }
 
 /**
- * "Patreon import: last synced 5 min ago · 12 members · 3 new payments · next in 25 min", the warnings
- * staff can act on, and an administrator's "Sync now". The status never includes the token.
+ * "Patreon: synced 5 min ago · next in 25 min · Automatic: on", what staff must check, an administrator's
+ * "Sync now", and a closed Details panel. The notices above it name a fault. The status never includes the token.
  */
 export function PatreonImport({
   sync,
   unavailable,
   disabled,
   onSynced,
+  status,
+  details,
 }: {
   sync: PatreonSyncStatus;
   /** The latest read failed, so the last status is not shown as current. */
   unavailable: boolean;
   disabled: boolean;
   onSynced: () => void;
+  /** More of the status line, after the schedule: the automatic matching span. */
+  status?: ReactNode;
+  /** More of the Details panel, after the last import. */
+  details?: ReactNode;
 }) {
   const { me } = useAdmin();
   const [syncing, setSyncing] = useState(false);
@@ -197,7 +195,7 @@ export function PatreonImport({
         ok: false,
         message:
           status === 0
-            ? "The sync request ended before Patreon finished. The import may still be running; this status updates on the next refresh."
+            ? "The sync request ended before Patreon finished. The import may still be running, and the status line updates on the next refresh."
             : errorMessage(error),
         attemptAt: before,
       });
@@ -219,8 +217,8 @@ export function PatreonImport({
   // An attempt after the last success that is no longer running did not succeed.
   const failedAt =
     show && !running && attempt && (!success || Date.parse(attempt) > Date.parse(success)) ? attempt : null;
-  // From the last successful import: founder promises whose payment Patreon no longer reports as paid or that is no
-  // longer marked as the first payment, and Discord conflicts.
+  // From the last successful import: founders whose payment Patreon no longer reports as paid or that is no longer
+  // marked as the first payment, and Discord conflicts.
   const founderRechecks = show && success ? sync.founderReviews.length : 0;
   const conflicts = show && success ? sync.conflicts : 0;
   // Patreon shares a patron's Discord account only once the creator sets up its Discord benefit.
@@ -247,56 +245,14 @@ export function PatreonImport({
     "Syncing now…"
   ) : success ? (
     <>
-      last synced <Moment at={success}>{ago(success, now)}</Moment>
+      synced <Moment at={success}>{ago(success, now)}</Moment>
     </>
   ) : (
     "Not synced yet"
   );
   return (
     <>
-      <div className="status-row supporter-sync">
-        {/* The page is a polite live region; the relative times change every minute and are not announced. */}
-        <p className={`status-line ${tone}`} aria-live="off">
-          <span>
-            Patreon import: <strong>{state}</strong>
-          </span>
-          {show && running && success && (
-            <span>
-              last synced <Moment at={success}>{ago(success, now)}</Moment>
-            </span>
-          )}
-          {failedAt && (
-            <span>
-              last tried <Moment at={failedAt}>{ago(failedAt, now)}</Moment>
-            </span>
-          )}
-          {founderRechecks > 0 && <span>{plural(founderRechecks, "founder record")} to recheck</span>}
-          {conflicts > 0 && <span>{plural(conflicts, "Discord conflict")}</span>}
-          {show && success && <span>{plural(sync.members, "member")}</span>}
-          {show && success && <span>{plural(sync.payments, "new payment")}</span>}
-          {show && !running && next && (
-            <span title={regular ? `Runs every ${duration(intervalMs)}` : undefined}>
-              next <Moment at={next}>{ahead(next, now)}</Moment>
-            </span>
-          )}
-        </p>
-        {canSync && (
-          <button
-            type="button"
-            className="button secondary small"
-            disabled={disabled || unavailable || running}
-            onClick={() => void syncNow()}
-          >
-            {running ? "Syncing…" : "Sync now"}
-          </button>
-        )}
-        {show && success && <LastImport sync={sync} />}
-        {!unavailable && !sync.configured && (
-          <p className="muted">
-            Set PATREON_ENABLED, PATREON_CAMPAIGN_ID and PATREON_CREATOR_ACCESS_TOKEN in Railway to import members.
-          </p>
-        )}
-      </div>
+      {/* Notices come first, each only while its fault lasts. */}
       {!unavailable &&
         (sync.tokenRejected ? (
           <p className="notice warning">
@@ -315,6 +271,54 @@ export function PatreonImport({
           on each paid tier.
         </p>
       )}
+      <div className="status-row supporter-sync">
+        {/* The page is a polite live region; the relative times change every minute and are not announced. */}
+        <p className={`status-line ${tone}`} aria-live="off">
+          <span>
+            Patreon: <strong>{state}</strong>
+          </span>
+          {show && running && success && (
+            <span>
+              synced <Moment at={success}>{ago(success, now)}</Moment>
+            </span>
+          )}
+          {failedAt && (
+            <span>
+              last tried <Moment at={failedAt}>{ago(failedAt, now)}</Moment>
+            </span>
+          )}
+          {show && !running && next && (
+            <span title={regular ? `Runs every ${duration(intervalMs)}` : undefined}>
+              next <Moment at={next}>{ahead(next, now)}</Moment>
+            </span>
+          )}
+          {status}
+          {founderRechecks > 0 && <span>{plural(founderRechecks, "founder payment")} to check</span>}
+          {conflicts > 0 && <span>{plural(conflicts, "Discord conflict")}</span>}
+        </p>
+        {canSync && (
+          <button
+            type="button"
+            className="button secondary small"
+            disabled={disabled || unavailable || running}
+            onClick={() => void syncNow()}
+          >
+            {running ? "Syncing…" : "Sync now"}
+          </button>
+        )}
+        <details className="status-about supporter-details">
+          <summary>Details</summary>
+          <div className="status-about-panel">
+            {show && success && <LastImport sync={sync} />}
+            {details}
+          </div>
+        </details>
+        {!unavailable && !sync.configured && (
+          <p className="muted">
+            Set PATREON_ENABLED, PATREON_CAMPAIGN_ID and PATREON_CREATOR_ACCESS_TOKEN in Railway to import members.
+          </p>
+        )}
+      </div>
       {shown && (
         <p className={`notice ${shown.ok ? "success" : "warning"}`} role="status">
           {shown.message}
