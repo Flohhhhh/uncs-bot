@@ -174,6 +174,12 @@ export type WeeklyHighlights = {
 };
 /** 2 km sanity cap on every public distance, the same 2,000 m the weekly post uses. */
 export const PUBLIC_MAX_DISTANCE_CENTIMETERS = 200_000;
+/**
+ * 1.2 km cap on a firearm long shot. A week of real shots topped out near 980 m with sniper rifles, while the
+ * feed also credited an MP9 with 1,930 m and an A-91 with 1,439 m, distances no gun in the game reaches.
+ * Farther firearm kills still count as kills, never as shots.
+ */
+export const LONG_SHOT_MAX_CENTIMETERS = 120_000;
 /** Kill-context tags with a public top-5 list, by the short name the feed's tags end in. */
 export const LEADER_TAGS = {
   melee: "WeaponMelee",
@@ -223,6 +229,8 @@ export type ServerStatsAggregate = {
     kills: number;
     headshotKills: number;
     longestCentimeters: number | null;
+    /** The longest kill that passes plausibleShot(): what a firearm's longest kill reads. */
+    longestShotCentimeters: number | null;
     melee: number;
     roadkill: number;
     vehicleExplosion: number;

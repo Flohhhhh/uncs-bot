@@ -32,42 +32,62 @@ type Entry = readonly [label: string, kind: CauseKind];
 const table = (entries: Record<string, Entry>) => new Map<string, Entry>(Object.entries(entries));
 const labels = (entries: Record<string, string>) => new Map<string, string>(Object.entries(entries));
 
-// Keys are norm() values. Names marked "unconfirmed" still need an in-game check by Floh or staff.
+// Keys are norm() values. Labels use the in-game names. The game's item ids were matched to names with the
+// community database at wardogs.zone (built from the game files) on October 5, 2026: for example
+// Id.Item.WEPN_029 is the Galil and SR_04 is the AMR 50. Staff can still correct a name from what the game shows.
 const ITEMS = table({
-  ak74m: ["AK-74M", "firearm"],
-  ak74: ["AK-74", "firearm"],
+  ak74m: ["AK74", "firearm"],
+  ak74: ["AK74", "firearm"],
   ak47: ["AK-47", "firearm"],
   akm: ["AKM", "firearm"],
+  a91: ["A-91", "firearm"],
+  wepn033: ["Bushmaster M17S", "firearm"],
+  wepn030: ["FAL", "firearm"],
+  wepn029: ["Galil", "firearm"],
+  kh2002: ["KH-2002", "firearm"],
   m4: ["M4", "firearm"],
   m4a1: ["M4A1", "firearm"],
   m16: ["M16", "firearm"],
   m16a4: ["M16A4", "firearm"],
-  mosin: ["Mosin-Nagant", "firearm"],
-  mosinnagant: ["Mosin-Nagant", "firearm"],
-  rfb: ["RFB", "firearm"],
+  tar21: ["T-21", "firearm"],
+  m249: ["M249 SAW", "firearm"],
+  lmg02: ["PKM", "firearm"],
+  rfb: ["BMR-308", "firearm"],
   sks: ["SKS", "firearm"],
-  m249: ["M249", "firearm"],
-  svdm: ["SVDM", "firearm"],
+  svdm: ["SVD", "firearm"],
   svd: ["SVD", "firearm"],
-  sv98: ["SV-98", "firearm"],
-  tar21: ["TAR-21", "firearm"],
-  mp9: ["MP9", "firearm"],
-  mp5: ["MP5", "firearm"],
-  m500: ["M500 shotgun", "firearm"],
-  a91: ["A-91", "firearm"],
+  sr04: ["AMR 50", "firearm"],
   mk22: ["MK22", "firearm"],
-  vector: ["Vector", "firearm"],
-  // Unconfirmed: a generic name only.
-  sr04: ["SR-04", "firearm"],
-  compoundbow: ["Compound bow", "firearm"],
-  bow: ["Compound bow", "firearm"],
-  // Unconfirmed: assumed to be a Carl Gustaf launcher. If wrong, use "CGM4".
-  cgm4: ["Carl Gustaf M4", "explosive"],
+  mosin: ["Mosin Nagant", "firearm"],
+  mosinnagant: ["Mosin Nagant", "firearm"],
+  wepn035: ["Scout Rifle TD", "firearm"],
+  sv98: ["SV98", "firearm"],
+  mp9: ["AMP-9", "firearm"],
+  mp5: ["MP5", "firearm"],
+  wepn028: ["MP5", "firearm"],
+  smg03: ["PP-19 Vityaz", "firearm"],
+  vector: ["Super-45", "firearm"],
+  m500: ["M500", "firearm"],
+  mp43: ["MP43", "firearm"],
+  wepn027: ["Deagle", "firearm"],
+  glock17: ["GGX 17", "firearm"],
+  wepn032: ["GGX 18", "firearm"],
+  judge: ["Judge", "firearm"],
+  wepn026: ["M1911", "firearm"],
+  combatbow: ["Compound Bow", "firearm"],
+  compoundbow: ["Compound Bow", "firearm"],
+  bow: ["Compound Bow", "firearm"],
+  launcher04: ["9K333 Verba", "explosive"],
+  cgm4: ["MAAWS", "explosive"],
+  mmgl: ["MGL-40", "explosive"],
   rpg7: ["RPG-7", "explosive"],
-  m67: ["M67 grenade", "explosive"],
-  m67grenade: ["M67 grenade", "explosive"],
-  c4: ["C4", "explosive"],
+  m67: ["M67 Frag Grenade", "explosive"],
+  m67grenade: ["M67 Frag Grenade", "explosive"],
+  goldm67grenade: ["Gold Frag Grenade", "explosive"],
+  c4: ["C4 Charge", "explosive"],
+  c4explosive: ["C4 Charge", "explosive"],
   ied: ["IED", "explosive"],
+  iedexplosive: ["IED", "explosive"],
   atmine: ["AT mine", "explosive"],
   claymore: ["Claymore", "explosive"],
   smoke: ["Smoke grenade", "explosive"],
@@ -82,16 +102,27 @@ const ITEMS = table({
   supplypallet: ["Supply pallet", "environment"],
 });
 const TOOLS = labels({ hammerlarge: "Big hammer", hammersmall: "Hammer", hammer: "Hammer", drill: "Drill" });
-// Unconfirmed: ROT_04 and WHL_05 keep generic names.
-const VEHICLES = labels({ humvee: "Humvee", rot04: "ROT-04 helicopter" });
-const MOUNTS = labels({ ringturret: "Ring turret" });
+// Vehicle models by in-game name, from the same database. WHL_05 and MBT_01 are not in it yet, so they keep
+// generic names.
+const VEHICLES = labels({
+  humvee: "Humvee",
+  rot04: "Z20 Lakota",
+  littlebird: "MH-6",
+  havoc: "Havoc",
+  bobcat: "Bobcat",
+  dunebuggy: "Dune Buggy",
+  kodiak: "Kodiak",
+  ural: "Ural",
+});
+// Mounted and stationary weapons by in-game name, from the same database.
+const MOUNTS = labels({ ringturret: "Ring turret", mistralaa: "Talon 9K-SAM", phalanx: "Vanguard CIWS" });
 const BUILDABLES = labels({ barbedwire: "Barbed wire", bremerwall: "Bremer wall", hblock: "H-block" });
 
 /**
  * The labelled firearms' norm() keys. Long shots count firearms only and the store picks the longest kills
  * in SQL, so it mirrors describeCause() there: a cause is a firearm exactly when its item code (the text
  * after `Id.Item.`, or a whole bare code) has one of these keys or is a `WEPN_` code. Unlabelled items,
- * family codes such as SMG_03 and every other kind never count. Built from ITEMS, so a new label updates it.
+ * family codes such as SMG_09 and every other kind never count. Built from ITEMS, so a new label updates it.
  */
 export const FIREARM_ITEM_KEYS: readonly string[] = [...ITEMS]
   .filter(([, [, kind]]) => kind === "firearm")
@@ -123,7 +154,7 @@ function tidy(parts: readonly string[]): string | null {
   return !value || /\d{17}/.test(value) || /\bfree\b/i.test(value) ? null : value;
 }
 
-/** WEPN_029 reads as "Weapon 029"; other short codes such as SMG_03 read as "SMG-03". */
+/** An unlabelled WEPN_031 reads as "Weapon 031"; other short codes such as SMG_09 read as "SMG-09". */
 function family(segment: string): CauseLabel | null {
   const weapon = /^wepn_?(\d{1,4})$/i.exec(segment);
   if (weapon) return { label: `Weapon ${weapon[1]}`, kind: "firearm" };

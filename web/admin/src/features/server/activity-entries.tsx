@@ -34,7 +34,7 @@ export type ActivityEntry = {
   search: string;
 };
 
-/** "Id.Item.AK74M" and "ID.Item.AK74M" read as "AK-74M", as on the public stats; the raw value stays searchable. */
+/** "Id.Item.AK74M" and "ID.Item.AK74M" read as "AK74", as on the public stats; the raw value stays searchable. */
 export function weaponLabel(cause: string | null | undefined) {
   return cause?.trim() ? describeCause(cause).label : "";
 }
@@ -152,7 +152,7 @@ export function When({ at }: { at: string }) {
   );
 }
 
-/** One feed line: "UncDap killed OldManRiver · AK-74M · 21 m", with player names as buttons when `onPlayer` is set. */
+/** One feed line: "UncDap killed OldManRiver · AK74 · 21 m", with player names as buttons when `onPlayer` is set. */
 export function ActivityLine({ entry, onPlayer }: { entry: ActivityEntry; onPlayer?: (player: SheetPlayer) => void }) {
   return (
     <span className="activity-line">

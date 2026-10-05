@@ -477,6 +477,7 @@ describe("telemetry HTTP boundaries", () => {
           kills: 3,
           headshotKills: 2,
           longestCentimeters: 41_200,
+          longestShotCentimeters: 41_200,
           melee: 0,
           roadkill: 0,
           vehicleExplosion: 0,
@@ -492,6 +493,7 @@ describe("telemetry HTTP boundaries", () => {
           kills: 3,
           headshotKills: 2,
           longestCentimeters: null,
+          longestShotCentimeters: null,
           melee: 0,
           roadkill: 0,
           vehicleExplosion: 0,
@@ -520,9 +522,9 @@ describe("telemetry HTTP boundaries", () => {
         serverId: "primary",
         period: "week",
         totals: { events: 7, kills: 0, deaths: 6, headshotKills: 0, players: 3, suicides: 1 },
-        weapons: [{ label: "AK-74M", kind: "firearm", kills: 3, headshotKills: 2, longestMeters: 412 }],
+        weapons: [{ label: "AK74", kind: "firearm", kills: 3, headshotKills: 2, longestMeters: 412 }],
         maps: [],
-        longestKills: [{ name: "Unnamed player", weapon: "AK-74M", meters: 412, map: "Bakurani" }],
+        longestKills: [{ name: "Unnamed player", weapon: "AK74", meters: 412, map: "Bakurani" }],
         tagLeaders: { penetration: [{ name: "Unnamed player", count: 1 }], falling: [{ name: "Player", count: 1 }] },
       });
       expect(result.body.hours).toHaveLength(24);
@@ -581,7 +583,7 @@ describe("telemetry HTTP boundaries", () => {
       deaths: 1,
       headshotKills: 2,
       kd: 4,
-      topWeapon: "AK-74M",
+      topWeapon: "AK74",
       longestKillMeters: 412,
       bestStreak: 3,
     });

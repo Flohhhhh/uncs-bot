@@ -29,7 +29,7 @@ const shareOfKills = (part: number, kills: number) =>
 const plural = (value: number, one: string, many: string) => `${count(value)} ${value === 1 ? one : many}`;
 /**
  * The weapon filter's value for a cause. Causes that read the same ("Id.Item.AK74M" and "ID.Item.AK74M"
- * are both "AK-74M") share one option; a cause with no readable name keeps its raw value, so each one
+ * are both "AK74") share one option; a cause with no readable name keeps its raw value, so each one
  * stays its own option. A readable name never equals such a raw value.
  */
 const causeFilter = (cause: string | null | undefined) => {

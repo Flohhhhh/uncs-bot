@@ -339,10 +339,10 @@ describe("weekly board renderer", () => {
     expect(causeLabel("Grenade_Frag")).toBe("Grenade Frag");
     expect(causeLabel("x".repeat(60))).toBe("x".repeat(40));
     // The game writes both prefix casings; each reads as the same shared label.
-    expect(causeLabel("Id.Item.AK74M")).toBe("AK-74M");
-    expect(causeLabel("ID.Item.AK74M")).toBe("AK-74M");
-    expect(causeLabel("Vehicle.Variant.Air.Rotary.ROT_04.Default")).toBe("ROT-04 helicopter");
-    expect(causeLabel("Id.Item.WEPN_029")).toBe("Weapon 029");
+    expect(causeLabel("Id.Item.AK74M")).toBe("AK74");
+    expect(causeLabel("ID.Item.AK74M")).toBe("AK74");
+    expect(causeLabel("Vehicle.Variant.Air.Rotary.ROT_04.Default")).toBe("Z20 Lakota");
+    expect(causeLabel("Id.Item.WEPN_029")).toBe("Galil");
     expect(mapName("NorthAmerica")).toBe("Zestafona");
     expect(mapName("Kavkazi")).toBe("Bakurani");
     expect(mapName("Some_New_Map")).toBe("Some New Map");
@@ -363,7 +363,7 @@ describe("weekly board renderer", () => {
         killsWithCause: 40,
         topCause: { cause: "Id.Item.AK74M", kills: 30 },
       }),
-    ).toEqual(["Long-distance call: Grandpa Joe, 300 m with AK-74M on Bakurani", "Old faithful: AK-74M, 30 kills"]);
+    ).toEqual(["Long-distance call: Grandpa Joe, 300 m with AK74 on Bakurani", "Old faithful: AK74, 30 kills"]);
     // An id describeCause() cannot name still leaves the weapon out rather than showing it raw.
     expect(labels({ kills: 40, killsWithCause: 40, topCause: { cause: "Meta.Unknown.Thing", kills: 30 } })).toEqual([]);
   });

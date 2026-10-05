@@ -15,6 +15,7 @@ import {
   emptyHighlights,
   emptyTotals,
   LEADER_TAGS,
+  LONG_SHOT_MAX_CENTIMETERS,
   PUBLIC_MAX_DISTANCE_CENTIMETERS,
 } from "./telemetry.types";
 
@@ -38,6 +39,16 @@ function hasTag(column: string, ...tags: string[]) {
     return TAG_PREFIXES.map((prefix) => `'${prefix}${tag}'`);
   });
   return sql.raw(`${column} ?| ARRAY[${variants.join(",")}]`);
+}
+/**
+ * The `<alias>` row's distance can be a long shot's: above zero, at most LONG_SHOT_MAX_CENTIMETERS, and with
+ * no tag saying something other than the shot killed (a vehicle explosion, a roadkill or a fall). Pair it
+ * with longShot() for the cause. Built only from code constants, so it binds no parameter.
+ */
+function plausibleShot(alias = "") {
+  const p = alias ? `${alias}.` : "";
+  const notShots = hasTag(`${p}context_tags`, LEADER_TAGS.vehicleExplosion, LEADER_TAGS.roadkill, LEADER_TAGS.falling);
+  return sql`${sql.raw(`${p}distance_centimeters > 0 AND ${p}distance_centimeters <= ${LONG_SHOT_MAX_CENTIMETERS}`)} AND NOT (${notShots})`;
 }
 /**
  * `server_id = $1 AND received_at >= $2 AND received_at <= $3`: the leading columns of
@@ -265,7 +276,8 @@ export class TelemetryStore {
   /**
    * Read-only weekly shout-out inputs over the same bounds as snapshot(). A kill is a non-suicide
    * event with a linked killer; names use snapshot()'s latest non-empty name, else the SteamID.
-   * bestKd only ranks players with at least minKdKills kills; longestKill counts long shots only (longShot()).
+   * bestKd only ranks players with at least minKdKills kills; longestKill counts plausible long shots only
+   * (plausibleShot() and longShot()).
    */
   async weeklyHighlights(since: Date, until: Date, serverId = "primary", minKdKills = 10): Promise<WeeklyHighlights> {
     const rows = await this.db.execute<WeeklyHighlights>(sql`
@@ -307,7 +319,7 @@ export class TelemetryStore {
           SELECT kills.killer_steam_id AS "steamId", coalesce(names.name, kills.killer_steam_id) AS name,
             kills.distance_centimeters AS "distanceCentimeters", kills.cause, kills.map_name AS "mapName"
           FROM kills LEFT JOIN names ON names.steam_id = kills.killer_steam_id
-          WHERE kills.distance_centimeters IS NOT NULL AND ${longShot("kills.cause")}
+          WHERE ${plausibleShot("kills")} AND ${longShot("kills.cause")}
           ORDER BY kills.distance_centimeters DESC, kills.received_at, kills.event_time, kills.event_id LIMIT 1
         ) r) AS "longestKill",
         (SELECT count(*)::int FROM kills) AS kills,
@@ -339,6 +351,7 @@ export class TelemetryStore {
           map_name AS "mapName", hour, count(*)::int AS kills,
           (count(*) FILTER (WHERE headshot))::int AS "headshotKills",
           max(distance_centimeters) FILTER (WHERE distance_centimeters > 0 AND distance_centimeters <= ${DISTANCE_CAP}) AS "longestCentimeters",
+          max(distance_centimeters) FILTER (WHERE ${plausibleShot()}) AS "longestShotCentimeters",
           (count(*) FILTER (WHERE ${hasTag("context_tags", LEADER_TAGS.melee)}))::int AS melee,
           (count(*) FILTER (WHERE ${hasTag("context_tags", LEADER_TAGS.roadkill)}))::int AS roadkill,
           (count(*) FILTER (WHERE ${hasTag("context_tags", LEADER_TAGS.vehicleExplosion)}))::int AS "vehicleExplosion",
@@ -371,7 +384,7 @@ export class TelemetryStore {
           GROUP BY v.id
         ) g
       `);
-      // S3: named lists. The ten players with the longest capped long shots (firearm kills, longShot()),
+      // S3: named lists. The ten players with the longest long shots (plausibleShot() firearm kills, longShot()),
       // ranked by each player's own best shot so a few snipers cannot crowd the others out, and the top
       // five per tag. Names are then read for those players only (at most 40), with one short backward
       // index probe each.
@@ -380,7 +393,7 @@ export class TelemetryStore {
         WITH best AS (
           SELECT killer_steam_id AS steam_id, max(distance_centimeters) AS cm FROM combat_events
           WHERE ${range3()} AND NOT suicide AND killer_steam_id IS NOT NULL
-            AND distance_centimeters > 0 AND distance_centimeters <= ${DISTANCE_CAP} AND ${longShot("cause")}
+            AND ${plausibleShot()} AND ${longShot("cause")}
           GROUP BY killer_steam_id
           ORDER BY cm DESC, killer_steam_id LIMIT 10
         ), longest AS (
@@ -388,7 +401,7 @@ export class TelemetryStore {
           FROM best CROSS JOIN LATERAL (
             SELECT c.cause, c.map_name, c.distance_centimeters, c.received_at, c.event_id FROM combat_events c
             WHERE ${range3("c")} AND c.killer_steam_id = best.steam_id AND NOT c.suicide
-              AND c.distance_centimeters = best.cm AND ${longShot("c.cause")}
+              AND c.distance_centimeters = best.cm AND ${plausibleShot("c")} AND ${longShot("c.cause")}
             ORDER BY c.received_at, c.event_id LIMIT 1
           ) shot
         ), tagged AS (
@@ -451,7 +464,7 @@ export class TelemetryStore {
 
   /**
    * Leaderboard row extras for up to 100 listed players over the same bounds as snapshot(): kills per
-   * cause, with its longest capped kill when the cause is a long shot (longShot()), and each player's
+   * cause, with its longest plausibleShot() kill when the cause is a long shot (longShot()), and each player's
    * most kills without dying within one server session (ordered by receipt, then game clock; a suicide
    * counts as a death). Reads only these players' own events through the killer and victim indexes.
    * Rows keep SteamIDs and never leave the service.
@@ -464,7 +477,7 @@ export class TelemetryStore {
       const weapons = await tx.execute<RowExtrasAggregate["weapons"][number]>(sql`
         WITH causes AS (
           SELECT killer_steam_id, min(btrim(cause)) AS cause, count(*)::int AS kills,
-            max(distance_centimeters) FILTER (WHERE distance_centimeters > 0 AND distance_centimeters <= ${DISTANCE_CAP}) AS longest
+            max(distance_centimeters) FILTER (WHERE ${plausibleShot()}) AS longest
           FROM combat_events
           WHERE ${receivedWindow(serverId, since, until)()} AND NOT suicide AND killer_steam_id IN (${idList(ids)})
           GROUP BY killer_steam_id, lower(btrim(cause))
