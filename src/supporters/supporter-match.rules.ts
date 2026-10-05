@@ -313,7 +313,10 @@ export type NextStepContext = {
   importConfigured: boolean;
   /** Hours an imported first payment must stand before an automatic founder promise. */
   holdHours: number;
-  /** Patrons can link their own Discord account with "Link Patreon" (PATREON_LINK_ENABLED). Omitted, off. */
+  /**
+   * Patrons can link their own Discord account with "Link Patreon": PATREON_LINK_ENABLED is on and every setting it
+   * uses is ready (patronLinkSetupProblem). Omitted, off.
+   */
   patronLink?: boolean;
   /**
    * Whether the viewer may open a game server. An application on any other server is named without its SteamID or

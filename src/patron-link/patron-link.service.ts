@@ -14,9 +14,10 @@ import { DiscordRolesService } from "../discord-roles/discord-roles.service";
 import { EnvService } from "../env/env.service";
 import { patreonCampaign } from "../supporters/founder-policy";
 import { PatreonClient, type PatreonMemberResult } from "../supporters/patreon.client";
-import { deploymentSecrets, PatreonSyncService } from "../supporters/patreon-sync.service";
+import { patronLinkSetupProblem } from "../supporters/patron-link-readiness";
+import { PatreonSyncService } from "../supporters/patreon-sync.service";
 import { SupporterMatchService } from "../supporters/supporter-match.service";
-import { SupportersStore } from "../supporters/supporters.store";
+import { importRoleChecks, SupportersStore } from "../supporters/supporters.store";
 import {
   isPatronLinkOutcome,
   issuedReply,
@@ -110,28 +111,8 @@ export class PatronLinkService {
 
   /** The first setting that keeps linking from working, in staff-facing words, or null when it is ready. */
   readiness(): string | null {
-    if (!this.sync.configured()) return READINESS_COPY.import;
-    const clientId = this.env.get("PATREON_CLIENT_ID");
-    if (typeof clientId !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(clientId)) return READINESS_COPY.clientId;
-    const secret = this.env.get("PATREON_CLIENT_SECRET");
-    if (
-      typeof secret !== "string" ||
-      !/^[\x21-\x7e]{16,512}$/.test(secret) ||
-      [
-        this.env.get("PATREON_CREATOR_ACCESS_TOKEN"),
-        this.env.get("PATREON_WEBHOOK_SECRET"),
-        ...deploymentSecrets(this.env, { clientSecret: false }),
-      ].includes(secret)
-    )
-      return READINESS_COPY.clientSecret;
-    try {
-      this.admin.patronLink();
-    } catch {
-      return READINESS_COPY.signIn;
-    }
-    if (!this.env.get("DISCORD_ROLES_ENABLED") || !this.env.get("DISCORD_SUPPORTER_ROLE_ID"))
-      return READINESS_COPY.roles;
-    return null;
+    const problem = patronLinkSetupProblem(this.env, this.admin, this.sync.configured());
+    return problem ? READINESS_COPY[problem] : null;
   }
 
   private settings(): Settings | null {
@@ -353,15 +334,14 @@ export class PatronLinkService {
           (found.userId !== null && found.userId !== identity.userId)))
     )
       return this.finish("not_member");
-    // Only a member Patreon names as this campaign's and this patron's is imported.
+    // Only a member Patreon names as this campaign's and this patron's is imported. The record is current only then,
+    // and only with a Discord answer Patreon could read.
+    let current = false;
     if (found?.campaignId && found.userId) {
       const imported = await this.supporters.importApiMember(settings.campaignId, found.snapshot, new Date());
-      // As after a sync: a changed record can change who holds the Supporter role.
-      if (
-        imported.discordId &&
-        (imported.created || imported.updated || imported.payments || imported.revoked || imported.discordLinked)
-      )
-        this.notifyRoles(imported.discordId);
+      // As after a sync: a changed record, or an account the import took off a record, can change who holds a role.
+      for (const discordId of importRoleChecks(imported)) this.notifyRoles(discordId);
+      current = found.snapshot.discordKnown;
     }
     const result = await this.store.link({
       campaignId: settings.campaignId,
@@ -371,8 +351,13 @@ export class PatronLinkService {
     });
     if (result.outcome !== "conflict") {
       this.notifyRoles(flow.discordId);
-      // Fire-and-forget, and it never rejects. A founder promise still waits for the first payment's refund window.
-      void this.match.member(result.memberId, "patron");
+      // Fire-and-forget, and it never rejects. A founder promise still waits for the first payment's refund window,
+      // and is recorded here only on what Patreon reported just now: its Discord account and its latest charge. When
+      // Patreon could not be read, the sweep after the next successful sync records it, once every member is imported
+      // again.
+      void (current
+        ? this.match.member(result.memberId, "patron")
+        : this.match.member(result.memberId, "patron", { founder: false }));
     }
     return this.finish(result.outcome);
   }

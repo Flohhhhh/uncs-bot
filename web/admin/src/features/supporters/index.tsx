@@ -11,6 +11,7 @@ import {
   founderOffered,
   founderWindowLabel,
   newYork,
+  patronLinkRefused,
   paymentLine,
   paymentOffered,
   providerLine,
@@ -30,6 +31,7 @@ import type { Supporter, SupporterDecision, SupporterReviewResponse, SupportersR
 /** Each staff action: its button label, which is also the form's title, the reason it starts with, and where it is sent. */
 const decisions = {
   link: { label: "Change accounts", reason: "Accounts changed", endpoint: "link" },
+  review: { label: "Keep accounts", reason: "Accounts kept", endpoint: "review" },
   payment: { label: "Add payment", reason: "Payment added", endpoint: "payment" },
   founder: { label: "Make founder", reason: "Founder confirmed", endpoint: "founder" },
 } satisfies Record<SupporterDecision, { label: string; reason: string; endpoint: SupporterDecision }>;
@@ -396,7 +398,9 @@ function SupporterDialog({
       description={
         result
           ? result.saved
-            ? "Gramps updates their Discord roles next."
+            ? review?.decision === "review"
+              ? undefined
+              : "Gramps updates their Discord roles next."
             : "Close and reload before trying again."
           : undefined
       }
@@ -429,6 +433,17 @@ function SupporterDialog({
               >
                 Change accounts
               </button>
+              {patronLinkRefused(record) && (
+                // The record is right as it is, so the refused sign-in leaves Needs you.
+                <button
+                  type="button"
+                  className="button secondary"
+                  disabled={busy || unavailable}
+                  onClick={() => choose("review")}
+                >
+                  Keep accounts
+                </button>
+              )}
               {paymentOffered(record, importConfigured) && (
                 <button
                   type="button"
@@ -464,7 +479,11 @@ function SupporterDialog({
               {review.decision === "payment" && <PaymentFields />}
               <ReasonField key={`reason:${review.id}`} defaultValue={selected.reason} />
             </fieldset>
-            <p className="muted">Gramps updates their Discord roles after you save.</p>
+            <p className="muted">
+              {review.decision === "review"
+                ? "The accounts stay as they are, and the refused sign-in leaves Needs you."
+                : "Gramps updates their Discord roles after you save."}
+            </p>
           </>
         )}
         {validation && (
@@ -486,7 +505,11 @@ function SupporterDialog({
           </button>
           {review && selected && !result && (
             <button type="submit" className="button primary" disabled={busy || unavailable || submitted.current}>
-              {sending ? "Saving…" : review.decision === "founder" ? selected.label : "Save"}
+              {sending
+                ? "Saving…"
+                : review.decision === "founder" || review.decision === "review"
+                  ? selected.label
+                  : "Save"}
             </button>
           )}
         </div>

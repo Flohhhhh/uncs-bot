@@ -1,5 +1,6 @@
 import { createHmac, randomUUID } from "node:crypto";
 import type { AdminAuth } from "../admin/admin.auth";
+import { AdminSettings } from "../admin/admin.settings";
 import type { Staff } from "../admin/admin.types";
 import type { EnvService } from "../env/env.service";
 import type { DiscordRolesService } from "../discord-roles/discord-roles.service";
@@ -85,6 +86,7 @@ function fixture(overrides: Record<string, unknown> = {}) {
     status: jest.fn().mockReturnValue({ configured: true, running: false, members: 2 }),
     staffSync: jest.fn().mockResolvedValue({ joined: false, sync: { configured: true, members: 2 } }),
   };
+  const env = { get: (key: string) => values[key] } as EnvService;
   return {
     store,
     values,
@@ -92,11 +94,12 @@ function fixture(overrides: Record<string, unknown> = {}) {
     sync,
     service: new SupportersService(
       store as unknown as SupportersStore,
-      { get: (key: string) => values[key] } as EnvService,
+      env,
       roles as unknown as DiscordRolesService,
       sync as unknown as PatreonSyncService,
       match as unknown as SupporterMatchService,
       auth as unknown as AdminAuth,
+      new AdminSettings(env),
     ),
     match,
     auth,

@@ -1072,6 +1072,64 @@ it("changes accounts with the record's revision, sending only the identity that 
   });
 });
 
+it("keeps the accounts as they are to settle a refused patron sign-in, offered only while one is in Needs you", async () => {
+  const refusal =
+    "Discord account 34567890123456789 signed in as this patron, but this record links 23456789012345678.";
+  const refused: Supporter = {
+    ...supporter,
+    discordSource: "patreon",
+    nextSteps: [{ code: "patron_link_conflict", area: "discord", message: refusal }, ...supporter.nextSteps],
+  };
+  request.mockImplementation(async (_path, options) =>
+    options?.method === "POST"
+      ? { ok: true, replayed: false, supporter: { ...supporter, discordSource: "patreon", version: 8 } }
+      : data(refused),
+  );
+  render(page());
+  const dialog = await openRecord();
+  expect(within(dialog).getByRole("heading", { name: "Needs you" }).nextElementSibling).toHaveTextContent(refusal);
+  fireEvent.click(within(dialog).getByRole("button", { name: "Keep accounts" }));
+  expect(screen.getByRole("dialog", { name: "Keep accounts" })).toBe(dialog);
+  expect(screen.getByLabelText("Reason")).toHaveValue("Accounts kept");
+  expect(screen.getByLabelText("Reason")).toHaveFocus();
+  expect(within(dialog).queryByLabelText("Discord user ID")).not.toBeInTheDocument();
+  expect(
+    within(dialog).getByText("The accounts stay as they are, and the refused sign-in leaves Needs you."),
+  ).toBeInTheDocument();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Keep accounts" }));
+  await screen.findByRole("heading", { name: "Saved" });
+  expect(postCalls()).toHaveLength(1);
+  expect(postCalls()[0][0]).toBe(`supporters/${supporter.id}/review`);
+  // The record as it is: nothing but the revision and the reason.
+  expect(JSON.parse(String(postCalls()[0][1]?.body))).toEqual({
+    id: expect.any(String),
+    version: 7,
+    confirm: supporter.confirmKey,
+    reason: "Accounts kept",
+  });
+  expect(within(dialog).queryByText("Gramps updates their Discord roles next.")).not.toBeInTheDocument();
+  // A record with no refused sign-in has nothing to keep.
+  const values = new FormData();
+  values.set("reason", "Accounts kept");
+  expect(reviewInput(refused, "review", "id", values)).toEqual({
+    id: "id",
+    version: 7,
+    confirm: supporter.confirmKey,
+    reason: "Accounts kept",
+  });
+  expect(() => reviewInput(supporter, "review", "id", values)).toThrow(
+    "Nothing on this record needs the accounts kept.",
+  );
+});
+
+it("offers Keep accounts only on a record with a refused patron sign-in", async () => {
+  request.mockResolvedValue(data());
+  render(page());
+  const dialog = await openRecord();
+  expect(within(dialog).getByRole("button", { name: "Change accounts" })).toBeInTheDocument();
+  expect(within(dialog).queryByRole("button", { name: "Keep accounts" })).not.toBeInTheDocument();
+});
+
 it("says when Gramps also added the SteamID on a save", async () => {
   request.mockImplementation(async (_path, options) =>
     options?.method === "POST"

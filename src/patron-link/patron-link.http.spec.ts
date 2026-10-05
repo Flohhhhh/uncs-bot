@@ -127,6 +127,25 @@ function patreonMember(campaignId = CAMPAIGN, userId = PATREON_USER) {
     ],
   };
 }
+/** What the import answers for the member: nothing changed, unless a test says otherwise. */
+function imported(overrides: Record<string, unknown> = {}) {
+  return {
+    memberId: RECORD,
+    patreonMemberId: MEMBER,
+    created: false,
+    updated: false,
+    payments: 0,
+    revoked: 0,
+    discordLinked: false,
+    discordConfirmed: false,
+    discordMoved: false,
+    conflict: null,
+    discordId: null,
+    releasedDiscordIds: [],
+    patreonDiscordChanged: false,
+    ...overrides,
+  };
+}
 /** The signed-in patron's identity, with their one membership of the campaign. */
 const identityBody = {
   data: { id: PATREON_USER, type: "user", relationships: { memberships: { data: [{ id: MEMBER, type: "member" }] } } },
@@ -195,7 +214,7 @@ describe("Link Patreon sign-in pages", () => {
     jest.clearAllMocks();
     store.link.mockResolvedValue({ outcome: "linked", memberId: RECORD });
     store.linked.mockResolvedValue(false);
-    supporters.importApiMember.mockResolvedValue({ memberId: RECORD, discordId: null, created: false, updated: false });
+    supporters.importApiMember.mockResolvedValue(imported());
     match.member.mockResolvedValue(null);
     sync.configured.mockReturnValue(true);
     answers = {
@@ -454,7 +473,8 @@ describe("Link Patreon sign-in pages", () => {
         store.link.mock.invocationCallOrder[0],
       );
       expect(roles.supporterChanged).toHaveBeenCalledWith(PATRON);
-      expect(match.member).toHaveBeenCalledWith(RECORD, "patron");
+      // Patreon was read just now, so matching may record a founder straight away.
+      expect(match.member.mock.calls).toEqual([[RECORD, "patron"]]);
       const [[, token]] = calls("patreonToken");
       expect(Object.fromEntries(new URLSearchParams(String(token.body)))).toEqual({
         code: SECRETS.patreonCode,
@@ -649,12 +669,64 @@ describe("Link Patreon sign-in pages", () => {
     it.each([
       ["an outage", () => json({}, 503)],
       ["a refused creator token", () => json({}, 401)],
+      ["Patreon asking to slow down", () => json({}, 429)],
       ["a broken answer", () => new Response("not json")],
-    ])("still links after %s reading the member, without importing it", async (_name, answer) => {
+    ])(
+      "still links after %s reading the member, without importing it or recording a founder",
+      async (_name, answer) => {
+        answers.member = answer;
+        expect((await throughPatreon()).done.headers.location).toBe("/supporters/link/done?r=linked");
+        expect(supporters.importApiMember).not.toHaveBeenCalled();
+        expect(store.link).toHaveBeenCalledTimes(1);
+        expect(roles.supporterChanged).toHaveBeenCalledWith(PATRON);
+        // What the last sync stored may be out of date: Patreon may now report another Discord account, or a refund.
+        // The sweep after the next successful sync, which imports every member again, records the founder instead.
+        expect(match.member.mock.calls).toEqual([[RECORD, "patron", { founder: false }]]);
+      },
+    );
+    it.each([
+      [
+        "leaves out the member's campaign and user",
+        () => {
+          const body = patreonMember();
+          const { pledge_history } = body.data.relationships;
+          return json({ ...body, data: { ...body.data, relationships: { pledge_history } } });
+        },
+        false,
+      ],
+      [
+        "answers with Discord connections Gramps cannot read",
+        () => {
+          const body = patreonMember();
+          const [user, ...rest] = body.included;
+          return json({ ...body, included: [{ ...user, attributes: { social_connections: "discord" } }, ...rest] });
+        },
+        true,
+      ],
+    ])("links but records no founder when Patreon %s", async (_name, answer, imports) => {
       answers.member = answer;
       expect((await throughPatreon()).done.headers.location).toBe("/supporters/link/done?r=linked");
-      expect(supporters.importApiMember).not.toHaveBeenCalled();
-      expect(store.link).toHaveBeenCalledTimes(1);
+      expect(supporters.importApiMember).toHaveBeenCalledTimes(imports ? 1 : 0);
+      expect(match.member.mock.calls).toEqual([[RECORD, "patron", { founder: false }]]);
+    });
+    it("checks the roles of every account the member's import changed or took off a record, as a sync does", async () => {
+      const released = "500000000000000009";
+      supporters.importApiMember.mockResolvedValue(
+        imported({ discordId: STRANGER, discordLinked: true, releasedDiscordIds: [released] }),
+      );
+      store.link.mockResolvedValue({ outcome: "conflict", conflict: "membership_linked", memberId: RECORD });
+      await throughPatreon();
+      expect(roles.supporterChanged.mock.calls).toEqual([[STRANGER], [released]]);
+      // Patreon confirming the account staff linked queues a check too.
+      roles.supporterChanged.mockClear();
+      supporters.importApiMember.mockResolvedValue(imported({ discordId: STRANGER, discordConfirmed: true }));
+      await throughPatreon();
+      expect(roles.supporterChanged.mock.calls).toEqual([[STRANGER]]);
+      // An unchanged record queues nothing.
+      roles.supporterChanged.mockClear();
+      supporters.importApiMember.mockResolvedValue(imported({ discordId: STRANGER }));
+      await throughPatreon();
+      expect(roles.supporterChanged).not.toHaveBeenCalled();
     });
     it("ends on the unavailable page with one fixed log line when saving fails", async () => {
       store.link.mockRejectedValue(new Error(`insert failed for ${PATRON} ${MEMBER} ${SECRETS.creator}`));

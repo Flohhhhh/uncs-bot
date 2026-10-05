@@ -204,9 +204,10 @@ describe("linking a membership after the patron's sign-in", () => {
     expect(statement.text).toContain(`"supporter_actions"."details"->>'discordId' = $`);
     expect(statement.text).toContain(`"supporter_actions"."details"->>'conflict' = $`);
     expect(statement.text).toContain(`"supporter_actions"."created_at" > $`);
-    // A later staff link or review, or a later Discord link, settles the earlier refusal, so it is recorded again.
+    // A later staff link or "Keep accounts" review, a later Discord link, or the import moving the account off the
+    // record settles the earlier refusal, so it is recorded again. The Supporters page settles it by the same rule.
     expect(statement.text).toContain(
-      "settled.kind IN ('link', 'review', 'patron-discord-link', 'patreon-discord-link')",
+      `settled.kind IN ('link', 'review', 'patron-discord-link', 'patreon-discord-link', 'patreon-discord-moved') AND settled.created_at > "supporter_actions"."created_at")`,
     );
     expect(values).toEqual(
       expect.arrayContaining([

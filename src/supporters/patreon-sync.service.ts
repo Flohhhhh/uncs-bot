@@ -3,7 +3,7 @@ import { DiscordRolesService } from "../discord-roles/discord-roles.service";
 import { EnvService } from "../env/env.service";
 import { PatreonApiError, PatreonClient, patreonChargePaid, type PatreonTierPrices } from "./patreon.client";
 import { SupporterMatchService } from "./supporter-match.service";
-import { SupportersStore } from "./supporters.store";
+import { importRoleChecks, SupportersStore } from "./supporters.store";
 
 export const PATREON_SYNC_STARTUP_DELAY_MS = 15_000;
 export const PATREON_SYNC_STAFF_COOLDOWN_MS = 30_000;
@@ -265,19 +265,8 @@ export class PatreonSyncService implements OnApplicationBootstrap, OnModuleDestr
         counts.tierConfirmedNew += result.tierConfirmedNew;
         counts.tierUnconfirmed += result.tierUnconfirmed;
         if (result.discordLinked) counts.discordLinks++;
-        // An unchanged record queues nothing; the six-hour role safety pass covers time-based expiry.
-        if (
-          result.discordId &&
-          (result.created ||
-            result.updated ||
-            result.payments ||
-            result.revoked ||
-            result.discordLinked ||
-            result.discordConfirmed)
-        )
-          this.notifyRoles(result.discordId);
-        // An account the import took off a record may no longer hold a role.
-        for (const released of result.releasedDiscordIds) this.notifyRoles(released);
+        // A changed record, and any account the import took off a record, may change who holds a role.
+        for (const discordId of importRoleChecks(result)) this.notifyRoles(discordId);
         if (result.conflict) {
           counts.conflicts++;
           if (counts.conflictDetails.length < MAX_DETAILS)

@@ -3059,7 +3059,7 @@ describe("launch storage on isolated PostgreSQL", () => {
       });
     });
 
-    it("never replaces a link, and shows the refusal to staff once a day until a review settles it", async () => {
+    it("never replaces a link, and shows the refusal to staff once a day until staff keep the accounts", async () => {
       const record = await importPatron("linked-elsewhere", patron);
       // Patreon linked the account three days ago, before any sign-in.
       await client.query(
@@ -3095,7 +3095,7 @@ describe("launch storage on isolated PostgreSQL", () => {
       expect(await refusals()).toBe(1);
       await patronLink.link(signIn("linked-elsewhere", otherAccount, new Date(firstAt.getTime() + day + 3_600_000)));
       expect(await refusals()).toBe(2);
-      // A staff review settles every earlier refusal.
+      // Staff keeping the accounts as they are (the dialog's Keep accounts, a review) settles every earlier refusal.
       await supporters.mutate(record.id, { ...review(view), kind: "review" }, staff, campaign, policy);
       view = (await supporters.get(record.id, campaign, automaticPolicy))!;
       expect(view.patronLinkConflict).toBeNull();
@@ -3127,6 +3127,48 @@ describe("launch storage on isolated PostgreSQL", () => {
         discordSource: "patron_signin",
         patronLinkConflict: null,
       });
+    });
+
+    it("drops a refusal from the page by itself once it no longer holds", async () => {
+      // membership_linked: the import moves the record's Patreon account to the patron Patreon now reports it for.
+      const moved = await importPatron("moved-from", patron);
+      expect(await patronLink.link(signIn("moved-from", otherAccount, new Date(Date.now() - 60_000)))).toMatchObject({
+        outcome: "conflict",
+        conflict: "membership_linked",
+      });
+      await importPatron("moved-from");
+      expect((await supporters.get(moved.id, campaign, automaticPolicy))?.patronLinkConflict).toMatchObject({
+        conflict: "membership_linked",
+      });
+      await importPatron("moved-to", patron);
+      expect(await supporters.get(moved.id, campaign, automaticPolicy)).toMatchObject({
+        discordId: null,
+        patronLinkConflict: null,
+      });
+      expect((await actions(moved.id)).map(({ kind }) => kind)).toContain("patreon-discord-moved");
+      // discord_linked: the record that held the account no longer does, though nothing happened on this record.
+      const holder = (await supporters.list(campaign, automaticPolicy, undefined, "moved-to"))[0];
+      const taker = await importPatron("late-taker");
+      expect(await patronLink.link(signIn("late-taker", patron, new Date(Date.now() - 60_000)))).toMatchObject({
+        outcome: "conflict",
+        conflict: "discord_linked",
+      });
+      expect((await supporters.get(taker.id, campaign, automaticPolicy))?.patronLinkConflict).toMatchObject({
+        discordId: patron,
+        conflict: "discord_linked",
+      });
+      await supporters.mutate(
+        holder.id,
+        { ...review(holder), kind: "link", discordId: "456789012345678913" },
+        staff,
+        campaign,
+        policy,
+      );
+      expect(await supporters.get(taker.id, campaign, automaticPolicy)).toMatchObject({
+        discordId: null,
+        patronLinkConflict: null,
+      });
+      expect((await actions(taker.id)).map(({ kind }) => kind)).toEqual(["patron-link-conflict"]);
     });
 
     it("gives a founder record no Discord account another founder holds", async () => {

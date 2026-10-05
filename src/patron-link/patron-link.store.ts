@@ -9,6 +9,7 @@ import {
   supporterPayments,
 } from "../database/supporters.schema";
 import { identityKeys, lockKeys, otherFounder } from "../supporters/founder-rules";
+import { patronLinkConflictSettled } from "../supporters/patron-link-conflict";
 import type { PatronLinkConflictReason } from "../supporters/supporter-match.rules";
 import { FOUNDER_PAYMENT_SOURCES, supportActive } from "../supporters/supporters.types";
 
@@ -185,9 +186,7 @@ export class PatronLinkStore {
           sql`${supporterActions.details}->>'discordId' = ${input.discordId}`,
           sql`${supporterActions.details}->>'conflict' = ${conflict}`,
           gt(supporterActions.createdAt, new Date(input.now.getTime() - PATRON_LINK_CONFLICT_REPEAT_MS)),
-          sql`NOT EXISTS (SELECT 1 FROM supporter_actions settled WHERE settled.member_id = ${member.id}
-            AND settled.kind IN ('link', 'review', 'patron-discord-link', 'patreon-discord-link')
-            AND settled.created_at > ${supporterActions.createdAt})`,
+          sql`NOT ${patronLinkConflictSettled(sql`${member.id}`, sql`${supporterActions.createdAt}`)}`,
         ),
       )
       .limit(1);
