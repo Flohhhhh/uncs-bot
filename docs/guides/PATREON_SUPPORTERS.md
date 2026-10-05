@@ -216,7 +216,7 @@ Do not sign in to Link Patreon with the creator's Patreon account. It belongs to
 1. Before switching on: `0006` has run, there is no `/patreon` command and the Supporters page is unchanged.
 2. `/patreon panel` posts the panel, or names the fix.
 3. An admin who is not a patron runs `/patreon link` with a Patreon account that is not the creator's. It ends at "No membership found".
-4. A paying patron on a phone sees "You're linked 🎉". The Supporter role follows within a minute or two, and the record links their Discord account.
+4. A paying patron on a phone sees "You're linked 🎉". The Supporter role follows within a minute or two, and the record links their Discord account, labelled **Linked by patron**. A first payment inside the founder window that has passed the refund wait becomes a founder promise at once, with nothing for staff to do.
 5. A link opened by another Discord account ends at "Wrong Discord account".
 6. The next Patreon sync succeeds. Logs show only `Patron link finished: <outcome>` and `Patron link failed. Nothing was linked.` lines.
 
@@ -251,7 +251,7 @@ The record's Discord fact and the table's Discord column label these links **Lin
 
 ### Refusals
 
-Gramps never overwrites a Discord link. It refuses when the record already links another Discord account (`membership_linked`), when another Patreon record of the campaign links this Discord account (`discord_linked`, a PayPal record does not count), or when the record is a founder and another founder holds this Discord account (`founder_tie`). Each refusal writes a `patron-link-conflict` audit row naming both accounts, at most once a day for the same account and reason. The record's `patronLinkConflict` and the `patron_link_conflict` step show the latest refusal until a later staff link or review, or a later Discord link, settles it. Two sign-ins racing for the same account end with one link and one refusal.
+Gramps never overwrites a Discord link. It refuses when the record already links another Discord account (`membership_linked`), when another Patreon record of the campaign links this Discord account (`discord_linked`, a PayPal record does not count), or when the record is a founder and another founder holds this Discord account (`founder_tie`). Each refusal writes a `patron-link-conflict` audit row naming both accounts, at most once a day for the same account and reason. The record's `patronLinkConflict` and the `patron_link_conflict` step show the latest refusal under **Needs you** until a later staff link or review, or a later Discord link, settles it. These refusals, and a different account Patreon later reports for a patron's own link (`discord_differs`), are the only Link Patreon records staff act on. Two sign-ins racing for the same account end with one link and one refusal.
 
 ### Privacy and security
 
