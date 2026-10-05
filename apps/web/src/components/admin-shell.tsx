@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 import { AdminSidebar, ServerSelectionPrompt } from "~/components/admin-sidebar";
+import { AdminServerProvider } from "~/components/admin-server-context";
 import { BackendStatus } from "~/components/backend-status";
 import { Button } from "~/components/ui/button";
 import { Separator } from "~/components/ui/separator";
@@ -136,7 +137,7 @@ export function AdminShell({ user, children }: { user: Staff; children: ReactNod
           ) : !selectedServer ? (
             <ServerSelectionPrompt serverList={serverList} invalid={invalidSelection} />
           ) : (
-            children
+            <AdminServerProvider server={selectedServer}>{children}</AdminServerProvider>
           )}
         </main>
       </SidebarInset>

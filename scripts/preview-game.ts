@@ -96,9 +96,9 @@ export function createPreviewGame(
       })),
     );
   const factions = [
-    { code: "RED", name: "Valkyra", colorHex: "#D86060", score: 18420 },
-    { code: "BLU", name: "Lonestar", colorHex: "#5B95D8", score: 14800 },
-    { code: "GRN", name: "Manticore", colorHex: "#7BC462", score: 12600 },
+    { code: "RED", name: "Valkyra", colorHex: "#D86060", score: 82 },
+    { code: "BLU", name: "Lonestar", colorHex: "#5B95D8", score: 64 },
+    { code: "GRN", name: "Manticore", colorHex: "#7BC462", score: 47 },
   ];
   const bans: { steamId: string; reason: string; bannedBy: string; bannedAtUtc: string }[] = [
     {
@@ -197,6 +197,7 @@ export function createPreviewGame(
             current: previewMode === "pre-round" ? 1 : previewMode === "full-server" ? 100 : players.length,
             max: 100,
           },
+          scoreCap: 100,
           factionScores: factions.map(({ name, colorHex, score }, index) => ({
             name,
             colorHex,
