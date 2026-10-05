@@ -24,6 +24,7 @@ import {
 } from "./policy";
 import { ManualMember } from "./manual-member";
 import { PatreonImport } from "./patreon-sync";
+import { AddPaypalSupporter } from "./paypal-form";
 import type {
   AutomationStatus,
   Supporter,
@@ -580,7 +581,7 @@ function AutomationStatusLine({ automation }: { automation: AutomationStatus | u
         <p className="muted">
           {idle && "Patreon is not configured, so nothing is matched automatically. "}
           {founderAuto
-            ? `Gramps records a Patreon founder promise itself only when the Discord account came from Patreon, a SteamID with nothing to check is linked, and the first Patreon payment qualifies and has stood for ${hold} hours, the wait for refunds. Staff record every other founder promise the founder rule allows.`
+            ? `Gramps records Patreon founders with Discord linked, ${hold} hours after their first payment.`
             : `Automatic founder recording is off. Choose the “Would be recorded automatically” filter to see what it would record; staff record founder promises. Switched on, it waits ${hold} hours after the first payment for refunds.`}
           {steamFill
             ? " Gramps copies an empty SteamID on a Patreon record from the Discord account’s approved whitelist application when nothing about it needs checking."
@@ -743,6 +744,12 @@ function AdminSupporters() {
         >
           Record existing Patreon member
         </button>
+        <AddPaypalSupporter
+          unavailable={pageUnavailable}
+          policy={policy}
+          onRecorded={resource.refresh}
+          onOpen={setSelected}
+        />
       </div>
       <p className="filter-note">
         {search

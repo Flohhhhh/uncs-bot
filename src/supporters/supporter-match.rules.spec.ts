@@ -7,9 +7,13 @@ import {
 } from "./supporter-fixtures";
 import {
   applicationSteamMatch,
+  appliedSteamIds,
+  automaticBlockedMessages,
   automaticFounderBlocker,
+  heldOnAnotherRecord,
   sourceApplicationRevoked,
   supporterNextSteps,
+  type ApplicationFact,
   type MatchFacts,
   type MatchMember,
   type NextStepContext,
@@ -118,6 +122,76 @@ describe("the automatic founder rule", () => {
   it("accepts a Patreon Discord account, a valid SteamID and a settled first imported payment", () => {
     expect(automaticFounderBlocker(patreonDiscord, facts(), later)).toBeNull();
   });
+  describe("with only a Discord account", () => {
+    const discordOnly: MatchMember = { ...patreonDiscord, steamId: null, steamSource: null };
+    it("needs no SteamID", () => {
+      expect(automaticFounderBlocker(discordOnly, facts(), later)).toBeNull();
+      expect(automaticFounderBlocker(discordOnly, facts({ applications: [] }), later)).toBeNull();
+    });
+    it.each<[string, Partial<MatchFacts>]>([
+      ["names another SteamID", { applications: [application({ steamId: otherSteam })] }],
+      ["was approved without a recorded grant", { applications: [application({ whitelistGrant: null })] }],
+      ["is under review", { applications: [application({ status: "needs_review" })] }],
+      ["was revoked", { applications: [application({ status: "revoked", accessIntent: "revoke" })] }],
+      ["names a SteamID another account applied with", { applications: [application({ otherDiscordClaim: true })] }],
+      ["names a SteamID that was rejected before", { applications: [application({ rejectedBefore: true })] }],
+    ])("skips the SteamID checks when the application %s", (_name, change) => {
+      expect(automaticFounderBlocker(discordOnly, facts(change), later)).toBeNull();
+    });
+    it.each<[string, Partial<ApplicationFact>]>([
+      ["approved", {}],
+      ["pending", { status: "pending" }],
+      ["under review", { status: "needs_review" }],
+    ])(
+      "leaves it to staff when another supporter record holds the SteamID of an application that is %s",
+      (_name, change) => {
+        // That record may be the same person's, with its own founder promise or an earlier payment.
+        const held = facts({ applications: [application({ otherSupporter: true, ...change })] });
+        expect(heldOnAnotherRecord(held)).toBe(true);
+        expect(automaticFounderBlocker(discordOnly, held, later)).toBe("steam_on_another_record");
+      },
+    );
+    it.each(["declined", "revoked"] as const)(
+      "ignores a SteamID another record holds when the application naming it was %s",
+      (status) => {
+        const held = facts({ applications: [application({ otherSupporter: true, status })] });
+        expect(heldOnAnotherRecord(held)).toBe(false);
+        expect(automaticFounderBlocker(discordOnly, held, later)).toBeNull();
+      },
+    );
+    it("checks the Discord account before another record's SteamID", () => {
+      const held = facts({ applications: [application({ otherSupporter: true })] });
+      expect(automaticFounderBlocker({ ...discordOnly, discordSource: "staff" }, held, later)).toBe(
+        "discord_not_from_patreon",
+      );
+    });
+    it.each([
+      ["a staff-entered Discord account", { discordSource: "staff" }, {}, "discord_not_from_patreon"],
+      ["Patreon reporting no account", { patreonDiscordId: null }, {}, "discord_differs"],
+      [
+        "the account reported for another patron",
+        {},
+        { discordReportedForOtherPatron: true },
+        "discord_reported_for_other_patron",
+      ],
+      ["no imported first payment", {}, { automatic: null }, "no_patreon_payment"],
+      ["a refunded latest charge", { lastChargeStatus: "Refunded" }, {}, "charge_reversed"],
+      [
+        "an earlier payment on another record",
+        {},
+        { automatic: { payment: paymentFixture(), earlier: false, earlierOtherRecord: true } },
+        "earlier_payment_other_record",
+      ],
+    ] as const)("still refuses %s", (_name, member, factChange, reason) => {
+      expect(automaticFounderBlocker({ ...discordOnly, ...member }, facts(factChange), later)).toBe(reason);
+    });
+    it("still waits out the hold", () => {
+      const paidAt = Date.parse(paymentFixture().paidAt);
+      expect(automaticFounderBlocker(discordOnly, facts(), { now: paidAt + 3_600_000, holdHours: 72 })).toBe(
+        "payment_too_recent",
+      );
+    });
+  });
   it.each([
     ["a PayPal record", { provider: "paypal" }, {}, "not_patreon"],
     ["no Discord account", { discordId: null, discordSource: null }, {}, "no_discord"],
@@ -131,8 +205,8 @@ describe("the automatic founder rule", () => {
       { discordReportedForOtherPatron: true },
       "discord_reported_for_other_patron",
     ],
-    ["no SteamID", { steamId: null, steamSource: null }, {}, "no_steam"],
-    ["an invalid SteamID", { steamId: "76561190000000001" }, {}, "no_steam"],
+    // The staff founder rule refuses a linked SteamID that is not a valid player ID with this same reason.
+    ["an invalid SteamID", { steamId: "76561190000000001" }, {}, "no_identity"],
     ["no imported first payment", {}, { automatic: null }, "no_patreon_payment"],
     [
       "a refunded latest charge",
@@ -195,6 +269,56 @@ describe("the automatic founder rule", () => {
           later,
         ),
       ).toBe("steam_shared");
+    });
+  });
+  describe("another SteamID the Discord account applied with", () => {
+    // The approved application's SteamID is clean. A second application, on another server, names a SteamID that
+    // another supporter record holds.
+    const elsewhere = (change: Partial<ApplicationFact> = {}) =>
+      facts({
+        applications: [
+          application(),
+          application({ id: "b2", serverId: "event", steamId: otherSteam, status: "pending", ...change }),
+        ],
+      });
+    const held = elsewhere({ otherSupporter: true });
+    const discordOnly: MatchMember = { ...patreonDiscord, steamId: null, steamSource: null };
+    const copied: MatchMember = { ...patreonDiscord, steamSource: "application", steamApplicationId: application().id };
+    it("leaves the founder to staff before and after the SteamID fill, and for a SteamID staff linked", () => {
+      // The fill would copy the approved SteamID: the pending application does not stop it.
+      expect(applicationSteamMatch(held.applications)).toMatchObject({ reason: null, steamId });
+      for (const member of [discordOnly, copied, patreonDiscord]) {
+        expect(heldOnAnotherRecord(held, member.steamId)).toBe(true);
+        expect(automaticFounderBlocker(member, held, later)).toBe("steam_on_another_record");
+        expect(automaticFounderBlocker(member, elsewhere(), later)).toBeNull();
+      }
+    });
+    it.each(["declined", "revoked"] as const)("ignores one named only by a %s application", (status) => {
+      for (const member of [discordOnly, copied, patreonDiscord])
+        expect(automaticFounderBlocker(member, elsewhere({ otherSupporter: true, status }), later)).toBeNull();
+    });
+    it("leaves a holder of the linked SteamID itself to the founder checks, which compare that SteamID", () => {
+      const sameSteam = facts({ applications: [application({ otherSupporter: true })] });
+      expect(heldOnAnotherRecord(sameSteam, steamId)).toBe(false);
+      // A SteamID staff linked: the staff founder rule sees the other record's founder promise and earlier payment.
+      expect(automaticFounderBlocker(patreonDiscord, sameSteam, later)).toBeNull();
+      // A SteamID copied from the application is still refused by the SteamID rule.
+      expect(automaticFounderBlocker(copied, sameSteam, later)).toBe("steam_on_another_record");
+    });
+    it("checks a linked SteamID's own alerts first", () => {
+      expect(automaticFounderBlocker(patreonDiscord, { ...held, linkedSteamShared: true }, later)).toBe("steam_shared");
+    });
+    it("lists the SteamIDs whose holders are checked: applied with, not declined or revoked, not the linked one", () => {
+      const applications = [
+        application({ steamId: otherSteam, status: "pending" }),
+        application({ id: "b2", serverId: "event" }),
+        application({ id: "b3", serverId: "east" }),
+        application({ id: "b4", serverId: "west", steamId: "76561198000000003", status: "declined" }),
+        application({ id: "b5", serverId: "north", steamId: "76561198000000004", status: "revoked" }),
+      ];
+      expect(appliedSteamIds({ applications })).toEqual([steamId, otherSteam]);
+      expect(appliedSteamIds({ applications }, steamId)).toEqual([otherSteam]);
+      expect(appliedSteamIds({ applications: [] })).toEqual([]);
     });
   });
   it("waits the configured hours after the payment", () => {
@@ -292,6 +416,13 @@ describe("next steps on the Supporters page", () => {
         }),
       ),
     ).toEqual([]);
+  });
+  it("asks for a Discord account in one short sentence while the import runs", () => {
+    expect(supporterNextSteps(supporterFixture(), on)[0]).toEqual({
+      code: "connect_discord_in_patreon",
+      area: "discord",
+      message: "Ask the patron to connect Discord on Patreon, or link it here.",
+    });
   });
   it.each([
     ["the import fills it in", supporterFixture(), on, "connect_discord_in_patreon"],
@@ -409,6 +540,47 @@ describe("next steps on the Supporters page", () => {
     ).toEqual(["linked_steam_shared"]);
     expect(codes(ready())).not.toContain("linked_steam_shared");
   });
+  it("says Gramps records a founder who has only a Discord account, and still asks for the SteamID", () => {
+    const discordOnly = ready({ steamId: null, steamSource: null, identityState: "partial" });
+    expect(codes(discordOnly)).toEqual(["steam_ready_automatic", "founder_ready_automatic"]);
+    expect(codes(discordOnly, off)).toEqual(["steam_available", "founder_ready_automatic_off"]);
+    const none = { ...ready().match, steam: steamMatch("no_application") };
+    expect(codes(ready({ steamId: null, steamSource: null, match: none }))).toEqual([
+      "no_whitelist_application",
+      "founder_ready_automatic",
+    ]);
+  });
+  it("leaves a founder to staff when another record holds the SteamID the Discord account applied with", () => {
+    const steps = supporterNextSteps(
+      ready({
+        steamId: null,
+        steamSource: null,
+        automaticBlockedReason: "steam_on_another_record",
+        match: { ...ready().match, steam: steamMatch("steam_on_another_record") },
+      }),
+      on,
+    );
+    expect(steps.map((step) => step.code)).toEqual(["steam_on_another_record", "founder_ready_staff"]);
+    expect(steps[0].message).toContain("Check both records.");
+    expect(steps[1].message).toBe(
+      "Ready for staff to record. Not automatic: Another supporter record holds a SteamID this Discord account applied with.",
+    );
+    // With a SteamID linked there is no SteamID step, so the reason has to stand on its own.
+    const linked = supporterNextSteps(ready({ automaticBlockedReason: "steam_on_another_record" }), on);
+    expect(linked).toEqual([expect.objectContaining({ code: "founder_ready_staff", message: steps[1].message })]);
+    expect(automaticBlockedMessages.steam_on_another_record).not.toContain("this SteamID");
+  });
+  it("gives staff a task when a founder with no SteamID applied with this record's SteamID", () => {
+    const steps = supporterNextSteps(ready({ founderBlockedReason: "steam_applied_by_founder" }), on);
+    expect(steps).toEqual([
+      {
+        code: "founder_steam_applied_by_founder",
+        area: "founder",
+        message:
+          "A founder with no SteamID linked applied for the whitelist with this SteamID. Link that founder's SteamID first.",
+      },
+    ]);
+  });
   it("tells automatic recording, recording with automation off and staff recording apart", () => {
     expect(codes(ready())).toEqual(["founder_ready_automatic"]);
     expect(codes(ready(), off)).toEqual(["founder_ready_automatic_off"]);
@@ -447,9 +619,25 @@ describe("next steps on the Supporters page", () => {
       }),
       on,
     );
-    expect(euro.at(-1)!.message).toContain("EUR payment");
-    // Another currency needs a staff decision, so it stays a founder task rather than a note.
+    expect(euro.at(-1)!.message).toBe(
+      "This EUR payment is not confirmed as US$5 or more. Check the patron's tier on Patreon.",
+    );
+    // Another currency is something staff can check, so it stays a founder task rather than a note.
     expect(euro.at(-1)!.area).toBe("founder");
+    // PayPal has no tiers to check.
+    const paypal = supporterNextSteps(
+      ready({
+        provider: "paypal",
+        founderBlockedReason: "below_minimum",
+        latestPayment: paymentFixture({ source: "paypal", currency: "CAD" }),
+        founderEligiblePayment: null,
+      }),
+      on,
+    );
+    expect(paypal.at(-1)).toMatchObject({
+      area: "founder",
+      message: "This CAD payment is not confirmed as US$5 or more.",
+    });
   });
   it("asks for a Discord account for a founder without one", () => {
     expect(

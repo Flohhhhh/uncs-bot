@@ -47,6 +47,18 @@ A crash or database completion failure can leave `processing`. Staff can recover
 
 Declining an application never removes an existing whitelist entry. Existing manual whitelist membership remains unchanged by merely submitting or declining a request.
 
+## Approving several at once
+
+On the Applications page staff can tick `pending` requests, or use **Select all pending** for the shown list, and press **Approve N**. One dialog lists each Discord name and SteamID with one shared reason. This is a dashboard feature only: there is no bulk route. The dashboard sends the same `POST …/applications/:id/approve` for each request, one at a time, oldest first, each with its own review ID and only `{id, reason}`. Every server check still applies to every request.
+
+- Only `pending` requests can be ticked. `processing` and `needs_review` keep their single review and recheck.
+- Approvals are paced. The pause is at least 2.2 seconds, 4 seconds while the game's request allowance is unknown, and longer when the game advertises an allowance, so a batch uses at most half of it (six game requests an approval). The first approval waits until the dialog has been open 1.1 seconds. This keeps a batch clear of the one-second action spacing and under 30 changes a minute.
+- A 429 is answered before the server reads the request. The dashboard waits as long as `Retry-After` says (60 seconds when it says nothing), then sends the same approval again with the same review ID, up to three times. If the server is still busy, or asks for more than five minutes, the batch stops and that request stays selected.
+- The batch stops at the first answer that is not a confirmed approval (`approved` with an `applied` outcome), and on **Stop**. A request already sent finishes with its real result. Nothing after it is sent, and those requests stay selected.
+- The summary counts only confirmed approvals as approved. Anything else is listed as **Needs a look** with the server's message and keeps the single review.
+- The open dialog pauses the 20-second refresh and blocks leaving the page. The batch keeps its own copy of the list, so a refresh cannot reorder or repeat it.
+- A batch never sends `existingAccessConfirmed`. With `WHITELIST_APPLICATION_EXISTING_CONFIRMATION_REQUIRED=true`, a request for a SteamID that is already whitelisted is refused with 409, shown as **Needs a look**, and stays `pending` for its own review.
+
 ## Statuses
 
 `pending` → `processing` → `approved` or `needs_review`; `declined`; and, for revocation, `revoking` → `revoked`. Applicants see `revoking` as `processing` and see `revoked` as their status; the website needs its own copy for `revoked`. Each application also records `accessIntent` (`grant` or `revoke`, which a recheck uses), `whitelistGrant` (`granted` for a real grant, `existing` for a registered existing entry, or null when not recorded) and `revokedAt`. The applicant view never includes these fields or any whitelist membership.

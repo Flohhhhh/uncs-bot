@@ -1,7 +1,7 @@
 import { Injectable, Logger, type OnApplicationBootstrap, type OnModuleDestroy } from "@nestjs/common";
 import { DiscordRolesService } from "../discord-roles/discord-roles.service";
 import { EnvService } from "../env/env.service";
-import { PatreonApiError, PatreonClient } from "./patreon.client";
+import { PatreonApiError, PatreonClient, type PatreonTierPrices } from "./patreon.client";
 import { SupporterMatchService } from "./supporter-match.service";
 import { SupportersStore, type FounderReview } from "./supporters.store";
 
@@ -57,6 +57,18 @@ export type PatreonSyncStatus = {
   /** Members whose returned pledge history may be incomplete, so no first payment was derived. */
   truncated: number;
   revokedPayments: number;
+  /** Members with at least one completed payment in the history Patreon returned. */
+  paidMembers: number;
+  /** Members Patreon reported a Discord account for, linked or not. */
+  discordReported: number;
+  /** Completed payments in another currency that count as US$5 or more by their tier's price. */
+  tierConfirmed: number;
+  /** How many of those this sync counted for the first time. */
+  tierConfirmedNew: number;
+  /** Completed payments in another currency that are still not confirmed as US$5 or more. */
+  tierUnconfirmed: number;
+  /** Whether this sync read tier prices (see PatreonTierPrices). */
+  tierPrices: PatreonTierPrices;
   memberListComplete: boolean;
   intervalMinutes: number;
   nextAttemptAt: string | null;
@@ -73,6 +85,12 @@ type Counts = Pick<
   | "conflicts"
   | "truncated"
   | "revokedPayments"
+  | "paidMembers"
+  | "discordReported"
+  | "tierConfirmed"
+  | "tierConfirmedNew"
+  | "tierUnconfirmed"
+  | "tierPrices"
   | "memberListComplete"
   | "conflictDetails"
   | "founderReviews"
@@ -86,6 +104,12 @@ const emptyCounts = (): Counts => ({
   conflicts: 0,
   truncated: 0,
   revokedPayments: 0,
+  paidMembers: 0,
+  discordReported: 0,
+  tierConfirmed: 0,
+  tierConfirmedNew: 0,
+  tierUnconfirmed: 0,
+  tierPrices: "not_requested",
   memberListComplete: true,
   conflictDetails: [],
   founderReviews: [],
@@ -218,18 +242,27 @@ export class PatreonSyncService implements OnApplicationBootstrap, OnModuleDestr
     if (!campaignId || !token || this.stopped || Date.now() < this.blockedUntil) return;
     this.lastAttemptAt = Date.now();
     try {
-      const { members, complete } = await this.client.members(campaignId, token);
+      const { members, complete, tierPrices, retryAfterMs } = await this.client.members(campaignId, token);
+      // Patreon rate-limited the tier request only. The members were read, so this import goes on and the next
+      // one waits.
+      if (retryAfterMs) this.blockedUntil = Date.now() + retryAfterMs;
       const counts = emptyCounts();
       counts.members = members.length;
       counts.memberListComplete = complete;
+      counts.tierPrices = tierPrices;
       for (const member of members) {
         if (this.stopped) break;
         if (!member.historyComplete) counts.truncated++;
+        if (member.discordId) counts.discordReported++;
+        if (member.events.some((event) => event.paymentStatus === "Paid")) counts.paidMembers++;
         const result = await this.store.importApiMember(campaignId, member, new Date());
         if (result.created) counts.newMembers++;
         if (result.updated) counts.updated++;
         counts.payments += result.payments;
         counts.revokedPayments += result.revoked;
+        counts.tierConfirmed += result.tierConfirmed;
+        counts.tierConfirmedNew += result.tierConfirmedNew;
+        counts.tierUnconfirmed += result.tierUnconfirmed;
         if (result.discordLinked) counts.discordLinks++;
         // An unchanged record queues nothing; the six-hour role safety pass covers time-based expiry.
         if (
@@ -253,6 +286,9 @@ export class PatreonSyncService implements OnApplicationBootstrap, OnModuleDestr
       // and keeps its own status, so it cannot fail the sync.
       await this.match.sweep("sync");
       counts.founderReviews = await this.store.founderReviews(campaignId);
+      // Logged once when the tier result changes, so a deploy shows whether other-currency payments now count.
+      const tierChanged =
+        counts.tierUnconfirmed !== this.counts.tierUnconfirmed || counts.tierPrices !== this.counts.tierPrices;
       this.counts = counts;
       this.lastSuccessAt = Date.now();
       this.tokenRejected = false;
@@ -265,10 +301,12 @@ export class PatreonSyncService implements OnApplicationBootstrap, OnModuleDestr
         counts.payments ||
         counts.revokedPayments ||
         counts.discordLinks ||
-        counts.conflicts
+        counts.conflicts ||
+        counts.tierConfirmedNew ||
+        tierChanged
       )
         this.logger.log(
-          `Patreon sync: ${counts.members} members, ${counts.newMembers} new, ${counts.updated} updated, ${counts.payments} payments, ${counts.revokedPayments} payments unverified, ${counts.discordLinks} Discord links, ${counts.conflicts} conflicts.`,
+          `Patreon sync: ${counts.members} members, ${counts.newMembers} new, ${counts.updated} updated, ${counts.payments} payments, ${counts.revokedPayments} payments unverified, ${counts.discordLinks} Discord links, ${counts.conflicts} conflicts, ${counts.discordReported} Discord accounts reported, ${counts.tierConfirmed} other-currency payments counted by tier price (${counts.tierConfirmedNew} new), ${counts.tierUnconfirmed} not confirmed, tier prices ${counts.tierPrices}.`,
         );
     } catch (error) {
       // Only fixed messages are recorded: errors may carry request details that must stay private.

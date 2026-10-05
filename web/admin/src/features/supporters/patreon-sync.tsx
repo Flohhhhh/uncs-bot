@@ -56,11 +56,18 @@ function LastImport({ sync }: { sync: PatreonSyncStatus }) {
     ["Updated members", sync.updated],
     ["New payments", sync.payments],
     ["Payments no longer marked paid", sync.revokedPayments],
+    ["Discord accounts from Patreon", sync.discordReported],
     ["Discord accounts linked", sync.discordLinks],
     ["Discord conflicts", sync.conflicts],
     ["Incomplete payment histories", sync.truncated],
     ["Founder records to recheck", sync.founderReviews.length],
   ];
+  // Payments in another currency count by their tier's price. Shown only when the campaign has any.
+  if (sync.tierConfirmed + sync.tierUnconfirmed > 0)
+    counts.push(
+      ["Other-currency payments counted", sync.tierConfirmed],
+      ["Other-currency payments not confirmed", sync.tierUnconfirmed],
+    );
   return (
     <details className="status-about">
       <summary>Last import</summary>
@@ -216,6 +223,8 @@ export function PatreonImport({
   // longer marked as the first payment, and Discord conflicts.
   const founderRechecks = show && success ? sync.founderReviews.length : 0;
   const conflicts = show && success ? sync.conflicts : 0;
+  // Patreon shares a patron's Discord account only once the creator sets up its Discord benefit.
+  const discordNotShared = Boolean(show && success) && sync.paidMembers > 0 && sync.discordReported === 0;
   const tone =
     unavailable || sync.tokenRejected || sync.lastError || founderRechecks > 0 || conflicts > 0
       ? "attention"
@@ -300,6 +309,12 @@ export function PatreonImport({
             <strong>Patreon import needs attention.</strong> {sync.lastError}
           </p>
         ) : null)}
+      {discordNotShared && (
+        <p className="notice info">
+          <strong>Patreon is not sharing Discord accounts.</strong> Connect Discord on Patreon and add it as a benefit
+          on each paid tier.
+        </p>
+      )}
       {shown && (
         <p className={`notice ${shown.ok ? "success" : "warning"}`} role="status">
           {shown.message}

@@ -128,6 +128,12 @@ function syncStatus(overrides: Partial<PatreonSyncStatus> = {}): PatreonSyncStat
     conflicts: 0,
     truncated: 0,
     revokedPayments: 0,
+    paidMembers: 10,
+    discordReported: 1,
+    tierConfirmed: 0,
+    tierConfirmedNew: 0,
+    tierUnconfirmed: 0,
+    tierPrices: "not_requested",
     memberListComplete: true,
     intervalMinutes: 30,
     nextAttemptAt: minutesFromNow(25),
@@ -893,8 +899,10 @@ it("words switched-on matching by the server's rule and says when Patreon leaves
   expect(within(line).getByText("Automatic founders on")).toBeInTheDocument();
   const detail = line.nextElementSibling!;
   expect(detail).toHaveTextContent("Patreon is not configured, so nothing is matched automatically.");
-  expect(detail).toHaveTextContent("has stood for 48 hours");
-  expect(detail).not.toHaveTextContent("Staff can always record one");
+  expect(detail).toHaveTextContent(
+    "Gramps records Patreon founders with Discord linked, 48 hours after their first payment.",
+  );
+  expect(detail).not.toHaveTextContent(/SteamID with nothing to check|Staff can always record one/);
 });
 
 it.each([
@@ -1187,8 +1195,79 @@ it("shows the Patreon import as one status line with the last import's details o
   ).not.toBeInTheDocument();
   fireEvent.click(screen.getByText("Last import"));
   expect(screen.getByText("New payments").nextElementSibling).toHaveTextContent("3");
+  expect(screen.getByText("Discord accounts from Patreon").nextElementSibling).toHaveTextContent("1");
   expect(screen.getByText("Discord conflicts", { selector: "dt" }).nextElementSibling).toHaveTextContent("0");
   expect(screen.queryByRole("heading", { name: /Discord conflicts|Founder records/ })).not.toBeInTheDocument();
+  // Every payment is in US dollars, so the other-currency counts stay out of the way.
+  expect(screen.queryByText(/Other-currency payments/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/not sharing Discord accounts/)).not.toBeInTheDocument();
+});
+
+it("shows how many payments in another currency the last import counted by tier price", async () => {
+  request.mockResolvedValue(
+    data(supporter, syncStatus({ tierConfirmed: 2, tierConfirmedNew: 2, tierUnconfirmed: 1, tierPrices: "read" })),
+  );
+  render(page());
+  await screen.findByRole("button", { name: "Sync now" });
+  // Counts only: nothing here needs attention on the status line.
+  expect(importLine()).toHaveClass("status-line", "good");
+  fireEvent.click(screen.getByText("Last import"));
+  expect(screen.getByText("Other-currency payments counted").nextElementSibling).toHaveTextContent("2");
+  expect(screen.getByText("Other-currency payments not confirmed").nextElementSibling).toHaveTextContent("1");
+});
+
+it("shows the other-currency counts when none could be counted", async () => {
+  request.mockResolvedValue(data(supporter, syncStatus({ tierUnconfirmed: 2, tierPrices: "unavailable" })));
+  render(page());
+  await screen.findByRole("button", { name: "Sync now" });
+  fireEvent.click(screen.getByText("Last import"));
+  expect(screen.getByText("Other-currency payments counted").nextElementSibling).toHaveTextContent("0");
+  expect(screen.getByText("Other-currency payments not confirmed").nextElementSibling).toHaveTextContent("2");
+});
+
+it("says in two short sentences when Patreon shares no Discord account for paying members", async () => {
+  request.mockResolvedValue(data(supporter, syncStatus({ members: 16, paidMembers: 14, discordReported: 0 })));
+  render(page());
+  await screen.findByRole("button", { name: "Sync now" });
+  const notice = screen.getByText("Patreon is not sharing Discord accounts.").closest("p")!;
+  expect(notice).toHaveClass("notice", "info");
+  expect(notice).toHaveTextContent(
+    /^Patreon is not sharing Discord accounts\. Connect Discord on Patreon and add it as a benefit on each paid tier\.$/,
+  );
+  // It explains a setup step; the import itself worked.
+  expect(importLine()).toHaveClass("status-line", "good");
+  expect(screen.queryByText(/Patreon import needs attention/)).not.toBeInTheDocument();
+  fireEvent.click(screen.getByText("Last import"));
+  expect(screen.getByText("Discord accounts from Patreon").nextElementSibling).toHaveTextContent("0");
+});
+
+it.each<[string, Partial<PatreonSyncStatus>]>([
+  ["Patreon shared one", { paidMembers: 14, discordReported: 1 }],
+  ["no member has paid", { paidMembers: 0, discordReported: 0 }],
+  ["nothing has synced yet", { paidMembers: 0, discordReported: 0, lastSuccessAt: null, lastAttemptAt: null }],
+  [
+    "the import is not configured",
+    { configured: false, paidMembers: 14, discordReported: 0, lastSuccessAt: null, lastAttemptAt: null },
+  ],
+])("says nothing about sharing Discord accounts when %s", async (_name, overrides) => {
+  request.mockResolvedValue(data(supporter, syncStatus(overrides)));
+  render(page());
+  await screen.findByRole("button", { name: "Review supporter" });
+  expect(screen.queryByText(/not sharing Discord accounts/)).not.toBeInTheDocument();
+});
+
+it("keeps the Discord sharing notice out of a status that could not be read", () => {
+  render(
+    <AdminContext.Provider value={context}>
+      <PatreonImport
+        sync={syncStatus({ paidMembers: 14, discordReported: 0 })}
+        unavailable
+        disabled={false}
+        onSynced={vi.fn()}
+      />
+    </AdminContext.Provider>,
+  );
+  expect(screen.queryByText(/not sharing Discord accounts/)).not.toBeInTheDocument();
 });
 
 it("puts founder records to recheck and Discord conflicts on the status line", async () => {
