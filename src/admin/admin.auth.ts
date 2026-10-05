@@ -42,9 +42,15 @@ export class AdminAuth {
     private readonly store: AdminStore,
   ) {}
 
-  private cookieOptions() {
+  private cookieOptions(path = "/") {
     const secure = this.settings.get().secure;
-    return { httpOnly: true, secure, sameSite: "lax" as const, path: secure ? "/" : "/admin" };
+    // Next's /sign-in route also needs the browser's session cookie for its
+    // server-side session check, so the cookie must cover the whole app path.
+    return { httpOnly: true, secure, sameSite: "lax" as const, path };
+  }
+
+  private clearLegacyPathCookie(res: Response, kind: "oauth" | "session") {
+    if (!this.settings.get().secure) res.clearCookie(this.cookieName(kind), this.cookieOptions("/admin"));
   }
 
   private cookieName(kind: "oauth" | "session") {
@@ -155,6 +161,7 @@ export class AdminAuth {
     const config = this.settings.get();
     const [nonce, issued, signature, extra] = cookie(req, this.cookieName("oauth")).split(".");
     res.clearCookie(this.cookieName("oauth"), this.cookieOptions());
+    this.clearLegacyPathCookie(res, "oauth");
     const expected = createHmac("sha256", config.secret).update(`${nonce}.${issued}`).digest("hex");
     const age = Date.now() - Number(issued);
     if (
@@ -194,6 +201,7 @@ export class AdminAuth {
       );
     await this.role(identity.id, true);
     const previousToken = cookie(req, this.cookieName("session"));
+    this.clearLegacyPathCookie(res, "session");
     if (/^[a-f0-9]{64}$/.test(previousToken)) await this.store.deleteSession(hash(previousToken));
     const token = randomBytes(32).toString("hex");
     await this.store.createSession({
@@ -246,6 +254,8 @@ export class AdminAuth {
     await this.store.deleteSession(hash(cookie(req, this.cookieName("session"))));
     res.clearCookie(this.cookieName("session"), this.cookieOptions());
     res.clearCookie(this.cookieName("oauth"), this.cookieOptions());
+    this.clearLegacyPathCookie(res, "session");
+    this.clearLegacyPathCookie(res, "oauth");
     return { ok: true };
   }
 }

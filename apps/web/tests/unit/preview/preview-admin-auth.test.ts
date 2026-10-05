@@ -21,7 +21,7 @@ test("session preview login, reload, CSRF, logout and stale-cookie rejection", (
   const response = res();
   auth.login(response);
   const [name, token, options] = (response.cookie as ReturnType<typeof vi.fn>).mock.calls[0];
-  expect(options).toMatchObject({ httpOnly: true, sameSite: "lax", path: "/admin" });
+  expect(options).toMatchObject({ httpOnly: true, sameSite: "lax", path: "/" });
   const cookie = `${name}=${token}`;
   const staff = auth.authenticate(req("GET", { cookie }));
   expect(auth.authenticate(req("GET", { cookie }))).toEqual(staff);

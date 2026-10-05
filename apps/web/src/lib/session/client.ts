@@ -1,15 +1,5 @@
 import { z } from "zod";
 
-export const staffSchema = z.object({
-  id: z.string().min(1),
-  name: z.string().min(1).max(100),
-  role: z.enum(["admin", "moderator", "viewer"]),
-  csrf: z.string().min(1),
-  demo: z.boolean().optional(),
-  gameMode: z.enum(["live", "sample"]).optional(),
-});
-export type Staff = z.infer<typeof staffSchema>;
-
 export class SessionError extends Error {
   constructor(readonly status: number) {
     super("The staff session could not be verified.");
@@ -30,10 +20,6 @@ async function sessionRequest(path: string, signal: AbortSignal, options: Reques
     throw new SessionError(response.status);
   }
   return response.json();
-}
-
-export async function readSession(signal: AbortSignal) {
-  return staffSchema.parse(await sessionRequest("/admin/api/me", signal));
 }
 
 export async function endSession(csrf: string, signal: AbortSignal) {

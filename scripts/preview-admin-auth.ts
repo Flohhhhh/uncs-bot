@@ -52,7 +52,8 @@ export class PreviewAdminIdentity {
         staff: { id: "preview", name: "UNC Staff", role: "admin", csrf: randomBytes(32).toString("hex"), demo: true },
         expires: Date.now() + lifetime,
       });
-      res.cookie(cookieName, token, { httpOnly: true, sameSite: "lax", path: "/admin", maxAge: lifetime });
+      res.clearCookie(cookieName, { httpOnly: true, sameSite: "lax", path: "/admin" });
+      res.cookie(cookieName, token, { httpOnly: true, sameSite: "lax", path: "/", maxAge: lifetime });
     }
     res.redirect("/admin");
   }
@@ -60,7 +61,10 @@ export class PreviewAdminIdentity {
     this.authenticate(req);
     const token = this.token(req);
     if (token) this.sessions.delete(token);
-    if (this.sessionMode) res.clearCookie(cookieName, { httpOnly: true, sameSite: "lax", path: "/admin" });
+    if (this.sessionMode) {
+      res.clearCookie(cookieName, { httpOnly: true, sameSite: "lax", path: "/" });
+      res.clearCookie(cookieName, { httpOnly: true, sameSite: "lax", path: "/admin" });
+    }
     return { ok: true };
   }
 }

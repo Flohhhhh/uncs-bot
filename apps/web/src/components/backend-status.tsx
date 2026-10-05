@@ -1,13 +1,9 @@
-"use client";
-
 import { CircleCheckIcon } from "lucide-react";
 
-import { useSession } from "~/components/session-provider";
 import { Badge } from "~/components/ui/badge";
+import type { Staff } from "~/lib/session/schema";
 
-export function BackendStatus() {
-  const { user } = useSession();
-  if (!user) return null;
+export function BackendStatus({ user }: { user: Staff }) {
   return (
     <span role="status" className="flex flex-wrap items-center gap-2">
       <Badge variant="secondary">

@@ -43,13 +43,12 @@ Next.js defaults to `http://127.0.0.1:4320` as its backend during development. A
 
 ## Implemented web authentication
 
-- `/sign-in` and `/access-denied` use the separate `(auth)` layout.
-- A shared session provider validates `GET /admin/api/me` with Zod. The contract is `id`, `name`, `role`, `csrf` and optional `demo`.
-- Identity and CSRF stay in memory. Session credentials use the backend's HttpOnly cookies and are never placed in local storage.
-- Sessions are checked on initial load, every 30 seconds while authenticated and visible, and on focus. Requests time out after ten seconds; stale responses are ignored.
-- The admin layout shows a loading skeleton while checking. A 401 clears staff data and redirects to sign-in; a 403 clears it and redirects to access denied. Connection errors or malformed responses hide protected content and offer retry.
-- The admin header shows display name, role, the local-preview label when applicable, and logout. The status indicator derives from this provider rather than running another polling loop.
-- Logout hides protected content and sends one `POST /admin/api/logout` with the session's CSRF header and same-origin credentials. Success or an already expired session returns to sign-in. Uncertain failures require manual retry and do not automatically repeat the POST.
+- `/sign-in` and `/access-denied` use the separate `(auth)` layout. The sign-in page checks the session on the server and renders the form directly when signed out.
+- The server-only `readServerSession()` helper forwards the incoming HttpOnly cookie to `GET /admin/api/me`, validates the `id`, `name`, `role`, `csrf` and optional `demo` contract, and disables caching.
+- The staff cookie uses `Path=/` so the server can check a session on both `/admin` and `/sign-in`; it remains host-only, HttpOnly and SameSite=Lax, and production uses Secure plus the `__Host-` prefix.
+- The admin layout redirects `401` to sign-in and `403` to access denied before rendering protected content. Backend failures fail closed and offer a retry.
+- There is no custom `SessionProvider`, client polling loop, or `AdminSessionGate`. Session data is passed from server components to the individual components that need it.
+- The admin header shows display name, role, and the local-preview label when applicable. Its logout button sends one `POST /admin/api/logout` with the session's CSRF header. Uncertain failures require a manual retry and do not automatically repeat the POST.
 
 The layout gate controls UI visibility. Nest remains the authorization boundary for every API request. Future server-side data fetching must verify authentication independently of the client layout.
 
@@ -89,12 +88,7 @@ The standalone preview remains useful for UI work without credentials.
 
 ## Verification and boundaries
 
-Completed verification:
-
-- 36 app-local unit tests under `apps/web/tests/unit/auth` and `apps/web/tests/unit/preview`, covering sessions, UI gating, logout, CSRF forwarding, mocked OAuth responses, and preview identity behavior.
-- Simulated browser login, admin reload, logout and direct-navigation protection.
-- Simulated access-denied and backend-unavailable browser states.
-- Web and backend builds, touched-file lint/typecheck, global formatting and whitespace checks.
+Verification from the initial auth implementation covered app-local auth/preview tests, simulated login and logout, protected navigation, access-denied and unavailable states, plus web/backend builds and repository checks. The current server-first auth structure is documented in [the auth overview](auth/overview.md); run the current app checks after changing this flow.
 
 A real Discord OAuth login against a configured development backend has **not** been verified end to end. Mocked OAuth tests and demo login do not substitute for that check.
 
