@@ -7,10 +7,12 @@ import {
 } from "@nestjs/common";
 import { z } from "zod";
 import { AdminAuth } from "../admin/admin.auth";
+import { AdminSettings } from "../admin/admin.settings";
 import { DiscordRolesService } from "../discord-roles/discord-roles.service";
 import { EnvService } from "../env/env.service";
 import type { Staff } from "../admin/admin.types";
 import { deploymentSecrets, PatreonSyncService } from "./patreon-sync.service";
+import { patronLinkSetupProblem } from "./patron-link-readiness";
 import { SupporterMatchService } from "./supporter-match.service";
 import { SupportersStore } from "./supporters.store";
 import { founderPolicy, patreonCampaign } from "./founder-policy";
@@ -45,6 +47,7 @@ export class SupportersService {
     private readonly patreonSync: PatreonSyncService,
     private readonly match: SupporterMatchService,
     private readonly auth: AdminAuth,
+    private readonly settings: AdminSettings,
   ) {}
   /** Lets the role service re-check this member. Fire-and-forget: a role problem never fails the request. */
   private notifyRoles(discordId: string | null | undefined) {
@@ -75,13 +78,20 @@ export class SupportersService {
   policy(): FounderPolicy {
     return founderPolicy(this.env);
   }
-  /** What the next-step text may promise: which automatic matching is on, and whether the import runs. */
+  /**
+   * What the next-step text may promise: which automatic matching is on, whether the import runs, and whether a
+   * patron can link their own Discord, which needs Link Patreon switched on and every setting it uses ready.
+   */
   private automation(): NextStepContext {
+    const importConfigured = this.patreonSync.configured();
     return {
       steamFill: this.env.get("SUPPORTER_AUTO_STEAM_FILL_ENABLED") === true,
       founderAuto: this.env.get("SUPPORTER_AUTO_FOUNDER_ENABLED") === true,
-      importConfigured: this.patreonSync.configured(),
+      importConfigured,
       holdHours: this.policy().automaticHoldHours ?? AUTO_FOUNDER_HOLD_HOURS_DEFAULT,
+      patronLink:
+        this.env.get("PATREON_LINK_ENABLED") === true &&
+        patronLinkSetupProblem(this.env, this.settings, importConfigured) === null,
     };
   }
   /**

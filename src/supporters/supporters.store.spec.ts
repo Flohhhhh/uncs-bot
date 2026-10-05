@@ -857,8 +857,36 @@ describe("supporter persistence and founder eligibility", () => {
     expect(statement.text).toContain("'steamSource', m.steam_source");
     expect(statement.text).toContain("'steamApplicationId', m.steam_application_id");
     expect(statement.text).toContain("WHEN m.discord_id IS NULL OR m.steam_id IS NULL THEN 'partial'");
-    expect(statement.text).toContain("WHEN m.discord_source = 'patreon' THEN 'patreon_linked' ELSE 'staff_linked'");
+    // A patron's own sign-in counts as linked from Patreon, like the import's link.
+    expect(statement.text).toContain(
+      "WHEN m.discord_source IN ('patreon', 'patron_signin') THEN 'patreon_linked' ELSE 'staff_linked'",
+    );
     expect(statement.text).toContain("'automatic', f.awarded_by LIKE 'system:%'");
+  });
+  it("shows the newest refused patron sign-in while it still holds and nothing later settled it", async () => {
+    const { store, query } = fixture();
+    await store.list("123", policy);
+    const [statement] = query.mock.calls[0];
+    expect(statement.text).toContain("'patronLinkConflict', (SELECT json_build_object('discordId', latest.discord_id");
+    expect(statement.text).toContain("refused.kind = 'patron-link-conflict'");
+    // A staff link or "Keep accounts" review, a Discord link, or the import moving the account off the record settles
+    // it, by the same rule as the once-a-day refusal record.
+    expect(statement.text).toContain(
+      "AND NOT EXISTS (SELECT 1 FROM supporter_actions settled WHERE settled.member_id = m.id\n            AND settled.kind IN ('link', 'review', 'patron-discord-link', 'patreon-discord-link', 'patreon-discord-moved') AND settled.created_at > refused.created_at)",
+    );
+    expect(statement.text).toContain("ORDER BY refused.created_at DESC, refused.id DESC LIMIT 1) latest");
+    // It leaves the page by itself once it no longer holds, judged as the sign-in judged it.
+    expect(statement.text).toContain(
+      "WHEN 'membership_linked' THEN m.discord_id IS NOT NULL AND m.discord_id <> latest.discord_id",
+    );
+    expect(statement.text).toContain(
+      "WHEN 'discord_linked' THEN m.discord_id IS NULL AND EXISTS (SELECT 1 FROM supporter_members holder\n              WHERE holder.provider = 'patreon' AND holder.campaign_id = m.campaign_id AND holder.id <> m.id\n              AND holder.discord_id = latest.discord_id)",
+    );
+    expect(statement.text).toContain(
+      "WHEN 'founder_tie' THEN m.discord_id IS NULL AND EXISTS (SELECT 1 FROM supporter_founders tie\n              JOIN supporter_members tie_member ON tie_member.id = tie.member_id\n              WHERE tie_member.id <> m.id AND tie_member.discord_id = latest.discord_id)",
+    );
+    // A patron's own link waits for nothing beyond the payment's refund window, so its time is never read.
+    expect(statement.text).not.toContain("patronLinkedAt");
   });
   it("reads whether a founder with no SteamID linked applied with the record's SteamID, by the shared expression", async () => {
     const { store, query } = fixture();

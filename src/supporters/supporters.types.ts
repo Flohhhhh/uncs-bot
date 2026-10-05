@@ -9,7 +9,7 @@ import type {
   SupporterSteamSource,
 } from "../database/supporters.schema";
 import { PATREON_REVERSED_CHARGE_STATUSES } from "./patreon.client";
-import type { AutomaticFounderBlockedReason, NextStep, SteamMatch } from "./supporter-match.rules";
+import type { AutomaticFounderBlockedReason, NextStep, PatronLinkConflict, SteamMatch } from "./supporter-match.rules";
 
 export const MAX_PATREON_BYTES = 65_536;
 const line = (maximum: number) =>
@@ -366,7 +366,8 @@ export type PaymentView = {
 };
 /**
  * How the two identities are linked: none, one of them, or both. `patreon_linked` means the Discord account came from
- * the patron's own Patreon connection; the SteamID is still a self-declared or staff-entered claim either way.
+ * the patron's own Patreon connection or the patron's own Discord and Patreon sign-in; the SteamID is still a
+ * self-declared or staff-entered claim either way.
  */
 export type SupporterIdentityState = "unlinked" | "partial" | "patreon_linked" | "staff_linked";
 export type SupporterView = {
@@ -387,6 +388,11 @@ export type SupporterView = {
   discordSource: SupporterDiscordSource | null;
   /** The Discord account Patreon last reported for this membership, linked or not. Patreon rows only. */
   patreonDiscordId: string | null;
+  /**
+   * The newest "Link Patreon" sign-in that matched this record but was refused, until a later staff link or review,
+   * or a later Discord link by the patron or the import, settles it. Null otherwise.
+   */
+  patronLinkConflict: PatronLinkConflict | null;
   steamId: string | null;
   /** Who made the SteamID link; null when unlinked, or for an older link that is not classified yet. */
   steamSource: SupporterSteamSource | null;

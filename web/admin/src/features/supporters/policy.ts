@@ -49,13 +49,15 @@ export function founderOffered(record: Supporter) {
   return founderReady(record) && !record.nextSteps.some((step) => OTHER_RECORD_CODES.has(step.code));
 }
 
-/** Where the Discord account came from. */
+/** Where the Discord account came from. The patron links one themselves by signing in with Link Patreon. */
 export const discordSource = (record: Supporter) =>
   record.discordSource === "patreon"
     ? "From Patreon"
-    : record.discordSource === "staff"
-      ? "Added by staff"
-      : "Added earlier";
+    : record.discordSource === "patron_signin"
+      ? "Linked by patron"
+      : record.discordSource === "staff"
+        ? "Added by staff"
+        : "Added earlier";
 /** Where the SteamID came from. */
 export const steamSource = (record: Supporter) =>
   record.steamSource === "application"
@@ -167,12 +169,23 @@ export function rowState(record: Supporter): RowState {
 }
 export const stateRank: Record<RowState["state"], number> = { needs: 0, waiting: 1, set: 2 };
 
-/** Discord steps that mean the linked or reported account needs a person to check it. */
+/**
+ * Discord steps that mean the linked or reported account needs a person to check it, including a patron's own
+ * Link Patreon sign-in that Gramps refused because it would replace a link.
+ */
 const DISCORD_CHECK_CODES = new Set([
   "discord_on_another_record",
   "discord_differs",
   "discord_reported_for_other_patron",
+  "patron_link_conflict",
 ]);
+/**
+ * A patron's Link Patreon sign-in Gramps refused, and it still holds. Staff settle it by changing the accounts, or by
+ * keeping them as they are when the record is right. It leaves by itself once it no longer holds.
+ */
+export function patronLinkRefused(record: Supporter) {
+  return record.nextSteps.some((step) => step.code === "patron_link_conflict");
+}
 export type DiscordCell = { text: string; warn: boolean; detail?: string; rank: number };
 /**
  * The table's Discord column. The first match wins, and `rank` sorts problems first. Only a PayPal record misses an
@@ -262,6 +275,11 @@ export function reviewInput(
       ...(steamChanged ? { steamId } : {}),
       ...(steamConfirmed ? { steamConfirmed: true as const } : {}),
     };
+  }
+  // Keeping the accounts sends nothing else: the record stays as it is.
+  if (decision === "review") {
+    if (!patronLinkRefused(record)) throw new Error("Nothing on this record needs the accounts kept.");
+    return base;
   }
   if (decision === "payment") {
     const paidAt = new Date(String(values.get("paidAt") ?? ""));

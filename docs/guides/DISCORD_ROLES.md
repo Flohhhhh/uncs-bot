@@ -93,7 +93,7 @@ The dashboard's **Discord roles** page (administrators only) shows each check wi
 ## When roles are checked
 
 - **Startup:** with the feature on, Gramps waits for Discord to connect and then checks everyone with a reason to hold or lose a role. This is also the **backfill**: the first start after enabling adds the UNC role for every existing approved UNC application, the Founder role for every founder with a linked Discord account and, when configured, the Supporter role for everyone who supports right now.
-- **Events:** an approval, recheck or revocation, a founder award (by staff, or recorded automatically), a Discord link on a supporter (by staff or filled in by the Patreon import), a staff receipt, a new PayPal record, a Patreon import that changed a linked supporter's record, a new signed Patreon webhook for a linked supporter, or someone joining the server queues a check for that person (batched for two seconds).
+- **Events:** an approval, recheck or revocation, a founder award (by staff, or recorded automatically), a Discord link on a supporter (by staff, filled in by the Patreon import, or made by the patron with [Link Patreon](PATREON_SUPPORTERS.md#link-patreon-patrons-link-their-own-discord)), a staff receipt, a new PayPal record, a Patreon import that changed a linked supporter's record, a new signed Patreon webhook for a linked supporter, or someone joining the server queues a check for that person (batched for two seconds).
 - **Safety pass:** a full check every six hours. It also covers anyone an event check missed, Supporter roles whose 7- or 31-day window ran out, and a Supporter role left on an account after staff moved a supporter record's Discord link to another account.
 - **Staff:** the reconcile endpoint above.
 

@@ -34,6 +34,7 @@ import {
   receiptCopy,
   supporterSteamKeys,
 } from "./founder-rules";
+import { patronLinkConflictHolds, patronLinkConflictSettled } from "./patron-link-conflict";
 import {
   applicationSteamMatch,
   AUTO_FOUNDER_HOLD_HOURS_DEFAULT,
@@ -91,6 +92,22 @@ export type ApiImportResult = {
   /** Patreon now reports a different Discord account (or none) for this membership than it did before. */
   patreonDiscordChanged: boolean;
 };
+
+/**
+ * The Discord accounts whose roles one import can change: the record's account when the import changed the record,
+ * and every account it took off a record. The sync and a patron's Link Patreon sign-in both queue role checks by it.
+ * An unchanged record queues nothing; the six-hour role safety pass covers time-based expiry.
+ */
+export function importRoleChecks(result: ApiImportResult): string[] {
+  const changed =
+    result.created ||
+    result.updated ||
+    result.payments > 0 ||
+    result.revoked > 0 ||
+    result.discordLinked ||
+    result.discordConfirmed;
+  return [...(result.discordId && changed ? [result.discordId] : []), ...result.releasedDiscordIds];
+}
 
 type MemberRow = typeof supporterMembers.$inferSelect;
 type MemberPatch = Partial<typeof supporterMembers.$inferInsert>;
@@ -367,8 +384,9 @@ export class SupportersStore {
    * The Discord account follows Patreon: an account Patreon reports for a staff link becomes a Patreon link, and a
    * Patreon link that is not a founder's follows the account Patreon now reports, taking it from another record only
    * when that record's link came from Patreon, Patreon no longer reports it for that patron, and it is not a founder.
-   * A staff link and a founder's link are never replaced, and a link Patreon no longer reports is kept. Founder
-   * records are never touched here.
+   * A staff link, a link the patron made by signing in ("Link Patreon") and a founder's link are never replaced, and a
+   * link Patreon no longer reports is kept. The patron's own link keeps its source when Patreon reports the same
+   * account. Founder records are never touched here.
    */
   async importApiMember(campaignId: string, snapshot: PatreonMemberSnapshot, receivedAt: Date) {
     const hash = apiSnapshotHash(campaignId, snapshot);
@@ -645,8 +663,9 @@ export class SupportersStore {
           .where(eq(supporterFounders.memberId, memberId))
       ).length > 0;
     if (member.discordId === reported) {
+      // The patron proved this account by signing in to Discord and Patreon, so it stays the patron's own link.
+      if (member.discordSource === "patreon" || member.discordSource === "patron_signin") return;
       // Patreon confirms the account staff linked, or one linked before sources were recorded.
-      if (member.discordSource === "patreon") return;
       patch.discordSource = "patreon";
       result.discordConfirmed = true;
       audit(
@@ -657,7 +676,8 @@ export class SupportersStore {
       );
       return;
     }
-    // A staff link and a founder's link stay as they are.
+    // A staff link, the patron's own link and a founder's link stay as they are. Another reported account is a
+    // conflict for staff.
     if (member.discordId && (member.discordSource !== "patreon" || (await founder(member.id)))) {
       result.conflict = "discord-differs";
       return;
@@ -759,7 +779,15 @@ export class SupportersStore {
         'steamApplicationId', m.steam_application_id,
         'identityState', CASE WHEN m.discord_id IS NULL AND m.steam_id IS NULL THEN 'unlinked'
           WHEN m.discord_id IS NULL OR m.steam_id IS NULL THEN 'partial'
-          WHEN m.discord_source = 'patreon' THEN 'patreon_linked' ELSE 'staff_linked' END,
+          WHEN m.discord_source IN ('patreon', 'patron_signin') THEN 'patreon_linked' ELSE 'staff_linked' END,
+        'patronLinkConflict', (SELECT json_build_object('discordId', latest.discord_id, 'conflict', latest.conflict,
+            'linkedDiscordId', latest.linked_discord_id)
+          FROM (SELECT refused.details->>'discordId' AS discord_id, refused.details->>'conflict' AS conflict,
+              refused.details->>'linkedDiscordId' AS linked_discord_id
+            FROM supporter_actions refused WHERE refused.member_id = m.id AND refused.kind = 'patron-link-conflict'
+            AND NOT ${patronLinkConflictSettled(sql.raw("m.id"), sql.raw("refused.created_at"))}
+            ORDER BY refused.created_at DESC, refused.id DESC LIMIT 1) latest
+          WHERE ${patronLinkConflictHolds}),
         'version', m.version,
         'latestPayment', (SELECT ${payment("p")} FROM supporter_payments p WHERE p.member_id = m.id
           ORDER BY (p.verification_state = 'verified') DESC, (p.source IN ${qualifyingSources}) DESC, p.paid_at DESC,
@@ -900,6 +928,7 @@ export class SupportersStore {
       : undefined;
     return {
       ...supporter,
+      patronLinkConflict: supporter.patronLinkConflict ?? null,
       payments: supporter.payments ?? [],
       founderBlockedReason,
       founderFirstPaymentWaiting,

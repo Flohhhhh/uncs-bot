@@ -593,6 +593,7 @@ describe("Patreon API import persistence", () => {
     for (const [name, change, founder] of [
       ["a staff link", { discordSource: "staff" }, false],
       ["an older link", { discordSource: null }, false],
+      ["a patron's own link", { discordSource: "patron_signin" }, false],
       ["an account Patreon still reports there", { patreonDiscordId: staff.id }, false],
       ["a founder", {}, true],
     ] as const) {
@@ -636,6 +637,35 @@ describe("Patreon API import persistence", () => {
     expect(update[0].text).not.toContain('"discord_id" =');
     expect(update[1]).toEqual([null, 5, memberId]);
   });
+  it.each([
+    ["no account", null, null, null],
+    ["the same account", staff.id, null, staff.id],
+    ["a different account", "999999999999999999", "discord-differs", "999999999999999999"],
+  ] as const)(
+    "keeps a link the patron made by signing in when Patreon reports %s, and never relabels it",
+    async (_name, reported, conflict, patreonDiscordId) => {
+      const { store, state, calls } = fixture();
+      state.observed = false;
+      state.payments = [payment()];
+      Object.assign(state.member, { discordId: staff.id, discordSource: "patron_signin", patreonDiscordId: null });
+      expect(await store.importApiMember(campaign, snapshot({ discordId: reported }), at)).toMatchObject({
+        discordLinked: false,
+        discordConfirmed: false,
+        discordMoved: false,
+        releasedDiscordIds: [],
+        conflict,
+        discordId: staff.id,
+        patreonDiscordChanged: patreonDiscordId !== null,
+      });
+      for (const [statement, values] of calls("update")) {
+        expect(statement.text).not.toContain('"discord_id" =');
+        expect(statement.text).not.toContain('"discord_source"');
+        expect(values).toEqual([patreonDiscordId, 5, memberId]);
+      }
+      expect(calls("update")).toHaveLength(patreonDiscordId === null ? 0 : 1);
+      expect(calls('insert into "supporter_actions"')).toHaveLength(0);
+    },
+  );
   it("never clears what Patreon reported when its answer could not be read", async () => {
     const { store, state, calls } = fixture();
     state.observed = false;

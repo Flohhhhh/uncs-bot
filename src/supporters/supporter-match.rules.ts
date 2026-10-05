@@ -17,6 +17,9 @@ import {
 export const SUPPORTER_MATCH_ACTOR = { id: "system:supporter-match", name: "Automatic supporter match" } as const;
 export const AUTO_FOUNDER_REASON =
   "Recorded automatically: Discord account from Patreon and a first Patreon payment inside the founder window.";
+/** The same promise on a Discord account the patron linked themselves ("Link Patreon"). */
+export const PATRON_LINK_FOUNDER_REASON =
+  "Recorded automatically: Discord account linked by the patron's own Discord and Patreon sign-in, and a first Patreon payment inside the founder window.";
 /** Default wait after an imported first payment before an automatic founder promise (Patreon's refund window). */
 export const AUTO_FOUNDER_HOLD_HOURS_DEFAULT = 72;
 
@@ -221,10 +224,12 @@ export const automaticBlockedMessages: Record<AutomaticFounderBlockedReason, str
 /**
  * Why automatic matching will not record a founder promise for this Patreon record, apart from the staff founder rule
  * (founderCheck, or founderBlocker on the same facts), which runs after this. It is stricter than staff awards: the
- * Discord account must come from the patron's Patreon connection, Patreon must report no other account for them and
- * this account for no other patron, and the payment must be a verified first Patreon API payment whose latest charge
- * was not reversed, that has passed the waiting period, and that has no earlier payment on another record for the
- * same person. A link Patreon no longer reports any account for is kept, and still counts.
+ * Discord account must come from the patron's Patreon connection or from the patron's own Discord and Patreon sign-in
+ * ("Link Patreon"), Patreon must report no other account for them and this account for no other patron, and the
+ * payment must be a verified first Patreon API payment whose latest charge was not reversed, that has passed the
+ * waiting period, and that has no earlier payment on another record for the same person. A link Patreon no longer
+ * reports any account for is kept, and still counts. A link the patron made by signing in counts like one from
+ * Patreon, since the patron proved the account to both, so it too waits only for the payment's refund window.
  *
  * A founder needs no SteamID: the Discord account is the identity. The SteamID alerts on the Supporters page matter
  * for the whitelist promise later, so they never stop a founder. A linked SteamID must still be a valid player ID, as
@@ -239,7 +244,8 @@ export function automaticFounderBlocker(
 ): AutomaticFounderBlockedReason | null {
   if (member.provider !== "patreon") return "not_patreon";
   if (!member.discordId) return "no_discord";
-  if (member.discordSource !== "patreon") return "discord_not_from_patreon";
+  // The patron proved the account either way: through Patreon's own connection, or by signing in to both themselves.
+  if (member.discordSource !== "patreon" && member.discordSource !== "patron_signin") return "discord_not_from_patreon";
   if (member.patreonDiscordId && member.patreonDiscordId !== member.discordId) return "discord_differs";
   if (facts.discordReportedForOtherPatron) return "discord_reported_for_other_patron";
   // The staff founder rule refuses an invalid SteamID with this same reason.
@@ -258,11 +264,27 @@ export function automaticFounderBlocker(
   return null;
 }
 
+/**
+ * Why a patron's own sign-in ("Link Patreon") was refused for this record: it already links another Discord account,
+ * another record of the campaign links that Discord account, or another founder record holds it.
+ */
+export type PatronLinkConflictReason = "membership_linked" | "discord_linked" | "founder_tie";
+/** The newest refused sign-in for a record that staff have not settled since (see SupporterView). */
+export type PatronLinkConflict = {
+  /** The Discord account the patron signed in with. */
+  discordId: string;
+  conflict: PatronLinkConflictReason;
+  /** The Discord account the record links, for `membership_linked`. */
+  linkedDiscordId: string | null;
+};
+
 /** `info` is not a task: it says why no founder promise is possible on this record. */
 export type NextStepArea = "discord" | "steam" | "payment" | "founder" | "info";
 export type NextStep = { code: string; area: NextStepArea; message: string };
 /** What the Supporters page needs to explain one record. */
 export type NextStepRecord = MatchMember & {
+  /** A refused patron sign-in staff have not settled yet. Omitted, none. */
+  patronLinkConflict?: PatronLinkConflict | null;
   founder: { automatic: boolean } | null;
   founderBlockedReason: FounderBlockedReason | "no_payment" | null;
   /** Only the first-payment mark, which the import has not settled yet, keeps it from being a founder (see SupporterView). */
@@ -291,6 +313,11 @@ export type NextStepContext = {
   importConfigured: boolean;
   /** Hours an imported first payment must stand before an automatic founder promise. */
   holdHours: number;
+  /**
+   * Patrons can link their own Discord account with "Link Patreon": PATREON_LINK_ENABLED is on and every setting it
+   * uses is ready (patronLinkSetupProblem). Omitted, off.
+   */
+  patronLink?: boolean;
   /**
    * Whether the viewer may open a game server. An application on any other server is named without its SteamID or
    * server; the step itself stays. Omitted, every server is shown.
@@ -328,6 +355,8 @@ const steamStepCodes: Record<SteamMatchBlock, string> = {
 const ASK_FOR_STEAM_ID = "Their application is on a server you cannot open, so ask them for their SteamID.";
 /** Waiting texts: what Gramps waits for, so no one has to do it. */
 const WAITING_FOR_DISCORD = "Waiting for them to connect Discord on Patreon.";
+/** With Link Patreon on, a patron can link a record that has no Discord account themselves. */
+const WAITING_FOR_PATRON_LINK = "Waiting for them to tap Link Patreon in Discord.";
 const WAITING_FOR_IMPORT = "Waiting for the Patreon import to be set up.";
 
 function steamStep(steam: SteamMatch, record: NextStepRecord, context: NextStepContext): NextStep {
@@ -358,16 +387,31 @@ function steamStep(steam: SteamMatch, record: NextStepRecord, context: NextStepC
   };
 }
 
+const patronLinkConflictMessages: Record<PatronLinkConflictReason, (conflict: PatronLinkConflict) => string> = {
+  membership_linked: ({ discordId, linkedDiscordId }) =>
+    `Discord account ${discordId} signed in as this patron, but this record links ${linkedDiscordId ?? "another account"}.`,
+  discord_linked: ({ discordId }) =>
+    `Discord account ${discordId} signed in as this patron, but another record already links it.`,
+  founder_tie: ({ discordId }) =>
+    `Discord account ${discordId} signed in as this patron, but another founder record holds it.`,
+};
+
 /**
  * The steps still needed for one record, in the order they are taken: Discord, SteamID, payment, founder. Alerts
- * (a different Discord account reported by Patreon, a revoked source application) come first in their area. Anything
- * the Patreon import can settle is worded as what Gramps waits for, so no one has to do it.
+ * (a refused patron sign-in, a different Discord account reported by Patreon, a revoked source application) come
+ * first in their area. Anything the Patreon import can settle is worded as what Gramps waits for, so no one has to do
+ * it.
  */
 export function supporterNextSteps(record: NextStepRecord, context: NextStepContext): NextStep[] {
   const steps: NextStep[] = [];
   const discord = (code: string, message: string) => steps.push({ code, area: "discord", message });
+  const refused = record.patronLinkConflict;
+  if (refused) discord("patron_link_conflict", patronLinkConflictMessages[refused.conflict](refused));
   // Without the import nothing reports the account, so the wait is for the import itself.
   const waitingForDiscord = context.importConfigured ? WAITING_FOR_DISCORD : WAITING_FOR_IMPORT;
+  // A record with no account waits for the patron, who can link it in Discord while Link Patreon is on.
+  const waitingForAccount =
+    context.importConfigured && context.patronLink ? WAITING_FOR_PATRON_LINK : waitingForDiscord;
   if (!record.discordId) {
     if (record.provider === "paypal") discord("link_discord_paypal", "Add their Discord account so they get roles.");
     else if (record.match.patreonDiscordElsewhere)
@@ -378,7 +422,7 @@ export function supporterNextSteps(record: NextStepRecord, context: NextStepCont
     else if (context.importConfigured)
       discord(
         "connect_discord_in_patreon",
-        record.patreonDiscordId ? "Gramps links their Discord at the next sync." : WAITING_FOR_DISCORD,
+        record.patreonDiscordId ? "Gramps links their Discord at the next sync." : waitingForAccount,
       );
     else discord("link_discord_no_import", WAITING_FOR_IMPORT);
   } else if (record.provider === "patreon") {
@@ -420,7 +464,7 @@ export function supporterNextSteps(record: NextStepRecord, context: NextStepCont
         area: "founder",
         // A Patreon founder's account arrives from Patreon. A PayPal founder's is added by staff.
         message:
-          record.provider === "patreon" ? waitingForDiscord : "Add a Discord account so they get the Founder role.",
+          record.provider === "patreon" ? waitingForAccount : "Add a Discord account so they get the Founder role.",
       });
     return steps;
   }
@@ -484,7 +528,8 @@ export function supporterNextSteps(record: NextStepRecord, context: NextStepCont
     founder("founder_waiting_patreon", "Waiting for Patreon to settle a refunded charge.");
   // The import makes the account a Patreon link once Patreon reports it for them.
   else if (automatic === "no_discord" || automatic === "discord_not_from_patreon")
-    founder("founder_waiting_discord", waitingForDiscord);
+    // Link Patreon links only a record with no account: one staff linked waits for Patreon to report it.
+    founder("founder_waiting_discord", automatic === "no_discord" ? waitingForAccount : waitingForDiscord);
   // The Discord step already says which account Patreon reports, and that staff check it.
   else if (automatic === "discord_differs" || automatic === "discord_reported_for_other_patron") return steps;
   else if (automatic === "steam_on_another_record") {
