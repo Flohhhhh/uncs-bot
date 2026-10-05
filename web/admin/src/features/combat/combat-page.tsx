@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { UNKNOWN_WEAPON } from "../../../../../src/common/cause-labels";
 import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 import { useResource } from "../../api/use-resource";
 import { useAdmin } from "../../app/context";
@@ -26,6 +27,16 @@ const headshotShare = (player: CombatPlayer) =>
 const shareOfKills = (part: number, kills: number) =>
   kills > 0 && Number.isFinite(part) ? `${Math.round((part / kills) * 100)}% of kills` : undefined;
 const plural = (value: number, one: string, many: string) => `${count(value)} ${value === 1 ? one : many}`;
+/**
+ * The weapon filter's value for a cause. Causes that read the same ("Id.Item.AK74M" and "ID.Item.AK74M"
+ * are both "AK-74M") share one option; a cause with no readable name keeps its raw value, so each one
+ * stays its own option. A readable name never equals such a raw value.
+ */
+const causeFilter = (cause: string | null | undefined) => {
+  const label = weaponLabel(cause);
+  return label === UNKNOWN_WEAPON ? (cause ?? "").trim() : label;
+};
+const causeOption = (value: string) => (weaponLabel(value) === UNKNOWN_WEAPON ? `${UNKNOWN_WEAPON} (${value})` : value);
 
 // Why deliveries that reached Gramps were refused or partly skipped, since it last started. A
 // receipt time alone cannot show that every event of a batch was invalid or that the game's
@@ -271,14 +282,19 @@ function CombatView({
   const search = query.trim().toLowerCase();
   const matches = (values: (string | null)[]) => values.some((value) => (value ?? "").toLowerCase().includes(search));
   const players = leaderboard.filter((entry) => matches([entry.name, entry.steamId]));
-  const causes = [
-    ...new Set(events.map((event) => event.cause).filter((value): value is string => Boolean(value))),
-  ].sort();
+  const causes = [...new Set(events.map((event) => causeFilter(event.cause)).filter(Boolean))].sort();
   const filtered = events.filter(
     (event) =>
-      matches([event.killerName, event.killerSteamId, event.victimName, event.victimSteamId, event.cause]) &&
+      matches([
+        event.killerName,
+        event.killerSteamId,
+        event.victimName,
+        event.victimSteamId,
+        event.cause,
+        weaponLabel(event.cause),
+      ]) &&
       (eventKind !== "headshot" || event.headshot) &&
-      (!cause || event.cause === cause),
+      (!cause || causeFilter(event.cause) === cause),
   );
   // Feed status is unknown while the latest read failed; never show the old state as current.
   const feed = error
@@ -444,11 +460,11 @@ function CombatView({
                 <select value={cause} disabled={disabled} onChange={(event) => onCause(event.target.value)}>
                   <option value="">All reported causes</option>
                   {cause && !causes.includes(cause) && (
-                    <option value={cause}>{weaponLabel(cause)} (not in recent events)</option>
+                    <option value={cause}>{causeOption(cause)} (not in recent events)</option>
                   )}
                   {causes.map((value) => (
                     <option key={value} value={value}>
-                      {weaponLabel(value)}
+                      {causeOption(value)}
                     </option>
                   ))}
                 </select>
