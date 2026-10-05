@@ -2,9 +2,18 @@ export class ApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    /** Seconds the server asked the caller to wait (its Retry-After header), when it sent one. */
+    readonly retryAfter?: number,
   ) {
     super(message);
   }
+}
+/** Retry-After as seconds, from either a number of seconds or a date. Undefined when absent or unreadable. */
+function retryAfterSeconds(response: Response) {
+  const value = response.headers?.get("Retry-After")?.trim();
+  if (!value) return undefined;
+  const seconds = /^\d+$/.test(value) ? Number(value) : (Date.parse(value) - Date.now()) / 1000;
+  return Number.isFinite(seconds) ? Math.max(0, seconds) : undefined;
 }
 let csrf = "";
 let revision = 0;
@@ -117,7 +126,8 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
         data && typeof data === "object" && "message" in data && typeof data.message === "string"
           ? data.message
           : "The request could not be completed.";
-      throw new ApiError(message, response.status);
+      // This client never repeats a request. A caller that knows a refusal changed nothing can wait this long.
+      throw new ApiError(message, response.status, retryAfterSeconds(response));
     }
     if (data === null)
       throw new ApiError("The response could not be read. Refresh before repeating any action.", response.status);
