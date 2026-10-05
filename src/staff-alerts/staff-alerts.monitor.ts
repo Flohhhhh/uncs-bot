@@ -469,23 +469,10 @@ export class StaffAlertsWorker {
     if (!presentAtStart || (first && overview.players.length)) this.bootChecked = true;
     if (!ids.length) return;
     const knownGood = options.performance.knownGood;
-    const kicks = await this.priorKicks(ids, options, now);
+    const [kicks, lookups] = await Promise.all([this.priorKicks(ids, options, now), this.networkBans(ids, now)]);
     // A watch-list alert already carries the player's kicks, so the same join raises no second alert.
     const watched = new Set<string>();
-    for (const source of this.sources) {
-      let found: Map<string, NetworkBanEntry>;
-      try {
-        found = await withTimeout((signal) => source.lookup(ids, signal), SOURCE_TIMEOUT_MS);
-        this.sourceErrors.set(source.name, null);
-      } catch {
-        // Never log SteamIDs or source details; the next join tries again.
-        this.logger.warn(`Network ban source "${source.name}" failed for ${this.server.id}.`);
-        this.sourceErrors.set(source.name, {
-          error: "The lookup failed or took longer than 3 seconds.",
-          at: new Date(now).toISOString(),
-        });
-        continue;
-      }
+    for (const { source, found } of lookups) {
       for (const steamId of ids) {
         const entry = found.get(steamId);
         if (!entry || entry.revoked) continue;
@@ -563,6 +550,26 @@ export class StaffAlertsWorker {
           ...(presentAtStart ? { suppressed: ONLINE_AT_START } : {}),
         });
       }
+  }
+
+  /** Each network-ban source's matches, asked in turn. A failed source is reported and skipped; the next join tries again. */
+  private async networkBans(ids: string[], now: number) {
+    const lookups: { source: NetworkBanSource; found: Map<string, NetworkBanEntry> }[] = [];
+    for (const source of this.sources) {
+      try {
+        const found = await withTimeout((signal) => source.lookup(ids, signal), SOURCE_TIMEOUT_MS);
+        this.sourceErrors.set(source.name, null);
+        lookups.push({ source, found });
+      } catch {
+        // Never log SteamIDs or source details.
+        this.logger.warn(`Network ban source "${source.name}" failed for ${this.server.id}.`);
+        this.sourceErrors.set(source.name, {
+          error: "The lookup failed or took longer than 3 seconds.",
+          at: new Date(now).toISOString(),
+        });
+      }
+    }
+    return lookups;
   }
 
   /**

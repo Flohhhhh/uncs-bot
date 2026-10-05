@@ -34,8 +34,14 @@ const routineDelivery = and(
   inArray(adminActions.state, ["accepted", "applied"]),
 )!;
 
-/** Kicks and bans that count toward a player's record: every one the game did not refuse. */
-const counted = and(inArray(adminActions.action, ["kick", "ban"]), ne(adminActions.state, "failed"))!;
+const moderation = inArray(adminActions.action, ["kick", "ban"]);
+/**
+ * Kicks and bans that count toward a player's record: those the game applied or accepted. A started,
+ * pending or unknown record may never have reached the game, such as one left by a crash.
+ */
+const counted = and(moderation, inArray(adminActions.state, ["applied", "accepted"]))!;
+/** A player's recent kicks and bans: every one the game did not refuse, shown with its outcome. */
+const attempted = and(moderation, ne(adminActions.state, "failed"))!;
 /** The value from the group's newest row, among the rows that match `filter` when one is given. */
 const newest = <T>(value: SQLWrapper, filter?: SQL) =>
   sql<T>`(array_agg(${value} order by ${adminActions.createdAt} desc)${filter ? sql` filter (where ${filter})` : sql``})[1]`;
@@ -170,8 +176,8 @@ export class AdminStore {
   }
 
   /**
-   * Kicks and bans recorded for these players on the server, in one query. Failed ones are not counted.
-   * `recent` counts those at or after `since`. Players with neither are left out.
+   * Kicks and bans the game applied or accepted for these players on the server, in one query. `recent`
+   * counts those at or after `since`. Players with neither are left out.
    */
   async moderationSummaries(serverId: string, steamIds: readonly string[], since = new Date(0)) {
     const summaries = new Map<string, ModerationSummary>();
@@ -192,12 +198,12 @@ export class AdminStore {
     return summaries;
   }
 
-  /** One player's newest kicks and bans on the server, failed ones left out. */
+  /** One player's newest kicks and bans on the server, unconfirmed ones included and failed ones left out. */
   async moderationEntries(serverId: string, steamId: string, limit = 10) {
     return this.db
       .select(auditFields)
       .from(adminActions)
-      .where(and(eq(actionServer, serverId), eq(adminActions.target, steamId), counted))
+      .where(and(eq(actionServer, serverId), eq(adminActions.target, steamId), attempted))
       .orderBy(desc(adminActions.createdAt))
       .limit(limit);
   }

@@ -398,7 +398,8 @@ describe("kicks and bans in the player panel", () => {
     lastBy,
     lastReason,
   });
-  const entry = (index: number, action: "kick" | "ban", state = "applied") => ({
+  // A kick the game takes is stored as accepted; a ban is applied once the ban list shows it.
+  const entry = (index: number, action: "kick" | "ban", state = action === "ban" ? "applied" : "accepted") => ({
     id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
     actorName: action === "ban" ? "Admin" : "Mod",
     action,
@@ -416,7 +417,7 @@ describe("kicks and bans in the player panel", () => {
 
   it("shows counts with the newest kick and ban above the history links, and older ones on request", async () => {
     record({
-      kicks: count(3, "Mod", "Team killing"),
+      kicks: count(2, "Mod", "Team killing"),
       bans: count(1, "Admin", "Cheating"),
       entries: [entry(1, "ban"), entry(2, "kick", "unknown"), entry(3, "kick"), entry(4, "kick")],
     });
@@ -424,7 +425,7 @@ describe("kicks and bans in the player panel", () => {
     const panel = openPanel(bob.name);
     const history = await within(panel).findByRole("region", { name: "Kicks and bans" });
     expect(request).toHaveBeenCalledWith(`moderation/players/${bob.steamId}`, expect.anything());
-    expect(within(history).getByText(`Kicked 3 times · last ${day} by Mod: Team killing`)).toBeInTheDocument();
+    expect(within(history).getByText(`Kicked 2 times · last ${day} by Mod: Team killing`)).toBeInTheDocument();
     expect(within(history).getByText(`Banned once · last ${day} by Admin: Cheating`)).toBeInTheDocument();
     const links = within(panel).getByRole("link", { name: "Combat history →" });
     expect(history.compareDocumentPosition(links) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -433,9 +434,27 @@ describe("kicks and bans in the player panel", () => {
     const items = within(recent).getAllByRole("listitem");
     expect(items).toHaveLength(4);
     expect(items[0]).toHaveTextContent(`${day} · Ban by Admin: Cheating`);
-    // An unconfirmed kick still counts, and says so.
+    // An unconfirmed kick is listed and marked; the server leaves it out of the count.
     expect(items[1]).toHaveTextContent(`${day} · Kick by Mod: Team killing Unconfirmed`);
-    expect(items[2]).not.toHaveTextContent("Applied");
+    expect(items[2]).toHaveTextContent(new RegExp(`^${day} · Kick by Mod: Team killing$`));
+  });
+
+  it("marks only kicks and bans that may not have reached the game", async () => {
+    record({
+      kicks: count(1, "Mod", "Team killing"),
+      bans: count(1, "Admin", "Cheating"),
+      entries: [entry(1, "kick"), entry(2, "ban"), entry(3, "kick", "pending"), entry(4, "kick", "started")],
+    });
+    show();
+    const panel = openPanel(bob.name);
+    const history = await within(panel).findByRole("region", { name: "Kicks and bans" });
+    const items = within(history).getAllByRole("listitem");
+    // An accepted kick is the game taking it: no amber "not verified" badge.
+    expect(items[0]).toHaveTextContent(new RegExp(`^${day} · Kick by Mod: Team killing$`));
+    expect(items[1]).toHaveTextContent(new RegExp(`^${day} · Ban by Admin: Cheating$`));
+    expect(history).not.toHaveTextContent(/Accepted|not verified|Applied/);
+    expect(items[2]).toHaveTextContent(/Team killing Pending$/);
+    expect(items[3]).toHaveTextContent(/Team killing Unconfirmed$/);
   });
 
   it("shows a single kick as one line without a list", async () => {

@@ -72,7 +72,10 @@ export type ModerationCount = {
   lastBy: string;
   lastReason: string | null;
 };
-/** A player's dashboard kicks and bans on this server; failed ones are not counted. */
+/**
+ * A player's dashboard kicks and bans on this server. Counts include only those the game applied or accepted;
+ * `entries` also lists unconfirmed ones with their outcome.
+ */
 export type PlayerModeration = { kicks: ModerationCount | null; bans: ModerationCount | null; entries: Audit[] };
 export type RepeatOffenderList = {
   minimum: number;

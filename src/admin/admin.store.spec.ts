@@ -107,7 +107,7 @@ describe("kick and ban records", () => {
     expect(plainParams.some((value) => typeof value === "string" && value.includes("playerName"))).toBe(false);
   });
 
-  it("counts each player's kicks and bans the game did not refuse, for a whole list in one query", async () => {
+  it("counts each player's kicks and bans the game applied or accepted, for a whole list in one query", async () => {
     const since = new Date("2026-09-05T00:00:00Z");
     const { query, store } = storeWith([
       [players[0], "kick", "4", "3", "2026-10-02 18:00:00+00", "Mod", "Team killing", "Griefer"],
@@ -119,11 +119,11 @@ describe("kick and ban records", () => {
     const [lookup, params] = query.mock.calls[0];
     expect(lookup.text.startsWith("select ")).toBe(true);
     expect(where(lookup.text)).toBe(
-      `(coalesce("admin_actions"."details"->>'serverId', $2) = $3 and "admin_actions"."target" in ($4, $5) and ("admin_actions"."action" in ($6, $7) and "admin_actions"."state" <> $8))`,
+      `(coalesce("admin_actions"."details"->>'serverId', $2) = $3 and "admin_actions"."target" in ($4, $5) and ("admin_actions"."action" in ($6, $7) and "admin_actions"."state" in ($8, $9)))`,
     );
     expect(lookup.text).toContain(`count(*) filter (where "admin_actions"."created_at" >= $1)`);
     expect(lookup.text).toContain(`group by "admin_actions"."target", "admin_actions"."action"`);
-    expect(params).toEqual([since.toISOString(), "primary", "east", ...players, "kick", "ban", "failed"]);
+    expect(params).toEqual([since.toISOString(), "primary", "east", ...players, "kick", "ban", "applied", "accepted"]);
     expect(summaries.get(players[0])).toEqual({
       name: "Griefer",
       kicks: {
@@ -144,7 +144,7 @@ describe("kick and ban records", () => {
     expect(query).not.toHaveBeenCalled();
   });
 
-  it("lists one player's newest kicks and bans with the history projection", async () => {
+  it("lists one player's newest kicks and bans, unconfirmed ones included and refused ones left out", async () => {
     const { query, store } = storeWith();
     await store.history("east");
     await store.moderationEntries("east", players[0]);
@@ -176,11 +176,12 @@ describe("kick and ban records", () => {
     ]);
     const [lookup, params] = query.mock.calls[0];
     expect(where(lookup.text)).toContain(`"admin_actions"."action" = $`);
-    expect(where(lookup.text)).toContain(`"admin_actions"."state" <> $`);
+    expect(where(lookup.text)).toContain(`"admin_actions"."state" in ($`);
     expect(where(lookup.text)).toContain(`"admin_actions"."created_at" >= $`);
     expect(lookup.text).toMatch(
       / having count\(\*\) >= \$\d+ order by count\(\*\) desc, max\("admin_actions"\."created_at"\) desc limit \$\d+$/,
     );
-    expect(params).toEqual(expect.arrayContaining(["east", "kick", "failed", since.toISOString(), 2, 50]));
+    expect(params).toEqual(expect.arrayContaining(["east", "kick", "applied", "accepted", since.toISOString(), 2, 50]));
+    expect(params).not.toContain("failed");
   });
 });

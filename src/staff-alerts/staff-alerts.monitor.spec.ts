@@ -683,6 +683,34 @@ describe("repeat offender joins", () => {
     expect(discord.channel.send.mock.calls[0][0].embeds[0].fields[3].value).toMatch(/^5 \(last 2026.10.01\)$/);
   });
 
+  it("asks the watch list while the kick lookup is still running", async () => {
+    const order: string[] = [];
+    const history = {
+      moderationSummaries: jest.fn(async (_serverId: string, steamIds: readonly string[]) => {
+        order.push("kicks asked");
+        await Promise.resolve();
+        await Promise.resolve();
+        order.push("kicks read");
+        return new Map(
+          steamIds.filter((id) => id === kicked).map((id) => [id, { name: null, kicks: kicks(5), bans: null }]),
+        );
+      }),
+    };
+    const source = {
+      name: "Test list",
+      lookup: jest.fn(async () => {
+        order.push("list asked");
+        return new Map<string, NetworkBanEntry>();
+      }),
+    };
+    const { pass, alerts } = workerFixture(values, { history, sources: [source] });
+    await pass(roster(clean), 0);
+    order.length = 0;
+    await pass(roster(clean, kicked));
+    expect(order).toEqual(["kicks asked", "list asked", "kicks read"]);
+    expect(alerts.list("primary")).toMatchObject([{ kind: "repeat-offender-join", player: { steamId: kicked } }]);
+  });
+
   it("records players online when Gramps starts without posting, and stays off at 0 kicks", async () => {
     const { pass, alerts, discord } = workerFixture(values, { history: historyFor({ [kicked]: kicks(3) }) });
     await pass(roster(kicked), 0);

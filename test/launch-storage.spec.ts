@@ -539,7 +539,7 @@ describe("launch storage on isolated PostgreSQL", () => {
     expect((await admin.receipt(notable[0], "primary"))?.state).toBe("applied");
   });
 
-  it("counts each player's kicks and bans the game did not refuse, on one server", async () => {
+  it("counts each player's kicks and bans the game applied or accepted, on one server", async () => {
     const [griefer, other, clean] = ["76561198000000001", "76561198000000002", "76561198000000003"];
     const record = async (
       action: "kick" | "ban",
@@ -565,7 +565,11 @@ describe("launch storage on isolated PostgreSQL", () => {
     };
     const oldest = await record("kick", griefer, "applied", 40, { name: "Old name", reason: "Spawn camping" });
     await record("kick", griefer, "failed", 3, { name: "Refused" });
-    const unfinished = await record("kick", griefer, null, 5);
+    // Started (a crash before the result), unknown and pending kicks may never have reached the game.
+    const unfinished = await record("kick", griefer, null, 5, { name: "Unfinished" });
+    const unknown = await record("kick", griefer, "unknown", 6, { name: "Unknown result" });
+    const pending = await record("kick", griefer, "pending", 7, { name: "Pending result" });
+    const earlier = await record("kick", griefer, "applied", 4);
     const accepted = await record("kick", griefer, "accepted", 2, { name: "Griefer" });
     const ban = await record("ban", griefer, "applied", 1, { name: "Griefer", reason: "Cheating" });
     await record("kick", griefer, "applied", 1, { serverId: "east", name: "Elsewhere" });
@@ -589,10 +593,14 @@ describe("launch storage on isolated PostgreSQL", () => {
       bans: null,
     });
 
+    // Recent entries list the unconfirmed kicks with their outcome; only refused ones are left out.
     expect((await admin.moderationEntries("primary", griefer)).map((entry) => entry.id)).toEqual([
       ban,
       accepted,
+      earlier,
       unfinished,
+      unknown,
+      pending,
       oldest,
     ]);
     expect(await admin.repeatOffenders("primary", since, 2)).toEqual([
