@@ -49,7 +49,7 @@ export function discordName(steamId: string | null | undefined, name: unknown) {
 }
 
 /**
- * A weapon or cause by its shared readable label ("Id.Item.AK74M" and "ID.Item.AK74M" both read "AK-74M"),
+ * A weapon or cause by its shared readable label ("Id.Item.AK74M" and "ID.Item.AK74M" both read "AK74"),
  * or null when describeCause() cannot name it: unknown dotted ids, paths, blueprint names and SteamID-like text.
  */
 export function causeLabel(cause: string | null | undefined) {

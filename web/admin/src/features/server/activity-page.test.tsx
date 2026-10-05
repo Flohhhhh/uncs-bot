@@ -103,11 +103,11 @@ it("keeps kills out of the feed until staff turn them on, with readable weapons 
   render(page(context()));
   await waitFor(() => expect(lines()).toContain("Alice joined"));
   expect(chip(/Kills & deaths 1/)).toHaveAttribute("aria-pressed", "false");
-  expect(lines()).not.toContain("Cara killed Bob · AK-74M · 21 m");
+  expect(lines()).not.toContain("Cara killed Bob · AK74 · 21 m");
   fireEvent.click(chip(/Kills & deaths/));
-  expect(lines()).toContain("Cara killed Bob · AK-74M · 21 m");
+  expect(lines()).toContain("Cara killed Bob · AK74 · 21 m");
   fireEvent.change(screen.getByRole("searchbox"), { target: { value: "Id.Item.AK74M" } });
-  expect(lines()).toEqual(["Cara killed Bob · AK-74M · 21 m"]);
+  expect(lines()).toEqual(["Cara killed Bob · AK74 · 21 m"]);
   expect(screen.getByText("Game connected · Combat feed: receiving")).toBeInTheDocument();
 });
 it("opens the player panel from a name in the feed", async () => {
