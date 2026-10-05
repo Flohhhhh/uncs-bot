@@ -52,6 +52,7 @@ import {
   PUBLIC_MAX_DISTANCE_CENTIMETERS,
   type CombatStats,
   type LeaderTag,
+  type RowExtrasAggregate,
   type ServerStatsAggregate,
 } from "../src/telemetry/telemetry.types";
 import { SupportersModule } from "../src/supporters/supporters.module";
@@ -925,6 +926,28 @@ const telemetryStore = {
         sample: null,
       },
     ];
+  },
+  /** Per-cause kills, longest kill and best streak for the listed players, from the simulated events. */
+  async rowExtras(since: Date, until: Date, steamIds: string[], serverId = "primary"): Promise<RowExtrasAggregate> {
+    const events = filteredDemoEvents(since, until, undefined, serverId);
+    const weapons: RowExtrasAggregate["weapons"] = [];
+    const streaks: RowExtrasAggregate["streaks"] = [];
+    for (const steamId of new Set(steamIds)) {
+      const kills = events.filter((event) => event.killerSteamId === steamId && !event.suicide);
+      for (const rows of demoGroupBy(kills, (event) => event.cause?.toLowerCase() ?? null).values())
+        weapons.push({ steamId, cause: rows[0].cause, kills: rows.length, longestCentimeters: demoLongest(rows) });
+      let run = 0,
+        best = 0;
+      const own = events
+        .filter((event) => event.victimSteamId === steamId || (event.killerSteamId === steamId && !event.suicide))
+        .sort((a, b) => a.receivedAt.getTime() - b.receivedAt.getTime() || a.eventTime - b.eventTime);
+      for (const event of own) {
+        run = event.victimSteamId === steamId ? 0 : run + 1;
+        best = Math.max(best, run);
+      }
+      streaks.push({ steamId, bestStreak: best });
+    }
+    return { weapons, streaks };
   },
 };
 // Fictional supporter evidence stays in memory. No Patreon credentials or calls.

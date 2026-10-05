@@ -46,6 +46,7 @@ describe("telemetry HTTP boundaries", () => {
     events: jest.fn(),
     eventTypes: jest.fn(),
     serverStats: jest.fn(),
+    rowExtras: jest.fn(),
   };
   const adminStore = { session: jest.fn() };
   const config = {
@@ -80,6 +81,7 @@ describe("telemetry HTTP boundaries", () => {
       longest: [],
       leaders: [],
     });
+    store.rowExtras.mockResolvedValue({ weapons: [], streaks: [] });
     adminStore.session.mockImplementation(async (key) =>
       key === hash(sessionToken)
         ? {
@@ -455,6 +457,13 @@ describe("telemetry HTTP boundaries", () => {
       ],
       totals: { ...emptyTotals(), events: 7, kills: 7, deaths: 6, headshotKills: 2, players: 3 },
     });
+    store.rowExtras.mockResolvedValue({
+      weapons: [
+        { steamId: ids[0], cause: "Id.Item.AK74M", kills: 3, longestCentimeters: 41_200 },
+        { steamId: ids[1], cause: "76561198000000009", kills: 2, longestCentimeters: null },
+      ],
+      streaks: [{ steamId: ids[0], bestStreak: 3 }],
+    });
     store.serverStats.mockResolvedValue({
       groups: [
         {
@@ -562,5 +571,21 @@ describe("telemetry HTTP boundaries", () => {
       expect(result.text).not.toMatch(/\d{17}/);
       expect(result.text).not.toMatch(/\p{Nd}{17}/u);
     }
+    // The extras are on the public rows, so the leaderboard path above did carry them.
+    const board = await request(app.getHttpServer()).get("/community/api/leaderboard?period=week").expect(200);
+    expect(board.body.leaderboard[0]).toEqual({
+      name: "Player",
+      kills: 4,
+      deaths: 1,
+      headshotKills: 2,
+      kd: 4,
+      topWeapon: "AK-74M",
+      longestKillMeters: 412,
+      bestStreak: 3,
+    });
+    expect(board.body.leaderboard.slice(1).map((row: { name: string }) => row.name)).toEqual([
+      "Unnamed player",
+      "Unnamed player",
+    ]);
   });
 });

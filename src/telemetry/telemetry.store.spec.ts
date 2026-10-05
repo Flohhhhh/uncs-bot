@@ -373,4 +373,51 @@ describe("telemetry persistence contract", () => {
     await expect(store.serverStats(new Date(0), new Date(1))).rejects.toThrow();
     expect(query.mock.calls.at(-1)![0].text).toBe("rollback");
   });
+  it("reads row extras only for listed public SteamIDs, bound as an explicit list, read-only", async () => {
+    const { store, query } = fixture();
+    const since = new Date("2026-09-29T00:00:00Z"),
+      until = new Date("2026-10-06T00:00:00Z");
+    await expect(store.rowExtras(since, until, [], "east")).resolves.toEqual({ weapons: [], streaks: [] });
+    await expect(store.rowExtras(since, until, ["123", "x' OR 1=1 --", "76561197960265728"])).resolves.toEqual({
+      weapons: [],
+      streaks: [],
+    });
+    expect(query).not.toHaveBeenCalled();
+    const ids = ["76561198000000001", "76561198000000002", "76561198000000001", "not-an-id"];
+    await store.rowExtras(since, until, ids, "east");
+    expect(query.mock.calls[0][0].text).toBe("begin isolation level repeatable read read only");
+    expect(query.mock.calls.at(-1)![0].text).toBe("commit");
+    const [weapons, streaks] = statements(query);
+    expect(statements(query)).toHaveLength(2);
+    expect(weapons[1]).toEqual(["east", since, until, "76561198000000001", "76561198000000002"]);
+    expect(weapons[0].text).toContain(
+      "server_id = $1 AND received_at >= $2 AND received_at <= $3 AND NOT suicide AND killer_steam_id IN ($4, $5)",
+    );
+    expect(weapons[0].text).toContain("GROUP BY killer_steam_id, lower(btrim(cause))");
+    expect(weapons[0].text).toContain("distance_centimeters <= 200000");
+    expect(streaks[1]).toEqual([
+      "east",
+      since,
+      until,
+      "76561198000000001",
+      "76561198000000002",
+      "76561198000000001",
+      "76561198000000002",
+    ]);
+    expect(streaks[0].text).toContain("PARTITION BY steam_id, server_instance_id");
+    expect(streaks[0].text).toContain("ORDER BY received_at, event_time, is_kill DESC, event_id");
+    expect(streaks[0].text).toContain("killer_steam_id IN ($4, $5)");
+    expect(streaks[0].text).toContain(
+      "server_id = $1 AND received_at >= $2 AND received_at <= $3 AND victim_steam_id IN ($6, $7)",
+    );
+    for (const [config] of [weapons, streaks]) {
+      expect(config.text).not.toContain("76561198");
+      expect(config.text).not.toMatch(/\b(insert|update|delete)\b/i);
+    }
+    // At most the leaderboard's 100 players.
+    query.mockClear();
+    const many = Array.from({ length: 150 }, (_, index) => String(76561198000000000n + BigInt(index + 1)));
+    await store.rowExtras(since, until, many, "east");
+    expect(statements(query)[0][1]).toHaveLength(3 + 100);
+  });
 });

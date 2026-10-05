@@ -8,7 +8,7 @@ import {
 } from "@nestjs/common";
 import { EnvService } from "../env/env.service";
 import { GameServers } from "../admin/game-servers";
-import { describeCause, type CauseKind } from "../common/cause-labels";
+import { describeCause, UNKNOWN_WEAPON, type CauseKind } from "../common/cause-labels";
 import { publicGameServer } from "../common/game-server";
 import { mapLabel } from "../common/map-labels";
 import { plainLabel } from "../server-community/community-state";
@@ -30,13 +30,15 @@ import {
   type ParsedFeed,
   type PublicCombatStats,
   type PublicServerStats,
+  type RowExtras,
+  type RowExtrasAggregate,
   type ServerStatsAggregate,
   type TelemetryPeriod,
   type TrackingRecord,
 } from "./telemetry.types";
 
 export const UNNAMED_PLAYER = "Unnamed player";
-/** Server stats are recomputed at most once a minute per server and period. */
+/** Server stats and leaderboard extras are recomputed at most once a minute per server and period. */
 export const STATS_TTL_MS = 60_000;
 const STATS_CACHE_ENTRIES = 30;
 const STEAM_ID_LIKE = /\p{Nd}{17}/u;
@@ -196,8 +198,52 @@ export function publicServerStats(aggregate: ServerStatsAggregate): PublicServer
   return stats;
 }
 
-export function publicStats({ steamId, name, kills, deaths, headshotKills, kd }: CombatStats): PublicCombatStats {
-  return { name: publicName(steamId, name), kills, deaths, headshotKills, kd };
+/** Each listed player's row extras from the store's per-cause rows and streaks. */
+export function rowExtrasByPlayer(aggregate: RowExtrasAggregate): Map<string, RowExtras> {
+  const players = new Map<string, { weapons: Map<string, number>; longest: number; streak: number }>();
+  const player = (steamId: string) => {
+    let entry = players.get(steamId);
+    if (!entry) players.set(steamId, (entry = { weapons: new Map(), longest: 0, streak: 0 }));
+    return entry;
+  };
+  for (const row of Array.isArray(aggregate?.weapons) ? aggregate.weapons : []) {
+    if (typeof row?.steamId !== "string") continue;
+    const entry = player(row.steamId);
+    const { label } = describeCause(row.cause);
+    if (label !== UNKNOWN_WEAPON && count(row.kills))
+      entry.weapons.set(label, (entry.weapons.get(label) ?? 0) + count(row.kills));
+    if (publicMeters(row.longestCentimeters) !== null) entry.longest = Math.max(entry.longest, row.longestCentimeters!);
+  }
+  for (const row of Array.isArray(aggregate?.streaks) ? aggregate.streaks : [])
+    if (typeof row?.steamId === "string") player(row.steamId).streak = count(row.bestStreak);
+  const result = new Map<string, RowExtras>();
+  for (const [steamId, entry] of players) {
+    const extras: RowExtras = {};
+    const [top] = [...entry.weapons.entries()].map(([label, kills]) => ({ label, kills })).sort(byCountThenLabel);
+    if (top) extras.topWeapon = top.label;
+    const meters = publicMeters(entry.longest);
+    if (meters !== null) extras.longestKillMeters = meters;
+    if (entry.streak >= 1) extras.bestStreak = entry.streak;
+    result.set(steamId, extras);
+  }
+  return result;
+}
+
+/** A public leaderboard row: game statistics and valid extras only, assigned one by one. */
+export function publicStats(
+  { steamId, name, kills, deaths, headshotKills, kd }: CombatStats,
+  extras?: RowExtras,
+): PublicCombatStats {
+  const row: PublicCombatStats = { name: publicName(steamId, name), kills, deaths, headshotKills, kd };
+  const weapon = extras?.topWeapon;
+  if (typeof weapon === "string" && /^[A-Za-z0-9][A-Za-z0-9 '-]{0,39}$/.test(weapon) && weapon !== UNKNOWN_WEAPON)
+    row.topWeapon = weapon;
+  const meters = extras?.longestKillMeters;
+  if (typeof meters === "number" && Number.isSafeInteger(meters) && meters >= 0 && meters <= 2_000)
+    row.longestKillMeters = meters;
+  const streak = extras?.bestStreak;
+  if (typeof streak === "number" && Number.isSafeInteger(streak) && streak >= 1) row.bestStreak = streak;
+  return row;
 }
 
 type Cached<T> = Map<string, { until: number; value: Promise<T> }>;
@@ -213,6 +259,7 @@ export class TelemetryService {
   // Time-based, not cleared by ingest(): each recompute scans the whole window, so traffic and feed
   // batches cannot raise their rate above one per server and period per minute.
   private readonly statsCache: Cached<StatsSnapshot> = new Map();
+  private readonly extrasCache: Cached<Map<string, RowExtras>> = new Map();
   constructor(
     private readonly store: TelemetryStore,
     private readonly env: EnvService,
@@ -418,10 +465,34 @@ export class TelemetryService {
     };
   }
 
-  /** Public leaderboard: display names and game statistics, never SteamIDs. */
+  /**
+   * Public leaderboard: display names, game statistics and optional row extras, never SteamIDs. The
+   * extras never fail the leaderboard: without them the rows are served as before.
+   */
   async leaderboard(input?: unknown, id?: string) {
     const result = await this.ranking(input, id);
-    return { ...result, leaderboard: result.leaderboard.map(publicStats) };
+    const extras = result.enabled
+      ? await this.rowExtras(result.serverId, result.period, result.leaderboard)
+      : new Map<string, RowExtras>();
+    return { ...result, leaderboard: result.leaderboard.map((row) => publicStats(row, extras.get(row.steamId))) };
+  }
+
+  /**
+   * Row extras for the players listed when the cache was filled, over the window ending then. Players who
+   * reach the top 100 later get theirs at the next refresh.
+   */
+  private async rowExtras(serverId: string, period: TelemetryPeriod, rows: CombatStats[]) {
+    try {
+      return await this.cached(this.extrasCache, `${serverId}:${period}`, async () => {
+        const until = new Date(Date.now()),
+          since = new Date(until.getTime() - periodMilliseconds[period]);
+        const steamIds = rows.map((row) => row.steamId);
+        return rowExtrasByPlayer(await this.store.rowExtras(since, until, steamIds, serverId));
+      });
+    } catch {
+      this.logger.warn("Leaderboard extras unavailable; serving rows without them.");
+      return new Map<string, RowExtras>();
+    }
   }
 
   /**

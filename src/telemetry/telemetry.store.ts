@@ -2,10 +2,12 @@ import { Inject, Injectable } from "@nestjs/common";
 import { and, desc, eq, gte, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { DATABASE, type Database } from "../database/database.types";
 import { combatEvents, combatTracking, gameFeedEventTypes } from "../database/telemetry.schema";
+import { isPublicIndividualSteamId } from "../common/steam-id";
 import {
   type CombatAggregate,
   type FeedEventTypeSummary,
   type ParsedFeed,
+  type RowExtrasAggregate,
   type ServerStatsAggregate,
   type TrackingRecord,
   type WeeklyHighlights,
@@ -50,6 +52,11 @@ function receivedWindow(serverId: string, since: Date, until: Date) {
     return sql`${sql.raw(p)}server_id = ${serverId} AND ${sql.raw(p)}received_at >= ${since} AND ${sql.raw(p)}received_at <= ${until}`;
   };
 }
+const idList = (ids: string[]) =>
+  sql.join(
+    ids.map((id) => sql`${id}`),
+    sql`, `,
+  );
 
 @Injectable()
 export class TelemetryStore {
@@ -403,6 +410,44 @@ export class TelemetryStore {
         longest: lists.rows[0]?.longest ?? [],
         leaders: lists.rows[0]?.leaders ?? [],
       };
+    }, READ_ONLY);
+  }
+
+  /**
+   * Leaderboard row extras for up to 100 listed players over the same bounds as snapshot(): kills and
+   * longest kill per cause, and each player's most kills without dying within one server session
+   * (ordered by receipt, then game clock; a suicide counts as a death). Reads only these players' own
+   * events through the killer and victim indexes. Rows keep SteamIDs and never leave the service.
+   */
+  async rowExtras(since: Date, until: Date, steamIds: string[], serverId = "primary"): Promise<RowExtrasAggregate> {
+    const ids = [...new Set(steamIds.filter(isPublicIndividualSteamId))].slice(0, 100);
+    if (!ids.length) return { weapons: [], streaks: [] };
+    return this.db.transaction(async (tx) => {
+      const weapons = await tx.execute<RowExtrasAggregate["weapons"][number]>(sql`
+        SELECT killer_steam_id AS "steamId", min(btrim(cause)) AS cause, count(*)::int AS kills,
+          max(distance_centimeters) FILTER (WHERE distance_centimeters > 0 AND distance_centimeters <= ${DISTANCE_CAP}) AS "longestCentimeters"
+        FROM combat_events
+        WHERE ${receivedWindow(serverId, since, until)()} AND NOT suicide AND killer_steam_id IN (${idList(ids)})
+        GROUP BY killer_steam_id, lower(btrim(cause))
+      `);
+      const range = receivedWindow(serverId, since, until);
+      const streaks = await tx.execute<RowExtrasAggregate["streaks"][number]>(sql`
+        SELECT steam_id AS "steamId", max(kills)::int AS "bestStreak" FROM (
+          SELECT steam_id, server_instance_id, life, count(*) FILTER (WHERE is_kill) AS kills FROM (
+            SELECT steam_id, server_instance_id, is_kill,
+              sum(CASE WHEN is_kill THEN 0 ELSE 1 END) OVER (PARTITION BY steam_id, server_instance_id
+                ORDER BY received_at, event_time, is_kill DESC, event_id ROWS UNBOUNDED PRECEDING) AS life
+            FROM (
+              SELECT killer_steam_id AS steam_id, server_instance_id, received_at, event_time, event_id, true AS is_kill
+              FROM combat_events WHERE ${range()} AND NOT suicide AND killer_steam_id IN (${idList(ids)})
+              UNION ALL
+              SELECT victim_steam_id, server_instance_id, received_at, event_time, event_id, false
+              FROM combat_events WHERE ${range()} AND victim_steam_id IN (${idList(ids)})
+            ) a
+          ) b GROUP BY steam_id, server_instance_id, life
+        ) c GROUP BY steam_id
+      `);
+      return { weapons: weapons.rows, streaks: streaks.rows };
     }, READ_ONLY);
   }
 

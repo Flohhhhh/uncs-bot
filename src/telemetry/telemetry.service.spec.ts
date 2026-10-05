@@ -39,6 +39,7 @@ function fixture(enabled = true, secret = token, rcon = "different-rcon-password
     events: jest.fn().mockResolvedValue([]),
     eventTypes: jest.fn().mockResolvedValue([]),
     serverStats: jest.fn().mockResolvedValue(emptyStatsAggregate()),
+    rowExtras: jest.fn().mockResolvedValue({ weapons: [], streaks: [] }),
   };
   const servers = fixtureServers({});
   servers.feedToken = () => (secret !== rcon ? secret : undefined);
@@ -899,5 +900,110 @@ describe("public server stats", () => {
     await expect(service.stats("week")).rejects.toThrow();
     await expect(service.stats("week")).resolves.toMatchObject({ period: "week" });
     expect(store.serverStats).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("leaderboard row extras", () => {
+  const [A, B, C, D, E] = ["01", "02", "03", "04", "05"].map((end) => `765611980000000${end}`);
+  beforeEach(() => {
+    jest.useFakeTimers().setSystemTime(now);
+    jest.spyOn(Logger.prototype, "warn").mockImplementation();
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+
+  it("attaches each listed player's extras by SteamID without exposing it", async () => {
+    const { service, store } = fixture();
+    store.snapshot.mockResolvedValue({
+      leaderboard: [
+        { steamId: A, name: "UncDap", kills: 30, deaths: 10, headshotKills: 9, kd: 3 },
+        { steamId: B, name: B, kills: 12, deaths: 12, headshotKills: 1, kd: 1 },
+        { steamId: C, name: "Quiet", kills: 2, deaths: 9, headshotKills: 0, kd: 0.22 },
+        { steamId: D, name: "Tied", kills: 2, deaths: 9, headshotKills: 0, kd: 0.22 },
+      ],
+      totals: { ...emptyTotals(), players: 4 },
+    });
+    store.rowExtras.mockResolvedValue({
+      weapons: [
+        { steamId: A, cause: "Id.Item.AK74M", kills: 10, longestCentimeters: 41_249 },
+        { steamId: A, cause: "ID.Item.AK74M", kills: 5, longestCentimeters: null },
+        { steamId: A, cause: "Id.Item.M4", kills: 12, longestCentimeters: 9_000 },
+        { steamId: A, cause: null, kills: 3, longestCentimeters: 250_000 },
+        // Only unnamed causes: no go-to weapon, but the distance still counts.
+        { steamId: B, cause: "Weapon.Rifle", kills: 8, longestCentimeters: 30_000 },
+        { steamId: B, cause: null, kills: 4, longestCentimeters: null },
+        { steamId: D, cause: "Id.Item.SKS", kills: 1, longestCentimeters: null },
+        { steamId: D, cause: "Id.Item.M4", kills: 1, longestCentimeters: null },
+        // Not on the board: ignored.
+        { steamId: E, cause: "Id.Item.SKS", kills: 9, longestCentimeters: 10_000 },
+      ],
+      streaks: [
+        { steamId: A, bestStreak: 9 },
+        { steamId: B, bestStreak: 0 },
+        { steamId: D, bestStreak: 1 },
+      ],
+    });
+    const result = await service.leaderboard("week");
+    expect(store.rowExtras).toHaveBeenCalledWith(
+      new Date(now.getTime() - periodMilliseconds.week),
+      now,
+      [A, B, C, D],
+      "primary",
+    );
+    expect(result.leaderboard).toEqual([
+      {
+        name: "UncDap",
+        kills: 30,
+        deaths: 10,
+        headshotKills: 9,
+        kd: 3,
+        topWeapon: "AK-74M",
+        longestKillMeters: 412,
+        bestStreak: 9,
+      },
+      { name: UNNAMED_PLAYER, kills: 12, deaths: 12, headshotKills: 1, kd: 1, longestKillMeters: 300 },
+      { name: "Quiet", kills: 2, deaths: 9, headshotKills: 0, kd: 0.22 },
+      // A tie goes to the alphabetically first label.
+      { name: "Tied", kills: 2, deaths: 9, headshotKills: 0, kd: 0.22, topWeapon: "M4", bestStreak: 1 },
+    ]);
+    const allowed = [...publicKeys, "topWeapon", "longestKillMeters", "bestStreak"];
+    for (const row of result.leaderboard) for (const key of Object.keys(row)) expect(allowed).toContain(key);
+    expect(JSON.stringify(result)).not.toMatch(/steamId|\p{Nd}{17}/u);
+    // Staff rankings are unchanged: SteamIDs, no extras.
+    const staff = await service.combat("week");
+    expect(Object.keys(staff.leaderboard[0]).sort()).toEqual([...publicKeys, "steamId"].sort());
+  });
+
+  it("serves the rows without extras when they cannot be read, and never fails the leaderboard", async () => {
+    const { service, store } = fixture();
+    store.snapshot.mockResolvedValue({
+      leaderboard: [{ steamId: A, name: "UncDap", kills: 3, deaths: 1, headshotKills: 1, kd: 3 }],
+      totals: emptyTotals(),
+    });
+    store.rowExtras.mockRejectedValueOnce(new Error(`postgres://user:secret@private-db ${A}`));
+    const result = await service.leaderboard("week");
+    expect(result.leaderboard).toEqual([{ name: "UncDap", kills: 3, deaths: 1, headshotKills: 1, kd: 3 }]);
+    expect(Object.keys(result.leaderboard[0]).sort()).toEqual(publicKeys);
+    expect(Logger.prototype.warn).toHaveBeenCalledWith("Leaderboard extras unavailable; serving rows without them.");
+    expect(JSON.stringify(jest.mocked(Logger.prototype.warn).mock.calls)).not.toMatch(/7656119|postgres/);
+    // The failure is not cached: the next read tries again.
+    await service.leaderboard("week");
+    expect(store.rowExtras).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps row extras for a minute even as feed batches refresh the rows", async () => {
+    const { service, store, payload } = fixture();
+    await service.leaderboard("week");
+    await service.ingest(`Bearer ${token}`, payload);
+    await service.leaderboard("week");
+    expect(store.snapshot).toHaveBeenCalledTimes(2);
+    expect(store.rowExtras).toHaveBeenCalledTimes(1);
+    await service.leaderboard("day");
+    expect(store.rowExtras).toHaveBeenCalledTimes(2);
+    jest.advanceTimersByTime(60_001);
+    await service.leaderboard("week");
+    expect(store.rowExtras).toHaveBeenCalledTimes(3);
   });
 });

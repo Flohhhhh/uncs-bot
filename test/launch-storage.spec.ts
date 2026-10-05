@@ -28,7 +28,7 @@ import { ServerEventsStore } from "../src/server-events/server-events.store";
 import { eventFixture, eventStaff, voteEventFixture } from "../src/server-events/event-fixtures";
 import { operation } from "../src/server-events/event-planner";
 import { TelemetryStore } from "../src/telemetry/telemetry.store";
-import { publicServerStats } from "../src/telemetry/telemetry.service";
+import { publicServerStats, rowExtrasByPlayer } from "../src/telemetry/telemetry.service";
 import { DiscordRolesStore } from "../src/discord-roles/discord-roles.store";
 import { PATRON_LINK_ACTOR, PatronLinkStore, type PatronLinkResult } from "../src/patron-link/patron-link.store";
 import { PATRON_LINK_FOUNDER_REASON } from "../src/supporters/supporter-match.rules";
@@ -676,7 +676,7 @@ describe("launch storage on isolated PostgreSQL", () => {
     expect((await telemetry.tracking("east"))?.lastReceivedAt).toEqual(now);
   });
 
-  it("aggregates public server stats from stored events", async () => {
+  it("aggregates public server stats and leaderboard row extras from stored events", async () => {
     const telemetry = new TelemetryStore(drizzle({ client, schema }));
     const now = new Date(),
       since = new Date(now.getTime() - 60_000);
@@ -783,6 +783,22 @@ describe("launch storage on isolated PostgreSQL", () => {
       falling: [{ name: "TeaAndTanks", count: 1 }],
     });
     expect(JSON.stringify(result)).not.toMatch(/steamId|\d{17}/);
+
+    const extras = await telemetry.rowExtras(since, now, [oldMan, mossy, tea, "not-an-id"], "east");
+    expect(extras.streaks.sort((a, b) => a.steamId.localeCompare(b.steamId))).toEqual([
+      // Three kills, then run over; the kill after that starts a new streak.
+      { steamId: oldMan, bestStreak: 3 },
+      { steamId: mossy, bestStreak: 1 },
+      { steamId: tea, bestStreak: 0 },
+    ]);
+    expect(rowExtrasByPlayer(extras)).toEqual(
+      new Map([
+        [oldMan, { topWeapon: "AK-74M", longestKillMeters: 412, bestStreak: 3 }],
+        [mossy, { topWeapon: "Humvee", bestStreak: 1 }],
+        [tea, {}],
+      ]),
+    );
+    expect(await telemetry.rowExtras(since, now, [], "east")).toEqual({ weapons: [], streaks: [] });
   });
 
   it("stores game GUIDs that are not RFC 4122 UUIDs and deduplicates them across letter case", async () => {

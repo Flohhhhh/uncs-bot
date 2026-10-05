@@ -133,8 +133,14 @@ export type CombatStats = {
   headshotKills: number;
   kd: number | null;
 };
+/**
+ * Optional per-row extras on the public leaderboard, each omitted when unknown (never null): the player's
+ * most-used named weapon, their longest kill within the public distance cap, and their most kills without
+ * dying within one server session.
+ */
+export type RowExtras = { topWeapon?: string; longestKillMeters?: number; bestStreak?: number };
 // Public leaderboard rows carry game statistics only: no SteamID and no other account identifier.
-export type PublicCombatStats = Omit<CombatStats, "steamId">;
+export type PublicCombatStats = Omit<CombatStats, "steamId"> & RowExtras;
 export type CombatTotals = { events: number; kills: number; deaths: number; headshotKills: number; players: number };
 export type CombatAggregate = { leaderboard: CombatStats[]; totals: CombatTotals };
 export type TrackingRecord = { firstReceivedAt: Date; lastReceivedAt: Date } | null;
@@ -231,6 +237,11 @@ export type ServerStatsAggregate = {
     distanceCentimeters: number;
   }>;
   leaders: Array<{ tag: string; steamId: string; name: string | null; count: number }>;
+};
+/** Store-internal leaderboard row inputs, keyed by SteamID for the service to attach. */
+export type RowExtrasAggregate = {
+  weapons: Array<{ steamId: string; cause: string | null; kills: number; longestCentimeters: number | null }>;
+  streaks: Array<{ steamId: string; bestStreak: number }>;
 };
 export const emptyHighlights = (): WeeklyHighlights => ({
   bestKd: null,
