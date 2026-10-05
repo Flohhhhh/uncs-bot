@@ -1,4 +1,5 @@
 import { MessageFlags } from "discord.js";
+import { describeCause, UNKNOWN_WEAPON } from "../common/cause-labels";
 import { mapLabel } from "../common/map-labels";
 import { plainLabel } from "../server-community/community-state";
 import { publicName, UNNAMED_PLAYER } from "../telemetry/telemetry.service";
@@ -30,8 +31,6 @@ export const NO_MENTIONS = { parse: [] as [], users: [] as string[], roles: [] a
 
 /** Any run of 17 decimal digits, in any script, reads as a SteamID64 and is never shown. */
 const STEAM_ID_LIKE = /\p{Nd}{17}/u;
-/** Unreal-style identifiers: paths, dotted names, blueprint prefixes and generated class suffixes. */
-const INTERNAL_ID = /[/.\\]|(?:^|[^A-Za-z])BP_|_C(?:_\d+)?$/;
 
 function safeLabel(value: string, max: number) {
   const label = plainLabel(value, max);
@@ -49,10 +48,13 @@ export function discordName(steamId: string | null | undefined, name: unknown) {
   return safeLabel(visible, 32) ?? UNNAMED_PLAYER;
 }
 
-/** A weapon or cause that reads as a name, or null for anything that looks like an internal identifier. */
+/**
+ * A weapon or cause by its shared readable label ("Id.Item.AK74M" and "ID.Item.AK74M" both read "AK-74M"),
+ * or null when describeCause() cannot name it: unknown dotted ids, paths, blueprint names and SteamID-like text.
+ */
 export function causeLabel(cause: string | null | undefined) {
-  if (typeof cause !== "string" || !cause.trim() || INTERNAL_ID.test(cause)) return null;
-  return safeLabel(cause, 40);
+  const { label } = describeCause(cause);
+  return label === UNKNOWN_WEAPON ? null : safeLabel(label, 40);
 }
 
 export function mapName(map: string | null | undefined) {

@@ -2,14 +2,19 @@ import { Inject, Injectable } from "@nestjs/common";
 import { and, desc, eq, gte, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { DATABASE, type Database } from "../database/database.types";
 import { combatEvents, combatTracking, gameFeedEventTypes } from "../database/telemetry.schema";
+import { isPublicIndividualSteamId } from "../common/steam-id";
 import {
   type CombatAggregate,
   type FeedEventTypeSummary,
   type ParsedFeed,
+  type RowExtrasAggregate,
+  type ServerStatsAggregate,
   type TrackingRecord,
   type WeeklyHighlights,
   emptyHighlights,
   emptyTotals,
+  LEADER_TAGS,
+  PUBLIC_MAX_DISTANCE_CENTIMETERS,
 } from "./telemetry.types";
 
 /** New event types recorded per server and UTC day, killed aside, so a bad feed cannot add unbounded rows. */
@@ -18,6 +23,40 @@ const RETENTION_MS = 90 * 86_400_000;
 const utcDay = (at: Date) => at.toISOString().slice(0, 10);
 
 type Transaction = Parameters<Parameters<Database["transaction"]>[0]>[0];
+
+/** Read-only stats reads see one consistent snapshot, so their numbers add up. */
+const READ_ONLY = { isolationLevel: "repeatable read", accessMode: "read only" } as const;
+/** The public distance cap as an SQL literal: a code constant, never input. */
+const DISTANCE_CAP = sql.raw(String(PUBLIC_MAX_DISTANCE_CENTIMETERS));
+// context_tags keeps the feed's full strings, so a tag matches with or without either known prefix.
+const TAG_PREFIXES = ["", "Meta.Progression.Context.Player.KillContext.", "Meta.PlayerKillFlag.Player."];
+/** `<column> ?| ARRAY[...]` over every stored spelling of these tags. Built only from code constants. */
+function hasTag(column: string, ...tags: string[]) {
+  const variants = tags.flatMap((tag) => {
+    if (!/^[A-Za-z]+$/.test(tag)) throw new Error("Tag constants must be plain words.");
+    return TAG_PREFIXES.map((prefix) => `'${prefix}${tag}'`);
+  });
+  return sql.raw(`${column} ?| ARRAY[${variants.join(",")}]`);
+}
+/**
+ * `server_id = $1 AND received_at >= $2 AND received_at <= $3`: the leading columns of
+ * combat_events_received_idx. The first use in a statement binds the three values; later uses reuse
+ * those same parameters, so every scan in the statement reads one window. Use it first in text order.
+ */
+function receivedWindow(serverId: string, since: Date, until: Date) {
+  let bound = false;
+  return (alias = "") => {
+    const p = alias ? `${alias}.` : "";
+    if (bound) return sql.raw(`${p}server_id = $1 AND ${p}received_at >= $2 AND ${p}received_at <= $3`);
+    bound = true;
+    return sql`${sql.raw(p)}server_id = ${serverId} AND ${sql.raw(p)}received_at >= ${since} AND ${sql.raw(p)}received_at <= ${until}`;
+  };
+}
+const idList = (ids: string[]) =>
+  sql.join(
+    ids.map((id) => sql`${id}`),
+    sql`, `,
+  );
 
 @Injectable()
 export class TelemetryStore {
@@ -255,8 +294,8 @@ export class TelemetryStore {
         (SELECT count(*)::int FROM kills) AS kills,
         (SELECT count(*)::int FROM kills WHERE cause IS NOT NULL AND cause <> '') AS "killsWithCause",
         (SELECT row_to_json(r) FROM (
-          SELECT cause, count(*)::int AS kills FROM kills WHERE cause IS NOT NULL AND cause <> ''
-          GROUP BY cause ORDER BY count(*) DESC, cause LIMIT 1
+          SELECT min(btrim(cause)) AS cause, count(*)::int AS kills FROM kills WHERE cause IS NOT NULL AND btrim(cause) <> ''
+          GROUP BY lower(btrim(cause)) ORDER BY count(*) DESC, lower(btrim(cause)) LIMIT 1
         ) r) AS "topCause",
         COALESCE((SELECT json_agg(row_to_json(r)) FROM (
           SELECT map_name AS "mapName", count(*)::int AS kills FROM kills WHERE map_name IS NOT NULL AND map_name <> ''
@@ -264,6 +303,168 @@ export class TelemetryStore {
         ) r), '[]'::json) AS maps
     `);
     return rows.rows[0] ?? emptyHighlights();
+  }
+
+  /**
+   * Server-wide stats inputs over the same bounds as snapshot(), in three read-only statements that share
+   * one snapshot. A kill is a non-suicide event with a linked killer, as in snapshot(), so these totals
+   * match the leaderboard's. Each statement range-scans combat_events_received_idx; there is no
+   * materialized copy of the window. Rows keep SteamIDs for name lookups and never leave the service.
+   */
+  async serverStats(since: Date, until: Date, serverId = "primary"): Promise<ServerStatsAggregate> {
+    return this.db.transaction(async (tx) => {
+      // S1: kills by cause, by map, by UTC hour and in total, in one scan with hashed grouping sets.
+      const range1 = receivedWindow(serverId, since, until);
+      const groups = await tx.execute<ServerStatsAggregate["groups"][number]>(sql`
+        SELECT GROUPING(cause_key, map_name, hour)::int AS "set", cause_key AS "causeKey", min(cause) AS cause,
+          map_name AS "mapName", hour, count(*)::int AS kills,
+          (count(*) FILTER (WHERE headshot))::int AS "headshotKills",
+          max(distance_centimeters) FILTER (WHERE distance_centimeters > 0 AND distance_centimeters <= ${DISTANCE_CAP}) AS "longestCentimeters",
+          (count(*) FILTER (WHERE ${hasTag("context_tags", LEADER_TAGS.melee)}))::int AS melee,
+          (count(*) FILTER (WHERE ${hasTag("context_tags", LEADER_TAGS.roadkill)}))::int AS roadkill,
+          (count(*) FILTER (WHERE ${hasTag("context_tags", LEADER_TAGS.vehicleExplosion)}))::int AS "vehicleExplosion",
+          (count(*) FILTER (WHERE ${hasTag("context_tags", LEADER_TAGS.penetration)}))::int AS penetration,
+          (count(*) FILTER (WHERE ${hasTag("context_tags", LEADER_TAGS.ricochet)}))::int AS ricochet
+        FROM (
+          SELECT lower(nullif(btrim(cause), '')) AS cause_key, nullif(btrim(cause), '') AS cause,
+            nullif(btrim(map_name), '') AS map_name, extract(hour FROM received_at AT TIME ZONE 'UTC')::int AS hour,
+            headshot, distance_centimeters, context_tags
+          FROM combat_events
+          WHERE ${range1()} AND NOT suicide AND killer_steam_id IS NOT NULL
+        ) k
+        GROUP BY GROUPING SETS ((cause_key), (map_name), (hour), ())
+      `);
+      // S2: event totals. Each event is read once as its killer and once as its victim. Grouping by id
+      // first lets Postgres hash about 2k players instead of sorting every row for count(DISTINCT);
+      // count(id) skips the NULL group, so players still means distinct linked killers and victims.
+      const range2 = receivedWindow(serverId, since, until);
+      const totals = await tx.execute<ServerStatsAggregate["totals"]>(sql`
+        SELECT coalesce(sum(events), 0)::int AS events, coalesce(sum(deaths), 0)::int AS deaths,
+          coalesce(sum(suicides), 0)::int AS suicides, coalesce(sum(falling), 0)::int AS falling,
+          count(id)::int AS players
+        FROM (
+          SELECT v.id, count(*) FILTER (WHERE v.n = 1) AS events,
+            count(*) FILTER (WHERE v.n = 2 AND v.id IS NOT NULL) AS deaths,
+            count(*) FILTER (WHERE v.n = 1 AND e.suicide) AS suicides,
+            count(*) FILTER (WHERE v.n = 2 AND v.id IS NOT NULL AND ${hasTag("e.context_tags", LEADER_TAGS.falling)}) AS falling
+          FROM combat_events e CROSS JOIN LATERAL (VALUES (1, e.killer_steam_id), (2, e.victim_steam_id)) AS v(n, id)
+          WHERE ${range2("e")}
+          GROUP BY v.id
+        ) g
+      `);
+      // S3: named lists. The ten players with the longest capped kills, ranked by each player's own best
+      // shot so a few snipers cannot crowd the others out, and the top five per tag. Names are then read
+      // for those players only (at most 40), with one short backward index probe each.
+      const range3 = receivedWindow(serverId, since, until);
+      const lists = await tx.execute<Pick<ServerStatsAggregate, "longest" | "leaders">>(sql`
+        WITH best AS (
+          SELECT killer_steam_id AS steam_id, max(distance_centimeters) AS cm FROM combat_events
+          WHERE ${range3()} AND NOT suicide AND killer_steam_id IS NOT NULL
+            AND distance_centimeters > 0 AND distance_centimeters <= ${DISTANCE_CAP}
+          GROUP BY killer_steam_id
+          ORDER BY cm DESC, killer_steam_id LIMIT 10
+        ), longest AS (
+          SELECT best.steam_id, shot.cause, shot.map_name, shot.distance_centimeters, shot.received_at, shot.event_id
+          FROM best CROSS JOIN LATERAL (
+            SELECT c.cause, c.map_name, c.distance_centimeters, c.received_at, c.event_id FROM combat_events c
+            WHERE ${range3("c")} AND c.killer_steam_id = best.steam_id AND NOT c.suicide
+              AND c.distance_centimeters = best.cm
+            ORDER BY c.received_at, c.event_id LIMIT 1
+          ) shot
+        ), tagged AS (
+          SELECT t.tag, t.steam_id FROM combat_events e
+          CROSS JOIN LATERAL (VALUES
+            ('melee', e.killer_steam_id, NOT e.suicide AND ${hasTag("e.context_tags", LEADER_TAGS.melee)}),
+            ('roadkill', e.killer_steam_id, NOT e.suicide AND ${hasTag("e.context_tags", LEADER_TAGS.roadkill)}),
+            ('vehicleExplosion', e.killer_steam_id, NOT e.suicide AND ${hasTag("e.context_tags", LEADER_TAGS.vehicleExplosion)}),
+            ('penetration', e.killer_steam_id, NOT e.suicide AND ${hasTag("e.context_tags", LEADER_TAGS.penetration)}),
+            ('ricochet', e.killer_steam_id, NOT e.suicide AND ${hasTag("e.context_tags", LEADER_TAGS.ricochet)}),
+            ('falling', e.victim_steam_id, ${hasTag("e.context_tags", LEADER_TAGS.falling)})
+          ) AS t(tag, steam_id, hit)
+          WHERE ${range3("e")} AND ${hasTag("e.context_tags", ...Object.values(LEADER_TAGS))}
+            AND t.hit AND t.steam_id IS NOT NULL
+        ), leaders AS (
+          SELECT tag, steam_id, hits FROM (
+            SELECT tag, steam_id, count(*)::int AS hits,
+              row_number() OVER (PARTITION BY tag ORDER BY count(*) DESC, steam_id) AS rank
+            FROM tagged GROUP BY tag, steam_id
+          ) ranked WHERE rank <= 5
+        ), named AS (
+          SELECT steam_id FROM longest UNION SELECT steam_id FROM leaders
+        ), names AS (
+          -- snapshot()'s rule: the latest non-empty name seen as killer or victim in the window.
+          SELECT named.steam_id, latest.name FROM named
+          LEFT JOIN LATERAL (
+            (SELECT c.killer_name AS name, c.received_at, c.event_id FROM combat_events c
+              WHERE ${range3("c")} AND c.killer_steam_id = named.steam_id
+                AND c.killer_name IS NOT NULL AND c.killer_name <> ''
+              ORDER BY c.received_at DESC, c.event_id DESC LIMIT 1)
+            UNION ALL
+            (SELECT c.victim_name, c.received_at, c.event_id FROM combat_events c
+              WHERE ${range3("c")} AND c.victim_steam_id = named.steam_id
+                AND c.victim_name IS NOT NULL AND c.victim_name <> ''
+              ORDER BY c.received_at DESC, c.event_id DESC LIMIT 1)
+            ORDER BY received_at DESC, event_id DESC LIMIT 1
+          ) latest ON true
+        )
+        SELECT
+          COALESCE((SELECT json_agg(row_to_json(r)) FROM (
+            SELECT longest.steam_id AS "steamId", names.name, longest.cause, longest.map_name AS "mapName",
+              longest.distance_centimeters AS "distanceCentimeters"
+            FROM longest LEFT JOIN names USING (steam_id)
+            ORDER BY longest.distance_centimeters DESC, longest.received_at, longest.event_id LIMIT 10
+          ) r), '[]'::json) AS longest,
+          COALESCE((SELECT json_agg(row_to_json(r)) FROM (
+            SELECT leaders.tag, leaders.steam_id AS "steamId", names.name, leaders.hits AS count
+            FROM leaders LEFT JOIN names USING (steam_id)
+            ORDER BY leaders.tag, leaders.hits DESC, leaders.steam_id
+          ) r), '[]'::json) AS leaders
+      `);
+      return {
+        groups: groups.rows,
+        totals: totals.rows[0] ?? { events: 0, deaths: 0, suicides: 0, falling: 0, players: 0 },
+        longest: lists.rows[0]?.longest ?? [],
+        leaders: lists.rows[0]?.leaders ?? [],
+      };
+    }, READ_ONLY);
+  }
+
+  /**
+   * Leaderboard row extras for up to 100 listed players over the same bounds as snapshot(): kills and
+   * longest kill per cause, and each player's most kills without dying within one server session
+   * (ordered by receipt, then game clock; a suicide counts as a death). Reads only these players' own
+   * events through the killer and victim indexes. Rows keep SteamIDs and never leave the service.
+   */
+  async rowExtras(since: Date, until: Date, steamIds: string[], serverId = "primary"): Promise<RowExtrasAggregate> {
+    const ids = [...new Set(steamIds.filter(isPublicIndividualSteamId))].slice(0, 100);
+    if (!ids.length) return { weapons: [], streaks: [] };
+    return this.db.transaction(async (tx) => {
+      const weapons = await tx.execute<RowExtrasAggregate["weapons"][number]>(sql`
+        SELECT killer_steam_id AS "steamId", min(btrim(cause)) AS cause, count(*)::int AS kills,
+          max(distance_centimeters) FILTER (WHERE distance_centimeters > 0 AND distance_centimeters <= ${DISTANCE_CAP}) AS "longestCentimeters"
+        FROM combat_events
+        WHERE ${receivedWindow(serverId, since, until)()} AND NOT suicide AND killer_steam_id IN (${idList(ids)})
+        GROUP BY killer_steam_id, lower(btrim(cause))
+      `);
+      const range = receivedWindow(serverId, since, until);
+      const streaks = await tx.execute<RowExtrasAggregate["streaks"][number]>(sql`
+        SELECT steam_id AS "steamId", max(kills)::int AS "bestStreak" FROM (
+          SELECT steam_id, server_instance_id, life, count(*) FILTER (WHERE is_kill) AS kills FROM (
+            SELECT steam_id, server_instance_id, is_kill,
+              sum(CASE WHEN is_kill THEN 0 ELSE 1 END) OVER (PARTITION BY steam_id, server_instance_id
+                ORDER BY received_at, event_time, is_kill DESC, event_id ROWS UNBOUNDED PRECEDING) AS life
+            FROM (
+              SELECT killer_steam_id AS steam_id, server_instance_id, received_at, event_time, event_id, true AS is_kill
+              FROM combat_events WHERE ${range()} AND NOT suicide AND killer_steam_id IN (${idList(ids)})
+              UNION ALL
+              SELECT victim_steam_id, server_instance_id, received_at, event_time, event_id, false
+              FROM combat_events WHERE ${range()} AND victim_steam_id IN (${idList(ids)})
+            ) a
+          ) b GROUP BY steam_id, server_instance_id, life
+        ) c GROUP BY steam_id
+      `);
+      return { weapons: weapons.rows, streaks: streaks.rows };
+    }, READ_ONLY);
   }
 
   /**

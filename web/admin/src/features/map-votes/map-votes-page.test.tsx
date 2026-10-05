@@ -326,7 +326,7 @@ it("checks voting setup only on request, clears stale results on retry, and neve
   show();
   await screen.findByRole("heading", { name: "Discord map voting is off" });
   expect(document.querySelector("details")).toBeNull();
-  expect(request.mock.calls.map(([path]) => path)).toEqual(["map-votes", "map-votes/controls"]);
+  await waitFor(() => expect(request.mock.calls.map(([path]) => path)).toEqual(["map-votes", "map-votes/controls"]));
   fireEvent.click(screen.getByRole("button", { name: "Check voting setup" }));
   expect(screen.getByRole("button", { name: "Checking setup…" })).toBeDisabled();
   resolveSetup({
@@ -520,7 +520,7 @@ it("shows saved results and closes an active ballot with a separate recorded req
   votes = [ballot];
   show();
   await screen.findByText(/An active ballot/);
-  expect(request.mock.calls.map(([path]) => path)).toEqual(["map-votes", "map-votes/controls"]);
+  await waitFor(() => expect(request.mock.calls.map(([path]) => path)).toEqual(["map-votes", "map-votes/controls"]));
   expect(screen.queryByRole("button", { name: "Review ballot" })).not.toBeInTheDocument();
   expect(screen.getByRole("link", { name: /View in Discord/ })).toHaveAttribute("href", ballot.messageUrl);
   fireEvent.click(screen.getByRole("button", { name: "Close ballot" }));

@@ -1,6 +1,6 @@
 # Combat history and server leaderboard
 
-The optional Wardogs feed stores combat events for this server and exposes rolling 24-hour, 7-day and 30-day views. The public website leaderboard contains game display names, recorded kills/deaths, headshot kills and K/D, never SteamID64s; a SteamID shown in place of a missing name becomes "Unnamed player". Authenticated staff rankings keep SteamID64s for moderation and player history. Authenticated staff can inspect the recent killfeed and a selected player's events. Application emails, Discord account details and application review notes are never joined into this data.
+The optional Wardogs feed stores combat events for this server and exposes rolling 24-hour, 7-day and 30-day views. The public website leaderboard contains game display names, recorded kills/deaths, headshot kills and K/D, plus optional row extras (go-to weapon, longest kill, best streak), never SteamID64s; a missing name, or a name that is or contains any 17-digit run (a SteamID, its own or another player's), becomes "Unnamed player". Public [server stats](#public-server-stats) add server-wide totals, weapons, maps, long shots, busy hours and fun-kill counts under the same rules. Authenticated staff rankings keep SteamID64s for moderation and player history. Authenticated staff can inspect the recent killfeed and a selected player's events. Application emails, Discord account details and application review notes are never joined into this data.
 
 This is recorded game history for human review, not an anti-cheat verdict. There are no automatic bans, cheat scores, or automatic accusation messages.
 
@@ -45,8 +45,57 @@ The table must exist before code that writes it is deployed: counts share the ki
 Routes:
 
 - `GET /community/api/leaderboard?period=day|week|month`: public game statistics only, without SteamIDs.
+- `GET /community/api/stats?period=day|week|month` and `GET /community/api/servers/:serverId/stats?period=...`: public server stats, without SteamIDs. See [Public server stats](#public-server-stats).
 - `GET /admin/api/combat?period=...`: authenticated staff history, including the event type counts above.
 - `GET /admin/api/combat/players/:steamId?period=...`: authenticated staff player history.
+
+### Weapon labels
+
+The game reports causes such as `Id.Item.AK74M`, `ID.Item.AK74M` (both casings occur), `Vehicle.Variant.Air.Rotary.ROT_04.Default` and `Id.Vehicle.WeaponExtension.WHL_05.RingTurret`. `describeCause()` in `src/common/cause-labels.ts` turns each into a readable label and a kind (`firearm`, `explosive`, `melee`, `vehicle`, `vehicle_weapon`, `tool`, `environment` or `unknown`): "AK-74M", "ROT-04 helicopter", "Ring turret". It ignores prefix casing, so both AK spellings are one weapon everywhere. Unnamed codes get a tidy generic name, such as "Weapon 029" for `WEPN_029`. A cause it cannot name (an unknown dotted id, a path, a blueprint name, or anything with a 17-digit run) reads as "Unknown weapon", never the raw id. Every label is at most 40 characters of letters, digits, spaces, `'` and `-`, and never contains the word "free". The public stats, the weekly Discord post and the staff dashboard all use it; staff still see and can search the raw cause, and can search the label too. The staff weapon filter has one option per label, so both AK spellings filter together; each cause with no name gets its own "Unknown weapon (raw id)" option.
+
+To name a new item, add it to the tables in that file with a test. As of October 5, CGM4 is assumed to be a Carl Gustaf launcher ("Carl Gustaf M4"; use "CGM4" if that is wrong), and SR_04, the `WEPN_0xx` codes, ROT_04 and WHL_05 keep generic names until someone checks them in game.
+
+### Leaderboard row extras
+
+Each public leaderboard row can also carry these optional fields. Each is omitted, never null, when it is unknown:
+
+- `topWeapon`: the label of the player's most-used weapon in the window, by kills. "Unknown weapon" is never chosen; ties go to the alphabetically first label.
+- `longestKillMeters`: the player's longest kill in whole metres, within the 2 km public cap.
+- `bestStreak`: the most kills in a row without dying, at least 1. It is counted within one game server session (`server_instance_id`) in receipt order, then game clock order, so it resets when the game server restarts and is approximate across delivery gaps. A self-inflicted death ends a streak. At an exact tie the kill counts before the death.
+
+They are read for the 100 listed players only, through the killer and victim indexes, in one read-only transaction (`TelemetryStore.rowExtras`). The result is cached for 60 seconds per server and period, separately from the 10-second leaderboard snapshot, and feed batches do not clear it. A player who enters the top 100 after the cache was filled gets extras at the next refresh. If the read fails, Gramps logs "Leaderboard extras unavailable; serving rows without them." and serves the rows as before: the leaderboard never fails because of extras. Staff rankings and player history are unchanged.
+
+### Public server stats
+
+`GET /community/api/stats` (or `/community/api/servers/:serverId/stats`) returns the leaderboard's metadata (`serverId`, `enabled`, `connected`, `feedStatus`, `lastReceivedAt`, `trackingStartedAt`, `period`, `windowStartedAt`, `asOf`, `coverageNote`) and:
+
+| Field          | What it holds                                                                                                                                                                       |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `totals`       | `events`, `kills`, `deaths`, `headshotKills`, `players` (the same rules as the leaderboard's totals) and `suicides`                                                                 |
+| `weapons`      | Up to 25 `{label, kind, kills, headshotKills, longestMeters}`, most kills first. Causes with one label are merged; "Unknown weapon" stays as an honest row                          |
+| `maps`         | Up to 10 `{label, kills}`; a map's catalog ID and in-game name count once                                                                                                           |
+| `longestKills` | Up to 10 `{name, weapon, meters, map}`: each player's own longest kill, so one sniper cannot fill the list                                                                          |
+| `hours`        | 24 kill counts by UTC hour of receipt (index 0 is 00:00–00:59 UTC). The website shows them in the viewer's time zone                                                                |
+| `tags`         | Counts for `melee`, `roadkill`, `vehicleExplosion`, `penetration`, `ricochet` (kills with that tag), `falling` (deaths with the Falling tag) and `suicide` (self-inflicted deaths)  |
+| `tagLeaders`   | Up to 5 `{name, count}` for each tag except `suicide`, which is a count only: naming who self-inflicted most is in poor taste. Fall deaths are listed by victim, the rest by killer |
+
+A kill is a non-suicide event with a linked killer, as on the leaderboard, so stats totals equal the leaderboard's totals for the same window. Distances over 2 km (`PUBLIC_MAX_DISTANCE_CENTIMETERS`, the weekly post's cap) are left out everywhere public; vehicle explosions and most suicides have no distance. Tags match the feed's full strings with or without the `Meta.Progression.Context.Player.KillContext.` and `Meta.PlayerKillFlag.Player.` prefixes.
+
+**Names only.** Gramps serves `/community/api/*` on its own origin too, so its own output is safe without the website's proxy: no `steamId` key at any depth, no 17-digit run, and no killer or victim ids. Names, on the leaderboard rows and in the stats lists alike, use the latest non-empty name, then the public name rule, then the website's stricter rule (any 17-digit run in any script's digits becomes "Unnamed player"), trimmed to 64 characters. `publicServerStats()` builds every field one by one; nothing from storage is spread into the response. The website's adapter also rebuilds the response from an allowlist.
+
+**Errors.** The server is resolved first (unknown server 404; no server with several configured 400), then the period (anything other than `day`, `week` or `month` is 400 "Choose day, week or month."), before any database read. With the feed off the response is the metadata and empty stats, with no database read. Database failures return the usual safe 503. The route shares the public read rate limit (300 a minute per proxy address) and the `no-store` headers.
+
+**Cost.** Three statements in one read-only `repeatable read` transaction, each a range scan of `combat_events_received_idx` (`server_id`, `received_at`) with no materialized copy of the window:
+
+1. Kills grouped by cause, map and UTC hour, plus the total, in one pass (`GROUPING SETS`).
+2. Event totals: events, deaths, suicides, fall deaths and distinct players, grouped by player id first so Postgres hashes about 2k ids instead of sorting two rows per event.
+3. Each killer's own longest capped kill (a hashed group over the same range), the ten best of those with their kill row read through the killer index, the top five per tag, and then names for only those players (at most 40): one latest-name probe each on the killer and victim indexes. Ranking players by their own best shot means a few snipers cannot fill the list; at an exact centimetre tie for tenth place the lower SteamID is kept.
+
+The result is cached for 60 seconds per server and period (at most 30 entries, one shared read for concurrent callers, a failed read is not kept). Feed batches do not clear it, so recomputes stay at one per server and period per minute whatever the traffic. `asOf` and `feedStatus` describe the cached read.
+
+**Check before relying on it (Dennis or staff, read-only):** run `EXPLAIN (ANALYZE, BUFFERS)` for the stats statements and for the row-extras streak query with a 30-day window on production-size data. The budget is under about 0.5 s warm for the three stats statements together and under 400 ms for the streak query. If the streak query is over budget for `month`, compute `bestStreak` only for `day` and `week`; the field is optional and the website already copes without it. Agents never run these against production.
+
+**Release order.** Either order works. The website adapter treats a 404 from `/community/api/stats` as "coming soon" and the row extras are optional, so a new site with an older Gramps shows no stats and no extras, and an older site with a newer Gramps 404s `/stats` and strips the extras. Shipping the website first is preferred.
 
 A weekly Discord post of the same names-only data, with data-backed shout-outs, is described in [Weekly Discord leaderboard post](WEEKLY_LEADERBOARD.md). It is off by default and stays silent without enough data.
 
@@ -82,7 +131,7 @@ Do not manufacture kills, send test ingest requests or restart the live game to 
 
 The database schema is provided in `src/database/telemetry.schema.ts` and exported by the main schema. The combined launch migration was applied to the identified production database on September 30 under the owner's explicit authorization, and schema checks passed; see [Database prerequisite](ADMIN_DASHBOARD.md#database-prerequisite--launch-migration-applied). Production uses Node 22.23.3. Consult the [current release audit](ADMIN_RELEASE_AUDIT.md) for dated configuration and delivery evidence. Never probe production ingest with invented kills or print feed credentials.
 
-The local preview overrides the store with explicit simulated events and cannot accept a live game feed. No real player history is imported into the preview.
+The local preview overrides the store with explicit simulated events and cannot accept a live game feed. No real player history is imported into the preview. Its simulated events use the game's cause spellings, kill-context tags and centimetre distances, and include one fictional player with a very long name, so the public stats, row extras and phone layouts can be checked by eye.
 
 ## Later moderation assistance
 

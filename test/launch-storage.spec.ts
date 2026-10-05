@@ -28,6 +28,7 @@ import { ServerEventsStore } from "../src/server-events/server-events.store";
 import { eventFixture, eventStaff, voteEventFixture } from "../src/server-events/event-fixtures";
 import { operation } from "../src/server-events/event-planner";
 import { TelemetryStore } from "../src/telemetry/telemetry.store";
+import { publicServerStats, rowExtrasByPlayer } from "../src/telemetry/telemetry.service";
 import { DiscordRolesStore } from "../src/discord-roles/discord-roles.store";
 import { PATRON_LINK_ACTOR, PatronLinkStore, type PatronLinkResult } from "../src/patron-link/patron-link.store";
 import { PATRON_LINK_FOUNDER_REASON } from "../src/supporters/supporter-match.rules";
@@ -673,6 +674,176 @@ describe("launch storage on isolated PostgreSQL", () => {
     expect(await telemetry.events(since, now, undefined, "primary")).toEqual([]);
     expect(await telemetry.tracking("primary")).toBeNull();
     expect((await telemetry.tracking("east"))?.lastReceivedAt).toEqual(now);
+  });
+
+  it("aggregates public server stats and leaderboard row extras from stored events", async () => {
+    const telemetry = new TelemetryStore(drizzle({ client, schema }));
+    const now = new Date(),
+      since = new Date(now.getTime() - 60_000);
+    const [oldMan, mossy, tea] = ["76561198000000001", "76561198000000002", "76561198000000003"];
+    const names: Record<string, string> = { [oldMan]: "OldManRiver", [mossy]: "MossyBoots", [tea]: "TeaAndTanks" };
+    const tag = (name: string) => `Meta.Progression.Context.Player.KillContext.${name}`;
+    let eventTime = 0;
+    // One batch: every event shares a receipt time, so the game clock orders them.
+    const kill = (
+      killer: string | null,
+      victim: string,
+      fields: { cause?: string; distance?: number; mapName?: string; contextTags?: string[] } = {},
+    ) => ({
+      eventId: randomUUID(),
+      type: "killed",
+      eventTime: ++eventTime,
+      mapName: "Europe",
+      killerSteamId: killer,
+      killerName: killer ? names[killer] : null,
+      victimSteamId: victim,
+      victimName: names[victim],
+      ...fields,
+    });
+    const feed = parseFeed({
+      serverId: randomUUID(),
+      serverName: "Game label",
+      events: [
+        kill(oldMan, mossy, {
+          cause: "Id.Item.AK74M",
+          distance: 41_200,
+          mapName: "Kavkazi",
+          contextTags: [tag("Headshot"), tag("Penetration")],
+        }),
+        // Over the 2 km cap: a kill, but never the longest.
+        kill(oldMan, tea, { cause: "ID.Item.AK74M", distance: 250_000, mapName: "Bakurani" }),
+        kill(oldMan, mossy, {
+          cause: "Id.Item.M4",
+          distance: 1_000,
+          contextTags: ["Meta.PlayerKillFlag.Player.WeaponMelee"],
+        }),
+        kill(mossy, oldMan, { cause: "Vehicle.Variant.Land.Wheeled.Humvee.Default", contextTags: [tag("RoadKill")] }),
+        kill(oldMan, tea, { cause: "Id.Item.AK74M", distance: 5_000 }),
+        kill(null, tea, { contextTags: [tag("Falling")] }),
+        kill(mossy, mossy, { contextTags: ["Meta.PlayerKillFlag.Player.Suicide"] }),
+      ],
+    });
+    expect((await telemetry.ingest(feed, now, "east")).inserted).toBe(7);
+    // Another server's events never count.
+    await telemetry.ingest({ ...feed, serverId: randomUUID() }, now, "central");
+
+    const stats = await telemetry.serverStats(since, now, "east");
+    const all = stats.groups.find((row) => row.set === 7);
+    expect(all).toMatchObject({
+      kills: 5,
+      headshotKills: 1,
+      melee: 1,
+      roadkill: 1,
+      vehicleExplosion: 0,
+      penetration: 1,
+    });
+    expect(stats.totals).toEqual({ events: 7, deaths: 7, suicides: 1, falling: 1, players: 3 });
+    const snapshot = await telemetry.snapshot(since, now, undefined, "east");
+    expect(snapshot.totals).toEqual({ events: 7, kills: 5, deaths: 7, headshotKills: 1, players: 3 });
+    expect(
+      stats.groups
+        .filter((row) => row.set === 3)
+        .map(({ causeKey, kills, longestCentimeters }) => ({ causeKey, kills, longestCentimeters }))
+        .sort((a, b) => b.kills - a.kills),
+    ).toEqual([
+      { causeKey: "id.item.ak74m", kills: 3, longestCentimeters: 41_200 },
+      expect.objectContaining({ kills: 1 }),
+      expect.objectContaining({ kills: 1 }),
+    ]);
+    expect(stats.groups.filter((row) => row.set === 6)).toEqual([
+      expect.objectContaining({ hour: now.getUTCHours(), kills: 5 }),
+    ]);
+    const result = publicServerStats(stats);
+    expect(result.totals).toEqual({ ...snapshot.totals, suicides: 1 });
+    expect(result.weapons).toEqual([
+      { label: "AK-74M", kind: "firearm", kills: 3, headshotKills: 1, longestMeters: 412 },
+      { label: "Humvee", kind: "vehicle", kills: 1, headshotKills: 0, longestMeters: null },
+      { label: "M4", kind: "firearm", kills: 1, headshotKills: 0, longestMeters: 10 },
+    ]);
+    expect(result.maps).toEqual([
+      { label: "Ozeti", kills: 3 },
+      { label: "Bakurani", kills: 2 },
+    ]);
+    expect(result.longestKills).toEqual([{ name: "OldManRiver", weapon: "AK-74M", meters: 412, map: "Bakurani" }]);
+    expect(result.tags).toEqual({
+      melee: 1,
+      roadkill: 1,
+      vehicleExplosion: 0,
+      penetration: 1,
+      ricochet: 0,
+      falling: 1,
+      suicide: 1,
+    });
+    expect(result.tagLeaders).toEqual({
+      melee: [{ name: "OldManRiver", count: 1 }],
+      roadkill: [{ name: "MossyBoots", count: 1 }],
+      vehicleExplosion: [],
+      penetration: [{ name: "OldManRiver", count: 1 }],
+      ricochet: [],
+      falling: [{ name: "TeaAndTanks", count: 1 }],
+    });
+    expect(JSON.stringify(result)).not.toMatch(/steamId|\d{17}/);
+
+    const extras = await telemetry.rowExtras(since, now, [oldMan, mossy, tea, "not-an-id"], "east");
+    expect(extras.streaks.sort((a, b) => a.steamId.localeCompare(b.steamId))).toEqual([
+      // Three kills, then run over; the kill after that starts a new streak.
+      { steamId: oldMan, bestStreak: 3 },
+      { steamId: mossy, bestStreak: 1 },
+      { steamId: tea, bestStreak: 0 },
+    ]);
+    expect(rowExtrasByPlayer(extras)).toEqual(
+      new Map([
+        [oldMan, { topWeapon: "AK-74M", longestKillMeters: 412, bestStreak: 3 }],
+        [mossy, { topWeapon: "Humvee", bestStreak: 1 }],
+        [tea, {}],
+      ]),
+    );
+    expect(await telemetry.rowExtras(since, now, [], "east")).toEqual({ weapons: [], streaks: [] });
+  });
+
+  it("ranks long-distance calls by each player's own best shot, so one sniper cannot crowd out the list", async () => {
+    const telemetry = new TelemetryStore(drizzle({ client, schema }));
+    const now = new Date(),
+      since = new Date(now.getTime() - 60_000),
+      earlier = new Date(now.getTime() - 30_000);
+    const sniper = "76561198000000101",
+      target = "76561198000000102";
+    const others = Array.from({ length: 11 }, (_, index) => `765611980000002${String(index).padStart(2, "0")}`);
+    let eventTime = 0;
+    const kill = (killer: string, killerName: string, distance: number, victim = target, victimName = "Target") => ({
+      eventId: randomUUID(),
+      type: "killed",
+      eventTime: ++eventTime,
+      killerSteamId: killer,
+      killerName,
+      victimSteamId: victim,
+      victimName,
+      cause: "Id.Item.SR_04",
+      distance,
+    });
+    const batch = (events: unknown[]) => parseFeed({ serverId: randomUUID(), serverName: "Game label", events });
+    // 201 sniper shots, every one longer than anyone else's best: the 200 longest kills are all his.
+    const shots = Array.from({ length: 201 }, (_, index) => kill(sniper, "LongShotLarry", 150_000 + index));
+    const spread = others.map((id, index) => kill(id, `Player ${index}`, 10_000 + index * 100));
+    for (const events of [shots.slice(0, 100), shots.slice(100, 200), [...shots.slice(200), ...spread]])
+      await telemetry.ingest(batch(events), earlier, "west");
+    // A later name, seen only as a victim, is the one shown.
+    await telemetry.ingest(batch([kill(sniper, "LongShotLarry", 500, others[10], "Renamed Ten")]), now, "west");
+
+    const stats = await telemetry.serverStats(since, now, "west");
+    expect(stats.longest).toHaveLength(10);
+    expect(publicServerStats(stats).longestKills.map(({ name, weapon, meters }) => ({ name, weapon, meters }))).toEqual(
+      [
+        { name: "LongShotLarry", weapon: "SR-04", meters: 1502 },
+        { name: "Renamed Ten", weapon: "SR-04", meters: 110 },
+        ...[9, 8, 7, 6, 5, 4, 3, 2].map((index) => ({
+          name: `Player ${index}`,
+          weapon: "SR-04",
+          meters: 100 + index,
+        })),
+      ],
+    );
+    expect(stats.totals).toEqual({ events: 213, deaths: 213, suicides: 0, falling: 0, players: 13 });
   });
 
   it("stores game GUIDs that are not RFC 4122 UUIDs and deduplicates them across letter case", async () => {

@@ -1,5 +1,6 @@
 import { Fragment } from "react";
 import type { ServerActivityView } from "../../../../../src/admin/server-activity";
+import { describeCause } from "../../../../../src/common/cause-labels";
 import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 import { useResource } from "../../api/use-resource";
 import type { Audit, Player } from "../../api/types";
@@ -33,9 +34,9 @@ export type ActivityEntry = {
   search: string;
 };
 
-/** "Id.Item.AK74M" reads as "AK74M"; the raw value stays searchable. */
+/** "Id.Item.AK74M" and "ID.Item.AK74M" read as "AK-74M", as on the public stats; the raw value stays searchable. */
 export function weaponLabel(cause: string | null | undefined) {
-  return (cause ?? "").replace(/^Id\.Item\./, "");
+  return cause?.trim() ? describeCause(cause).label : "";
 }
 function who(steamId: string | null | undefined, name: string | null | undefined, fallback: string): Segment {
   return steamId && isPublicIndividualSteamId(steamId)
@@ -151,7 +152,7 @@ export function When({ at }: { at: string }) {
   );
 }
 
-/** One feed line: "UncDap killed OldManRiver · AK74M · 21 m", with player names as buttons when `onPlayer` is set. */
+/** One feed line: "UncDap killed OldManRiver · AK-74M · 21 m", with player names as buttons when `onPlayer` is set. */
 export function ActivityLine({ entry, onPlayer }: { entry: ActivityEntry; onPlayer?: (player: SheetPlayer) => void }) {
   return (
     <span className="activity-line">

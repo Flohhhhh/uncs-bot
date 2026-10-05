@@ -47,7 +47,14 @@ import { EnvService } from "../src/env/env.service";
 import type { whitelistApplications } from "../src/database/schema";
 import { TelemModule } from "../src/telemetry/telemetry.module";
 import { TelemetryStore } from "../src/telemetry/telemetry.store";
-import type { CombatStats } from "../src/telemetry/telemetry.types";
+import {
+  LEADER_TAGS,
+  PUBLIC_MAX_DISTANCE_CENTIMETERS,
+  type CombatStats,
+  type LeaderTag,
+  type RowExtrasAggregate,
+  type ServerStatsAggregate,
+} from "../src/telemetry/telemetry.types";
 import { SupportersModule } from "../src/supporters/supporters.module";
 import { SupportersStore } from "../src/supporters/supporters.store";
 import { SupporterMatchService } from "../src/supporters/supporter-match.service";
@@ -703,29 +710,76 @@ const applicantAuth = {
   },
 };
 const demoInstance = randomUUID();
+// Simulated kill causes and tags in the game's own spellings, so labels can be checked by eye.
+const demoCauses = [
+  "Id.Item.AK74M",
+  "ID.Item.AK74M",
+  "Id.Item.SR_04",
+  "Id.Item.WEPN_029",
+  "ID.Item.ATMine",
+  "Vehicle.Variant.Land.Wheeled.Humvee.Default",
+  "Id.Vehicle.WeaponExtension.WHL_05.RingTurret",
+];
+const demoTag = (name: string) => `Meta.Progression.Context.Player.KillContext.${name}`;
+// A fictional player with a very long name, for the website's phone-width checks. Not on the live roster.
+const demoLongName = {
+  name: "Sir Reginald Fluffington-Bottomsworth III of the Back Porch",
+  steamId: "76561198123456799",
+};
 const demoEvents = Array.from({ length: 48 }, (_, index) => {
-  const killer = index % 11 === 0 ? null : players[index % 7 < 4 ? 0 : index % players.length];
+  const killer =
+    index % 11 === 0 ? null : index % 13 === 5 ? demoLongName : players[index % 7 < 4 ? 0 : index % players.length];
   const victim = players[1 + (index % (players.length - 1))];
   const ageDays = index < 24 ? 0 : index < 38 ? 3 : 12;
   const suicide = !!killer && killer.steamId === victim.steamId;
+  const cause = killer ? demoCauses[index % demoCauses.length] : null;
+  // Centimetres, as the feed sends them. One reading over the public 2 km cap stays out of public stats.
+  const distanceCentimeters = !killer
+    ? null
+    : index === 47
+      ? 250_000
+      : Math.round((cause === "Id.Item.SR_04" ? 300 + index * 6 : 18 + index * 2.75) * 100);
   return {
     serverId: index % 3 === 0 ? "event" : "primary",
     eventId: randomUUID(),
     serverInstanceId: demoInstance,
-    receivedAt: new Date(Date.now() - ageDays * 86_400_000 - index * 65_000 - 20_000),
+    // Spread across the day so the hour chart has a shape; the newest stays 20 seconds old.
+    receivedAt: new Date(Date.now() - ageDays * 86_400_000 - (index % 24) * 47 * 60_000 - 20_000),
     eventTime: 3400 - index * 35,
     matchId: demoInstance,
-    mapName: "Kavkazi",
+    mapName: ["Kavkazi", "Europe", "NorthAmerica"][Math.floor(index / 3) % 3],
     killerSteamId: killer?.steamId ?? null,
     killerName: killer?.name ?? null,
     victimSteamId: victim.steamId,
     victimName: victim.name,
-    cause: killer ? "Id.Item.AK74M" : null,
-    distanceMeters: killer ? 18 + index * 2.75 : null,
+    cause,
+    distanceCentimeters,
+    distanceMeters: distanceCentimeters === null ? null : distanceCentimeters / 100,
+    contextTags: [
+      ...(!!killer && !suicide && index % 4 === 0 ? [demoTag("Headshot")] : []),
+      ...(killer && index % 5 === 0 ? [demoTag("Penetration")] : []),
+      ...(killer && index % 9 === 4 ? [demoTag("WeaponMelee")] : []),
+      ...(killer ? [] : [demoTag("Falling")]),
+    ],
     headshot: !!killer && !suicide && index % 4 === 0,
     suicide,
   };
 });
+type DemoEvent = (typeof demoEvents)[number];
+const demoHasTag = (event: DemoEvent, tag: string) =>
+  event.contextTags.some((entry) => entry === tag || entry.endsWith(`.${tag}`));
+const demoCapped = (centimeters: number | null) =>
+  centimeters !== null && centimeters > 0 && centimeters <= PUBLIC_MAX_DISTANCE_CENTIMETERS ? centimeters : null;
+const demoLongest = (events: DemoEvent[]) =>
+  events.reduce<number | null>((best, event) => {
+    const centimeters = demoCapped(event.distanceCentimeters);
+    return centimeters !== null && (best === null || centimeters > best) ? centimeters : best;
+  }, null);
+function demoGroupBy<K>(events: DemoEvent[], key: (event: DemoEvent) => K) {
+  const groups = new Map<K, DemoEvent[]>();
+  for (const event of events) groups.set(key(event), [...(groups.get(key(event)) ?? []), event]);
+  return groups;
+}
 const filteredDemoEvents = (since: Date, until: Date, playerId?: string, serverId = "primary") =>
   demoEvents.filter(
     (entry) =>
@@ -781,7 +835,83 @@ const telemetryStore = {
   async events(since: Date, until: Date, playerId?: string, serverId = "primary") {
     return filteredDemoEvents(since, until, playerId, serverId)
       .sort((a, b) => b.receivedAt.getTime() - a.receivedAt.getTime())
-      .slice(0, 100);
+      .slice(0, 100)
+      .map(({ contextTags: _tags, distanceCentimeters: _centimeters, ...event }) => event);
+  },
+  /** The real store's aggregate shape, computed in memory from the simulated events. */
+  async serverStats(since: Date, until: Date, serverId = "primary"): Promise<ServerStatsAggregate> {
+    const events = filteredDemoEvents(since, until, undefined, serverId);
+    const kills = events.filter((event) => event.killerSteamId && !event.suicide);
+    const tagged = (rows: DemoEvent[], tag: string) => rows.filter((event) => demoHasTag(event, tag)).length;
+    const group = (set: number, rows: DemoEvent[], fields: Partial<ServerStatsAggregate["groups"][number]> = {}) => ({
+      set,
+      causeKey: null,
+      cause: null,
+      mapName: null,
+      hour: null,
+      kills: rows.length,
+      headshotKills: rows.filter((event) => event.headshot).length,
+      longestCentimeters: demoLongest(rows),
+      melee: tagged(rows, LEADER_TAGS.melee),
+      roadkill: tagged(rows, LEADER_TAGS.roadkill),
+      vehicleExplosion: tagged(rows, LEADER_TAGS.vehicleExplosion),
+      penetration: tagged(rows, LEADER_TAGS.penetration),
+      ricochet: tagged(rows, LEADER_TAGS.ricochet),
+      ...fields,
+    });
+    const groups = [
+      ...[...demoGroupBy(kills, (event) => event.cause?.toLowerCase() ?? null)].map(([causeKey, rows]) =>
+        group(3, rows, { causeKey, cause: rows[0].cause }),
+      ),
+      ...[...demoGroupBy(kills, (event) => event.mapName)].map(([mapName, rows]) => group(5, rows, { mapName })),
+      ...[...demoGroupBy(kills, (event) => event.receivedAt.getUTCHours())].map(([hour, rows]) =>
+        group(6, rows, { hour }),
+      ),
+      group(7, kills),
+    ];
+    const longest = [...demoGroupBy(kills, (event) => event.killerSteamId!)]
+      .map(([steamId, rows]) => {
+        const best = rows
+          .filter((event) => demoCapped(event.distanceCentimeters) !== null)
+          .sort((a, b) => b.distanceCentimeters! - a.distanceCentimeters!)[0];
+        return best
+          ? {
+              steamId,
+              name: best.killerName,
+              cause: best.cause,
+              mapName: best.mapName,
+              distanceCentimeters: best.distanceCentimeters!,
+            }
+          : null;
+      })
+      .filter((row) => row !== null)
+      .sort((a, b) => b.distanceCentimeters - a.distanceCentimeters)
+      .slice(0, 10);
+    const leaders = (Object.keys(LEADER_TAGS) as LeaderTag[]).flatMap((tag) => {
+      const falling = tag === "falling";
+      const hits = (falling ? events : kills).filter((event) => demoHasTag(event, LEADER_TAGS[tag]));
+      return [...demoGroupBy(hits, (event) => (falling ? event.victimSteamId : event.killerSteamId!))]
+        .map(([steamId, rows]) => ({
+          tag,
+          steamId,
+          name: falling ? rows[0].victimName : rows[0].killerName,
+          count: rows.length,
+        }))
+        .sort((a, b) => b.count - a.count || a.steamId.localeCompare(b.steamId))
+        .slice(0, 5);
+    });
+    return {
+      groups,
+      totals: {
+        events: events.length,
+        deaths: events.length,
+        suicides: events.filter((event) => event.suicide).length,
+        falling: events.filter((event) => demoHasTag(event, LEADER_TAGS.falling)).length,
+        players: new Set(events.flatMap((event) => [event.killerSteamId, event.victimSteamId]).filter(Boolean)).size,
+      },
+      longest,
+      leaders,
+    };
   },
   // Simulated killed counts only: the preview invents no other game event types or samples.
   async eventTypes(since: Date, until: Date, serverId = "primary") {
@@ -796,6 +926,28 @@ const telemetryStore = {
         sample: null,
       },
     ];
+  },
+  /** Per-cause kills, longest kill and best streak for the listed players, from the simulated events. */
+  async rowExtras(since: Date, until: Date, steamIds: string[], serverId = "primary"): Promise<RowExtrasAggregate> {
+    const events = filteredDemoEvents(since, until, undefined, serverId);
+    const weapons: RowExtrasAggregate["weapons"] = [];
+    const streaks: RowExtrasAggregate["streaks"] = [];
+    for (const steamId of new Set(steamIds)) {
+      const kills = events.filter((event) => event.killerSteamId === steamId && !event.suicide);
+      for (const rows of demoGroupBy(kills, (event) => event.cause?.toLowerCase() ?? null).values())
+        weapons.push({ steamId, cause: rows[0].cause, kills: rows.length, longestCentimeters: demoLongest(rows) });
+      let run = 0,
+        best = 0;
+      const own = events
+        .filter((event) => event.victimSteamId === steamId || (event.killerSteamId === steamId && !event.suicide))
+        .sort((a, b) => a.receivedAt.getTime() - b.receivedAt.getTime() || a.eventTime - b.eventTime);
+      for (const event of own) {
+        run = event.victimSteamId === steamId ? 0 : run + 1;
+        best = Math.max(best, run);
+      }
+      streaks.push({ steamId, bestStreak: best });
+    }
+    return { weapons, streaks };
   },
 };
 // Fictional supporter evidence stays in memory. No Patreon credentials or calls.
