@@ -59,11 +59,12 @@ To name a new item, add it to the tables in that file with a test. As of October
 
 The longest kill counts infantry weapons only. Artillery, rocket pods and vehicle main guns reach close to 2 km, so before this rule they filled the longest-kill list and many leaderboard rows. A long shot is a kill whose cause is a firearm (`describeCause()` kind `firearm`), tested in SQL as `TelemetryStore`'s `longShot()`:
 
-- An `Id.Item.` cause (either casing) counts, except build tools (`Id.Item.BuildTool.`), buildables and the labelled items of another kind: explosives such as the RPG-7, Carl Gustaf, M67 grenade, C4 and mines, melee weapons, the defibrillator and the supply pallet. Their keys (`NOT_FIREARM_ITEM_KEYS` in `src/common/cause-labels.ts`) come from the label table and are bound as a query parameter, so labelling a new item as an explosive also takes it out of the long shots. An item without a label yet counts until it is labelled, so label a new non-firearm item when it appears.
-- A bare code with no dots counts only when it is a labelled firearm (`FIREARM_ITEM_KEYS`) or a `WEPN_` code.
+- An `Id.Item.` cause (any casing) counts when its item is a labelled firearm (`FIREARM_ITEM_KEYS` in `src/common/cause-labels.ts`, built from the label table and bound as a query parameter) or a `WEPN_` code such as `Id.Item.WEPN_029`.
+- A bare code with no dots counts on the same terms, such as `AK74M` or `WEPN_030`.
+- Nothing else counts: explosives such as the RPG-7, Carl Gustaf, M67 grenade, C4 and mines, melee weapons, build tools, buildables, the defibrillator and the supply pallet, and also items with no label yet and family codes such as `SMG_03`, whose kind is `unknown` even when they have a readable name. Label a new firearm as `firearm` so its kills count as long shots.
 - Vehicles and their weapons (`Vehicle.Variant.`, `Id.Vehicle.`, including `Id.Vehicle.WeaponExtension.` mounts, artillery and rocket pods) never count.
 
-It applies to the public stats' `longestKills`, the leaderboard rows' `longestKillMeters` and the weekly post's long-distance call. Each weapon's own `longestMeters` in the stats `weapons` list still covers every kind. The test is plain text matching on rows each statement already reads in its range scan; there is no new index or materialized copy.
+It applies to the public stats' `longestKills`, the leaderboard rows' `longestKillMeters` and the weekly post's long-distance call. Each weapon's own `longestMeters` in the stats `weapons` list still covers every kind. The test is plain text matching on rows each statement already reads in its range scan; there is no new index or materialized copy. `cause-labels.spec.ts` and the PostgreSQL storage suite check that it agrees with `describeCause()` for every cause shape.
 
 ### Leaderboard row extras
 

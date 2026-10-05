@@ -4,7 +4,7 @@ import { getTableConfig } from "drizzle-orm/pg-core";
 import type { Client } from "pg";
 import type { Database } from "../database/database.types";
 import { combatEvents, gameFeedEventTypes } from "../database/telemetry.schema";
-import { FIREARM_ITEM_KEYS, NOT_FIREARM_ITEM_KEYS } from "../common/cause-labels";
+import { FIREARM_ITEM_KEYS } from "../common/cause-labels";
 import { MAX_FEED_TYPES_PER_DAY, TelemetryStore } from "./telemetry.store";
 import { MAX_SAMPLE_BYTES, parseFeed } from "./telemetry.types";
 
@@ -16,21 +16,16 @@ function fixture() {
   return { store: new TelemetryStore(db), query };
 }
 const isTypeUpsert = (text: string) => text.includes("INSERT INTO game_feed_event_types");
-/** The bound key lists of one long-shot test (firearms only), in parameter order. */
-const LONG_SHOT_KEYS = [NOT_FIREARM_ITEM_KEYS, FIREARM_ITEM_KEYS];
+/** The bound key list of one long-shot test (labelled firearms only), in parameter order. */
+const LONG_SHOT_KEYS = [FIREARM_ITEM_KEYS];
 /**
- * The long-shot test on `column`, with its key lists at $first and $first + 1: Id.Item causes except build
- * tools, buildables and labelled non-firearms, and bare codes only when they are labelled firearms.
+ * The long-shot test on `column`, with its key list at $param: the item code (after Id.Item., or a whole
+ * bare code) is a labelled firearm or a WEPN_ code, as in describeCause(). Nothing else counts.
  */
-const longShotSql = (column: string, first: number) => {
+const longShotSql = (column: string, param: number) => {
   const cause = `lower(btrim(${column}))`;
-  return [
-    `(CASE WHEN ${cause} LIKE 'id.item.%'`,
-    `THEN ${cause} NOT LIKE 'id.item.buildtool.%' AND ${cause} NOT LIKE '%.buildable%'`,
-    `AND regexp_replace(substr(${cause}, 9), '[^a-z0-9]', '', 'g') <> ALL($${first}::text[])`,
-    `ELSE ${cause} !~ '[./\\\\]'`,
-    `AND (regexp_replace(${cause}, '[^a-z0-9]', '', 'g') = ANY($${first + 1}::text[]) OR ${cause} ~ '^wepn_?[0-9]{1,4}$') END)`,
-  ].join(" ");
+  const code = `(CASE WHEN ${cause} LIKE 'id.item.%' THEN substr(${cause}, 9) WHEN ${cause} !~ '[./\\\\]' THEN ${cause} END)`;
+  return `(regexp_replace(${code}, '[^a-z0-9]', '', 'g') = ANY($${param}::text[]) OR ${code} ~ '^wepn_?[0-9]{1,4}$')`;
 };
 const oneLine = (text: string) => text.replace(/\s+/g, " ");
 const serverInstance = randomUUID();
@@ -349,7 +344,7 @@ describe("telemetry persistence contract", () => {
       expect(config.text).not.toMatch(/\b(insert|update|delete)\b/i);
       expect(config.text).not.toMatch(/email|discord|MATERIALIZED/i);
     }
-    // Only S3's long shots bind more: the firearm key lists, once for the ranking and once for the kill row.
+    // Only S3's long shots bind more: the firearm key list, once for the ranking and once for the kill row.
     for (const [config, params] of [s1, s2]) {
       expect(params).toHaveLength(3);
       expect(config.text).not.toMatch(/\$4/);
@@ -395,7 +390,7 @@ describe("telemetry persistence contract", () => {
       "c.server_id = $1 AND c.received_at >= $2 AND c.received_at <= $3 AND c.killer_steam_id = best.steam_id",
     );
     // The kill row is a long shot too, so a vehicle kill at the same centimetre cannot be shown instead.
-    expect(oneLine(longest)).toContain(`c.distance_centimeters = best.cm AND ${longShotSql("c.cause", 6)} ORDER BY`);
+    expect(oneLine(longest)).toContain(`c.distance_centimeters = best.cm AND ${longShotSql("c.cause", 5)} ORDER BY`);
     expect(longest).toContain("ORDER BY c.received_at, c.event_id LIMIT 1");
     expect(s3[0].text).not.toContain("LIMIT 200");
     expect(s3[0].text).not.toContain("DISTINCT ON");

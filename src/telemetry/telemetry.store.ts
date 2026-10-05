@@ -3,7 +3,7 @@ import { and, desc, eq, gte, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { DATABASE, type Database } from "../database/database.types";
 import { combatEvents, combatTracking, gameFeedEventTypes } from "../database/telemetry.schema";
 import { isPublicIndividualSteamId } from "../common/steam-id";
-import { FIREARM_ITEM_KEYS, NOT_FIREARM_ITEM_KEYS } from "../common/cause-labels";
+import { FIREARM_ITEM_KEYS } from "../common/cause-labels";
 import {
   type CombatAggregate,
   type FeedEventTypeSummary,
@@ -54,23 +54,22 @@ function receivedWindow(serverId: string, since: Date, until: Date) {
   };
 }
 /**
- * `<column>` is a long-shot cause: a firearm, so artillery, rocket pods, vehicle guns, explosives, melee and
- * tools never top a longest-kill list. An `Id.Item.` cause counts unless it is a build tool, a buildable or
- * an item labelled as another kind (NOT_FIREARM_ITEM_KEYS), so an unlabelled item counts until it is
- * labelled; a bare code counts only as a labelled firearm or a `WEPN_` code. Vehicles and their weapons
- * (`Vehicle.Variant.`, `Id.Vehicle.`) never count. Plain text tests on rows the range scan already reads,
- * with the key lists bound as two text[] parameters. Use it after receivedWindow() in text order.
+ * `<column>` is a long shot: describeCause() calls the cause a firearm, so artillery, rocket pods, vehicle
+ * guns, explosives, melee, tools and unlabelled items never top a longest-kill list. The item code is the
+ * text after `Id.Item.` (any casing) or a whole bare code with no dot, slash or backslash; it is a firearm
+ * when its norm() key is a labelled firearm (FIREARM_ITEM_KEYS, bound as one text[] parameter) or it is a
+ * `WEPN_` code. Every other cause, including vehicles and their weapons (`Vehicle.Variant.`, `Id.Vehicle.`),
+ * has no item code. Plain text tests on rows the range scan already reads. Use it after receivedWindow() in
+ * text order.
  */
 function longShot(column: "cause" | "c.cause" | "kills.cause") {
-  const cause = sql.raw(`lower(btrim(${column}))`);
-  // describeCause()'s norm() of the item code after "id.item.", and of a whole bare code.
-  const itemKey = sql.raw(`regexp_replace(substr(lower(btrim(${column})), 9), '[^a-z0-9]', '', 'g')`);
-  const bareKey = sql.raw(`regexp_replace(lower(btrim(${column})), '[^a-z0-9]', '', 'g')`);
-  return sql`(CASE WHEN ${cause} LIKE 'id.item.%'
-      THEN ${cause} NOT LIKE 'id.item.buildtool.%' AND ${cause} NOT LIKE '%.buildable%'
-        AND ${itemKey} <> ALL(${sql.param([...NOT_FIREARM_ITEM_KEYS])}::text[])
-      ELSE ${cause} !~ '[./\\\\]'
-        AND (${bareKey} = ANY(${sql.param([...FIREARM_ITEM_KEYS])}::text[]) OR ${cause} ~ '^wepn_?[0-9]{1,4}$') END)`;
+  const cause = `lower(btrim(${column}))`;
+  const code = sql.raw(
+    `(CASE WHEN ${cause} LIKE 'id.item.%' THEN substr(${cause}, 9) WHEN ${cause} !~ '[./\\\\]' THEN ${cause} END)`,
+  );
+  // describeCause()'s norm() of the code, or its WEPN_ family code (a single segment, so no dot).
+  return sql`(regexp_replace(${code}, '[^a-z0-9]', '', 'g') = ANY(${sql.param([...FIREARM_ITEM_KEYS])}::text[])
+      OR ${code} ~ '^wepn_?[0-9]{1,4}$')`;
 }
 const idList = (ids: string[]) =>
   sql.join(

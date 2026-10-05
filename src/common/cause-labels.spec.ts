@@ -2,7 +2,7 @@ import {
   CAUSE_KINDS,
   describeCause,
   FIREARM_ITEM_KEYS,
-  NOT_FIREARM_ITEM_KEYS,
+  ITEM_KEYS,
   UNKNOWN_WEAPON,
   type CauseKind,
 } from "./cause-labels";
@@ -165,36 +165,66 @@ describe("cause labels", () => {
     expect(known.map(({ kind }) => kind)).not.toContain("unknown");
   });
 
-  it("splits every labelled item into the long-shot firearm keys and the keys long shots exclude", () => {
-    const all = [...FIREARM_ITEM_KEYS, ...NOT_FIREARM_ITEM_KEYS];
-    expect(new Set(all).size).toBe(all.length);
-    // The store binds these as SQL parameters and compares them with norm()'d causes.
-    for (const key of all) expect(key).toMatch(/^[a-z0-9]+$/);
-    for (const key of FIREARM_ITEM_KEYS) {
-      expect(describeCause(`Id.Item.${key}`).kind).toBe("firearm");
-      expect(describeCause(key).kind).toBe("firearm");
+  it("lists exactly the labelled firearms' keys for the store's long-shot SQL", () => {
+    expect(new Set(ITEM_KEYS).size).toBe(ITEM_KEYS.length);
+    expect(FIREARM_ITEM_KEYS).toEqual(ITEM_KEYS.filter((key) => describeCause(key).kind === "firearm"));
+    for (const key of ITEM_KEYS) {
+      // The store binds these as one SQL parameter and compares them with norm()'d item codes.
+      expect(key).toMatch(/^[a-z0-9]+$/);
+      // The SQL counts every single-segment WEPN_ code as a firearm, so no label may claim one.
+      expect(key).not.toMatch(/^wepn\d{1,4}$/);
     }
-    for (const key of NOT_FIREARM_ITEM_KEYS)
-      expect(["explosive", "melee", "tool", "environment"]).toContain(describeCause(`ID.Item.${key}`).kind);
-    expect(NOT_FIREARM_ITEM_KEYS).toEqual(
-      expect.arrayContaining([
-        "cgm4",
-        "rpg7",
-        "m67",
-        "m67grenade",
-        "c4",
-        "atmine",
-        "claymore",
-        "knife",
-        "fists",
-        "halligan",
-        "defibrillator",
-        "supplypallet",
-      ]),
-    );
+    for (const key of FIREARM_ITEM_KEYS) {
+      for (const cause of [`Id.Item.${key}`, `ID.Item.${key.toUpperCase()}`, key, key.toUpperCase()])
+        expect(describeCause(cause).kind).toBe("firearm");
+      // The SQL matches keys only. describeCause() rejects build tools, buildables, blueprint names (BP_, _C)
+      // and SteamID-like causes before it looks a key up, so a firearm key that could come from one would
+      // count in SQL alone: such a label needs that check added to longShot() in telemetry.store.ts first.
+      expect(key).not.toMatch(/^buildtool|buildable|bp|c\d*$|\d{17}/);
+    }
     expect(FIREARM_ITEM_KEYS).toEqual(
       expect.arrayContaining(["ak74m", "sr04", "svdm", "mosin", "compoundbow", "m500", "a91", "mk22", "vector"]),
     );
+    for (const key of ["cgm4", "rpg7", "m67", "m67grenade", "c4", "atmine", "knife", "fists", "defibrillator"])
+      expect(FIREARM_ITEM_KEYS).not.toContain(key);
+  });
+
+  it("agrees with a mirror of the store's long-shot SQL on every stored cause shape", () => {
+    // telemetry.store.ts longShot(): the item code after "id.item." or a whole bare code (no dot, slash or
+    // backslash) has a labelled firearm's norm() key or is a WEPN_ code. Stored causes are trimmed.
+    const sqlLongShot = (stored: string) => {
+      const cause = stored.toLowerCase();
+      const code = cause.startsWith("id.item.") ? cause.slice(8) : /[./\\]/.test(cause) ? null : cause;
+      return (
+        code !== null && (FIREARM_ITEM_KEYS.includes(code.replace(/[^a-z0-9]/g, "")) || /^wepn_?[0-9]{1,4}$/.test(code))
+      );
+    };
+    const fixed = [
+      ...["Id.Item.SMG_03", "SMG_03", "Id.Item.NewRifle", "Id.Item.NewThing.Variant", "Id.Item.", "Id.Item.WEPN_"],
+      ...["Id.Item.WEPN_12345", "Id.Item.Foo.WEPN_029", "Id.Item.76561198000000001", "Id.Item.Free_Gun"],
+      ...["Id.Item.Mosin.Nagant", "ID.ITEM.SR_04", "id.item.wepn7", "WEPN_030", "Compound Bow", "BP_AK74M"],
+      ...["AK74M_C", "Id.Item.Buildable.AK74M", "Id.Item.BuildTool.SVDM", "Id.Vehicle.Item.AK74M", "Item.AK74M"],
+      ...["Id.Items.AK74M", "Id.Vehicle.WeaponExtension.Artillery", "Vehicle.Variant.Air.Rotary.ROT_04.Default"],
+    ];
+    // Deterministic pseudo-random input, so a failure is reproducible.
+    let seed = 20261005;
+    const next = (max: number) => {
+      seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
+      return seed % max;
+    };
+    const pieces = [
+      ...["Id.Item.", "ID.Item.", "id.ITEM.", "Id.Vehicle.", "Vehicle.Variant.", "WeaponExtension.", "BuildTool."],
+      ...["Buildable.", "Buildables", "Item.", "AK74M", "ak-74m", "SVDM", "Mosin", "Nagant", "SR_04", "M500"],
+      ...["Compound", "Bow", "RPG7", "M67Grenade", "Knife", "SupplyPallet", "SMG_03", "WEPN_", "WEPN", "029"],
+      ...["7", "12345", "76561198000000001", ".", "/", "\\", "_", " ", "-", "BP_", "_C", "free", "a", "Z"],
+    ];
+    const random = Array.from({ length: 5000 }, () =>
+      Array.from({ length: 1 + next(5) }, () => pieces[next(pieces.length)]).join(""),
+    );
+    for (const cause of [...fixed, ...random].map((value) => value.trim()).filter(Boolean)) {
+      const firearm = describeCause(cause).kind === "firearm";
+      if (sqlLongShot(cause) !== firearm) throw new Error(`${cause}: SQL ${!firearm}, describeCause ${firearm}`);
+    }
   });
 
   it("never returns a dot, slash, 17-digit run or more than 40 characters for random input", () => {

@@ -157,7 +157,7 @@ export const emptyTotals = (): CombatTotals => ({ events: 0, kills: 0, deaths: 0
 export type WeeklyHighlights = {
   bestKd: { steamId: string; name: string; kills: number; deaths: number } | null;
   mostHeadshots: { steamId: string; name: string; headshotKills: number } | null;
-  /** The longest firearm kill: vehicles, their weapons, explosives, melee and tools never count. */
+  /** The longest firearm kill: vehicles, their weapons, explosives, melee, tools and unlabelled items never count. */
   longestKill: {
     steamId: string;
     name: string;

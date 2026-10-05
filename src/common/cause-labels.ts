@@ -88,18 +88,16 @@ const MOUNTS = labels({ ringturret: "Ring turret" });
 const BUILDABLES = labels({ barbedwire: "Barbed wire", bremerwall: "Bremer wall", hblock: "H-block" });
 
 /**
- * Long shots count firearms only. The store picks the longest kills in SQL, so it tests causes against
- * these norm() keys of the item table: an `Id.Item.` cause is a long shot unless its key is one of the
- * labelled items of another kind (explosives such as the RPG-7, melee, tools and environment), and a bare
- * code is one only when its key names a labelled firearm. Built from ITEMS, so a new label updates both.
+ * The labelled firearms' norm() keys. Long shots count firearms only and the store picks the longest kills
+ * in SQL, so it mirrors describeCause() there: a cause is a firearm exactly when its item code (the text
+ * after `Id.Item.`, or a whole bare code) has one of these keys or is a `WEPN_` code. Unlabelled items,
+ * family codes such as SMG_03 and every other kind never count. Built from ITEMS, so a new label updates it.
  */
-export const NOT_FIREARM_ITEM_KEYS: readonly string[] = [...ITEMS]
-  .filter(([, [, kind]]) => kind !== "firearm")
-  .map(([key]) => key);
-/** The labelled firearms' norm() keys: see NOT_FIREARM_ITEM_KEYS. */
 export const FIREARM_ITEM_KEYS: readonly string[] = [...ITEMS]
   .filter(([, [, kind]]) => kind === "firearm")
   .map(([key]) => key);
+/** Every labelled item's norm() key, for the tests that keep the store's SQL mirror exact. */
+export const ITEM_KEYS: readonly string[] = [...ITEMS.keys()];
 
 const STEAM_ID_LIKE = /\p{Nd}{17}/u;
 /** Unreal blueprint prefixes and generated class suffixes. Paths and dotted names never reach step 8. */
