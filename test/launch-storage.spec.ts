@@ -757,7 +757,7 @@ describe("launch storage on isolated PostgreSQL", () => {
     const result = publicServerStats(stats);
     expect(result.totals).toEqual({ ...snapshot.totals, suicides: 1 });
     expect(result.weapons).toEqual([
-      { label: "AK-74M", kind: "firearm", kills: 3, headshotKills: 1, longestMeters: 412 },
+      { label: "AK74", kind: "firearm", kills: 3, headshotKills: 1, longestMeters: 412 },
       { label: "Humvee", kind: "vehicle", kills: 1, headshotKills: 0, longestMeters: null },
       { label: "M4", kind: "firearm", kills: 1, headshotKills: 0, longestMeters: 10 },
     ]);
@@ -765,7 +765,7 @@ describe("launch storage on isolated PostgreSQL", () => {
       { label: "Ozeti", kills: 3 },
       { label: "Bakurani", kills: 2 },
     ]);
-    expect(result.longestKills).toEqual([{ name: "OldManRiver", weapon: "AK-74M", meters: 412, map: "Bakurani" }]);
+    expect(result.longestKills).toEqual([{ name: "OldManRiver", weapon: "AK74", meters: 412, map: "Bakurani" }]);
     expect(result.tags).toEqual({
       melee: 1,
       roadkill: 1,
@@ -794,7 +794,7 @@ describe("launch storage on isolated PostgreSQL", () => {
     ]);
     expect(rowExtrasByPlayer(extras)).toEqual(
       new Map([
-        [oldMan, { topWeapon: "AK-74M", longestKillMeters: 412, bestStreak: 3 }],
+        [oldMan, { topWeapon: "AK74", longestKillMeters: 412, bestStreak: 3 }],
         [mossy, { topWeapon: "Humvee", bestStreak: 1 }],
         [tea, {}],
       ]),
@@ -835,11 +835,11 @@ describe("launch storage on isolated PostgreSQL", () => {
     expect(stats.longest).toHaveLength(10);
     expect(publicServerStats(stats).longestKills.map(({ name, weapon, meters }) => ({ name, weapon, meters }))).toEqual(
       [
-        { name: "LongShotLarry", weapon: "SR-04", meters: 1002 },
-        { name: "Renamed Ten", weapon: "SR-04", meters: 110 },
+        { name: "LongShotLarry", weapon: "AMR 50", meters: 1002 },
+        { name: "Renamed Ten", weapon: "AMR 50", meters: 110 },
         ...[9, 8, 7, 6, 5, 4, 3, 2].map((index) => ({
           name: `Player ${index}`,
-          weapon: "SR-04",
+          weapon: "AMR 50",
           meters: 100 + index,
         })),
       ],
@@ -908,32 +908,32 @@ describe("launch storage on isolated PostgreSQL", () => {
 
     const result = publicServerStats(await telemetry.serverStats(since, now, "east"));
     expect(result.longestKills).toEqual([
-      { name: "RifleRicky", weapon: "SVDM", meters: 600, map: "Bakurani" },
-      { name: "ArtilleryAnnie", weapon: "AK-74M", meters: 50, map: "Bakurani" },
-      { name: "MachineMax", weapon: "MP9", meters: 30, map: "Bakurani" },
+      { name: "RifleRicky", weapon: "SVD", meters: 600, map: "Bakurani" },
+      { name: "ArtilleryAnnie", weapon: "AK74", meters: 50, map: "Bakurani" },
+      { name: "MachineMax", weapon: "AMP-9", meters: 30, map: "Bakurani" },
     ]);
     // Each weapon's own longest kill still covers every kind.
     expect(result.weapons).toEqual(
       expect.arrayContaining([
         { label: "Artillery", kind: "vehicle_weapon", kills: 1, headshotKills: 0, longestMeters: 2_000 },
         { label: "Rocket Pods", kind: "vehicle_weapon", kills: 1, headshotKills: 0, longestMeters: 1_500 },
-        { label: "SVDM", kind: "firearm", kills: 1, headshotKills: 0, longestMeters: 600 },
+        { label: "SVD", kind: "firearm", kills: 1, headshotKills: 0, longestMeters: 600 },
         // A firearm's own longest kill is its longest plausible shot.
-        { label: "MP9", kind: "firearm", kills: 2, headshotKills: 0, longestMeters: 30 },
+        { label: "AMP-9", kind: "firearm", kills: 2, headshotKills: 0, longestMeters: 30 },
         { label: "A-91", kind: "firearm", kills: 1, headshotKills: 0, longestMeters: null },
-        { label: "Weapon 029", kind: "firearm", kills: 1, headshotKills: 0, longestMeters: null },
+        { label: "Galil", kind: "firearm", kills: 1, headshotKills: 0, longestMeters: null },
       ]),
     );
 
     const extras = await telemetry.rowExtras(since, now, [ricky, annie, rita, tom, max], "east");
     expect(rowExtrasByPlayer(extras)).toEqual(
       new Map([
-        [ricky, { topWeapon: "SVDM", longestKillMeters: 600, bestStreak: 1 }],
-        [annie, { topWeapon: "AK-74M", longestKillMeters: 50, bestStreak: 2 }],
+        [ricky, { topWeapon: "SVD", longestKillMeters: 600, bestStreak: 1 }],
+        [annie, { topWeapon: "AK74", longestKillMeters: 50, bestStreak: 2 }],
         // No firearm kill, so no longest kill at all.
         [rita, { topWeapon: "New Rifle", bestStreak: 2 }],
-        [tom, { topWeapon: "M67 grenade", bestStreak: 3 }],
-        [max, { topWeapon: "MP9", longestKillMeters: 30, bestStreak: 4 }],
+        [tom, { topWeapon: "M67 Frag Grenade", bestStreak: 3 }],
+        [max, { topWeapon: "AMP-9", longestKillMeters: 30, bestStreak: 4 }],
       ]),
     );
 
@@ -954,11 +954,11 @@ describe("launch storage on isolated PostgreSQL", () => {
     const firearms = [
       ...["Id.Item.AK74M", "ID.Item.SVDM", "ID.ITEM.MOSIN", "Id.Item.SR_04", "Id.Item.Mosin.Nagant", "Id.Item.M500"],
       ...["Id.Item.A91", "Id.Item.MK22", "Id.Item.Vector", "Id.Item.WEPN_029", "ID.Item.WEPN7", "AK-47", "SVD"],
-      ...["Compound Bow", "WEPN_030"],
+      ...["Compound Bow", "WEPN_030", "Id.Item.SMG_03", "SMG_03", "LMG_02", "Id.Item.Glock17"],
     ];
     const others = [
       // Unlabelled items and family codes read as names but are not firearms until they are labelled.
-      ...["Id.Item.SMG_03", "SMG_03", "Id.Item.NewRifle", "Id.Item.NewThing.Variant", "Id.Item.Foo.WEPN_029"],
+      ...["Id.Item.SMG_09", "SMG_09", "Id.Item.NewRifle", "Id.Item.NewThing.Variant", "Id.Item.Foo.WEPN_029"],
       ...["Id.Item.WEPN_", "Id.Item.WEPN_12345", "Id.Item.", "Id.Item.76561198000000009", "Id.Item.Free_Gun", "Mortar"],
       ...[
         "ID.Item.M67Grenade",

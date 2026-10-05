@@ -14,29 +14,44 @@ const casings = (cause: string) => [cause, cause.replace(/^Id\./, "ID."), cause.
 
 describe("cause labels", () => {
   it.each<[string, string, CauseKind]>([
-    ["Id.Item.AK74M", "AK-74M", "firearm"],
-    ["Id.Item.SR_04", "SR-04", "firearm"],
-    ["Id.Item.WEPN_029", "Weapon 029", "firearm"],
-    ["Id.Item.WEPN_030", "Weapon 030", "firearm"],
-    ["Id.Item.WEPN_032", "Weapon 032", "firearm"],
+    ["Id.Item.AK74M", "AK74", "firearm"],
+    ["Id.Item.SR_04", "AMR 50", "firearm"],
+    ["Id.Item.WEPN_026", "M1911", "firearm"],
+    ["Id.Item.WEPN_027", "Deagle", "firearm"],
+    ["Id.Item.WEPN_028", "MP5", "firearm"],
+    ["Id.Item.WEPN_029", "Galil", "firearm"],
+    ["Id.Item.WEPN_030", "FAL", "firearm"],
+    ["Id.Item.WEPN_032", "GGX 18", "firearm"],
+    ["Id.Item.WEPN_033", "Bushmaster M17S", "firearm"],
+    ["Id.Item.WEPN_035", "Scout Rifle TD", "firearm"],
     ["Id.Item.M4", "M4", "firearm"],
-    ["Id.Item.CGM4", "Carl Gustaf M4", "explosive"],
-    ["Id.Item.Mosin", "Mosin-Nagant", "firearm"],
-    ["Id.Item.RFB", "RFB", "firearm"],
+    ["Id.Item.KH2002", "KH-2002", "firearm"],
+    ["Id.Item.CGM4", "MAAWS", "explosive"],
+    ["Id.Item.Launcher_04", "9K333 Verba", "explosive"],
+    ["Id.Item.MMGL", "MGL-40", "explosive"],
+    ["Id.Item.Mosin", "Mosin Nagant", "firearm"],
+    ["Id.Item.RFB", "BMR-308", "firearm"],
     ["Id.Item.SKS", "SKS", "firearm"],
-    ["Id.Item.M249", "M249", "firearm"],
-    ["Id.Item.SVDM", "SVDM", "firearm"],
-    ["Id.Item.TAR21", "TAR-21", "firearm"],
-    ["Id.Item.MP9", "MP9", "firearm"],
-    ["Id.Item.M500", "M500 shotgun", "firearm"],
+    ["Id.Item.M249", "M249 SAW", "firearm"],
+    ["Id.Item.LMG_02", "PKM", "firearm"],
+    ["Id.Item.SVDM", "SVD", "firearm"],
+    ["Id.Item.TAR21", "T-21", "firearm"],
+    ["Id.Item.MP9", "AMP-9", "firearm"],
+    ["Id.Item.SMG_03", "PP-19 Vityaz", "firearm"],
+    ["Id.Item.M500", "M500", "firearm"],
+    ["Id.Item.MP43", "MP43", "firearm"],
+    ["Id.Item.Glock17", "GGX 17", "firearm"],
+    ["Id.Item.Judge", "Judge", "firearm"],
     ["Id.Item.A91", "A-91", "firearm"],
     ["Id.Item.MK22", "MK22", "firearm"],
-    ["Id.Item.Vector", "Vector", "firearm"],
-    ["Id.Item.M67Grenade", "M67 grenade", "explosive"],
+    ["Id.Item.Vector", "Super-45", "firearm"],
+    ["Id.Item.CombatBow", "Compound Bow", "firearm"],
+    ["Id.Item.M67Grenade", "M67 Frag Grenade", "explosive"],
     ["ID.Item.ATMine", "AT mine", "explosive"],
     ["ID.Item.BuildTool.Hammer.Large", "Big hammer", "tool"],
     ["Id.Vehicle.WeaponExtension.WHL_05.RingTurret", "Ring turret", "vehicle_weapon"],
-    ["Vehicle.Variant.Air.Rotary.ROT_04.Default", "ROT-04 helicopter", "vehicle"],
+    ["Vehicle.Variant.Air.Rotary.ROT_04.Default", "Z20 Lakota", "vehicle"],
+    ["Vehicle.Variant.Air.Rotary.LittleBird.Default", "MH-6", "vehicle"],
     ["Vehicle.Variant.Land.Wheeled.Humvee.Default", "Humvee", "vehicle"],
   ])("labels %s as %s in either prefix casing", (cause, label, kind) => {
     for (const raw of casings(cause)) expect(describeCause(raw)).toEqual({ label, kind });
@@ -45,7 +60,7 @@ describe("cause labels", () => {
 
   it("names unknown codes generically and keeps readable names", () => {
     expect(describeCause("Id.Item.WEPN_7")).toEqual({ label: "Weapon 7", kind: "firearm" });
-    expect(describeCause("Id.Item.SMG_03")).toEqual({ label: "SMG-03", kind: "unknown" });
+    expect(describeCause("Id.Item.SMG_09")).toEqual({ label: "SMG-09", kind: "unknown" });
     expect(describeCause("Id.Item.NewThing.Variant")).toEqual({ label: "New Thing Variant", kind: "unknown" });
     expect(describeCause("Vehicle.Variant.Air.Rotary.ROT_09.Default")).toEqual({
       label: "ROT-09 helicopter",
@@ -131,12 +146,32 @@ describe("cause labels", () => {
       "sr04",
       "compoundbow",
       "bow",
+      "combatbow",
+      "wepn026",
+      "wepn027",
+      "wepn028",
+      "wepn029",
+      "wepn030",
+      "wepn032",
+      "wepn033",
+      "wepn035",
+      "kh2002",
+      "lmg02",
+      "smg03",
+      "mp43",
+      "glock17",
+      "judge",
+      "launcher04",
+      "mmgl",
       "cgm4",
       "rpg7",
       "m67",
       "m67grenade",
+      "goldm67grenade",
       "c4",
+      "c4explosive",
       "ied",
+      "iedexplosive",
       "atmine",
       "claymore",
       "smoke",
@@ -150,7 +185,9 @@ describe("cause labels", () => {
       "defib",
       "supplypallet",
     ].map((code) => describeCause(`Id.Item.${code}`));
-    const vehicles = ["Humvee", "ROT_04"].map((code) => describeCause(`Id.Vehicle.${code}`));
+    const vehicles = ["Humvee", "ROT_04", "LittleBird", "Havoc", "Bobcat", "DuneBuggy", "Kodiak", "Ural"].map((code) =>
+      describeCause(`Id.Vehicle.${code}`),
+    );
     const mounts = [describeCause("Id.Vehicle.WeaponExtension.X.RingTurret")];
     const tools = ["Hammer.Large", "Hammer.Small", "Hammer", "Drill"].map((code) =>
       describeCause(`Id.Item.BuildTool.${code}`),
@@ -171,8 +208,8 @@ describe("cause labels", () => {
     for (const key of ITEM_KEYS) {
       // The store binds these as one SQL parameter and compares them with norm()'d item codes.
       expect(key).toMatch(/^[a-z0-9]+$/);
-      // The SQL counts every single-segment WEPN_ code as a firearm, so no label may claim one.
-      expect(key).not.toMatch(/^wepn\d{1,4}$/);
+      // The SQL counts every single-segment WEPN_ code as a firearm, so a labelled one must be a firearm too.
+      if (/^wepn\d{1,4}$/.test(key)) expect(describeCause(key).kind).toBe("firearm");
     }
     for (const key of FIREARM_ITEM_KEYS) {
       for (const cause of [`Id.Item.${key}`, `ID.Item.${key.toUpperCase()}`, key, key.toUpperCase()])
