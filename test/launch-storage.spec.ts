@@ -28,6 +28,8 @@ import { eventFixture, eventStaff, voteEventFixture } from "../src/server-events
 import { operation } from "../src/server-events/event-planner";
 import { TelemetryStore } from "../src/telemetry/telemetry.store";
 import { DiscordRolesStore } from "../src/discord-roles/discord-roles.store";
+import { PATRON_LINK_ACTOR, PatronLinkStore, type PatronLinkResult } from "../src/patron-link/patron-link.store";
+import { PATRON_LINK_FOUNDER_REASON } from "../src/supporters/supporter-match.rules";
 import { parseFeed } from "../src/telemetry/telemetry.types";
 import { defaultVotingPolicy, defaultVotingSettings } from "../src/common/voting-policy";
 
@@ -44,9 +46,11 @@ describe("launch storage on isolated PostgreSQL", () => {
   let votes: MapVotesStore;
   let events: ServerEventsStore;
   let roles: DiscordRolesStore;
+  let patronLink: PatronLinkStore;
   let migratedApplicationAccess: unknown[] | undefined;
   let migratedLegacyData: Record<string, unknown[]>;
   let migratedSupporterData: unknown[] | undefined;
+  let migratedDiscordSources: unknown[] | undefined;
   const legacySupporterId = randomUUID();
   const legacyApplicationId = randomUUID();
   const legacyServerInstanceId = randomUUID();
@@ -59,6 +63,7 @@ describe("launch storage on isolated PostgreSQL", () => {
       pool,
       supporters: new SupportersStore(db),
       match: new SupporterMatchStore(db),
+      patronLink: new PatronLinkStore(db),
       applications: new ApplicationsStore(db),
       votes: new MapVotesStore(db),
       events: new ServerEventsStore(db),
@@ -251,8 +256,24 @@ describe("launch storage on isolated PostgreSQL", () => {
           [legacySupporterId, legacyFirstReceivedAt, staff.id],
         );
       }
+      if (file.startsWith("0006_")) {
+        // Discord sources recorded before patron sign-in links must stay valid under the widened check.
+        await client.query(
+          `INSERT INTO supporter_members (id, provider, campaign_id, patreon_member_id, observed_at, discord_id,
+             discord_source, patreon_discord_id)
+           VALUES ($1, 'patreon', '999001', 'imported-member', $3, '234567890123456781', 'patreon',
+             '234567890123456781'),
+             ($2, 'paypal', NULL, NULL, $3, '234567890123456782', 'staff', NULL)`,
+          [randomUUID(), randomUUID(), legacyFirstReceivedAt],
+        );
+      }
       await client.query(await readFile(join(directory, file), "utf8"));
     }
+    migratedDiscordSources = (
+      await client.query(
+        "SELECT provider, discord_source FROM supporter_members WHERE discord_source IS NOT NULL ORDER BY provider",
+      )
+    ).rows;
     migratedApplicationAccess = (
       await client.query(
         "SELECT status, access_intent, whitelist_grant, revoked_at FROM whitelist_applications WHERE id = $1",
@@ -283,6 +304,7 @@ describe("launch storage on isolated PostgreSQL", () => {
     votes = new MapVotesStore(db);
     events = new ServerEventsStore(db);
     roles = new DiscordRolesStore(db);
+    patronLink = new PatronLinkStore(db);
     workers = ["a", "b"].map((name) =>
       worker(new Pool({ ...connection, max: 1, application_name: `uncs_launch_worker_${name}` })),
     );
@@ -353,6 +375,13 @@ describe("launch storage on isolated PostgreSQL", () => {
     ]);
   });
 
+  it("keeps Discord sources recorded before patron sign-in links", () => {
+    expect(migratedDiscordSources).toEqual([
+      { provider: "patreon", discord_source: "patreon" },
+      { provider: "paypal", discord_source: "staff" },
+    ]);
+  });
+
   it("rejects identity sources that do not match the record's identities or provider", async () => {
     const insert = (values: {
       provider?: "patreon" | "paypal";
@@ -390,6 +419,8 @@ describe("launch storage on isolated PostgreSQL", () => {
       [{ discordSource: "staff" }, discordSource],
       [{ discordId: staff.id, discordSource: "someone" }, discordSource],
       [{ provider: "paypal", discordId: staff.id, discordSource: "patreon" }, discordSource],
+      [{ discordSource: "patron_signin" }, discordSource],
+      [{ provider: "paypal", discordId: staff.id, discordSource: "patron_signin" }, discordSource],
       [{ steamSource: "staff" }, steamSource],
       [
         {
@@ -420,6 +451,8 @@ describe("launch storage on isolated PostgreSQL", () => {
       steamId: "76561198000000002",
       steamSource: "staff",
     });
+    // A patron's own sign-in link is a Patreon record's.
+    await insert({ discordId: "234567890123456783", discordSource: "patron_signin" });
   });
 
   const ballotInput = () => ({
@@ -2626,6 +2659,315 @@ describe("launch storage on isolated PostgreSQL", () => {
           options({ policy: { ...policy, automaticHoldHours: 72 }, now: new Date("2026-10-02T12:00:00.000Z") }),
         ),
       ).toMatchObject({ steamFilled: true, founderRecorded: false, blocked: ["payment_too_recent"] });
+    });
+  });
+
+  describe("Link Patreon sign-ins", () => {
+    const patron = "456789012345678911";
+    const otherAccount = "456789012345678912";
+    const automaticPolicy: FounderPolicy = { ...policy, automaticHoldHours: 0 };
+    const signIn = (patreonMemberId: string, discordId = patron, now = new Date()) => ({
+      campaignId: campaign,
+      patreonMemberId,
+      discordId,
+      now,
+    });
+    async function importPatron(patreonMemberId: string, discordId: string | null = null) {
+      await supporters.importApiMember(
+        campaign,
+        {
+          ...apiMember(patreonMemberId, [charge(`pledge_start:${patreonMemberId}`, "2026-10-01T12:00:00.000Z")], true),
+          discordId,
+        },
+        new Date(),
+      );
+      return (await supporters.list(campaign, automaticPolicy, undefined, patreonMemberId))[0];
+    }
+    const actions = async (memberId: string) =>
+      (
+        await client.query<{ actor_id: string; kind: string; details: Record<string, unknown> }>(
+          "SELECT actor_id, kind, details FROM supporter_actions WHERE member_id = $1 ORDER BY created_at, kind",
+          [memberId],
+        )
+      ).rows;
+    const refusals = async () =>
+      (
+        await client.query<{ count: number }>(
+          "SELECT count(*)::int AS count FROM supporter_actions WHERE kind = 'patron-link-conflict'",
+        )
+      ).rows[0].count;
+
+    it("fills the empty link as the patron's own, bumps the version once and audits it, then writes nothing again", async () => {
+      const record = await importPatron("self-linked");
+      expect(record).toMatchObject({ discordId: null, identityState: "unlinked" });
+      expect(await patronLink.linked(campaign, patron)).toBe(false);
+      expect(await patronLink.link(signIn("self-linked"))).toEqual({ outcome: "linked", memberId: record.id });
+      const view = (await supporters.get(record.id, campaign, automaticPolicy))!;
+      expect(view).toMatchObject({
+        discordId: patron,
+        discordSource: "patron_signin",
+        identityState: "partial",
+        version: record.version + 1,
+        patronLinkConflict: null,
+      });
+      expect(await actions(record.id)).toEqual([
+        {
+          actor_id: PATRON_LINK_ACTOR.id,
+          kind: "patron-discord-link",
+          details: {
+            discordId: patron,
+            previousDiscordId: null,
+            patreonMemberId: "self-linked",
+            patreonDiscordId: null,
+            memberCreated: 0,
+          },
+        },
+      ]);
+      expect(await patronLink.linked(campaign, patron)).toBe(true);
+      // Signing in again for the same link changes nothing.
+      expect(await patronLink.link(signIn("self-linked"))).toEqual({ outcome: "already", memberId: record.id });
+      expect(await actions(record.id)).toHaveLength(1);
+      expect((await supporters.get(record.id, campaign, automaticPolicy))?.version).toBe(view.version);
+      // The next import keeps the patron's link, even when Patreon reports no Discord account.
+      await importPatron("self-linked");
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        discordId: patron,
+        discordSource: "patron_signin",
+      });
+    });
+
+    it("creates the import's minimal record for a membership the import has not seen, pending until a payment", async () => {
+      const result = await patronLink.link(signIn("not-imported-yet"));
+      expect(result).toMatchObject({ outcome: "pending" });
+      expect(
+        (
+          await client.query(
+            `SELECT provider, campaign_id, patreon_member_id, display_name, review_state, discord_id, discord_source,
+              version FROM supporter_members WHERE id = $1`,
+            [result.memberId],
+          )
+        ).rows,
+      ).toEqual([
+        {
+          provider: "patreon",
+          campaign_id: campaign,
+          patreon_member_id: "not-imported-yet",
+          display_name: null,
+          review_state: "pending",
+          discord_id: patron,
+          discord_source: "patron_signin",
+          version: 2,
+        },
+      ]);
+      expect((await actions(result.memberId)).map(({ details }) => details.memberCreated)).toEqual([1]);
+      // The import then fills in the membership and its payment around the patron's link.
+      expect(await importPatron("not-imported-yet")).toMatchObject({
+        id: result.memberId,
+        discordId: patron,
+        discordSource: "patron_signin",
+        latestPayment: { source: "patreon_api" },
+      });
+    });
+
+    it("never replaces a link, and shows the refusal to staff once a day until a review settles it", async () => {
+      const record = await importPatron("linked-elsewhere", patron);
+      // Patreon linked the account three days ago, before any sign-in.
+      await client.query(
+        "UPDATE supporter_actions SET created_at = created_at - interval '3 days' WHERE member_id = $1",
+        [record.id],
+      );
+      const day = 24 * 3_600_000;
+      const firstAt = new Date(Date.now() - 2 * day);
+      expect(await patronLink.link(signIn("linked-elsewhere", otherAccount, firstAt))).toEqual({
+        outcome: "conflict",
+        conflict: "membership_linked",
+        memberId: record.id,
+      });
+      let view = (await supporters.get(record.id, campaign, automaticPolicy))!;
+      expect(view).toMatchObject({
+        discordId: patron,
+        discordSource: "patreon",
+        version: record.version,
+        patronLinkConflict: { discordId: otherAccount, conflict: "membership_linked", linkedDiscordId: patron },
+      });
+      expect((await actions(record.id)).at(-1)).toEqual({
+        actor_id: PATRON_LINK_ACTOR.id,
+        kind: "patron-link-conflict",
+        details: {
+          discordId: otherAccount,
+          conflict: "membership_linked",
+          linkedDiscordId: patron,
+          patreonMemberId: "linked-elsewhere",
+        },
+      });
+      // The same refusal within a day is recorded once. A day later it is recorded again.
+      await patronLink.link(signIn("linked-elsewhere", otherAccount, new Date(firstAt.getTime() + 3_600_000)));
+      expect(await refusals()).toBe(1);
+      await patronLink.link(signIn("linked-elsewhere", otherAccount, new Date(firstAt.getTime() + day + 3_600_000)));
+      expect(await refusals()).toBe(2);
+      // A staff review settles every earlier refusal.
+      await supporters.mutate(record.id, { ...review(view), kind: "review" }, staff, campaign, policy);
+      view = (await supporters.get(record.id, campaign, automaticPolicy))!;
+      expect(view.patronLinkConflict).toBeNull();
+      // A sign-in after the review is a new refusal, even within the day.
+      await patronLink.link(signIn("linked-elsewhere", otherAccount));
+      expect(await refusals()).toBe(3);
+      expect((await supporters.get(record.id, campaign, automaticPolicy))?.patronLinkConflict).toMatchObject({
+        discordId: otherAccount,
+      });
+    });
+
+    it("never takes an account another Patreon record links, a PayPal record does not block, and a link clears the refusal", async () => {
+      await importPatron("holder", patron);
+      const record = await importPatron("taker");
+      expect(await patronLink.link(signIn("taker", patron, new Date(Date.now() - 60_000)))).toEqual({
+        outcome: "conflict",
+        conflict: "discord_linked",
+        memberId: record.id,
+      });
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        discordId: null,
+        version: record.version,
+        patronLinkConflict: { discordId: patron, conflict: "discord_linked", linkedDiscordId: null },
+      });
+      await supporters.recordPaypal(paypalInput({ discordId: otherAccount }), staff, null, policy);
+      expect(await patronLink.link(signIn("taker", otherAccount))).toEqual({ outcome: "linked", memberId: record.id });
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        discordId: otherAccount,
+        discordSource: "patron_signin",
+        patronLinkConflict: null,
+      });
+    });
+
+    it("gives a founder record no Discord account another founder holds", async () => {
+      await supporters.recordPaypal(paypalInput({ discordId: otherAccount, awardFounder: true }), staff, null, policy);
+      let record = await register("steam-only-founder");
+      record = (
+        await supporters.mutate(
+          record.id,
+          { ...review(record), kind: "link", steamId: "76561198000000041" },
+          staff,
+          campaign,
+          policy,
+        )
+      ).supporter!;
+      record = await payment(record);
+      record = (
+        await supporters.mutate(
+          record.id,
+          { ...review(record), kind: "founder", paymentId: record.founderEligiblePayment!.id },
+          staff,
+          campaign,
+          policy,
+        )
+      ).supporter!;
+      expect(record.founder).not.toBeNull();
+      expect(await patronLink.link(signIn("steam-only-founder", otherAccount))).toEqual({
+        outcome: "conflict",
+        conflict: "founder_tie",
+        memberId: record.id,
+      });
+      expect(await supporters.get(record.id, campaign, policy)).toMatchObject({ discordId: null });
+      // An account no founder holds is fine.
+      expect(await patronLink.link(signIn("steam-only-founder", patron))).toMatchObject({ memberId: record.id });
+      expect(await supporters.get(record.id, campaign, policy)).toMatchObject({
+        discordId: patron,
+        discordSource: "patron_signin",
+      });
+    });
+
+    it("links one of two Discord accounts that sign in for the same membership at once", async () => {
+      const record = await importPatron("raced-membership");
+      // One clock for both: a refusal stays shown until a link made after it.
+      const at = new Date();
+      const results = await overlap(
+        "supporter_members",
+        ({ patronLink }) => patronLink.link(signIn("raced-membership", patron, at)),
+        ({ patronLink }) => patronLink.link(signIn("raced-membership", otherAccount, at)),
+      );
+      expect(results.every((result) => result.status === "fulfilled")).toBe(true);
+      const outcomes = results.map((result) => (result as PromiseFulfilledResult<PatronLinkResult>).value);
+      expect(outcomes.map(({ outcome }) => outcome).sort()).toEqual(["conflict", "linked"]);
+      expect(outcomes.find(({ outcome }) => outcome === "conflict")).toMatchObject({ conflict: "membership_linked" });
+      const view = (await supporters.get(record.id, campaign, automaticPolicy))!;
+      const loser = view.discordId === patron ? otherAccount : patron;
+      expect(view).toMatchObject({ discordSource: "patron_signin", version: record.version + 1 });
+      expect(view.patronLinkConflict).toEqual({
+        discordId: loser,
+        conflict: "membership_linked",
+        linkedDiscordId: view.discordId,
+      });
+      expect((await actions(record.id)).map(({ kind }) => kind).sort()).toEqual([
+        "patron-discord-link",
+        "patron-link-conflict",
+      ]);
+    });
+
+    it("links one of two memberships that sign in with the same Discord account at once", async () => {
+      const records = [await importPatron("raced-one"), await importPatron("raced-two")];
+      const results = await overlap(
+        "supporter_members",
+        ({ patronLink }) => patronLink.link(signIn("raced-one")),
+        ({ patronLink }) => patronLink.link(signIn("raced-two")),
+      );
+      expect(results.every((result) => result.status === "fulfilled")).toBe(true);
+      const outcomes = results.map((result) => (result as PromiseFulfilledResult<PatronLinkResult>).value);
+      expect(outcomes.map(({ outcome }) => outcome).sort()).toEqual(["conflict", "linked"]);
+      const lost = outcomes.find(({ outcome }) => outcome === "conflict")!;
+      expect(lost).toMatchObject({ conflict: "discord_linked" });
+      const won = outcomes.find(({ outcome }) => outcome === "linked")!;
+      expect(await supporters.get(won.memberId, campaign, automaticPolicy)).toMatchObject({
+        discordId: patron,
+        discordSource: "patron_signin",
+      });
+      // The losing record is unchanged apart from the refusal staff see.
+      expect(await supporters.get(lost.memberId, campaign, automaticPolicy)).toMatchObject({
+        discordId: null,
+        version: records.find(({ id }) => id === lost.memberId)!.version,
+        patronLinkConflict: { discordId: patron, conflict: "discord_linked", linkedDiscordId: null },
+      });
+      expect((await actions(lost.memberId)).map(({ kind }) => kind)).toEqual(["patron-link-conflict"]);
+    });
+
+    it("holds an automatic founder on a new patron link for the waiting period, then records it with its own reason", async () => {
+      const record = await importPatron("held-link");
+      const linkedAt = new Date("2026-10-08T12:00:00.000Z");
+      expect(await patronLink.link(signIn("held-link", patron, linkedAt))).toEqual({
+        outcome: "linked",
+        memberId: record.id,
+      });
+      const held = { ...policy, automaticHoldHours: 72 };
+      const options = (now: string): AutoMatchOptions => ({
+        campaignId: campaign,
+        policy: held,
+        fillSteam: true,
+        recordFounder: true,
+        now: new Date(now),
+      });
+      // The first payment is days old, but the link is not.
+      expect(await match.autoMatch(record.id, options("2026-10-11T11:59:59.999Z"))).toMatchObject({
+        founderRecorded: false,
+        blocked: expect.arrayContaining(["patron_link_too_recent"]),
+      });
+      expect(await supporters.get(record.id, campaign, held)).toMatchObject({ founder: null });
+      expect(await match.autoMatch(record.id, options("2026-10-11T12:00:00.000Z"))).toMatchObject({
+        founderRecorded: true,
+      });
+      expect(await supporters.get(record.id, campaign, held)).toMatchObject({ founder: { automatic: true } });
+      expect(
+        (await client.query("SELECT reason FROM supporter_founders WHERE member_id = $1", [record.id])).rows,
+      ).toEqual([{ reason: PATRON_LINK_FOUNDER_REASON }]);
+      expect((await actions(record.id)).map(({ actor_id, kind }) => ({ actor_id, kind }))).toEqual([
+        { actor_id: PATRON_LINK_ACTOR.id, kind: "patron-discord-link" },
+        { actor_id: "system:supporter-match", kind: "founder" },
+      ]);
+      expect(
+        (
+          await client.query("SELECT reason FROM supporter_actions WHERE member_id = $1 AND kind = 'founder'", [
+            record.id,
+          ])
+        ).rows,
+      ).toEqual([{ reason: PATRON_LINK_FOUNDER_REASON }]);
     });
   });
 
