@@ -45,6 +45,7 @@ describe("telemetry HTTP boundaries", () => {
     tracking: jest.fn(),
     events: jest.fn(),
     eventTypes: jest.fn(),
+    serverStats: jest.fn(),
   };
   const adminStore = { session: jest.fn() };
   const config = {
@@ -73,6 +74,12 @@ describe("telemetry HTTP boundaries", () => {
     store.tracking.mockResolvedValue(null);
     store.events.mockResolvedValue([]);
     store.eventTypes.mockResolvedValue([]);
+    store.serverStats.mockResolvedValue({
+      groups: [],
+      totals: { events: 0, deaths: 0, suicides: 0, falling: 0, players: 0 },
+      longest: [],
+      leaders: [],
+    });
     adminStore.session.mockImplementation(async (key) =>
       key === hash(sessionToken)
         ? {
@@ -436,5 +443,124 @@ describe("telemetry HTTP boundaries", () => {
       .send(batch())
       .expect(503);
     expect(store.ingest).not.toHaveBeenCalled();
+  });
+  const ids = ["76561198000000001", "76561198000000002", "76561198000000003"];
+  /** Storage rows that still carry SteamIDs, as the real store's do, including SteamID-like names. */
+  function storeWithSteamIds() {
+    store.snapshot.mockResolvedValue({
+      leaderboard: [
+        { steamId: ids[0], name: "Player", kills: 4, deaths: 1, headshotKills: 2, kd: 4 },
+        { steamId: ids[1], name: ids[1], kills: 2, deaths: 2, headshotKills: 0, kd: 1 },
+        { steamId: ids[2], name: `Tag ${ids[2]}`, kills: 1, deaths: 3, headshotKills: 0, kd: 0.33 },
+      ],
+      totals: { ...emptyTotals(), events: 7, kills: 7, deaths: 6, headshotKills: 2, players: 3 },
+    });
+    store.serverStats.mockResolvedValue({
+      groups: [
+        {
+          set: 3,
+          causeKey: "id.item.ak74m",
+          cause: "Id.Item.AK74M",
+          mapName: null,
+          hour: null,
+          kills: 3,
+          headshotKills: 2,
+          longestCentimeters: 41_200,
+          melee: 0,
+          roadkill: 0,
+          vehicleExplosion: 0,
+          penetration: 1,
+          ricochet: 0,
+        },
+        {
+          set: 5,
+          causeKey: null,
+          cause: null,
+          mapName: "76561198000000008",
+          hour: null,
+          kills: 3,
+          headshotKills: 2,
+          longestCentimeters: null,
+          melee: 0,
+          roadkill: 0,
+          vehicleExplosion: 0,
+          penetration: 0,
+          ricochet: 0,
+        },
+      ],
+      totals: { events: 7, deaths: 6, suicides: 1, falling: 1, players: 3 },
+      longest: [
+        { steamId: ids[1], name: ids[1], cause: "ID.Item.AK74M", mapName: "Kavkazi", distanceCentimeters: 41_200 },
+      ],
+      leaders: [
+        { tag: "penetration", steamId: ids[2], name: `Tag ${ids[2]}`, count: 1 },
+        { tag: "falling", steamId: ids[0], name: "Player", count: 1 },
+      ],
+    });
+  }
+  it("serves public server stats on both routes without SteamIDs or 17-digit runs", async () => {
+    storeWithSteamIds();
+    for (const path of ["/community/api/stats", "/community/api/servers/primary/stats"]) {
+      const result = await request(app.getHttpServer()).get(`${path}?period=week`).expect(200);
+      expect(result.text).not.toMatch(/steamId|\d{17}/i);
+      expect(result.headers["cache-control"]).toBe("no-store");
+      expect(result.headers["cdn-cache-control"]).toBe("no-store");
+      expect(result.body).toMatchObject({
+        serverId: "primary",
+        period: "week",
+        totals: { events: 7, kills: 0, deaths: 6, headshotKills: 0, players: 3, suicides: 1 },
+        weapons: [{ label: "AK-74M", kind: "firearm", kills: 3, headshotKills: 2, longestMeters: 412 }],
+        maps: [],
+        longestKills: [{ name: "Unnamed player", weapon: "AK-74M", meters: 412, map: "Bakurani" }],
+        tagLeaders: { penetration: [{ name: "Unnamed player", count: 1 }], falling: [{ name: "Player", count: 1 }] },
+      });
+      expect(result.body.hours).toHaveLength(24);
+    }
+    // One recompute served both routes.
+    expect(store.serverStats).toHaveBeenCalledTimes(1);
+  });
+  it("refuses a bad period or unknown server on the stats routes before reading storage", async () => {
+    for (const path of ["/community/api/stats", "/community/api/servers/primary/stats"]) {
+      const result = await request(app.getHttpServer()).get(`${path}?period=year`).expect(400);
+      expect(result.body).toEqual({ message: "Choose day, week or month." });
+    }
+    await request(app.getHttpServer()).get("/community/api/servers/nope/stats?period=week").expect(404);
+    await request(app.getHttpServer()).get("/community/api/stats/x").expect(404);
+    expect(store.serverStats).not.toHaveBeenCalled();
+  });
+  it("counts stats reads in the public leaderboard's read bucket", async () => {
+    for (let count = 0; count < 150; count++) {
+      await request(app.getHttpServer()).get("/community/api/leaderboard").expect(200);
+      await request(app.getHttpServer()).get("/community/api/stats").expect(200);
+    }
+    await request(app.getHttpServer()).get("/community/api/stats").expect(429);
+    await request(app.getHttpServer()).get("/community/api/servers/primary/stats").expect(429);
+  });
+  it("returns a safe error when stats storage is unavailable", async () => {
+    store.serverStats.mockRejectedValueOnce(new Error(`postgres://user:password@private-db ${ids[0]}`));
+    const result = await request(app.getHttpServer()).get("/community/api/stats").expect(503);
+    expect(result.text).not.toMatch(/postgres|password|private-db|7656119/);
+  });
+  it("never puts a steamId key or a 17-digit run in any public response, on any route or period", async () => {
+    storeWithSteamIds();
+    const paths = ["/community/api/servers"];
+    for (const period of ["day", "week", "month"])
+      for (const route of ["leaderboard", "stats"])
+        paths.push(
+          `/community/api/${route}?period=${period}`,
+          `/community/api/servers/primary/${route}?period=${period}`,
+        );
+    const keys = (value: unknown): string[] =>
+      Array.isArray(value)
+        ? value.flatMap(keys)
+        : value && typeof value === "object"
+          ? Object.entries(value).flatMap(([key, child]) => [key, ...keys(child)])
+          : [];
+    for (const path of paths) {
+      const result = await request(app.getHttpServer()).get(path).expect(200);
+      expect(keys(result.body).filter((key) => /steam/i.test(key))).toEqual([]);
+      expect(result.text).not.toMatch(/\d{17}/);
+      expect(result.text).not.toMatch(/\p{Nd}{17}/u);
+    }
   });
 });

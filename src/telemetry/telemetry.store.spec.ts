@@ -295,4 +295,82 @@ describe("telemetry persistence contract", () => {
     expect(params.at(-1)).toBe(100);
     expect(config.text).not.toMatch(/email|discord|to_timestamp/);
   });
+  const statements = (query: ReturnType<typeof fixture>["query"]) =>
+    query.mock.calls.filter(([config]) => !/^(begin|commit|rollback)\b/.test(config.text));
+  it("reads server stats in three range scans inside one read-only, repeatable-read transaction", async () => {
+    const { store, query } = fixture();
+    const since = new Date("2026-09-06T02:00:00Z"),
+      until = new Date("2026-10-06T02:00:00Z");
+    query.mockImplementation(async (config) => ({
+      rows: config.text.includes("GROUPING SETS")
+        ? [{ set: 7, kills: 3 }]
+        : config.text.includes("CROSS JOIN LATERAL (VALUES (1,")
+          ? [{ events: 4, deaths: 4, suicides: 1, falling: 0, players: 3 }]
+          : config.text.includes("WITH longest AS")
+            ? [{ longest: [{ steamId: "76561198000000001" }], leaders: [] }]
+            : [],
+    }));
+    await expect(store.serverStats(since, until, "east")).resolves.toEqual({
+      groups: [{ set: 7, kills: 3 }],
+      totals: { events: 4, deaths: 4, suicides: 1, falling: 0, players: 3 },
+      longest: [{ steamId: "76561198000000001" }],
+      leaders: [],
+    });
+    expect(query.mock.calls[0][0].text).toBe("begin isolation level repeatable read read only");
+    expect(query.mock.calls.at(-1)![0].text).toBe("commit");
+    const [s1, s2, s3] = statements(query);
+    expect(statements(query)).toHaveLength(3);
+    for (const [config, params] of [s1, s2, s3]) {
+      // Every scan uses the leading columns of combat_events_received_idx, bound once per statement.
+      expect(params).toEqual(["east", since, until]);
+      expect(config.text).toMatch(/server_id = \$1 AND (e\.)?received_at >= \$2 AND (e\.)?received_at <= \$3/);
+      expect(config.text).not.toMatch(/\$4/);
+      expect(config.text).not.toMatch(/\b(insert|update|delete)\b/i);
+      expect(config.text).not.toMatch(/email|discord|MATERIALIZED/i);
+    }
+    // S1: kills by cause, map and hour plus the total, in one scan.
+    expect(s1[0].text).toContain("GROUP BY GROUPING SETS ((cause_key), (map_name), (hour), ())");
+    expect(s1[0].text).toContain("NOT suicide AND killer_steam_id IS NOT NULL");
+    expect(s1[0].text).toContain("extract(hour FROM received_at AT TIME ZONE 'UTC')");
+    expect(s1[0].text).toContain("distance_centimeters <= 200000");
+    expect(s1[0].text).toContain(
+      "?| ARRAY['Penetration','Meta.Progression.Context.Player.KillContext.Penetration','Meta.PlayerKillFlag.Player.Penetration']",
+    );
+    // S2: event totals, with the e. alias.
+    expect(s2[0].text).toContain("e.server_id = $1 AND e.received_at >= $2 AND e.received_at <= $3");
+    expect(s2[0].text).toContain("count(DISTINCT v.id)::int AS players");
+    expect(s2[0].text).toContain(
+      "e.context_tags ?| ARRAY['Falling','Meta.Progression.Context.Player.KillContext.Falling','Meta.PlayerKillFlag.Player.Falling']",
+    );
+    // S3: one longest kill per player from the top 200, five leaders per tag, ten rows out.
+    expect(s3[0].text).toContain("ORDER BY distance_centimeters DESC, received_at, event_id LIMIT 200");
+    expect(s3[0].text).toContain("SELECT DISTINCT ON (killer_steam_id)");
+    expect(s3[0].text).toContain("distance_centimeters <= 200000");
+    expect(s3[0].text).toContain("row_number() OVER (PARTITION BY tag ORDER BY count(*) DESC, steam_id)");
+    expect(s3[0].text).toContain("rank <= 5");
+    expect(s3[0].text).toContain("LIMIT 10");
+    expect(s3[0].text).toContain("e.server_id = $1 AND e.received_at >= $2 AND e.received_at <= $3");
+    expect(s3[0].text).toContain("killer_steam_id IN (SELECT steam_id FROM named)");
+    expect(s3[0].text).toContain("victim_steam_id IN (SELECT steam_id FROM named)");
+    expect(s3[0].text).toContain("ORDER BY steam_id, received_at DESC, event_id DESC");
+    // Self-inflicted deaths are counted in S2 but never ranked by name.
+    expect(s3[0].text).not.toContain("'suicide'");
+    expect(s3[0].text).toContain("('falling', e.victim_steam_id,");
+  });
+  it("rolls back a failed stats read and returns empty lists when nothing matched", async () => {
+    const { store, query } = fixture();
+    await expect(store.serverStats(new Date(0), new Date(1))).resolves.toEqual({
+      groups: [],
+      totals: { events: 0, deaths: 0, suicides: 0, falling: 0, players: 0 },
+      longest: [],
+      leaders: [],
+    });
+    expect(statements(query).map(([, params]) => params[0])).toEqual(["primary", "primary", "primary"]);
+    query.mockImplementation(async (config) => {
+      if (config.text.includes("WITH longest AS")) throw new Error("database error");
+      return { rows: [] };
+    });
+    await expect(store.serverStats(new Date(0), new Date(1))).rejects.toThrow();
+    expect(query.mock.calls.at(-1)![0].text).toBe("rollback");
+  });
 });

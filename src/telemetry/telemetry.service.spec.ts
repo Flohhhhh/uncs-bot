@@ -1,10 +1,10 @@
-import { Logger } from "@nestjs/common";
+import { BadRequestException, Logger } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import type { EnvService } from "../env/env.service";
 import { TelemetryDeliveries } from "./telemetry.deliveries";
 import { TelemetryService, UNNAMED_PLAYER, publicName } from "./telemetry.service";
 import type { TelemetryStore } from "./telemetry.store";
-import { emptyTotals, periodMilliseconds } from "./telemetry.types";
+import { emptyTotals, periodMilliseconds, type ServerStatsAggregate } from "./telemetry.types";
 import { fixtureServers } from "../admin/game-server-fixture";
 import { GameServers } from "../admin/game-servers";
 import { AdminSettings } from "../admin/admin.settings";
@@ -20,6 +20,12 @@ const deliveryKeys = [
   "lastRejectedWithoutToken",
   "rejectedWithoutTokenCount",
 ];
+const emptyStatsAggregate = (): ServerStatsAggregate => ({
+  groups: [],
+  totals: { events: 0, deaths: 0, suicides: 0, falling: 0, players: 0 },
+  longest: [],
+  leaders: [],
+});
 function fixture(enabled = true, secret = token, rcon = "different-rcon-password") {
   const values: Record<string, unknown> = {
     WARDOGS_FEED_ENABLED: enabled,
@@ -32,6 +38,7 @@ function fixture(enabled = true, secret = token, rcon = "different-rcon-password
     tracking: jest.fn().mockResolvedValue(null),
     events: jest.fn().mockResolvedValue([]),
     eventTypes: jest.fn().mockResolvedValue([]),
+    serverStats: jest.fn().mockResolvedValue(emptyStatsAggregate()),
   };
   const servers = fixtureServers({});
   servers.feedToken = () => (secret !== rcon ? secret : undefined);
@@ -181,6 +188,7 @@ describe("telemetry authorization and reporting", () => {
       events: [],
     });
     await expect(service.player(steamId)).resolves.toMatchObject({ player: null, events: [] });
+    await expect(service.leaderboard()).resolves.toMatchObject({ enabled: false, leaderboard: [] });
     for (const method of Object.values(store)) expect(method).not.toHaveBeenCalled();
   });
   it.each([
@@ -643,5 +651,253 @@ describe("telemetry authorization and reporting", () => {
     expect(publicName(steamId, 5)).toBe(UNNAMED_PLAYER);
     // The website's stricter rule (any 17-digit run) is applied by the Discord renderer, not here.
     expect(publicName(steamId, "x76561198000000009x")).toBe("x76561198000000009x");
+  });
+});
+
+describe("public server stats", () => {
+  const [A, B, C, D, E] = ["01", "02", "03", "04", "05"].map((end) => `765611980000000${end}`);
+  const contractKeys = [
+    "asOf",
+    "connected",
+    "coverageNote",
+    "enabled",
+    "feedStatus",
+    "hours",
+    "lastReceivedAt",
+    "longestKills",
+    "maps",
+    "period",
+    "serverId",
+    "tagLeaders",
+    "tags",
+    "totals",
+    "trackingStartedAt",
+    "weapons",
+    "windowStartedAt",
+  ];
+  const tagCounts = { melee: 0, roadkill: 0, vehicleExplosion: 0, penetration: 0, ricochet: 0 };
+  const group = (set: number, fields: Partial<ServerStatsAggregate["groups"][number]>) => ({
+    ...tagCounts,
+    set,
+    causeKey: null,
+    cause: null,
+    mapName: null,
+    hour: null,
+    kills: 0,
+    headshotKills: 0,
+    longestCentimeters: null,
+    ...fields,
+  });
+  const cause = (raw: string | null, kills: number, headshotKills = 0, longestCentimeters: number | null = null) =>
+    group(3, { causeKey: raw?.toLowerCase() ?? null, cause: raw, kills, headshotKills, longestCentimeters });
+  const aggregate = (): ServerStatsAggregate => ({
+    groups: [
+      cause("Id.Item.AK74M", 30, 9, 41_249),
+      cause("ID.Item.AK74M", 12, 3, 52_000),
+      cause("Id.Item.Mosin", 5, 2, 30_000),
+      // Over the 2 km cap: counted, but its distance is left out.
+      cause("ID.Item.MosinNagant", 4, 1, 250_000),
+      cause("Vehicle.Variant.Air.Rotary.ROT_04.Default", 7),
+      cause("Weapon.Rifle", 3, 1, 1_000),
+      cause("76561198000000009", 2),
+      cause(null, 4),
+      group(5, { mapName: "Kavkazi", kills: 20 }),
+      group(5, { mapName: "Bakurani", kills: 6 }),
+      group(5, { mapName: "Europe", kills: 21 }),
+      group(5, { mapName: "76561198000000005", kills: 3 }),
+      group(5, { mapName: null, kills: 4 }),
+      group(6, { hour: 0, kills: 10 }),
+      group(6, { hour: 21, kills: 30 }),
+      group(6, { hour: 23, kills: 14 }),
+      group(7, { kills: 54, headshotKills: 16, melee: 6, roadkill: 1, vehicleExplosion: 2, penetration: 4 }),
+    ],
+    totals: { events: 60, deaths: 58, suicides: 2, falling: 3, players: 7 },
+    longest: [
+      { steamId: A, name: "OldManRiver", cause: "Id.Item.SR_04", mapName: "Europe", distanceCentimeters: 59_100 },
+      // Storage falls back to the SteamID as the name.
+      { steamId: B, name: B, cause: null, mapName: "Kavkazi", distanceCentimeters: 30_000 },
+      { steamId: C, name: `Tag ${C}`, cause: "Weapon.Rifle", mapName: null, distanceCentimeters: 25_049 },
+      {
+        steamId: D,
+        name: "x76561198999999999x",
+        cause: "ID.Item.AK74M",
+        mapName: "76561198000000005",
+        distanceCentimeters: 20_000,
+      },
+      { steamId: A, name: "OldManRiver", cause: "Id.Item.M4", mapName: "Europe", distanceCentimeters: 10_000 },
+      { steamId: E, name: "TooFar", cause: "Id.Item.M4", mapName: "Europe", distanceCentimeters: 250_000 },
+    ],
+    leaders: [
+      { tag: "melee", steamId: A, name: "OldManRiver", count: 6 },
+      { tag: "melee", steamId: B, name: null, count: 2 },
+      { tag: "falling", steamId: C, name: `Tag ${C}`, count: 3 },
+      { tag: "suicide", steamId: D, name: "Oops", count: 2 },
+      { tag: "penetration", steamId: E, name: "Wallbanger", count: 0 },
+    ],
+  });
+
+  beforeEach(() => {
+    jest.useFakeTimers().setSystemTime(now);
+    jest.spyOn(Logger.prototype, "warn").mockImplementation();
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+
+  it("builds the public stats from named, merged and capped aggregates only", async () => {
+    const { service, store } = fixture();
+    store.serverStats.mockResolvedValue(aggregate());
+    store.tracking.mockResolvedValue({ firstReceivedAt: new Date(now.getTime() - 3_600_000), lastReceivedAt: now });
+    const result = await service.stats("week");
+    expect(store.serverStats).toHaveBeenCalledWith(new Date(now.getTime() - periodMilliseconds.week), now, "primary");
+    expect(Object.keys(result).sort()).toEqual(contractKeys);
+    expect(result).toMatchObject({
+      serverId: "primary",
+      enabled: true,
+      connected: true,
+      feedStatus: "receiving",
+      period: "week",
+      asOf: now.toISOString(),
+    });
+    expect(result.totals).toEqual({ events: 60, kills: 54, deaths: 58, headshotKills: 16, players: 7, suicides: 2 });
+    expect(result.weapons).toEqual([
+      // Id. and ID. rows are one weapon; so are two spellings of one name.
+      { label: "AK-74M", kind: "firearm", kills: 42, headshotKills: 12, longestMeters: 520 },
+      { label: "Mosin-Nagant", kind: "firearm", kills: 9, headshotKills: 3, longestMeters: 300 },
+      { label: "ROT-04 helicopter", kind: "vehicle", kills: 7, headshotKills: 0, longestMeters: null },
+      { label: "Unknown weapon", kind: "unknown", kills: 5, headshotKills: 1, longestMeters: 10 },
+    ]);
+    // Kavkazi is Bakurani's catalog ID; SteamID-like and missing map names are left out.
+    expect(result.maps).toEqual([
+      { label: "Bakurani", kills: 26 },
+      { label: "Ozeti", kills: 21 },
+    ]);
+    expect(result.longestKills).toEqual([
+      { name: "OldManRiver", weapon: "SR-04", meters: 591, map: "Ozeti" },
+      { name: UNNAMED_PLAYER, weapon: null, meters: 300, map: "Bakurani" },
+      { name: UNNAMED_PLAYER, weapon: "Unknown weapon", meters: 250, map: null },
+      { name: UNNAMED_PLAYER, weapon: "AK-74M", meters: 200, map: null },
+    ]);
+    expect(result.hours).toHaveLength(24);
+    expect([result.hours[0], result.hours[21], result.hours[23]]).toEqual([10, 30, 14]);
+    expect(result.hours.reduce((total, kills) => total + kills, 0)).toBe(54);
+    expect(result.tags).toEqual({
+      melee: 6,
+      roadkill: 1,
+      vehicleExplosion: 2,
+      penetration: 4,
+      ricochet: 0,
+      falling: 3,
+      suicide: 2,
+    });
+    expect(result.tagLeaders).toEqual({
+      melee: [
+        { name: "OldManRiver", count: 6 },
+        { name: UNNAMED_PLAYER, count: 2 },
+      ],
+      roadkill: [],
+      vehicleExplosion: [],
+      penetration: [],
+      ricochet: [],
+      falling: [{ name: UNNAMED_PLAYER, count: 3 }],
+    });
+    // Self-inflicted deaths are a count only, never a list of names.
+    expect(result.tagLeaders).not.toHaveProperty("suicide");
+    const json = JSON.stringify(result);
+    expect(json).not.toMatch(/steamId|\p{Nd}{17}/u);
+    for (const id of [A, B, C, D, E]) expect(json).not.toContain(id);
+    expect(json).not.toMatch(/Oops|Wallbanger|TooFar|Id\.Item|Weapon\.Rifle/);
+  });
+
+  it("keeps the top 25 weapons, ten long shots and five names per tag", async () => {
+    const { service, store } = fixture();
+    store.serverStats.mockResolvedValue({
+      groups: Array.from({ length: 30 }, (_, index) => cause(`Id.Item.WEPN_${100 + index}`, 100 - index)),
+      totals: { events: 0, deaths: 0, suicides: 0, falling: 0, players: 0 },
+      longest: Array.from({ length: 15 }, (_, index) => ({
+        steamId: String(76561198000000100n + BigInt(index)),
+        name: `Shooter ${index}`,
+        cause: null,
+        mapName: null,
+        distanceCentimeters: 50_000 - index * 100,
+      })),
+      leaders: Array.from({ length: 8 }, (_, index) => ({
+        tag: "roadkill",
+        steamId: String(76561198000000200n + BigInt(index)),
+        name: `Driver ${index}`,
+        count: 20 - index,
+      })),
+    });
+    const result = await service.stats("month");
+    expect(result.weapons).toHaveLength(25);
+    expect(result.weapons[0]).toMatchObject({ label: "Weapon 100", kind: "firearm", kills: 100 });
+    expect(result.weapons.at(-1)).toMatchObject({ label: "Weapon 124", kills: 76 });
+    expect(result.longestKills).toHaveLength(10);
+    expect(result.longestKills[0]).toEqual({ name: "Shooter 0", weapon: null, meters: 500, map: null });
+    expect(result.tagLeaders.roadkill.map((row) => row.name)).toEqual([0, 1, 2, 3, 4].map((n) => `Driver ${n}`));
+  });
+
+  it("rejects a bad period or server before any store read", async () => {
+    const { service, store } = fixture();
+    for (const period of ["year", "", ["week"], "WEEK"])
+      await expect(service.stats(period)).rejects.toBeInstanceOf(BadRequestException);
+    await expect(service.stats("year")).rejects.toThrow("Choose day, week or month.");
+    await expect(service.stats("week", "nope")).rejects.toMatchObject({ status: 404 });
+    for (const method of Object.values(store)) expect(method).not.toHaveBeenCalled();
+    // No period means the 7-day view, as on the leaderboard.
+    await expect(service.stats()).resolves.toMatchObject({ period: "week" });
+  });
+
+  it("serves the empty shape without reading storage while the feed is off", async () => {
+    const { service, store } = fixture(false);
+    const result = await service.stats("day");
+    expect(Object.keys(result).sort()).toEqual(contractKeys);
+    expect(result).toMatchObject({
+      enabled: false,
+      connected: false,
+      feedStatus: "waiting",
+      coverageNote: "Game event tracking is not enabled.",
+      totals: { events: 0, kills: 0, deaths: 0, headshotKills: 0, players: 0, suicides: 0 },
+      weapons: [],
+      maps: [],
+      longestKills: [],
+      tags: { melee: 0, roadkill: 0, vehicleExplosion: 0, penetration: 0, ricochet: 0, falling: 0, suicide: 0 },
+      tagLeaders: { melee: [], roadkill: [], vehicleExplosion: [], penetration: [], ricochet: [], falling: [] },
+    });
+    expect(result.hours).toEqual(Array.from({ length: 24 }, () => 0));
+    for (const method of Object.values(store)) expect(method).not.toHaveBeenCalled();
+  });
+
+  it("recomputes at most once a minute per server and period, whatever the traffic or feed batches", async () => {
+    const { service, store, payload } = fixture();
+    store.tracking.mockResolvedValue({ firstReceivedAt: now, lastReceivedAt: now });
+    // Concurrent readers share one read.
+    const [first, second] = await Promise.all([service.stats("week"), service.stats("week")]);
+    expect(store.serverStats).toHaveBeenCalledTimes(1);
+    expect(second).toEqual(first);
+    jest.advanceTimersByTime(30_000);
+    await service.ingest(`Bearer ${token}`, payload);
+    // ingest() does not evict stats; numbers and feed status stay as of the cached read.
+    await expect(service.stats("week")).resolves.toMatchObject({ asOf: now.toISOString(), feedStatus: "receiving" });
+    expect(store.serverStats).toHaveBeenCalledTimes(1);
+    await service.stats("day");
+    expect(store.serverStats).toHaveBeenCalledTimes(2);
+    jest.advanceTimersByTime(29_999);
+    await service.stats("week");
+    expect(store.serverStats).toHaveBeenCalledTimes(2);
+    jest.advanceTimersByTime(1_001);
+    await expect(service.stats("week")).resolves.toMatchObject({
+      asOf: new Date(now.getTime() + 61_000).toISOString(),
+    });
+    expect(store.serverStats).toHaveBeenCalledTimes(3);
+  });
+
+  it("evicts a failed recompute so the next reader tries again", async () => {
+    const { service, store } = fixture();
+    store.serverStats.mockRejectedValueOnce(new Error("postgres://user:secret@private-db"));
+    await expect(service.stats("week")).rejects.toThrow();
+    await expect(service.stats("week")).resolves.toMatchObject({ period: "week" });
+    expect(store.serverStats).toHaveBeenCalledTimes(2);
   });
 });

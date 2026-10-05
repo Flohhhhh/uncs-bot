@@ -8,26 +8,38 @@ import {
 } from "@nestjs/common";
 import { EnvService } from "../env/env.service";
 import { GameServers } from "../admin/game-servers";
+import { describeCause, type CauseKind } from "../common/cause-labels";
 import { publicGameServer } from "../common/game-server";
+import { mapLabel } from "../common/map-labels";
+import { plainLabel } from "../server-community/community-state";
 import { feedCredentials, feedServer, usableFeedToken } from "./telemetry.credentials";
 import { TelemetryDeliveries } from "./telemetry.deliveries";
 import { TelemetryStore } from "./telemetry.store";
 import {
   emptyTotals,
   FeedRejectedException,
+  LEADER_TAGS,
   parseFeed,
   periodMilliseconds,
   periodSchema,
+  PUBLIC_MAX_DISTANCE_CENTIMETERS,
   telemetrySteamId,
   type CombatAggregate,
   type CombatStats,
+  type LeaderTag,
   type ParsedFeed,
   type PublicCombatStats,
+  type PublicServerStats,
+  type ServerStatsAggregate,
   type TelemetryPeriod,
   type TrackingRecord,
 } from "./telemetry.types";
 
 export const UNNAMED_PLAYER = "Unnamed player";
+/** Server stats are recomputed at most once a minute per server and period. */
+export const STATS_TTL_MS = 60_000;
+const STATS_CACHE_ENTRIES = 30;
+const STEAM_ID_LIKE = /\p{Nd}{17}/u;
 
 // Storage falls back to the SteamID when no display name was observed, so a public name
 // replaces any name that is empty, is a SteamID or contains this player's SteamID with a neutral label.
@@ -37,9 +49,159 @@ export function publicName(steamId: string | null | undefined, name: unknown): s
   return identifying ? UNNAMED_PLAYER : (name as string);
 }
 
+/** A name in a public stats list: publicName(), then the website's stricter rule that any 17-digit run is hidden. */
+export function publicListName(steamId: string | null | undefined, name: unknown): string {
+  const visible = publicName(steamId, name);
+  if (STEAM_ID_LIKE.test(visible)) return UNNAMED_PLAYER;
+  return visible.trim().slice(0, 64) || UNNAMED_PLAYER;
+}
+
+const count = (value: unknown) => (typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : 0);
+/** Whole metres for a distance within the public 2 km cap, else null. */
+export function publicMeters(centimeters: unknown): number | null {
+  return typeof centimeters === "number" &&
+    Number.isFinite(centimeters) &&
+    centimeters > 0 &&
+    centimeters <= PUBLIC_MAX_DISTANCE_CENTIMETERS
+    ? Math.round(centimeters / 100)
+    : null;
+}
+/** A readable map name, or null for an empty, unknown or SteamID-like one. */
+function publicMap(name: unknown): string | null {
+  if (typeof name !== "string" || !name.trim()) return null;
+  const label = plainLabel(mapLabel(name.trim()), 40);
+  return label === "Unknown" || STEAM_ID_LIKE.test(label) ? null : label;
+}
+const byCountThenLabel = (a: { kills: number; label: string }, b: { kills: number; label: string }) =>
+  b.kills - a.kills || (a.label < b.label ? -1 : a.label > b.label ? 1 : 0);
+const LEADER_KEYS = Object.keys(LEADER_TAGS) as LeaderTag[];
+
+/** Public stats with nothing recorded: every count 0 and every list empty. */
+export function emptyServerStats(): PublicServerStats {
+  return {
+    totals: { ...emptyTotals(), suicides: 0 },
+    weapons: [],
+    maps: [],
+    longestKills: [],
+    hours: Array.from({ length: 24 }, () => 0),
+    tags: { melee: 0, roadkill: 0, vehicleExplosion: 0, penetration: 0, ricochet: 0, falling: 0, suicide: 0 },
+    tagLeaders: { melee: [], roadkill: [], vehicleExplosion: [], penetration: [], ricochet: [], falling: [] },
+  };
+}
+
+/**
+ * The public stats shape, built field by field from the store's aggregate so nothing else can pass
+ * through: names only, never a SteamID, and every weapon named by describeCause().
+ */
+export function publicServerStats(aggregate: ServerStatsAggregate): PublicServerStats {
+  const stats = emptyServerStats();
+  const groups = Array.isArray(aggregate?.groups) ? aggregate.groups : [];
+  const all = groups.find((row) => row?.set === 7);
+  const totals = aggregate?.totals;
+  stats.totals = {
+    events: count(totals?.events),
+    kills: count(all?.kills),
+    deaths: count(totals?.deaths),
+    headshotKills: count(all?.headshotKills),
+    players: count(totals?.players),
+    suicides: count(totals?.suicides),
+  };
+
+  // Weapons: each cause row named, then rows with one name merged ("Id.Item.AK74M" and "ID.Item.AK74M").
+  const weapons = new Map<
+    string,
+    { label: string; kind: CauseKind; kindKills: number; kills: number; headshotKills: number; longest: number }
+  >();
+  const causes = groups
+    .filter((row) => row?.set === 3 && typeof row.cause === "string" && row.cause.trim())
+    .slice(0, 500)
+    .map((row) => ({ row, key: row.causeKey ?? row.cause!.trim().toLowerCase() }))
+    .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+    .map(({ row }) => row);
+  for (const row of causes) {
+    const { label, kind } = describeCause(row.cause);
+    const kills = count(row.kills);
+    if (!kills) continue;
+    const entry = weapons.get(label) ?? { label, kind, kindKills: 0, kills: 0, headshotKills: 0, longest: 0 };
+    if (kills > entry.kindKills) Object.assign(entry, { kind, kindKills: kills });
+    entry.kills += kills;
+    entry.headshotKills += count(row.headshotKills);
+    const longest = publicMeters(row.longestCentimeters) === null ? 0 : row.longestCentimeters!;
+    entry.longest = Math.max(entry.longest, longest);
+    weapons.set(label, entry);
+  }
+  stats.weapons = [...weapons.values()]
+    .sort(byCountThenLabel)
+    .slice(0, 25)
+    .map(({ label, kind, kills, headshotKills, longest }) => ({
+      label,
+      kind,
+      kills,
+      headshotKills,
+      longestMeters: publicMeters(longest),
+    }));
+
+  // Maps: the catalog ID and the in-game name of one map count once.
+  const maps = new Map<string, number>();
+  for (const row of groups) {
+    if (row?.set !== 5) continue;
+    const label = publicMap(row.mapName);
+    if (label && count(row.kills)) maps.set(label, (maps.get(label) ?? 0) + count(row.kills));
+  }
+  stats.maps = [...maps.entries()]
+    .map(([label, kills]) => ({ label, kills }))
+    .sort(byCountThenLabel)
+    .slice(0, 10);
+
+  for (const row of groups)
+    if (row?.set === 6 && Number.isInteger(row.hour) && row.hour! >= 0 && row.hour! < 24)
+      stats.hours[row.hour!] += count(row.kills);
+
+  stats.tags = {
+    melee: count(all?.melee),
+    roadkill: count(all?.roadkill),
+    vehicleExplosion: count(all?.vehicleExplosion),
+    penetration: count(all?.penetration),
+    ricochet: count(all?.ricochet),
+    falling: count(totals?.falling),
+    suicide: stats.totals.suicides,
+  };
+
+  // Longest kills: one row per player, farthest first.
+  const seen = new Set<string>();
+  const longest = (Array.isArray(aggregate?.longest) ? aggregate.longest : [])
+    .map((row, order) => ({ row, order, meters: publicMeters(row?.distanceCentimeters) }))
+    .filter(({ row, meters }) => meters !== null && typeof row.steamId === "string")
+    .sort((a, b) => b.row.distanceCentimeters - a.row.distanceCentimeters || a.order - b.order);
+  for (const { row, meters } of longest) {
+    if (stats.longestKills.length >= 10 || seen.has(row.steamId)) continue;
+    seen.add(row.steamId);
+    stats.longestKills.push({
+      name: publicListName(row.steamId, row.name),
+      weapon: typeof row.cause === "string" && row.cause.trim() ? describeCause(row.cause).label : null,
+      meters: meters!,
+      map: publicMap(row.mapName),
+    });
+  }
+
+  // Tag leaders: the top five names per tag. Self-inflicted deaths are never listed by name.
+  const leaders = Array.isArray(aggregate?.leaders) ? aggregate.leaders : [];
+  for (const tag of LEADER_KEYS)
+    stats.tagLeaders[tag] = leaders
+      .map((row, order) => ({ row, order, hits: count(row?.count) }))
+      .filter(({ row, hits }) => row?.tag === tag && hits > 0 && typeof row.steamId === "string")
+      .sort((a, b) => b.hits - a.hits || a.order - b.order)
+      .slice(0, 5)
+      .map(({ row, hits }) => ({ name: publicListName(row.steamId, row.name), count: hits }));
+  return stats;
+}
+
 export function publicStats({ steamId, name, kills, deaths, headshotKills, kd }: CombatStats): PublicCombatStats {
   return { name: publicName(steamId, name), kills, deaths, headshotKills, kd };
 }
+
+type Cached<T> = Map<string, { until: number; value: Promise<T> }>;
+type StatsSnapshot = { aggregate: ServerStatsAggregate; tracking: TrackingRecord; since: Date; asOf: Date };
 
 @Injectable()
 export class TelemetryService {
@@ -48,6 +210,9 @@ export class TelemetryService {
     string,
     { until: number; value: Promise<{ aggregate: CombatAggregate; tracking: TrackingRecord; since: Date; asOf: Date }> }
   >();
+  // Time-based, not cleared by ingest(): each recompute scans the whole window, so traffic and feed
+  // batches cannot raise their rate above one per server and period per minute.
+  private readonly statsCache: Cached<StatsSnapshot> = new Map();
   constructor(
     private readonly store: TelemetryStore,
     private readonly env: EnvService,
@@ -167,7 +332,47 @@ export class TelemetryService {
     }
   }
 
-  private metadata(serverId: string, period: TelemetryPeriod, tracking: TrackingRecord, since: Date, asOf: Date) {
+  /**
+   * Single-flight time-based cache: callers within the TTL share one load, a failed load is evicted,
+   * and the oldest entry makes room past STATS_CACHE_ENTRIES.
+   */
+  private async cached<T>(cache: Cached<T>, key: string, load: () => Promise<T>): Promise<T> {
+    const now = Date.now();
+    const existing = cache.get(key);
+    if (existing && existing.until > now) return existing.value;
+    cache.delete(key);
+    while (cache.size >= STATS_CACHE_ENTRIES) cache.delete(cache.keys().next().value!);
+    const entry = { until: now + STATS_TTL_MS, value: load() };
+    cache.set(key, entry);
+    try {
+      return await entry.value;
+    } catch (error) {
+      if (cache.get(key) === entry) cache.delete(key);
+      throw error;
+    }
+  }
+
+  private statsSnapshot(serverId: string, period: TelemetryPeriod) {
+    return this.cached(this.statsCache, `${serverId}:${period}`, async (): Promise<StatsSnapshot> => {
+      const asOf = new Date(Date.now()),
+        since = new Date(asOf.getTime() - periodMilliseconds[period]);
+      const [aggregate, tracking] = await Promise.all([
+        this.store.serverStats(since, asOf, serverId),
+        this.store.tracking(serverId),
+      ]);
+      return { aggregate, tracking, since, asOf };
+    });
+  }
+
+  /** `now` sets when feedStatus is judged: stats pass the time their cached numbers were read. */
+  private metadata(
+    serverId: string,
+    period: TelemetryPeriod,
+    tracking: TrackingRecord,
+    since: Date,
+    asOf: Date,
+    now = Date.now(),
+  ) {
     const enabled = this.configured(serverId);
     const last = tracking?.lastReceivedAt ?? null;
     return {
@@ -177,7 +382,7 @@ export class TelemetryService {
       feedStatus:
         last === null
           ? ("waiting" as const)
-          : Date.now() - last.getTime() <= 60_000
+          : now - last.getTime() <= 60_000
             ? ("receiving" as const)
             : ("quiet" as const),
       lastReceivedAt: last?.toISOString() ?? null,
@@ -217,6 +422,27 @@ export class TelemetryService {
   async leaderboard(input?: unknown, id?: string) {
     const result = await this.ranking(input, id);
     return { ...result, leaderboard: result.leaderboard.map(publicStats) };
+  }
+
+  /**
+   * Public server stats: totals, weapons, maps, long shots, hours and tag counts, with the leaderboard's
+   * metadata. Names only, never SteamIDs. Recomputed at most once a minute per server and period.
+   */
+  async stats(input?: unknown, id?: string) {
+    const serverId = this.servers.resolve(id);
+    const period = this.period(input);
+    if (!this.configured(serverId)) {
+      const now = new Date();
+      return {
+        ...this.metadata(serverId, period, null, new Date(now.getTime() - periodMilliseconds[period]), now),
+        ...emptyServerStats(),
+      };
+    }
+    const { aggregate, tracking, since, asOf } = await this.statsSnapshot(serverId, period);
+    return {
+      ...this.metadata(serverId, period, tracking, since, asOf, asOf.getTime()),
+      ...publicServerStats(aggregate),
+    };
   }
 
   /** Staff ranking with SteamIDs. Shares the snapshot cache with the public leaderboard. */
