@@ -1,10 +1,14 @@
 import { Module } from "@nestjs/common";
 import { IntentsBitField } from "discord.js";
 import { NecordModule } from "necord";
-import { EnvService } from "src/env/env.service";
+import { EnvService } from "../env/env.service";
+import { StartupModule } from "../startup/startup";
 
 @Module({
   imports: [
+    // Global and listed before NecordModule on purpose: its bootstrap hook opens the HTTP port before Necord's own
+    // hook signs in to Discord. See src/startup/startup.ts.
+    StartupModule,
     NecordModule.forRootAsync({
       inject: [EnvService],
       useFactory: (envService: EnvService) => ({
