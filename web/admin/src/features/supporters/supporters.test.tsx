@@ -1713,6 +1713,17 @@ it("notes a Discord account Patreon no longer shows, and keeps it linked, only w
   expect(fact(dialog, "Discord")).toHaveTextContent(new RegExp(`^${supporter.discordId}From Patreon$`));
 });
 
+it("labels a Discord account the patron linked with Link Patreon, with no note when Patreon shows none", async () => {
+  const own: Supporter = { ...supporter, discordSource: "patron_signin", patreonDiscordId: null, nextSteps: [] };
+  request.mockResolvedValue(data(own));
+  render(page());
+  await openButton();
+  expect(cell(rowOf(supporter.displayName!), "Discord")).toHaveTextContent(/^LinkedLinked by patron$/);
+  expect(cell(rowOf(supporter.displayName!), "Next")).toHaveTextContent(/^All set$/);
+  const dialog = await openRecord();
+  expect(fact(dialog, "Discord")).toHaveTextContent(new RegExp(`^${supporter.discordId}Linked by patron$`));
+});
+
 it("names the phone sort orders in plain words, with Needs you first as the default", async () => {
   vi.stubGlobal(
     "matchMedia",

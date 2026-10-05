@@ -49,13 +49,15 @@ export function founderOffered(record: Supporter) {
   return founderReady(record) && !record.nextSteps.some((step) => OTHER_RECORD_CODES.has(step.code));
 }
 
-/** Where the Discord account came from. */
+/** Where the Discord account came from. The patron links one themselves by signing in with Link Patreon. */
 export const discordSource = (record: Supporter) =>
   record.discordSource === "patreon"
     ? "From Patreon"
-    : record.discordSource === "staff"
-      ? "Added by staff"
-      : "Added earlier";
+    : record.discordSource === "patron_signin"
+      ? "Linked by patron"
+      : record.discordSource === "staff"
+        ? "Added by staff"
+        : "Added earlier";
 /** Where the SteamID came from. */
 export const steamSource = (record: Supporter) =>
   record.steamSource === "application"
@@ -167,11 +169,15 @@ export function rowState(record: Supporter): RowState {
 }
 export const stateRank: Record<RowState["state"], number> = { needs: 0, waiting: 1, set: 2 };
 
-/** Discord steps that mean the linked or reported account needs a person to check it. */
+/**
+ * Discord steps that mean the linked or reported account needs a person to check it, including a patron's own
+ * Link Patreon sign-in that Gramps refused because it would replace a link.
+ */
 const DISCORD_CHECK_CODES = new Set([
   "discord_on_another_record",
   "discord_differs",
   "discord_reported_for_other_patron",
+  "patron_link_conflict",
 ]);
 export type DiscordCell = { text: string; warn: boolean; detail?: string; rank: number };
 /**
