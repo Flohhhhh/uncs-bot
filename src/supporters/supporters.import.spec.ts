@@ -593,6 +593,7 @@ describe("Patreon API import persistence", () => {
     for (const [name, change, founder] of [
       ["a staff link", { discordSource: "staff" }, false],
       ["an older link", { discordSource: null }, false],
+      ["a patron's own link", { discordSource: "patron_signin" }, false],
       ["an account Patreon still reports there", { patreonDiscordId: staff.id }, false],
       ["a founder", {}, true],
     ] as const) {
@@ -649,6 +650,9 @@ describe("Patreon API import persistence", () => {
       Object.assign(state.member, { discordId: staff.id, discordSource: "patron_signin", patreonDiscordId: null });
       expect(await store.importApiMember(campaign, snapshot({ discordId: reported }), at)).toMatchObject({
         discordLinked: false,
+        discordConfirmed: false,
+        discordMoved: false,
+        releasedDiscordIds: [],
         conflict,
         discordId: staff.id,
         patreonDiscordChanged: patreonDiscordId !== null,

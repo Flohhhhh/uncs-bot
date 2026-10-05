@@ -3007,6 +3007,23 @@ describe("launch storage on isolated PostgreSQL", () => {
         discordId: patron,
         discordSource: "patron_signin",
       });
+      // Patreon reporting the same account leaves it the patron's own link, never one "staff linked".
+      await importPatron("self-linked", patron);
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        discordId: patron,
+        discordSource: "patron_signin",
+        patreonDiscordId: patron,
+      });
+      // Another account Patreon reports never replaces it: the record keeps the link and shows the conflict.
+      await importPatron("self-linked", otherAccount);
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        discordId: patron,
+        discordSource: "patron_signin",
+        patreonDiscordId: otherAccount,
+      });
+      const importKinds = (await actions(record.id)).map(({ kind }) => kind);
+      expect(importKinds).not.toContain("patreon-discord-confirmed");
+      expect(importKinds).not.toContain("patreon-discord-link");
     });
 
     it("creates the import's minimal record for a membership the import has not seen, pending until a payment", async () => {
