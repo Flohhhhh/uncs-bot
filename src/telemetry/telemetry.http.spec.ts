@@ -446,7 +446,7 @@ describe("telemetry HTTP boundaries", () => {
       .expect(503);
     expect(store.ingest).not.toHaveBeenCalled();
   });
-  const ids = ["76561198000000001", "76561198000000002", "76561198000000003"];
+  const ids = ["76561198000000001", "76561198000000002", "76561198000000003", "76561198000000004"];
   /** Storage rows that still carry SteamIDs, as the real store's do, including SteamID-like names. */
   function storeWithSteamIds() {
     store.snapshot.mockResolvedValue({
@@ -454,8 +454,10 @@ describe("telemetry HTTP boundaries", () => {
         { steamId: ids[0], name: "Player", kills: 4, deaths: 1, headshotKills: 2, kd: 4 },
         { steamId: ids[1], name: ids[1], kills: 2, deaths: 2, headshotKills: 0, kd: 1 },
         { steamId: ids[2], name: `Tag ${ids[2]}`, kills: 1, deaths: 3, headshotKills: 0, kd: 0.33 },
+        // Another player's SteamID inside a name: the own-ID check alone would let it through.
+        { steamId: ids[3], name: `Clan ${ids[1]}`, kills: 0, deaths: 1, headshotKills: 0, kd: 0 },
       ],
-      totals: { ...emptyTotals(), events: 7, kills: 7, deaths: 6, headshotKills: 2, players: 3 },
+      totals: { ...emptyTotals(), events: 7, kills: 7, deaths: 6, headshotKills: 2, players: 4 },
     });
     store.rowExtras.mockResolvedValue({
       weapons: [
@@ -584,6 +586,7 @@ describe("telemetry HTTP boundaries", () => {
       bestStreak: 3,
     });
     expect(board.body.leaderboard.slice(1).map((row: { name: string }) => row.name)).toEqual([
+      "Unnamed player",
       "Unnamed player",
       "Unnamed player",
     ]);

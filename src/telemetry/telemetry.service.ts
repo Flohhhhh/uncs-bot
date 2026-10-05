@@ -51,7 +51,11 @@ export function publicName(steamId: string | null | undefined, name: unknown): s
   return identifying ? UNNAMED_PLAYER : (name as string);
 }
 
-/** A name in a public stats list: publicName(), then the website's stricter rule that any 17-digit run is hidden. */
+/**
+ * A name in any public response (leaderboard rows and stats lists): publicName(), then the website's
+ * stricter rule that any 17-digit run, in any script's digits, is hidden. Gramps serves these on its own
+ * origin, so this holds without the website's proxy. The weekly Discord post applies the same rule itself.
+ */
 export function publicListName(steamId: string | null | undefined, name: unknown): string {
   const visible = publicName(steamId, name);
   if (STEAM_ID_LIKE.test(visible)) return UNNAMED_PLAYER;
@@ -234,7 +238,8 @@ export function publicStats(
   { steamId, name, kills, deaths, headshotKills, kd }: CombatStats,
   extras?: RowExtras,
 ): PublicCombatStats {
-  const row: PublicCombatStats = { name: publicName(steamId, name), kills, deaths, headshotKills, kd };
+  // A name can embed another player's SteamID ("UNC|7656119...|"), which the own-ID check in publicName() misses.
+  const row: PublicCombatStats = { name: publicListName(steamId, name), kills, deaths, headshotKills, kd };
   const weapon = extras?.topWeapon;
   if (typeof weapon === "string" && /^[A-Za-z0-9][A-Za-z0-9 '-]{0,39}$/.test(weapon) && weapon !== UNKNOWN_WEAPON)
     row.topWeapon = weapon;

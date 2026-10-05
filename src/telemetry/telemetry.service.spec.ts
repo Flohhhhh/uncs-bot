@@ -2,7 +2,7 @@ import { BadRequestException, Logger } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import type { EnvService } from "../env/env.service";
 import { TelemetryDeliveries } from "./telemetry.deliveries";
-import { TelemetryService, UNNAMED_PLAYER, publicName } from "./telemetry.service";
+import { TelemetryService, UNNAMED_PLAYER, publicListName, publicName } from "./telemetry.service";
 import type { TelemetryStore } from "./telemetry.store";
 import { emptyTotals, periodMilliseconds, type ServerStatsAggregate } from "./telemetry.types";
 import { fixtureServers } from "../admin/game-server-fixture";
@@ -282,7 +282,12 @@ describe("telemetry authorization and reporting", () => {
     const { service, store } = fixture();
     const unnamed = "76561198000000002",
       embedded = "76561198000000003",
-      numeric = "76561198000000004";
+      numeric = "76561198000000004",
+      clan = "76561198000000005",
+      script = "76561198000000006";
+    // Another player's SteamID inside a name, and this player's own SteamID in Arabic-Indic digits.
+    const clanName = "UNC|76561198000000009|";
+    const scriptName = `Tag ${script.replace(/\d/g, (digit) => String.fromCharCode(0x0660 + Number(digit)))}`;
     store.snapshot.mockResolvedValue({
       leaderboard: [
         { steamId, name: "Player", kills: 3, deaths: 1, headshotKills: 1, kd: 3 },
@@ -290,23 +295,30 @@ describe("telemetry authorization and reporting", () => {
         { steamId: unnamed, name: unnamed, kills: 2, deaths: 1, headshotKills: 0, kd: 2 },
         { steamId: embedded, name: `Tag ${embedded}`, kills: 1, deaths: 1, headshotKills: 0, kd: 1 },
         { steamId: numeric, name: "76561198999999999", kills: 0, deaths: 1, headshotKills: 0, kd: 0 },
+        { steamId: clan, name: clanName, kills: 0, deaths: 2, headshotKills: 0, kd: 0 },
+        { steamId: script, name: scriptName, kills: 0, deaths: 3, headshotKills: 0, kd: 0 },
       ],
-      totals: { ...emptyTotals(), players: 4 },
+      totals: { ...emptyTotals(), players: 6 },
     });
     const result = await service.leaderboard("week");
     const json = JSON.stringify(result);
-    for (const id of [steamId, unnamed, embedded, numeric, "76561198999999999"]) expect(json).not.toContain(id);
+    for (const id of [steamId, unnamed, embedded, numeric, clan, script, "76561198999999999", "76561198000000009"])
+      expect(json).not.toContain(id);
     expect(json).not.toMatch(/steamId|7656119\d{10}/i);
+    expect(json).not.toMatch(/\p{Nd}{17}/u);
     expect(result.leaderboard).toEqual([
       { name: "Player", kills: 3, deaths: 1, headshotKills: 1, kd: 3 },
       { name: UNNAMED_PLAYER, kills: 2, deaths: 1, headshotKills: 0, kd: 2 },
       { name: UNNAMED_PLAYER, kills: 1, deaths: 1, headshotKills: 0, kd: 1 },
       { name: UNNAMED_PLAYER, kills: 0, deaths: 1, headshotKills: 0, kd: 0 },
+      { name: UNNAMED_PLAYER, kills: 0, deaths: 2, headshotKills: 0, kd: 0 },
+      { name: UNNAMED_PLAYER, kills: 0, deaths: 3, headshotKills: 0, kd: 0 },
     ]);
     for (const row of result.leaderboard) expect(Object.keys(row).sort()).toEqual(publicKeys);
     const staff = await service.combat("week");
-    expect(staff.leaderboard.map((row) => row.steamId)).toEqual([steamId, unnamed, embedded, numeric]);
+    expect(staff.leaderboard.map((row) => row.steamId)).toEqual([steamId, unnamed, embedded, numeric, clan, script]);
     expect(staff.leaderboard[1].name).toBe(unnamed);
+    expect(staff.leaderboard[4].name).toBe(clanName);
     // Both views read the same 10-second snapshot.
     expect(store.snapshot).toHaveBeenCalledTimes(1);
     jest.advanceTimersByTime(10_001);
@@ -652,6 +664,9 @@ describe("telemetry authorization and reporting", () => {
     expect(publicName(steamId, 5)).toBe(UNNAMED_PLAYER);
     // The website's stricter rule (any 17-digit run) is applied by the Discord renderer, not here.
     expect(publicName(steamId, "x76561198000000009x")).toBe("x76561198000000009x");
+    // Every public API name (leaderboard rows and stats lists) applies it on top.
+    expect(publicListName(steamId, "x76561198000000009x")).toBe(UNNAMED_PLAYER);
+    expect(publicListName(steamId, " Player ")).toBe("Player");
   });
 });
 
