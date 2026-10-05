@@ -127,6 +127,18 @@ export interface PatreonSyncStatus {
   conflicts: number;
   truncated: number;
   revokedPayments: number;
+  /** Members with at least one completed payment. */
+  paidMembers: number;
+  /** Members Patreon reported a Discord account for, linked or not. */
+  discordReported: number;
+  /** Completed payments in another currency that count as US$5 or more by their tier's price. */
+  tierConfirmed: number;
+  /** How many of those the last sync counted for the first time. */
+  tierConfirmedNew: number;
+  /** Completed payments in another currency that are not confirmed as US$5 or more. */
+  tierUnconfirmed: number;
+  /** Whether the last sync read tier prices. */
+  tierPrices: "read" | "not_needed" | "unavailable" | "refused";
   memberListComplete: boolean;
   intervalMinutes: number;
   nextAttemptAt: string | null;
