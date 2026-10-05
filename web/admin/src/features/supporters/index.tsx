@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { api } from "../../api/client";
 import { useResource } from "../../api/use-resource";
 import { useAdmin } from "../../app/context";
@@ -9,8 +9,6 @@ import {
   discordCell,
   discordSource,
   founderReady,
-  founderReviewSentences,
-  founderReviewsFor,
   founderWindowLabel,
   newYork,
   paymentLine,
@@ -27,41 +25,23 @@ import {
 import { ManualMember } from "./manual-member";
 import { PatreonImport } from "./patreon-sync";
 import { AddPaypalSupporter } from "./paypal-form";
-import type {
-  PatreonSyncStatus,
-  Supporter,
-  SupporterDecision,
-  SupporterReviewResponse,
-  SupportersResponse,
-} from "./types";
+import type { Supporter, SupporterDecision, SupporterReviewResponse, SupportersResponse } from "./types";
 
-/**
- * Each staff action: its button label, which is also the form's title, the reason it starts with, and where it is
- * sent. Keep Discord is a Link that confirms the account the record has.
- */
+/** Each staff action: its button label, which is also the form's title, the reason it starts with, and where it is sent. */
 const decisions = {
   link: { label: "Change accounts", reason: "Accounts changed", endpoint: "link" },
   payment: { label: "Add payment", reason: "Payment added", endpoint: "payment" },
   founder: { label: "Make founder", reason: "Founder confirmed", endpoint: "founder" },
-  review: { label: "Mark payment checked", reason: "Checked in Patreon", endpoint: "review" },
-  keep: { label: "Keep Discord", reason: "Checked their Discord account", endpoint: "link" },
-} satisfies Record<SupporterDecision | "keep", { label: string; reason: string; endpoint: SupporterDecision }>;
+} satisfies Record<SupporterDecision, { label: string; reason: string; endpoint: SupporterDecision }>;
 type Decision = keyof typeof decisions;
-type FounderReview = PatreonSyncStatus["founderReviews"][number];
 
 const providerName = (record: Supporter) => (record.provider === "paypal" ? "PayPal" : "Patreon");
 const day = (value: string) =>
   new Date(value).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-/** Gramps makes this record a founder itself, now or after the refund wait, so staff need not. */
-const automaticFounder = (record: Supporter) =>
-  record.nextSteps.some((step) => step.code === "founder_ready_automatic" || step.code === "founder_automatic_waiting");
 const refundWait = (record: Supporter) => record.nextSteps.some((step) => step.code === "founder_automatic_waiting");
 
-/**
- * The record's steps by who acts on them. Each heading shows only with something under it. `check` holds the actions
- * that answer a Needs you line, a founder payment to check or a Discord account Patreon no longer shows, under it.
- */
-function Steps({ record, state, check }: { record: Supporter; state: RowState; check?: ReactNode }) {
+/** The record's steps by who acts on them. Each heading shows only with something under it. */
+function Steps({ record, state }: { record: Supporter; state: RowState }) {
   // The server's founder verdict, unless a step already gives it.
   const blocked = record.founderBlockedMessage;
   const verdictShown = record.nextSteps.some(
@@ -69,7 +49,8 @@ function Steps({ record, state, check }: { record: Supporter; state: RowState; c
   );
   const sections: [string, string[]][] = [
     ["Needs you", state.needs],
-    ["Waiting", [...state.waiting, ...state.later]],
+    ["Waiting", state.waiting],
+    ["Later", state.later],
     ["Not a founder", blocked && !verdictShown ? [...state.notes, blocked] : state.notes],
   ];
   return (
@@ -84,16 +65,39 @@ function Steps({ record, state, check }: { record: Supporter; state: RowState; c
                 <li key={`${index}:${line}`}>{line}</li>
               ))}
             </ul>
-            {heading === "Needs you" && check}
           </section>
         ))}
     </>
   );
 }
 
-/** Four facts about the record: Discord, SteamID, payment and founder. */
-function Facts({ record, founderAuto }: { record: Supporter; founderAuto: boolean }) {
+/**
+ * Four facts about the record: Discord, SteamID, payment and founder. What Patreon reports after the fact is a note
+ * here, never a task: a link Patreon no longer shows is kept, and a founder stays a founder.
+ */
+function Facts({
+  record,
+  founderAuto,
+  importConfigured,
+}: {
+  record: Supporter;
+  founderAuto: boolean;
+  /** The Patreon import runs, so what Patreon reports is current. */
+  importConfigured: boolean;
+}) {
   const payment = record.latestPayment;
+  const unreported =
+    importConfigured &&
+    record.provider === "patreon" &&
+    Boolean(record.discordId) &&
+    record.discordSource === "patreon" &&
+    !record.patreonDiscordId;
+  const founderNote =
+    record.founder?.paymentVerified === false
+      ? "Patreon no longer shows their founder payment as paid. They stay a founder."
+      : record.founder?.paymentFirst === false
+        ? "Patreon shows an earlier payment. They stay a founder."
+        : null;
   const charge =
     record.provider === "patreon" && record.lastChargeStatus && record.lastChargeStatus !== "Paid"
       ? record.lastChargeStatus
@@ -114,6 +118,7 @@ function Facts({ record, founderAuto }: { record: Supporter; founderAuto: boolea
             <>
               {record.discordId}
               <small>{discordSource(record)}</small>
+              {unreported && <small>Patreon no longer shows it.</small>}
             </>
           ) : (
             <>
@@ -151,6 +156,7 @@ function Facts({ record, founderAuto }: { record: Supporter; founderAuto: boolea
             <>
               Since {day(record.founder.awardedAt)}
               <small>{record.founder.automatic ? "Added by Gramps" : "Added by staff"}</small>
+              {founderNote && <small>{founderNote}</small>}
             </>
           ) : (
             "No"
@@ -276,14 +282,15 @@ function PaymentFields() {
  */
 function SupporterDialog({
   record: initialRecord,
-  sync,
+  importConfigured,
   founderAuto,
   unavailable,
   onClose,
   onReviewed,
 }: {
   record: Supporter;
-  sync: PatreonSyncStatus | undefined;
+  /** The Patreon import runs, so it brings in each Patreon payment itself. */
+  importConfigured: boolean;
   /** Automatic founders are switched on. */
   founderAuto: boolean;
   unavailable: boolean;
@@ -292,8 +299,7 @@ function SupporterDialog({
 }) {
   const { busy, setBusy } = useAdmin();
   const [record, setRecord] = useState(initialRecord);
-  // `check` is the founder payment a Mark payment checked form names, kept as it was when the form opened.
-  const [review, setReview] = useState<{ decision: Decision; id: string; check?: FounderReview } | null>(null);
+  const [review, setReview] = useState<{ decision: Decision; id: string } | null>(null);
   const [result, setResult] = useState<{ saved: boolean; message: string } | null>(null);
   const [validation, setValidation] = useState("");
   const [sending, setSending] = useState(false);
@@ -317,15 +323,10 @@ function SupporterDialog({
     if (result) outcome.current?.focus();
   }, [result]);
   const ready = founderReady(record);
-  const founderReview = founderReviewsFor(record, sync)[0];
-  // Patreon no longer shows the Discord account it gave. Staff keep it, or change it with Change accounts.
-  const keepDiscord =
-    Boolean(record.discordId) && record.nextSteps.some((step) => step.code === "discord_not_reported");
 
   function choose(decision: Decision) {
     if (busy || unavailable || submitted.current || (decision === "founder" && !ready)) return;
-    if ((decision === "review" && !founderReview) || (decision === "keep" && !keepDiscord)) return;
-    setReview({ decision, id: crypto.randomUUID(), check: decision === "review" ? founderReview : undefined });
+    setReview({ decision, id: crypto.randomUUID() });
     setValidation("");
   }
 
@@ -384,8 +385,6 @@ function SupporterDialog({
   const memberId = record.provider === "patreon" ? record.patreonMemberId : null;
   const selected = review ? decisions[review.decision] : null;
   const eligiblePayment = record.founderEligiblePayment;
-  // Marking a payment checked or keeping the Discord account changes no role, so nothing is said about roles.
-  const changesRoles = review?.decision !== "review" && review?.decision !== "keep";
   return (
     <Modal
       className="supporter-dialog"
@@ -396,9 +395,7 @@ function SupporterDialog({
       description={
         result
           ? result.saved
-            ? changesRoles
-              ? "Gramps updates their Discord roles next."
-              : undefined
+            ? "Gramps updates their Discord roles next."
             : "Close and reload before trying again."
           : undefined
       }
@@ -409,42 +406,14 @@ function SupporterDialog({
         )}
         {!review && (
           <>
-            <Steps
-              record={record}
-              state={rowState(record, sync)}
-              check={
-                (founderReview || keepDiscord) && (
-                  <div className="action-list">
-                    {founderReview && (
-                      <button
-                        type="button"
-                        className="button secondary small"
-                        disabled={busy || unavailable}
-                        onClick={() => choose("review")}
-                      >
-                        Mark payment checked
-                      </button>
-                    )}
-                    {keepDiscord && (
-                      <button
-                        type="button"
-                        className="button secondary small"
-                        disabled={busy || unavailable}
-                        onClick={() => choose("keep")}
-                      >
-                        Keep Discord
-                      </button>
-                    )}
-                  </div>
-                )
-              }
-            />
-            <Facts record={record} founderAuto={founderAuto} />
+            <Steps record={record} state={rowState(record)} />
+            <Facts record={record} founderAuto={founderAuto} importConfigured={importConfigured} />
             <div className="action-list supporter-actions">
               {ready && (
+                // Staff make a PayPal founder. Gramps makes a Patreon one, so for Patreon this is only an override.
                 <button
                   type="button"
-                  className={`button ${automaticFounder(record) ? "secondary" : "primary"}`}
+                  className={`button ${record.provider === "paypal" ? "primary" : "secondary"}`}
                   disabled={busy || unavailable}
                   onClick={() => choose("founder")}
                 >
@@ -459,7 +428,7 @@ function SupporterDialog({
               >
                 Change accounts
               </button>
-              {paymentOffered(record) && (
+              {paymentOffered(record, importConfigured) && (
                 <button
                   type="button"
                   className="button secondary"
@@ -485,41 +454,16 @@ function SupporterDialog({
                   </p>
                 </section>
                 <p className="notice warning">
-                  This is permanent.{refundWait(record) && " This skips the refund wait."}
+                  {refundWait(record) ? "This is permanent and skips the refund wait." : "This is permanent."}
                 </p>
               </>
-            )}
-            {review.decision === "keep" && (
-              <section className="supporter-steps">
-                <h3>Discord</h3>
-                <p className="supporter-founder-payment">
-                  {record.discordId}
-                  <small>Patreon no longer shows this account for them.</small>
-                </p>
-              </section>
-            )}
-            {review.check && (
-              <section className="supporter-steps">
-                <h3>Payment</h3>
-                <p className="supporter-founder-payment">
-                  {founderReviewSentences[review.check.reviewReason] ?? "Check their founder payment in Patreon."}
-                  <small>Reference {review.check.unverifiedReference}</small>
-                </p>
-              </section>
             )}
             <fieldset ref={fields} disabled={sending} className="review-fields">
               {review.decision === "link" && <LinkFields key={`link:${review.id}`} record={record} />}
               {review.decision === "payment" && <PaymentFields />}
               <ReasonField key={`reason:${review.id}`} defaultValue={selected.reason} />
-              {review.check && <input type="hidden" name="paymentId" value={review.check.unverifiedPaymentId} />}
             </fieldset>
-            <p className="muted">
-              {changesRoles
-                ? "Gramps updates their Discord roles after you save."
-                : review.decision === "keep"
-                  ? "It stays linked as added by staff."
-                  : "They stay a founder."}
-            </p>
+            <p className="muted">Gramps updates their Discord roles after you save.</p>
           </>
         )}
         {validation && (
@@ -532,7 +476,7 @@ function SupporterDialog({
             <p ref={outcome} tabIndex={-1} className={`notice ${result.saved ? "success" : "warning"}`} role="status">
               {result.message}
             </p>
-            {result.saved && <Facts record={record} founderAuto={founderAuto} />}
+            {result.saved && <Facts record={record} founderAuto={founderAuto} importConfigured={importConfigured} />}
           </>
         )}
         <div className="dialog-footer">
@@ -642,7 +586,7 @@ function AdminSupporters() {
   const sync = data.sync;
   // Needs you first, then Waiting, then All set. The sort is stable, so the server's order holds within each.
   const rows: Row[] = records
-    .map((record) => ({ record, state: rowState(record, sync), discord: discordCell(record, sync) }))
+    .map((record) => ({ record, state: rowState(record), discord: discordCell(record) }))
     .sort((a, b) => stateRank[a.state.state] - stateRank[b.state.state]);
   const shown = rows.filter((supporterFilters.find((entry) => entry.id === filter) ?? supporterFilters[0]).matches);
   const policy = data.founderPolicy;
@@ -653,8 +597,17 @@ function AdminSupporters() {
     value ? new Date(value).toLocaleString(undefined, { timeZone: newYork, timeZoneName: "short" }) : "Not set";
   // Patreon must be configured for Patreon records; PayPal records stay reviewable without it.
   const patreonReady = data.enabled && data.configured;
+  // While the import runs it brings in every Patreon member and payment, so staff add neither by hand.
+  const importConfigured = Boolean(sync?.configured);
   const pageUnavailable = Boolean(resource.error) || resource.loading || resource.refreshing;
   const reviewUnavailable = (record: Supporter) => (record.provider === "patreon" && !patreonReady) || pageUnavailable;
+  const holdHours = automation?.holdHours ?? policy.automaticHoldHours ?? 72;
+  // With automatic founders off, every Patreon supporter Gramps would make a founder waits for the switch. Counted on
+  // the full list only, since a search shows part of it.
+  const readyOff = records.filter((record) =>
+    record.nextSteps.some((step) => step.code === "founder_ready_automatic_off"),
+  ).length;
+  const switchNotice = !founderAuto && policy.configured && patreonReady && !search;
   const details = (
     <>
       <dl className="sync-counts">
@@ -686,14 +639,16 @@ function AdminSupporters() {
           </dd>
         </div>
       </dl>
-      <button
-        type="button"
-        className="button secondary small"
-        disabled={busy || pageUnavailable || !patreonReady}
-        onClick={() => setAdding(true)}
-      >
-        Add Patreon member
-      </button>
+      {!importConfigured && (
+        <button
+          type="button"
+          className="button secondary small"
+          disabled={busy || pageUnavailable || !patreonReady}
+          onClick={() => setAdding(true)}
+        >
+          Add Patreon member
+        </button>
+      )}
     </>
   );
   return (
@@ -710,6 +665,18 @@ function AdminSupporters() {
         </p>
       )}
       {!policy.configured && <p className="notice warning">Founder dates are not set.</p>}
+      {switchNotice && (
+        <p className={`notice ${readyOff ? "warning" : "info"}`}>
+          <strong>Automatic founders are off.</strong>{" "}
+          {readyOff === 0
+            ? "No Patreon supporter is ready yet."
+            : readyOff === 1
+              ? "1 Patreon supporter is ready to be a founder."
+              : `${readyOff} Patreon supporters are ready to be founders.`}{" "}
+          Turn on SUPPORTER_AUTO_FOUNDER_ENABLED in Railway and Gramps records them once each payment is {holdHours}{" "}
+          hours old.
+        </p>
+      )}
       {sync && (
         <PatreonImport
           sync={sync}
@@ -814,7 +781,7 @@ function AdminSupporters() {
       {selected && (
         <SupporterDialog
           record={selected}
-          sync={sync}
+          importConfigured={importConfigured}
           founderAuto={founderAuto}
           unavailable={reviewUnavailable(selected)}
           onClose={() => setSelected(null)}

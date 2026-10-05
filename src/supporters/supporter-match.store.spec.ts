@@ -11,6 +11,7 @@ import {
   FIXTURE_STEAM_ID as steamId,
   paymentFixture,
 } from "./supporter-fixtures";
+import { firstPaidEventId, type PatreonPledgeEvent } from "./patreon.client";
 import type { MatchFacts } from "./supporter-match.rules";
 import { SupporterMatchStore, type AutoMatchOptions } from "./supporter-match.store";
 import type { FounderPolicy } from "./supporters.types";
@@ -568,7 +569,7 @@ describe("automatic founder promise", () => {
   });
   it.each([
     ["a staff-entered Discord account", { discordSource: "staff" }, {}, "discord_not_from_patreon"],
-    ["a Discord account Patreon no longer reports", { patreonDiscordId: null }, {}, "discord_differs"],
+    ["another Discord account Patreon reports", { patreonDiscordId: "234567890123456789" }, {}, "discord_differs"],
     ["no imported first payment", {}, { automatic: null }, "no_patreon_payment"],
     [
       "a reversed charge",
@@ -582,19 +583,6 @@ describe("automatic founder promise", () => {
       {},
       "charge_reversed",
     ],
-    [
-      "a staff SteamID that differs from the approved application",
-      {},
-      { applications: [applicationFixture({ steamId: "76561198000000002" })] },
-      "steam_differs_from_application",
-    ],
-    ["a staff SteamID another Discord account applied with", {}, { linkedSteamShared: true }, "steam_shared"],
-    [
-      "a revoked source application",
-      { steamSource: "application", steamApplicationId: applicationFixture().id },
-      { applications: [applicationFixture({ status: "revoked", accessIntent: "revoke" })] },
-      "source_application_revoked",
-    ],
   ])("refuses %s without taking founder locks", async (_name, memberChange, facts, reason) => {
     const f = ready();
     Object.assign(f.member, memberChange);
@@ -602,6 +590,58 @@ describe("automatic founder promise", () => {
     expect(await f.run({ recordFounder: true, fillSteam: false })).toMatchObject({ blocked: [reason] });
     expect(f.texts().some((text) => text.includes("pg_advisory_xact_lock"))).toBe(false);
     expect(writes(f.texts())).toEqual([]);
+  });
+  it.each([
+    ["a Patreon link Patreon no longer reports any account for", { patreonDiscordId: null }, {}],
+    [
+      "a staff SteamID that differs from the approved application",
+      {},
+      { applications: [applicationFixture({ steamId: "76561198000000002" })] },
+    ],
+    ["a staff SteamID another Discord account applied with", {}, { linkedSteamShared: true }],
+    [
+      "a revoked source application",
+      { steamSource: "application", steamApplicationId: applicationFixture().id },
+      { applications: [applicationFixture({ status: "revoked", accessIntent: "revoke" })] },
+    ],
+  ])("records the founder despite %s, which a founder does not need", async (_name, memberChange, facts) => {
+    const f = ready();
+    Object.assign(f.member, memberChange);
+    Object.assign(f.state.facts, facts);
+    expect(await f.run({ recordFounder: true, fillSteam: false })).toMatchObject({
+      founderRecorded: true,
+      blocked: [],
+    });
+    expect(f.calls('insert into "supporter_founders"')).toHaveLength(1);
+  });
+  it("records the founder on a first payment the import derived from a history with no pledge start", async () => {
+    // Patreon returned the whole history, which starts with a renewal: the import marks that renewal as the first.
+    const events: PatreonPledgeEvent[] = [
+      {
+        id: "subscription:41",
+        date: new Date("2026-10-01T12:00:00.000Z"),
+        amountCents: 500,
+        currency: "USD",
+        paymentStatus: "Paid",
+        type: "subscription",
+      },
+    ];
+    const first = firstPaidEventId(events, true);
+    expect(first).toBe("subscription:41");
+    const f = fixture();
+    f.state.facts.automatic = {
+      payment: paymentFixture({ reference: first!, firstSuccessfulPaymentVerified: true }),
+      earlier: false,
+      earlierOtherRecord: false,
+    };
+    expect(await f.run({ recordFounder: true, fillSteam: false })).toMatchObject({
+      founderRecorded: true,
+      blocked: [],
+    });
+    expect(audit(f.calls('insert into "supporter_actions"'))[0]).toMatchObject({
+      reference: "subscription:41",
+      automatic: 1,
+    });
   });
   it("waits for the payment to pass the hold", async () => {
     const f = ready();

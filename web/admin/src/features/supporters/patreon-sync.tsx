@@ -1,13 +1,9 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api } from "../../api/client";
 import { useAdmin } from "../../app/context";
-import { CopyValue } from "../../components/data-table";
 import { errorMessage } from "../actions/policy";
-import { conflictSentences } from "./policy";
 import type { PatreonSyncResponse, PatreonSyncStatus } from "./types";
 
-const plural = (count: number, one: string, many = `${one}s`) =>
-  `${count.toLocaleString()} ${count === 1 ? one : many}`;
 const valid = (value: string | null): value is string => value !== null && Number.isFinite(Date.parse(value));
 
 /** A rounded length of time: "under a minute", "5 min", "2 h 5 min" or "3 days". */
@@ -44,7 +40,7 @@ function Moment({ at, children }: { at: string; children: ReactNode }) {
   );
 }
 
-/** Counts and lists from the last successful import. */
+/** Counts from the last successful import. Each record says what is left for it in its own steps. */
 function LastImport({ sync }: { sync: PatreonSyncStatus }) {
   const counts: [string, number][] = [
     ["Members listed", sync.members],
@@ -56,7 +52,6 @@ function LastImport({ sync }: { sync: PatreonSyncStatus }) {
     ["Discord accounts linked", sync.discordLinks],
     ["Discord conflicts", sync.conflicts],
     ["Incomplete payment histories", sync.truncated],
-    ["Founder payments to check", sync.founderReviews.length],
   ];
   // Payments in another currency count by their tier's price. Shown only when the campaign has any.
   if (sync.tierConfirmed + sync.tierUnconfirmed > 0)
@@ -74,36 +69,6 @@ function LastImport({ sync }: { sync: PatreonSyncStatus }) {
           </div>
         ))}
       </dl>
-      {sync.conflictDetails.length > 0 && (
-        <>
-          <h3>Discord conflicts</h3>
-          <ul aria-label="Discord conflicts">
-            {sync.conflictDetails.map((conflict) => (
-              <li key={`${conflict.supporterId}:${conflict.reason}`}>
-                <CopyValue value={conflict.patreonMemberId} label="Patreon member ID" />
-                <small>{conflictSentences[conflict.reason] ?? "Check their Discord account."}</small>
-              </li>
-            ))}
-          </ul>
-        </>
-      )}
-      {sync.founderReviews.length > 0 && (
-        <>
-          <h3>Founder payments to check</h3>
-          <ul aria-label="Founder payments to check">
-            {sync.founderReviews.map((review) => (
-              <li key={`${review.supporterId}:${review.unverifiedPaymentId}`}>
-                <CopyValue value={review.patreonMemberId} label="Patreon member ID" />
-                <small>
-                  {review.reviewReason === "not_first_payment"
-                    ? `Payment ${review.unverifiedReference} is no longer their first payment`
-                    : `Patreon no longer shows payment ${review.unverifiedReference} as paid`}
-                </small>
-              </li>
-            ))}
-          </ul>
-        </>
-      )}
       <p className="muted">
         {sync.memberListComplete
           ? "Counts are from the last successful import."
@@ -114,8 +79,9 @@ function LastImport({ sync }: { sync: PatreonSyncStatus }) {
 }
 
 /**
- * "Patreon: synced 5 min ago · next in 25 min · Automatic: on", what staff must check, an administrator's
- * "Sync now", and a closed Details panel. The notices above it name a fault. The status never includes the token.
+ * "Patreon: synced 5 min ago · next in 25 min · Automatic: on", an administrator's "Sync now", and a closed Details
+ * panel. The notices above it name a fault. What a record needs is on the record, never on this line. The status
+ * never includes the token.
  */
 export function PatreonImport({
   sync,
@@ -217,18 +183,10 @@ export function PatreonImport({
   // An attempt after the last success that is no longer running did not succeed.
   const failedAt =
     show && !running && attempt && (!success || Date.parse(attempt) > Date.parse(success)) ? attempt : null;
-  // From the last successful import: founders whose payment Patreon no longer reports as paid or that is no longer
-  // marked as the first payment, and Discord conflicts.
-  const founderRechecks = show && success ? sync.founderReviews.length : 0;
-  const conflicts = show && success ? sync.conflicts : 0;
   // Patreon shares a patron's Discord account only once the creator sets up its Discord benefit.
   const discordNotShared = Boolean(show && success) && sync.paidMembers > 0 && sync.discordReported === 0;
   const tone =
-    unavailable || sync.tokenRejected || sync.lastError || founderRechecks > 0 || conflicts > 0
-      ? "attention"
-      : sync.configured && success
-        ? "good"
-        : "quiet";
+    unavailable || sync.tokenRejected || sync.lastError ? "attention" : sync.configured && success ? "good" : "quiet";
   // The schedule's own cadence. A rejected token or Patreon's rate limit can push the next run later, and a failed
   // run's end is not recorded, so allow two minutes past its start.
   const intervalMs = sync.intervalMinutes * 60_000;
@@ -293,8 +251,6 @@ export function PatreonImport({
             </span>
           )}
           {status}
-          {founderRechecks > 0 && <span>{plural(founderRechecks, "founder payment")} to check</span>}
-          {conflicts > 0 && <span>{plural(conflicts, "Discord conflict")}</span>}
         </p>
         {canSync && (
           <button

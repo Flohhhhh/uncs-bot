@@ -714,7 +714,6 @@ describe("the Supporters page", () => {
       intervalMinutes: 30,
       nextAttemptAt: null,
       conflictDetails: [],
-      founderReviews: [],
     },
   };
   const page = () =>

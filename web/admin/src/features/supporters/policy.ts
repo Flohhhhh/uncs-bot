@@ -1,12 +1,4 @@
-import type {
-  FounderPolicy,
-  NextStep,
-  PatreonSyncStatus,
-  PaymentEvidence,
-  Supporter,
-  SupporterDecision,
-  SupporterReviewInput,
-} from "./types";
+import type { FounderPolicy, PaymentEvidence, Supporter, SupporterDecision, SupporterReviewInput } from "./types";
 import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 
 /** The record's name, or which kind of supporter it is when it has none. */
@@ -75,33 +67,22 @@ export function providerLine(record: Supporter): { text: string; warn: boolean }
   return { text: status ? (statuses[status] ?? `Patreon · ${status}`) : "Patreon · not paying", warn: false };
 }
 
-type SyncLists = Pick<PatreonSyncStatus, "founderReviews" | "conflictDetails">;
-/** What the last import found about a founder's payment, as one sentence. */
-export const founderReviewSentences: Record<string, string> = {
-  unverified: "Patreon no longer shows their founder payment as paid.",
-  not_first_payment: "Their founder payment is no longer their first payment.",
-};
-/** What the last import found about a Discord account, as one sentence. */
-export const conflictSentences: Record<string, string> = {
-  "discord-in-use": "Their Discord account is already on another supporter.",
-  "discord-differs": "Patreon shows a different Discord account.",
-};
-const conflictFor = (record: Supporter, sync: SyncLists | null | undefined) =>
-  sync?.conflictDetails.find((conflict) => conflict.supporterId === record.id);
-/** The record's founder payments to check from the last import, less any staff marked checked since. */
-export const founderReviewsFor = (record: Supporter, sync: SyncLists | null | undefined) =>
-  (sync?.founderReviews ?? []).filter((review) => review.supporterId === record.id);
-
 /**
- * Gramps, or the supporter, does these next. Nothing for staff to do. A below-minimum step that is not a note is a
- * Patreon payment in another currency, which every sync checks against its tier's price again.
+ * Gramps, Patreon or the supporter does these next. Nothing for staff to do. A below-minimum step that is not a note
+ * is a Patreon payment in another currency, which every sync checks against its tier's price again.
  */
 const WAITING_CODES = new Set([
   "connect_discord_in_patreon",
+  "link_discord_no_import",
   "steam_ready_automatic",
   "founder_ready_automatic",
   "founder_automatic_waiting",
+  "founder_ready_automatic_off",
   "founder_below_minimum",
+  "founder_not_first_payment",
+  "founder_source_not_qualifying",
+  "founder_waiting_patreon",
+  "founder_waiting_discord",
 ]);
 /** A missing whitelist application matters only once the whitelist promise is used, so it is shown in the record only. */
 const LATER_CODES = new Set([
@@ -110,81 +91,96 @@ const LATER_CODES = new Set([
   "application_in_progress",
   "no_approved_application",
 ]);
+/**
+ * A Patreon founder needs no SteamID, so on a Patreon record these SteamID steps matter only for the whitelist promise
+ * later. On a PayPal record staff match the SteamID themselves, so they stay tasks there.
+ */
+const PATREON_LATER_CODES = new Set([
+  "application_not_confirmed",
+  "several_steam_ids",
+  "invalid_steam_id",
+  "steam_shared",
+  "steam_rejected_before",
+  "steam_available",
+  "source_application_revoked",
+  "steam_differs_from_application",
+  "linked_steam_shared",
+]);
 
 export type RowState = {
-  /** `needs` while staff have something to do, `waiting` while Gramps or the supporter does, otherwise `set`. */
+  /** `needs` while staff have something to do, `waiting` while Gramps, Patreon or the supporter does, else `set`. */
   state: "needs" | "waiting" | "set";
-  /** Founder payments to check, a Discord conflict, then the server's steps for staff. */
+  /** The server's steps only staff can take. */
   needs: string[];
   waiting: string[];
-  /** Whitelist application steps, shown in the record only. */
+  /** Steps that matter only for the whitelist promise later, shown in the record only. */
   later: string[];
   /** Why this record cannot be a founder. */
   notes: string[];
 };
 
 /**
- * Sorts a record's next steps by who acts on them. Payment steps and notes say why the record is not a founder and
- * grant nothing, so they are notes. A step this page does not know lands in `needs`, so nothing new is hidden.
+ * Sorts a record's next steps by who acts on them; the first match wins. Payment steps and notes say why the record
+ * is not a founder and grant nothing, so they are notes. A step this page does not know lands in `needs`, so nothing
+ * new is hidden. Each line shows once, though two steps can wait for the same thing.
  */
-export function rowState(record: Supporter, sync?: SyncLists | null): RowState {
-  const waiting: string[] = [];
-  const later: string[] = [];
-  const notes: string[] = [];
-  const tasks: NextStep[] = [];
+export function rowState(record: Supporter): RowState {
+  const needs = new Set<string>();
+  const waiting = new Set<string>();
+  const later = new Set<string>();
+  const notes = new Set<string>();
   const noAccount = !record.discordId && !record.steamId;
+  const patreon = record.provider === "patreon";
   for (const step of record.nextSteps) {
     if (step.area === "payment" || step.area === "info" || step.code === "founder_window_not_configured")
-      notes.push(step.message);
-    else if (WAITING_CODES.has(step.code) || (step.code === "founder_no_identity" && noAccount))
-      waiting.push(step.message);
-    else if (LATER_CODES.has(step.code)) later.push(step.message);
-    else tasks.push(step);
+      notes.add(step.message);
+    else if (
+      WAITING_CODES.has(step.code) ||
+      (step.code === "founder_no_identity" && noAccount) ||
+      (step.code === "founder_needs_discord" && patreon)
+    )
+      waiting.add(step.message);
+    else if (LATER_CODES.has(step.code) || (patreon && PATREON_LATER_CODES.has(step.code))) later.add(step.message);
+    else needs.add(step.message);
   }
-  const reviews = founderReviewsFor(record, sync).map(
-    (review) => founderReviewSentences[review.reviewReason] ?? "Check their founder payment in Patreon.",
-  );
-  const needs = [...new Set(reviews)];
-  const conflict = conflictFor(record, sync);
-  // A Discord step already says what is wrong with the account.
-  if (conflict && !tasks.some((step) => step.area === "discord"))
-    needs.push(conflictSentences[conflict.reason] ?? "Check their Discord account.");
-  needs.push(...tasks.map((step) => step.message));
-  return { state: needs.length ? "needs" : waiting.length ? "waiting" : "set", needs, waiting, later, notes };
+  return {
+    state: needs.size ? "needs" : waiting.size ? "waiting" : "set",
+    needs: [...needs],
+    waiting: [...waiting],
+    later: [...later],
+    notes: [...notes],
+  };
 }
 export const stateRank: Record<RowState["state"], number> = { needs: 0, waiting: 1, set: 2 };
 
 /** Discord steps that mean the linked or reported account needs a person to check it. */
 const DISCORD_CHECK_CODES = new Set([
   "discord_on_another_record",
-  "discord_not_reported",
   "discord_differs",
   "discord_reported_for_other_patron",
 ]);
 export type DiscordCell = { text: string; warn: boolean; detail?: string; rank: number };
-/** The table's Discord column. The first match wins, and `rank` sorts problems first. */
-export function discordCell(record: Supporter, sync?: SyncLists | null): DiscordCell {
-  if (record.nextSteps.some((step) => DISCORD_CHECK_CODES.has(step.code)) || conflictFor(record, sync))
+/**
+ * The table's Discord column. The first match wins, and `rank` sorts problems first. Only a PayPal record misses an
+ * account staff must add: a Patreon one arrives from Patreon.
+ */
+export function discordCell(record: Supporter): DiscordCell {
+  if (record.nextSteps.some((step) => DISCORD_CHECK_CODES.has(step.code)))
     return { text: "Check", warn: true, rank: 0 };
   if (record.discordId) return { text: "Linked", warn: false, detail: discordSource(record), rank: 4 };
-  if (
-    record.provider === "paypal" ||
-    record.needsDiscordLink ||
-    record.nextSteps.some((step) => step.code === "link_discord_no_import")
-  )
-    return { text: "Missing", warn: true, rank: 1 };
+  if (record.provider === "paypal") return { text: "Missing", warn: true, rank: 1 };
   if (record.patreonDiscordId) return { text: "Linking soon", warn: false, rank: 3 };
   return { text: "Not connected", warn: false, rank: 2 };
 }
 
 /**
- * Whether the record offers Add payment: a Patreon record with a payment step, a first payment to check, or no paid
- * payment on record. The Supporter role needs one, whether or not the founder dates are set.
+ * Whether the record offers Add payment: a Patreon record while the Patreon import is not set up, with a payment step
+ * or no paid payment on record. While the import runs it brings in every payment itself. A PayPal record records its
+ * payments in the PayPal form.
  */
-export function paymentOffered(record: Supporter) {
-  if (record.provider !== "patreon") return false;
-  if (record.nextSteps.some((step) => step.area === "payment" || step.code === "founder_not_first_payment"))
-    return true;
+export function paymentOffered(record: Supporter, importConfigured: boolean) {
+  if (record.provider !== "patreon" || importConfigured) return false;
+  if (record.nextSteps.some((step) => step.area === "payment")) return true;
   const payment = record.latestPayment;
   return (
     !payment ||
@@ -205,13 +201,10 @@ export function applicationSteamId(record: Supporter) {
   return !record.steamId && steam?.steamId && OFFERED_REASONS.has(steam.reason) ? steam.steamId : null;
 }
 
-/**
- * The request body for a staff action. `keep` is a Link that confirms the Discord account the record already has, so
- * it becomes a staff link.
- */
+/** The request body for a staff action. */
 export function reviewInput(
   record: Supporter,
-  decision: SupporterDecision | "keep",
+  decision: SupporterDecision,
   id: string,
   values: FormData,
 ): SupporterReviewInput {
@@ -223,10 +216,6 @@ export function reviewInput(
   )
     throw new Error("Enter a single-line review reason between 3 and 200 characters.");
   const base = { id, version: record.version, confirm: record.confirmKey, reason };
-  if (decision === "keep") {
-    if (!record.discordId) throw new Error("This record has no Discord account to keep.");
-    return { ...base, discordId: record.discordId, discordConfirmed: true };
-  }
   if (decision === "link") {
     const discordId = String(values.get("discordId") ?? "").trim();
     const steamId = String(values.get("steamId") ?? "").trim();
@@ -287,14 +276,9 @@ export function reviewInput(
       firstSuccessfulPaymentVerified: values.get("firstSuccessfulPaymentVerified") === "on",
     };
   }
-  if (decision === "founder") {
-    if (!founderReady(record) || !record.founderEligiblePayment)
-      throw new Error(record.founderBlockedMessage ?? "This supporter cannot be made a founder yet.");
-    return { ...base, paymentId: record.founderEligiblePayment.id };
-  }
-  // Marking a founder payment checked names the payment the import listed.
-  const paymentId = String(values.get("paymentId") ?? "");
-  return paymentId ? { ...base, paymentId } : base;
+  if (!founderReady(record) || !record.founderEligiblePayment)
+    throw new Error(record.founderBlockedMessage ?? "This supporter cannot be made a founder yet.");
+  return { ...base, paymentId: record.founderEligiblePayment.id };
 }
 
 /** Founder dates are set and shown in New York time. */

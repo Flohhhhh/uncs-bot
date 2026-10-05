@@ -120,19 +120,15 @@ export const manualMemberSchema = z
   })
   .strict();
 export type ManualMemberInput = z.infer<typeof manualMemberSchema>;
-// `paymentId` marks a founder's payment as checked: the founder payment it names leaves the payments to check.
-export const reviewSchema = z.object({ ...base, paymentId: z.uuid().optional() }).strict();
+export const reviewSchema = z.object(base).strict();
 // Either identity may be linked alone. A field that is left out keeps its current value. `steamConfirmed` restates
 // the current SteamID as staff-checked, which a Discord change needs when the SteamID came from an application.
-// `discordConfirmed` with the current Discord ID restates that account as staff-checked, for one Patreon no longer
-// reports.
 export const linkSchema = z
   .object({
     ...base,
     discordId: discordUserId.optional(),
     steamId: playerSteamId.optional(),
     steamConfirmed: z.literal(true).optional(),
-    discordConfirmed: z.literal(true).optional(),
   })
   .strict()
   .refine((value) => value.discordId !== undefined || value.steamId !== undefined, "Enter a Discord ID or SteamID64.");
@@ -395,16 +391,27 @@ export type SupporterView = {
   /** Newest first, at most 20. */
   payments: PaymentView[];
   founderEligiblePayment: PaymentView | null;
-  /** `automatic` is true when automatic supporter matching recorded the promise. */
-  founder: { awardedAt: string; paymentId: string; source: SupporterPaymentSource | null; automatic: boolean } | null;
+  /**
+   * `automatic` is true when automatic supporter matching recorded the promise. `paymentVerified` is false once
+   * Patreon no longer reports the founder payment as paid (for a staff receipt, its imported copy), and
+   * `paymentFirst` is false once that payment is no longer marked as the first payment. The promise stands either way.
+   */
+  founder: {
+    awardedAt: string;
+    paymentId: string;
+    source: SupporterPaymentSource | null;
+    automatic: boolean;
+    paymentVerified: boolean;
+    paymentFirst: boolean;
+  } | null;
   /** Why no founder promise can be recorded yet; null for a founder or a member ready to award. */
   founderBlockedReason: FounderBlockedReason | "no_payment" | null;
   /**
-   * Only the first-payment mark stands between this record and a founder promise: its payment is in US dollars,
-   * inside the founder window and worth US$5 or more. A checked staff receipt marked as the first payment can make
-   * it a founder, so staff check it.
+   * Only the first-payment mark, which the Patreon import has not settled yet, stands between this Patreon record and
+   * a founder promise, apart from a missing Discord account or a tier price Patreon can still supply. Its payment is a
+   * verified imported payment. Gramps waits for the import rather than asking staff.
    */
-  founderFirstPaymentToCheck: boolean;
+  founderFirstPaymentWaiting: boolean;
   /** The staff-facing text for `founderBlockedReason`. */
   founderBlockedMessage: string | null;
   /** A founder without a linked Discord account cannot receive the Founder role. */

@@ -77,6 +77,10 @@ export interface Supporter {
     paymentId: string;
     source?: PaymentEvidence["source"] | null;
     automatic?: boolean;
+    /** False once Patreon no longer reports the founder payment as paid. They stay a founder. */
+    paymentVerified?: boolean;
+    /** False once Patreon shows an earlier payment than the founder payment. They stay a founder. */
+    paymentFirst?: boolean;
   } | null;
   /** The server's verdict: why no founder promise can be recorded yet, or null when it can. */
   founderBlockedReason: string | null;
@@ -124,6 +128,7 @@ export interface PatreonSyncStatus {
   updated: number;
   payments: number;
   discordLinks: number;
+  /** Discord accounts the last import could not settle. Each record says which, in its own Discord step. */
   conflicts: number;
   truncated: number;
   revokedPayments: number;
@@ -146,17 +151,6 @@ export interface PatreonSyncStatus {
     supporterId: string;
     patreonMemberId: string;
     reason: "discord-in-use" | "discord-differs";
-  }[];
-  founderReviews: {
-    supporterId: string;
-    patreonMemberId: string;
-    paymentId: string;
-    paymentSource: string;
-    reference: string;
-    unverifiedPaymentId: string;
-    unverifiedReference: string;
-    /** `unverified`: the payment is no longer verified. `not_first_payment`: the founder's own payment lost its first-payment flag. */
-    reviewReason: "unverified" | "not_first_payment";
   }[];
 }
 /** POST supporters/sync: joins a running sync, or reuses one that finished moments ago. */
@@ -183,7 +177,7 @@ export interface SupporterReviewResponse {
   /** Set when the save let Gramps copy the SteamID from an approved application straight away. */
   automatic?: { steamFilled: boolean; founderRecorded: boolean };
 }
-export type SupporterDecision = "link" | "payment" | "founder" | "review";
+export type SupporterDecision = "link" | "payment" | "founder";
 interface ReviewBase {
   id: string;
   version: number;
@@ -192,7 +186,7 @@ interface ReviewBase {
 }
 export type SupporterReviewInput = ReviewBase &
   (
-    | { discordId?: string; steamId?: string; steamConfirmed?: true; discordConfirmed?: true }
+    | { discordId?: string; steamId?: string; steamConfirmed?: true }
     | {
         paidAt: string;
         amountCents: number;
@@ -202,5 +196,4 @@ export type SupporterReviewInput = ReviewBase &
         firstSuccessfulPaymentVerified: boolean;
       }
     | { paymentId: string }
-    | Record<never, never>
   );

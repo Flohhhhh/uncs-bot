@@ -1263,20 +1263,18 @@ describe("launch storage on isolated PostgreSQL", () => {
     expect(record.founder).not.toBeNull();
     const refunded = { ...snapshot, events: [{ ...snapshot.events[0], paymentStatus: "Refunded" }] };
     expect(await supporters.importApiMember(campaign, refunded, new Date())).toMatchObject({ revoked: 1 });
+    // The promise stands. The record notes that Patreon no longer shows its payment as paid; nothing is for staff.
     expect(await supporters.get(record.id, campaign, policy)).toMatchObject({
-      founder: record.founder,
+      founder: { ...record.founder, paymentVerified: false, paymentFirst: false },
       founderEligiblePayment: null,
     });
-    expect(await supporters.founderReviews(campaign)).toEqual([
-      expect.objectContaining({ supporterId: record.id, paymentSource: "patreon_api", reference: "pledge_start:1001" }),
-    ]);
     const kinds = (
       await client.query<{ kind: string }>("SELECT kind FROM supporter_actions WHERE member_id = $1", [record.id])
     ).rows.map((row) => row.kind);
     expect(kinds.sort()).toEqual(["founder", "link", "patreon-discord-link", "patreon-payment-status"]);
   });
 
-  it("keeps a staff receipt eligible beside the earlier imported copy of its charge and reviews its founder after a refund", async () => {
+  it("keeps a staff receipt eligible beside the earlier imported copy of its charge and notes a refund of that copy", async () => {
     // The receipt's time was estimated from Patreon's date-only history; the real charge was earlier that morning.
     let record = await payment(
       await linked("receipt-member", "76561198000000003"),
@@ -1300,32 +1298,17 @@ describe("launch storage on isolated PostgreSQL", () => {
         policy,
       )
     ).supporter!;
-    expect(record.founder).toMatchObject({ paymentId: receipt.id });
-    expect(await supporters.founderReviews(campaign)).toEqual([]);
+    expect(record.founder).toMatchObject({ paymentId: receipt.id, paymentVerified: true, paymentFirst: true });
     const refunded = apiMember(
       "receipt-member",
       [{ ...snapshot.events[0], paymentStatus: "Refunded" }],
       snapshot.historyComplete,
     );
     expect(await supporters.importApiMember(campaign, refunded, new Date())).toMatchObject({ revoked: 1 });
-    const [copy] = (
-      await client.query<{ id: string }>("SELECT id FROM supporter_payments WHERE reference = 'pledge_start:2001'")
-    ).rows;
-    expect(await supporters.founderReviews(campaign)).toEqual([
-      {
-        supporterId: record.id,
-        patreonMemberId: "receipt-member",
-        paymentId: receipt.id,
-        paymentSource: "manual_receipt",
-        reference: "receipt-2001",
-        reviewReason: "unverified",
-        unverifiedPaymentId: copy.id,
-        unverifiedReference: "pledge_start:2001",
-      },
-    ]);
-    // The promise is never changed, but the refunded charge no longer qualifies the receipt.
+    // The promise is never changed, but the refunded charge no longer qualifies the receipt. The receipt is still
+    // its first payment; Patreon no longer shows the charge behind it as paid.
     expect(await supporters.get(record.id, campaign, policy)).toMatchObject({
-      founder: record.founder,
+      founder: { ...record.founder, paymentVerified: false, paymentFirst: true },
       founderEligiblePayment: null,
     });
   });
@@ -1987,7 +1970,7 @@ describe("launch storage on isolated PostgreSQL", () => {
       expect(
         await match.candidates(campaign, automaticPolicy, { fillSteam: true, recordFounder: true }, null, 10),
       ).toEqual([]);
-      // A refund still lists the automatic founder for staff review; the promise itself is untouched.
+      // After a refund the record notes it, and the promise itself is untouched.
       await supporters.importApiMember(
         campaign,
         {
@@ -2000,9 +1983,10 @@ describe("launch storage on isolated PostgreSQL", () => {
         },
         new Date(),
       );
-      expect(await supporters.founderReviews(campaign)).toEqual([
-        expect.objectContaining({ supporterId: record.id, paymentSource: "patreon_api", reviewReason: "unverified" }),
-      ]);
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        founder: { automatic: true, paymentId: view.founder!.paymentId, paymentVerified: false, paymentFirst: false },
+      });
+      expect((await roles.desired([patron])).founder).toEqual(new Map([[patron, record.id]]));
     });
 
     it("records an automatic founder with only a Discord account and copies the SteamID once it is approved", async () => {
@@ -2086,7 +2070,7 @@ describe("launch storage on isolated PostgreSQL", () => {
       record = (
         await supporters.mutate(
           record.id,
-          { ...review(record), kind: "link", steamId: "76561198000000022" },
+          { ...review(record), kind: "link", discordId: "567890123456789018", steamId: "76561198000000022" },
           staff,
           campaign,
           policy,
@@ -2094,26 +2078,156 @@ describe("launch storage on isolated PostgreSQL", () => {
       ).supporter!;
       expect(await match.autoMatch(record.id, options({ recordFounder: false }))).toMatchObject({ steamFilled: false });
       expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        discordId: "567890123456789018",
+        discordSource: "staff",
         steamId: "76561198000000022",
         steamSource: "staff",
       });
-      await supporters.importApiMember(
-        campaign,
-        {
-          ...apiMember("auto-patron", [charge("pledge_start:auto-patron", "2026-10-01T12:00:00.000Z")], true),
-          discordId: "567890123456789014",
-        },
-        new Date(),
-      );
+      expect(
+        await supporters.importApiMember(
+          campaign,
+          {
+            ...apiMember("auto-patron", [charge("pledge_start:auto-patron", "2026-10-01T12:00:00.000Z")], true),
+            discordId: "567890123456789014",
+          },
+          new Date(),
+        ),
+      ).toMatchObject({ discordLinked: false, conflict: "discord-differs" });
       expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
-        discordId: patron,
-        discordSource: "patreon",
+        discordId: "567890123456789018",
+        discordSource: "staff",
         patreonDiscordId: "567890123456789014",
-        automaticBlockedReason: "discord_differs",
+        automaticBlockedReason: "discord_not_from_patreon",
+        nextSteps: expect.arrayContaining([expect.objectContaining({ code: "discord_differs" })]),
       });
       expect(await match.autoMatch(record.id, options())).toMatchObject({
         founderRecorded: false,
-        blocked: ["discord_differs"],
+        blocked: ["discord_not_from_patreon"],
+      });
+    });
+
+    it("follows the account Patreon reports for a Patreon link, and confirms a staff link Patreon reports", async () => {
+      const record = await importPatron("following-patron");
+      const report = (discordId: string | null) =>
+        supporters.importApiMember(
+          campaign,
+          {
+            ...apiMember(
+              "following-patron",
+              [charge("pledge_start:following-patron", "2026-10-01T12:00:00.000Z")],
+              true,
+            ),
+            discordId,
+          },
+          new Date(),
+        );
+      // Patreon no longer reports any account: the link is kept.
+      expect(await report(null)).toMatchObject({ discordLinked: false, patreonDiscordChanged: true });
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        discordId: patron,
+        discordSource: "patreon",
+        patreonDiscordId: null,
+        automaticBlockedReason: null,
+      });
+      // Patreon reports another account: the Patreon link follows it.
+      expect(await report("567890123456789019")).toMatchObject({
+        discordLinked: true,
+        discordId: "567890123456789019",
+        releasedDiscordIds: [patron],
+      });
+      let view = (await supporters.get(record.id, campaign, automaticPolicy))!;
+      expect(view).toMatchObject({ discordId: "567890123456789019", discordSource: "patreon" });
+      // Staff link another account, and Patreon later reports exactly that one: it becomes a Patreon link.
+      view = (
+        await supporters.mutate(
+          record.id,
+          { ...review(view), kind: "link", discordId: "567890123456789020" },
+          staff,
+          campaign,
+          policy,
+        )
+      ).supporter!;
+      expect(view.discordSource).toBe("staff");
+      expect(await report("567890123456789020")).toMatchObject({ discordConfirmed: true, conflict: null });
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        discordId: "567890123456789020",
+        discordSource: "patreon",
+      });
+      expect((await kinds(record.id)).map((row) => row.kind)).toEqual([
+        "patreon-discord-link",
+        "patreon-discord-link",
+        "link",
+        "patreon-discord-confirmed",
+      ]);
+    });
+
+    it("moves an account to the patron Patreon now reports it for, from a record Patreon no longer reports it for", async () => {
+      const earlier = await importPatron("earlier-patron");
+      // Patreon stops reporting the account for the first patron, then reports it for a second one.
+      await supporters.importApiMember(
+        campaign,
+        {
+          ...apiMember("earlier-patron", [charge("pledge_start:earlier-patron", "2026-10-01T12:00:00.000Z")], true),
+          discordId: null,
+        },
+        new Date(),
+      );
+      const later = await importPatron("later-patron");
+      expect(later).toMatchObject({ discordId: patron, discordSource: "patreon", patreonDiscordId: patron });
+      expect(await supporters.get(earlier.id, campaign, automaticPolicy)).toMatchObject({
+        discordId: null,
+        discordSource: null,
+      });
+      expect((await kinds(earlier.id)).map((row) => row.kind)).toEqual([
+        "patreon-discord-link",
+        "patreon-discord-moved",
+      ]);
+      // Once that patron is a founder, the account stays where it is.
+      const founder = await importPatron("founder-patron", "567890123456789021");
+      await match.autoMatch(founder.id, options({ fillSteam: false }));
+      await supporters.importApiMember(
+        campaign,
+        {
+          ...apiMember("founder-patron", [charge("pledge_start:founder-patron", "2026-10-01T12:00:00.000Z")], true),
+          discordId: null,
+        },
+        new Date(),
+      );
+      const kept = await importPatron("kept-patron", "567890123456789021");
+      expect(kept).toMatchObject({ discordId: null, patreonDiscordId: "567890123456789021" });
+      expect(await supporters.get(founder.id, campaign, automaticPolicy)).toMatchObject({
+        discordId: "567890123456789021",
+        founder: { automatic: true },
+      });
+    });
+
+    it("records an automatic founder on a history that starts with a renewal, once the refund wait is over", async () => {
+      // Patreon returned the patron's whole history, which starts with a renewal rather than the pledge start.
+      const record = await importPatron(
+        "renewal-patron",
+        patron,
+        charge("subscription:renewal-patron", "2026-10-01T12:00:00.000Z", "subscription"),
+      );
+      expect(record).toMatchObject({
+        founderBlockedReason: null,
+        founderFirstPaymentWaiting: false,
+        founderEligiblePayment: { reference: "subscription:renewal-patron", firstSuccessfulPaymentVerified: true },
+      });
+      const waiting = { ...policy, automaticHoldHours: 72 };
+      expect(
+        await match.autoMatch(
+          record.id,
+          options({ policy: waiting, fillSteam: false, now: new Date("2026-10-02T12:00:00.000Z") }),
+        ),
+      ).toMatchObject({ founderRecorded: false, blocked: ["payment_too_recent"] });
+      expect(
+        await match.autoMatch(
+          record.id,
+          options({ policy: waiting, fillSteam: false, now: new Date("2026-10-04T12:00:00.000Z") }),
+        ),
+      ).toMatchObject({ founderRecorded: true, blocked: [] });
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        founder: { automatic: true, paymentVerified: true, paymentFirst: true },
       });
     });
 
@@ -2138,7 +2252,7 @@ describe("launch storage on isolated PostgreSQL", () => {
       ).toMatchObject({ discordId: "567890123456789017", steamId: patronSteam, steamSource: "staff" });
     });
 
-    it("records no automatic founder on a staff SteamID another Discord account applied with", async () => {
+    it("records an automatic founder on a staff SteamID another Discord account applied with, and keeps the alert", async () => {
       const record = await importPatron();
       await supporters.mutate(
         record.id,
@@ -2153,14 +2267,13 @@ describe("launch storage on isolated PostgreSQL", () => {
         automaticBlockedReason: null,
       });
       await application("567890123456789016", patronSteam);
+      // A founder needs no SteamID. The alert matters for the whitelist promise later.
       expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
         match: { linkedSteamShared: true },
-        automaticBlockedReason: "steam_shared",
+        automaticBlockedReason: null,
+        nextSteps: expect.arrayContaining([expect.objectContaining({ code: "linked_steam_shared" })]),
       });
-      expect(await match.autoMatch(record.id, options())).toMatchObject({
-        founderRecorded: false,
-        blocked: ["steam_shared"],
-      });
+      expect(await match.autoMatch(record.id, options())).toMatchObject({ founderRecorded: true, blocked: [] });
     });
 
     it("shows a Discord account Patreon reports for one record while another links it", async () => {
@@ -2193,10 +2306,8 @@ describe("launch storage on isolated PostgreSQL", () => {
       const actor = { ...staff, serverId: "primary" };
       const revocation = { id: randomUUID(), reason: "Left the fictional community" };
       await applications.claimRevoke(created.id, revocation, actor);
-      expect(await match.autoMatch(record.id, options())).toMatchObject({
-        founderRecorded: false,
-        blocked: ["source_application_revoked"],
-      });
+      // A founder needs no SteamID, so the revocation never stops one.
+      expect(await match.autoMatch(record.id, options())).toMatchObject({ founderRecorded: true, blocked: [] });
       await applications.finishRevoke(created.id, revocation.id, { state: "applied", message: "Removed" });
       expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
         steamId: patronSteam,

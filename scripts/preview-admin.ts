@@ -49,7 +49,7 @@ import { TelemModule } from "../src/telemetry/telemetry.module";
 import { TelemetryStore } from "../src/telemetry/telemetry.store";
 import type { CombatStats } from "../src/telemetry/telemetry.types";
 import { SupportersModule } from "../src/supporters/supporters.module";
-import { SupportersStore, type FounderReview } from "../src/supporters/supporters.store";
+import { SupportersStore } from "../src/supporters/supporters.store";
 import { SupporterMatchService } from "../src/supporters/supporter-match.service";
 import { SupporterMatchStore } from "../src/supporters/supporter-match.store";
 import { DiscordRolesDiscord } from "../src/discord-roles/discord-roles.discord";
@@ -851,10 +851,20 @@ for (const [index, displayName] of ["Demo · Steady Supporter", "Demo · Foundin
     latestPayment: payment,
     payments: [payment],
     founderEligiblePayment: null,
+    // The demo founder's charge was refunded after the promise, so the record shows that note. It stays a founder.
     founder:
-      index === 1 ? { awardedAt: paidAt, paymentId: payment.id, source: payment.source, automatic: false } : null,
+      index === 1
+        ? {
+            awardedAt: paidAt,
+            paymentId: payment.id,
+            source: payment.source,
+            automatic: false,
+            paymentVerified: false,
+            paymentFirst: true,
+          }
+        : null,
     founderBlockedReason: null,
-    founderFirstPaymentToCheck: false,
+    founderFirstPaymentWaiting: false,
     founderBlockedMessage: null,
     needsDiscordLink: false,
     ...previewMatch(
@@ -867,17 +877,7 @@ for (const [index, displayName] of ["Demo · Steady Supporter", "Demo · Foundin
     ),
   });
 }
-/** Founder payments marked checked in the preview, as `record:payment:reason`. */
-const previewCheckedReviews = new Set<string>();
 const supporterStore = {
-  async uncheckedFounderReviews<T extends Pick<FounderReview, "supporterId" | "unverifiedPaymentId" | "reviewReason">>(
-    reviews: T[],
-  ) {
-    return reviews.filter(
-      (review) =>
-        !previewCheckedReviews.has(`${review.supporterId}:${review.unverifiedPaymentId}:${review.reviewReason}`),
-    );
-  },
   async ingest() {
     throw new Error("Patreon webhook intake is unavailable in the simulated preview.");
   },
@@ -914,7 +914,7 @@ const supporterStore = {
       founderEligiblePayment: null,
       founder: null,
       founderBlockedReason: "no_payment",
-      founderFirstPaymentToCheck: false,
+      founderFirstPaymentWaiting: false,
       founderBlockedMessage: founderBlockedMessages.no_payment,
       needsDiscordLink: false,
       ...previewMatch({ discordId: null, discordSource: null, steamId: null }, false),
@@ -991,6 +991,8 @@ const supporterStore = {
         paymentId: input.paymentId,
         source: view.founderEligiblePayment.source,
         automatic: false,
+        paymentVerified: true,
+        paymentFirst: true,
       };
       Object.assign(record, previewMatch(record, true));
     }
@@ -1034,20 +1036,15 @@ const supporterStore = {
       };
       record.payments = [record.latestPayment, ...record.payments];
     }
-    if (input.kind === "review") {
-      record.reviewState = "verified";
-      // As the store does: a checked founder payment leaves the payments to check. The preview's is unverified.
-      if (input.paymentId) previewCheckedReviews.add(`${memberId}:${input.paymentId}:unverified`);
-    }
+    if (input.kind === "review") record.reviewState = "verified";
     record.version++;
     demoSupporterActions.set(input.id, fingerprint);
     return { ok: true, replayed: false, supporter: structuredClone(record) };
   },
 };
 // A simulated Patreon import: no token and no Patreon calls. "Sync now" runs for two seconds.
-// It reports one Discord conflict and one founder promise to recheck, so both review lists show on a phone.
-const [, previewFounder, previewBacker] = [...demoSupporters.values()];
-const previewUnverifiedPaymentId = randomUUID();
+// It reports one Discord conflict, which shows as a count in Details.
+const [, , previewBacker] = [...demoSupporters.values()];
 let previewSyncRun: Promise<PatreonSyncStatus> | null = null;
 let previewSyncedAt = Date.now() - 12 * 60_000;
 const previewSyncStatus = (): PatreonSyncStatus => ({
@@ -1078,20 +1075,6 @@ const previewSyncStatus = (): PatreonSyncStatus => ({
     // The demo supporters are Patreon records, so the member ID equals the confirm key.
     { supporterId: previewBacker.id, patreonMemberId: previewBacker.confirmKey, reason: "discord-in-use" },
   ],
-  founderReviews: previewFounder.founder
-    ? [
-        {
-          supporterId: previewFounder.id,
-          patreonMemberId: previewFounder.confirmKey,
-          paymentId: previewFounder.founder.paymentId,
-          paymentSource: "manual_receipt",
-          reference: "DEMO-RECEIPT-2",
-          unverifiedPaymentId: previewUnverifiedPaymentId,
-          unverifiedReference: "DEMO-PLEDGE-EVENT-2",
-          reviewReason: "unverified" as const,
-        },
-      ]
-    : [],
 });
 const patreonSync = {
   configured: () => true,

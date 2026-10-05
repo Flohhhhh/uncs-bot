@@ -1,5 +1,5 @@
 import { ConflictException, Inject, Injectable, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
-import { and, eq, inArray, ne, sql } from "drizzle-orm";
+import { and, eq, ne, sql } from "drizzle-orm";
 import { createHash, randomUUID } from "node:crypto";
 import { DATABASE, type Database } from "../database/database.types";
 import {
@@ -11,7 +11,13 @@ import {
   type SupporterProvider,
 } from "../database/supporters.schema";
 import type { Staff } from "../admin/admin.types";
-import { firstPaidEventId, type PatreonMemberSnapshot, type PatreonPledgeEvent } from "./patreon.client";
+import {
+  firstPaidEventId,
+  patreonChargePaid,
+  patreonChargeTaken,
+  type PatreonMemberSnapshot,
+  type PatreonPledgeEvent,
+} from "./patreon.client";
 import {
   earlierPayment,
   type Executor,
@@ -25,7 +31,6 @@ import {
   otherFounder,
   paymentJson,
   qualifyingSources,
-  RECEIPT_COPY_TOLERANCE,
   receiptCopy,
   supporterSteamKeys,
 } from "./founder-rules";
@@ -66,33 +71,40 @@ export type ApiImportResult = {
   tierConfirmedNew: number;
   /** This member's completed payments in another currency that are still not confirmed as US$5 or more. */
   tierUnconfirmed: number;
+  /** The import linked the Discord account Patreon reports: a new link, or one that replaced an older Patreon link. */
   discordLinked: boolean;
+  /** Patreon reports the account staff linked, so the link now counts as coming from Patreon. */
+  discordConfirmed: boolean;
+  /** The reported account moved here from another record whose patron Patreon no longer reports it for. */
+  discordMoved: boolean;
+  /**
+   * `discord-differs`: Patreon reports another account than a staff link or a founder's link, which the import never
+   * replaces. `discord-in-use`: another record holds the reported account and keeps it.
+   */
   conflict: "discord-in-use" | "discord-differs" | null;
   /** The record's Discord account after the import, or null; used only to queue a Discord role check. */
   discordId: string | null;
+  /** Discord accounts the import took off a record, which need a Discord role check too. */
+  releasedDiscordIds: string[];
   /** Patreon now reports a different Discord account (or none) for this membership than it did before. */
   patreonDiscordChanged: boolean;
 };
-/** A founder promise for staff review, with the payment that is no longer verified or no longer the first one. */
-export type FounderReview = {
-  supporterId: string;
-  patreonMemberId: string;
-  paymentId: string;
-  paymentSource: string;
-  reference: string;
-  unverifiedPaymentId: string;
-  unverifiedReference: string;
-  /** `unverified`: the payment is no longer verified. `not_first_payment`: the founder's own payment lost its first-payment flag. */
-  reviewReason: "unverified" | "not_first_payment";
-};
 
 type MemberRow = typeof supporterMembers.$inferSelect;
+type MemberPatch = Partial<typeof supporterMembers.$inferInsert>;
 type PaymentRow = typeof supporterPayments.$inferSelect;
+/** Queues one audit row by the Patreon sync. `key` makes its fingerprint, with the kind. */
+type SyncAudit = (
+  kind: string,
+  reason: string,
+  details: Record<string, string | number | null>,
+  key: Record<string, unknown>,
+) => void;
 // Internal columns used to explain founder readiness; removed before a view leaves the store.
 type StoredSupporter = Omit<
   SupporterView,
   | "founderBlockedReason"
-  | "founderFirstPaymentToCheck"
+  | "founderFirstPaymentWaiting"
   | "founderBlockedMessage"
   | "needsDiscordLink"
   | "match"
@@ -148,7 +160,7 @@ export function apiSnapshotHash(campaignId: string, snapshot: PatreonMemberSnaps
 
 /** A completed payment in a currency other than the founder minimum's, which only a tier price can confirm. */
 const otherCurrencyPaid = (event: PatreonPledgeEvent) =>
-  event.paymentStatus === "Paid" && event.currency !== null && event.currency !== FOUNDER_MINIMUM.currency;
+  patreonChargePaid(event.paymentStatus) && event.currency !== null && event.currency !== FOUNDER_MINIMUM.currency;
 /**
  * Whether a completed payment in another currency counts as US$5 or more: Patreon named its tier, and that tier costs
  * at least the founder minimum in US cents. The amount paid is in the patron's currency and is not compared.
@@ -194,8 +206,6 @@ function founderConflict(reason: FounderBlockedReason, suffix = "", payment?: { 
 function founderHere(suffix = "") {
   return new ConflictException({ message: `They are already a founder.${suffix}`, blockedReason: "already_founder" });
 }
-/** A founder review staff marked checked: the record, the payment and why it was listed. */
-const reviewKey = (memberId: string, paymentId: unknown, reason: unknown) => `${memberId}:${paymentId}:${reason}`;
 
 @Injectable()
 export class SupportersStore {
@@ -324,11 +334,18 @@ export class SupportersStore {
   }
 
   /**
-   * Imports one authenticated Patreon API member. Each Paid pledge event becomes one verified
-   * patreon_api payment keyed by its event ID; a later non-Paid status marks that payment unverified.
-   * A Paid event in another currency is marked `minimumConfirmed` when its tier costs US$5 or more, on a new
-   * payment or one imported earlier, with an audit row. That mark is never removed here. Founder records are never
-   * touched here.
+   * Imports one authenticated Patreon API member. Each charge Patreon took becomes one `patreon_api` payment keyed by
+   * its event ID: verified while it is Paid (or Patreon declined its refund), unverified once Patreon reports it
+   * reversed, including a charge first seen already reversed, so the earlier-payment test still sees it. A changed
+   * first-payment mark writes a `patreon-first-payment` audit row. A Paid event in another currency is marked
+   * `minimumConfirmed` when its tier costs US$5 or more, on a new payment or one imported earlier, with an audit row.
+   * That mark is never removed here.
+   *
+   * The Discord account follows Patreon: an account Patreon reports for a staff link becomes a Patreon link, and a
+   * Patreon link that is not a founder's follows the account Patreon now reports, taking it from another record only
+   * when that record's link came from Patreon, Patreon no longer reports it for that patron, and it is not a founder.
+   * A staff link and a founder's link are never replaced, and a link Patreon no longer reports is kept. Founder
+   * records are never touched here.
    */
   async importApiMember(campaignId: string, snapshot: PatreonMemberSnapshot, receivedAt: Date) {
     const hash = apiSnapshotHash(campaignId, snapshot);
@@ -381,14 +398,28 @@ export class SupportersStore {
         tierConfirmedNew: 0,
         tierUnconfirmed: 0,
         discordLinked: false,
+        discordConfirmed: false,
+        discordMoved: false,
         conflict: null,
         discordId: member.discordId,
+        releasedDiscordIds: [],
         patreonDiscordChanged: false,
       };
       // An unchanged snapshot keeps the member's review state; a changed or corrected one needs review like a webhook.
-      const patch: Partial<typeof supporterMembers.$inferInsert> =
-        observed || stale ? { ...fields, observedAt: receivedAt, reviewState: "pending" } : {};
+      const patch: MemberPatch = observed || stale ? { ...fields, observedAt: receivedAt, reviewState: "pending" } : {};
       const actions: (typeof supporterActions.$inferInsert)[] = [];
+      const audit: SyncAudit = (kind, reason, details, key) =>
+        actions.push({
+          id: randomUUID(),
+          memberId: member.id,
+          actorId: PATREON_SYNC_ACTOR.id,
+          actorName: PATREON_SYNC_ACTOR.name,
+          kind,
+          reason,
+          fingerprint: sha256({ kind, ...key }),
+          details,
+          createdAt: receivedAt,
+        });
       let paymentsChanged = false;
       const existing = new Map(
         (
@@ -401,15 +432,10 @@ export class SupportersStore {
       // The audit row for a payment this import counts as US$5 or more by its tier's price.
       const confirmByTier = (paymentId: string, event: PatreonPledgeEvent) => {
         result.tierConfirmedNew++;
-        actions.push({
-          id: randomUUID(),
-          memberId: member.id,
-          actorId: PATREON_SYNC_ACTOR.id,
-          actorName: PATREON_SYNC_ACTOR.name,
-          kind: "patreon-payment-minimum",
-          reason: "The tier this payment paid for costs US$5 or more.",
-          fingerprint: sha256({ kind: "patreon-payment-minimum", paymentId }),
-          details: {
+        audit(
+          "patreon-payment-minimum",
+          "The tier this payment paid for costs US$5 or more.",
+          {
             paymentId,
             reference: event.id,
             amountCents: event.amountCents,
@@ -418,16 +444,19 @@ export class SupportersStore {
             tierAmountCents: event.tierAmountCents ?? null,
             minimumConfirmed: 1,
           },
-          createdAt: receivedAt,
-        });
+          { paymentId },
+        );
       };
       // One pass per event: a history that lists an event twice must not write or count it twice.
       const events = [...new Map(snapshot.events.map((event) => [event.id, event])).values()];
       for (const event of events.sort((a, b) => a.date.getTime() - b.date.getTime())) {
         const row = existing.get(event.id);
-        const paid = event.paymentStatus === "Paid";
+        const paid = patreonChargePaid(event.paymentStatus);
         const meets = tierMeetsMinimum(event);
-        if (paid && !row) {
+        if (!row) {
+          // Only a charge Patreon took is a payment. One first seen already reversed is kept unverified, so a later
+          // payment is never taken for the first one.
+          if (!patreonChargeTaken(event.paymentStatus)) continue;
           const [inserted] = await tx
             .insert(supporterPayments)
             .values({
@@ -439,8 +468,8 @@ export class SupportersStore {
               currency: event.currency,
               source: "patreon_api",
               reference: event.id,
-              verificationState: "verified",
-              firstSuccessfulPaymentVerified: event.id === firstId,
+              verificationState: paid ? "verified" : "unverified",
+              firstSuccessfulPaymentVerified: paid && event.id === firstId,
               minimumConfirmed: meets,
               verifiedBy: PATREON_SYNC_ACTOR.id,
               recordedBy: PATREON_SYNC_ACTOR.id,
@@ -448,14 +477,13 @@ export class SupportersStore {
             })
             .onConflictDoNothing()
             .returning({ id: supporterPayments.id });
-          if (inserted) {
+          if (inserted && paid) {
             result.payments++;
             if (meets) confirmByTier(inserted.id, event);
             if (otherCurrencyPaid(event)) result[meets ? "tierConfirmed" : "tierUnconfirmed"]++;
-          }
+          } else if (inserted) paymentsChanged = true;
           continue;
         }
-        if (!row) continue;
         // Only ever false to true: a payment counted once stays counted, whatever Patreon reports later.
         const confirm = meets && !row.minimumConfirmed;
         if (otherCurrencyPaid(event)) result[row.minimumConfirmed || confirm ? "tierConfirmed" : "tierUnconfirmed"]++;
@@ -473,64 +501,39 @@ export class SupportersStore {
           .where(eq(supporterPayments.id, row.id));
         paymentsChanged = true;
         if (confirm) confirmByTier(row.id, event);
-        if (row.verificationState === state) continue;
+        if (row.verificationState === state) {
+          // The status stands, so Patreon's history itself settled whether this is the first payment.
+          if (row.firstSuccessfulPaymentVerified !== first)
+            audit(
+              "patreon-first-payment",
+              first
+                ? "Patreon's history shows this is their first payment."
+                : "Patreon's history shows an earlier one.",
+              {
+                paymentId: row.id,
+                reference: row.reference,
+                previousFirstSuccessfulPaymentVerified: row.firstSuccessfulPaymentVerified ? 1 : 0,
+                firstSuccessfulPaymentVerified: first ? 1 : 0,
+              },
+              { paymentId: row.id, first, hash },
+            );
+          continue;
+        }
         if (!paid) result.revoked++;
-        actions.push({
-          id: randomUUID(),
-          memberId: member.id,
-          actorId: PATREON_SYNC_ACTOR.id,
-          actorName: PATREON_SYNC_ACTOR.name,
-          kind: "patreon-payment-status",
-          reason: `Patreon reported this payment as ${event.paymentStatus ?? "unknown"}.`,
-          fingerprint: sha256({ kind: "patreon-payment-status", paymentId: row.id, state, hash }),
-          details: {
+        audit(
+          "patreon-payment-status",
+          `Patreon reported this payment as ${event.paymentStatus ?? "unknown"}.`,
+          {
             paymentId: row.id,
             reference: row.reference,
             previousVerificationState: row.verificationState,
             verificationState: state,
             paymentStatus: event.paymentStatus,
           },
-          createdAt: receivedAt,
-        });
+          { paymentId: row.id, state, hash },
+        );
       }
-      if (snapshot.discordId && member.discordId !== snapshot.discordId) {
-        if (member.discordId) result.conflict = "discord-differs";
-        else {
-          const [other] = await tx
-            .select({ id: supporterMembers.id })
-            .from(supporterMembers)
-            .where(
-              and(
-                eq(supporterMembers.campaignId, campaignId),
-                eq(supporterMembers.discordId, snapshot.discordId),
-                ne(supporterMembers.id, member.id),
-              ),
-            )
-            .limit(1);
-          if (other) result.conflict = "discord-in-use";
-          else {
-            patch.discordId = snapshot.discordId;
-            patch.discordSource = "patreon";
-            result.discordLinked = true;
-            result.discordId = snapshot.discordId;
-            actions.push({
-              id: randomUUID(),
-              memberId: member.id,
-              actorId: PATREON_SYNC_ACTOR.id,
-              actorName: PATREON_SYNC_ACTOR.name,
-              kind: "patreon-discord-link",
-              reason: "Patreon reported the Discord account this patron connected.",
-              fingerprint: sha256({ kind: "patreon-discord-link", memberId: member.id, discordId: snapshot.discordId }),
-              details: {
-                discordId: snapshot.discordId,
-                previousDiscordId: null,
-                patreonMemberId: snapshot.patreonMemberId,
-              },
-              createdAt: receivedAt,
-            });
-          }
-        }
-      }
+      await this.followPatreonDiscord(tx, campaignId, member, snapshot, receivedAt, patch, result, audit);
       // What Patreon reports is kept even when it is not linked, so staff and automatic matching can compare it with
       // the link. An unreadable answer is not a disconnection and changes nothing.
       if (snapshot.discordKnown && snapshot.discordId !== member.patreonDiscordId) {
@@ -543,6 +546,7 @@ export class SupportersStore {
         result.payments ||
         paymentsChanged ||
         result.discordLinked ||
+        result.discordConfirmed ||
         result.patreonDiscordChanged
       )
         await tx
@@ -555,57 +559,119 @@ export class SupportersStore {
   }
 
   /**
-   * Permanent founder promises for staff review: the founder's own payment, or an imported payment dated inside the
-   * founder window (widened by the receipt-copy tolerance), is no longer verified. This also covers a founder awarded
-   * on a staff receipt whose charge Patreon later reports as refunded, declined or fraudulent, and a founder whose own
-   * payment is no longer marked as the first successful payment (for example after the import saw an earlier charge).
+   * Makes the record's Discord link follow the account Patreon reports (see importApiMember), filling `patch` and
+   * `result`. Another record that gives up the account is written here, under its row lock and before this record's
+   * own update, so the two never hold one account at once.
    */
-  async founderReviews(campaignId: string): Promise<FounderReview[]> {
-    const tolerance = sql.raw(RECEIPT_COPY_TOLERANCE);
-    const result = await this.db.execute<FounderReview>(sql`
-      SELECT f.member_id AS "supporterId", m.patreon_member_id AS "patreonMemberId", f.payment_id AS "paymentId",
-        q.source AS "paymentSource", q.reference,
-        unverified.id AS "unverifiedPaymentId", unverified.reference AS "unverifiedReference",
-        unverified.review_reason AS "reviewReason"
-      FROM supporter_founders f
-      JOIN supporter_members m ON m.id = f.member_id
-      JOIN supporter_payments q ON q.id = f.payment_id
-      JOIN LATERAL (SELECT x.id, x.reference,
-          CASE WHEN x.verification_state <> 'verified' THEN 'unverified' ELSE 'not_first_payment' END AS review_reason
-        FROM supporter_payments x
-        WHERE x.member_id = f.member_id AND ((x.verification_state <> 'verified'
-          AND (x.id = f.payment_id OR (x.source = 'patreon_api'
-            AND x.paid_at >= f.window_start - ${tolerance} AND x.paid_at < f.window_end + ${tolerance})))
-          OR (x.id = f.payment_id AND NOT x.first_successful_payment_verified))
-        ORDER BY (x.id = f.payment_id) DESC, x.paid_at, x.id LIMIT 1) unverified ON true
-      WHERE m.campaign_id = ${campaignId}
-      ORDER BY f.awarded_at, f.member_id LIMIT 50
-    `);
-    return result.rows;
-  }
-
-  /**
-   * The founder reviews staff have not marked checked. A check names the payment and why it was listed, so the same
-   * payment listed again for another reason shows again.
-   */
-  async uncheckedFounderReviews<T extends Pick<FounderReview, "supporterId" | "unverifiedPaymentId" | "reviewReason">>(
-    reviews: T[],
-  ): Promise<T[]> {
-    if (!reviews.length) return reviews;
-    const checked = await this.db
-      .select({ memberId: supporterActions.memberId, details: supporterActions.details })
-      .from(supporterActions)
+  private async followPatreonDiscord(
+    tx: Pick<Database, "select" | "update" | "insert">,
+    campaignId: string,
+    member: MemberRow,
+    snapshot: PatreonMemberSnapshot,
+    at: Date,
+    patch: MemberPatch,
+    result: ApiImportResult,
+    audit: SyncAudit,
+  ) {
+    // Null when Patreon reports none, or its answer could not be read: either way the link is kept.
+    const reported = snapshot.discordId;
+    if (!reported) return;
+    const founder = async (memberId: string) =>
+      (
+        await tx
+          .select({ memberId: supporterFounders.memberId })
+          .from(supporterFounders)
+          .where(eq(supporterFounders.memberId, memberId))
+      ).length > 0;
+    if (member.discordId === reported) {
+      // Patreon confirms the account staff linked, or one linked before sources were recorded.
+      if (member.discordSource === "patreon") return;
+      patch.discordSource = "patreon";
+      result.discordConfirmed = true;
+      audit(
+        "patreon-discord-confirmed",
+        "Patreon reports the Discord account staff linked.",
+        { discordId: reported, previousDiscordSource: member.discordSource, patreonMemberId: snapshot.patreonMemberId },
+        { memberId: member.id, discordId: reported },
+      );
+      return;
+    }
+    // A staff link and a founder's link stay as they are.
+    if (member.discordId && (member.discordSource !== "patreon" || (await founder(member.id)))) {
+      result.conflict = "discord-differs";
+      return;
+    }
+    const [other] = await tx
+      .select({
+        id: supporterMembers.id,
+        discordSource: supporterMembers.discordSource,
+        patreonDiscordId: supporterMembers.patreonDiscordId,
+        steamSource: supporterMembers.steamSource,
+        version: supporterMembers.version,
+      })
+      .from(supporterMembers)
       .where(
         and(
-          inArray(supporterActions.memberId, [...new Set(reviews.map((review) => review.supporterId))]),
-          eq(supporterActions.kind, "review"),
+          eq(supporterMembers.campaignId, campaignId),
+          eq(supporterMembers.discordId, reported),
+          ne(supporterMembers.id, member.id),
         ),
-      );
-    const keys = new Set(
-      checked.map((action) => reviewKey(action.memberId, action.details.paymentId, action.details.reviewReason)),
-    );
-    return reviews.filter(
-      (review) => !keys.has(reviewKey(review.supporterId, review.unverifiedPaymentId, review.reviewReason)),
+      )
+      .for("update");
+    if (other) {
+      // Only an account Patreon gave that record, no longer reports for that patron, and no founder holds.
+      if (other.discordSource !== "patreon" || other.patreonDiscordId === reported || (await founder(other.id))) {
+        result.conflict = "discord-in-use";
+        return;
+      }
+      const steamCleared = other.steamSource === "application";
+      await tx
+        .update(supporterMembers)
+        .set({
+          discordId: null,
+          discordSource: null,
+          // A SteamID copied from that account's application goes with the account.
+          ...(steamCleared ? { steamId: null, steamSource: null, steamApplicationId: null } : {}),
+          version: other.version + 1,
+        })
+        .where(eq(supporterMembers.id, other.id));
+      await tx.insert(supporterActions).values({
+        id: randomUUID(),
+        memberId: other.id,
+        actorId: PATREON_SYNC_ACTOR.id,
+        actorName: PATREON_SYNC_ACTOR.name,
+        kind: "patreon-discord-moved",
+        reason: "Patreon reports this Discord account for another patron, so it moved to their record.",
+        fingerprint: sha256({ kind: "patreon-discord-moved", memberId: other.id, discordId: reported, to: member.id }),
+        details: {
+          discordId: null,
+          previousDiscordId: reported,
+          movedToMemberId: member.id,
+          steamCleared: +steamCleared,
+        },
+        createdAt: at,
+      });
+      result.discordMoved = true;
+    }
+    patch.discordId = reported;
+    patch.discordSource = "patreon";
+    // A SteamID copied from the previous account's application belongs to that account. The SteamID fill copies the
+    // new account's own.
+    const steamCleared = Boolean(member.discordId) && member.steamSource === "application";
+    if (steamCleared) Object.assign(patch, { steamId: null, steamSource: null, steamApplicationId: null });
+    if (member.discordId) result.releasedDiscordIds.push(member.discordId);
+    result.discordLinked = true;
+    result.discordId = reported;
+    audit(
+      "patreon-discord-link",
+      "Patreon reported the Discord account this patron connected.",
+      {
+        discordId: reported,
+        previousDiscordId: member.discordId,
+        patreonMemberId: snapshot.patreonMemberId,
+        ...(steamCleared ? { previousSteamId: member.steamId } : {}),
+      },
+      { memberId: member.id, discordId: reported },
     );
   }
 
@@ -662,8 +728,12 @@ export class SupportersStore {
         'founderAppliedWithSteam', ${founderAppliedWithSteam(sql.raw("m.id"), sql.raw("m.steam_id"))},
         'matchFacts', ${matchFactsSql(campaignId)},
         'founder', (SELECT json_build_object('awardedAt', f.awarded_at, 'paymentId', f.payment_id, 'source', founder_payment.source,
-            'automatic', f.awarded_by LIKE 'system:%')
+            'automatic', f.awarded_by LIKE 'system:%',
+            'paymentVerified', coalesce(founder_payment.verification_state = 'verified', false)
+              AND coalesce(founder_copy.verification_state = 'verified', true),
+            'paymentFirst', coalesce(founder_payment.first_successful_payment_verified, false))
           FROM supporter_founders f LEFT JOIN supporter_payments founder_payment ON founder_payment.id = f.payment_id
+          LEFT JOIN LATERAL ${receiptCopy("founder_payment")} founder_copy ON true
           WHERE f.member_id = m.id)
       ) AS supporter FROM supporter_members m
       WHERE (m.provider = 'paypal' OR (m.provider = 'patreon' AND m.campaign_id = ${campaignId}))
@@ -697,7 +767,7 @@ export class SupportersStore {
       linkedSteamShared: Boolean(matchFacts?.linkedSteamShared),
     };
     let founderBlockedReason: SupporterView["founderBlockedReason"] = null;
-    let founderFirstPaymentToCheck = false;
+    let founderFirstPaymentWaiting = false;
     let candidate: PaymentView | null = null;
     if (!supporter.founder) {
       const eligible = supporter.founderEligiblePayment;
@@ -714,11 +784,21 @@ export class SupportersStore {
         : !candidate
           ? "no_payment"
           : founderBlocker(candidate, policy, context);
-      // A staff receipt is always in US dollars, so it can stand in only for a payment in US dollars. With the first
-      // payment confirmed, nothing else may stop the payment, apart from a Discord account staff can add.
-      if (founderBlockedReason === "not_first_payment" && candidate?.currency === policy.currency) {
-        const confirmed = founderBlocker({ ...candidate, firstSuccessfulPaymentVerified: true }, policy, context);
-        founderFirstPaymentToCheck = confirmed === null || confirmed === "no_identity";
+      // An imported payment without the first-payment mark is one Patreon's history has not settled yet: the history
+      // was incomplete, or a charge before it is still pending. Gramps waits for the import to settle it when that
+      // mark is all that stands between the payment and a founder, apart from a Discord account and a tier price
+      // Patreon can still supply.
+      if (
+        founderBlockedReason === "not_first_payment" &&
+        supporter.provider === "patreon" &&
+        candidate?.source === "patreon_api" &&
+        candidate.verificationState === "verified"
+      ) {
+        const marked = founderBlocker({ ...candidate, firstSuccessfulPaymentVerified: true }, policy, context);
+        founderFirstPaymentWaiting =
+          marked === null ||
+          (marked === "no_identity" && !supporter.discordId) ||
+          (marked === "below_minimum" && candidate.currency !== null && candidate.currency !== policy.currency);
       }
     }
     // The same verdict automatic matching reaches: its own rules, then the staff founder rule on its payment.
@@ -741,7 +821,7 @@ export class SupportersStore {
       ...supporter,
       payments: supporter.payments ?? [],
       founderBlockedReason,
-      founderFirstPaymentToCheck,
+      founderFirstPaymentWaiting,
       founderBlockedMessage: founderBlockedReason ? founderBlockedMessage(founderBlockedReason, candidate) : null,
       needsDiscordLink: Boolean(supporter.founder) && !supporter.discordId,
       match: {
@@ -817,16 +897,9 @@ export class SupportersStore {
             });
         }
         const steamRestated = !steamChanged && input.steamConfirmed === true && member.steamId !== null;
-        // Staff vouch for the account they already have, such as one Patreon no longer reports: it becomes a staff
-        // link, and nothing else changes.
-        const discordRestated =
-          !discordChanged &&
-          input.discordConfirmed === true &&
-          member.discordId !== null &&
-          input.discordId !== undefined;
         const discordId = discordChanged ? input.discordId! : member.discordId,
           steamId = steamChanged ? input.steamId! : member.steamId;
-        const discordSource = discordChanged || discordRestated ? "staff" : member.discordSource,
+        const discordSource = discordChanged ? "staff" : member.discordSource,
           steamSource = steamChanged || steamRestated ? "staff" : member.steamSource,
           steamApplicationId = steamChanged || steamRestated ? null : member.steamApplicationId;
         if (discordChanged || steamChanged) {
@@ -858,7 +931,6 @@ export class SupportersStore {
         details.steamSource = steamSource;
         details.previousSteamApplicationId = member.steamApplicationId;
         if (input.steamConfirmed) details.steamConfirmed = 1;
-        if (discordRestated) details.discordConfirmed = 1;
         await tx
           .update(supporterMembers)
           .set({ discordId, discordSource, steamId, steamSource, steamApplicationId })
@@ -916,16 +988,6 @@ export class SupportersStore {
         details.paymentSource = payment.source;
         details.windowStart = policy.startsAt;
         details.windowEnd = policy.endsAt;
-      }
-      if (input.kind === "review" && input.paymentId) {
-        const [payment] = await tx
-          .select()
-          .from(supporterPayments)
-          .where(and(eq(supporterPayments.id, input.paymentId), eq(supporterPayments.memberId, memberId)));
-        if (!payment) throw new ConflictException("Choose a payment recorded for this supporter.");
-        // Why the founder review lists this payment now, so a later, different change to it is listed again.
-        details.paymentId = payment.id;
-        details.reviewReason = payment.verificationState !== "verified" ? "unverified" : "not_first_payment";
       }
       await tx
         .update(supporterMembers)

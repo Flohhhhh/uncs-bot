@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { discordCell, paymentLine, paymentOffered, providerLine, reviewInput, rowState } from "./policy";
-import type { NextStep, PatreonSyncStatus, PaymentEvidence, Supporter } from "./types";
+import type { NextStep, PaymentEvidence, Supporter } from "./types";
 
 const payment: PaymentEvidence = {
   id: "01234567-89ab-4cde-8fab-0123456789ac",
@@ -53,103 +53,85 @@ const record: Supporter = {
 };
 const step = (code: string, area: NextStep["area"] = "steam"): NextStep => ({ code, area, message: `Step ${code}.` });
 const withSteps = (...nextSteps: NextStep[]): Supporter => ({ ...record, nextSteps });
-type Lists = Pick<PatreonSyncStatus, "founderReviews" | "conflictDetails">;
-const review = (reviewReason: "unverified" | "not_first_payment", supporterId = record.id) => ({
-  supporterId,
-  patreonMemberId: "member-1",
-  paymentId: payment.id,
-  paymentSource: "patreon_api",
-  reference: payment.reference,
-  unverifiedPaymentId: payment.id,
-  unverifiedReference: payment.reference,
-  reviewReason,
+const paypal = (...nextSteps: NextStep[]): Supporter => ({
+  ...record,
+  provider: "paypal",
+  patreonMemberId: null,
+  confirmKey: record.id,
+  nextSteps,
 });
-const conflict = (reason: "discord-in-use" | "discord-differs", supporterId = record.id) => ({
-  supporterId,
-  patreonMemberId: "member-1",
-  reason,
-});
-const lists = (overrides: Partial<Lists> = {}): Lists => ({ founderReviews: [], conflictDetails: [], ...overrides });
+/** Which list a step lands in, on a Patreon record and on a PayPal record. */
+const placed = (state: ReturnType<typeof rowState>) =>
+  (["needs", "waiting", "later", "notes"] as const).find((list) => state[list].length > 0) ?? "none";
 
 describe("row state", () => {
   it("is all set with nothing left", () => {
     expect(rowState(record)).toEqual({ state: "set", needs: [], waiting: [], later: [], notes: [] });
   });
 
-  it.each([
-    "connect_discord_in_patreon",
-    "steam_ready_automatic",
-    "founder_ready_automatic",
-    "founder_automatic_waiting",
-  ])("waits on Gramps or the supporter for %s", (code) => {
-    expect(rowState(withSteps(step(code)))).toMatchObject({ state: "waiting", waiting: [`Step ${code}.`], needs: [] });
+  // One case per step code the server sends, for each provider: [code, area, Patreon list, PayPal list].
+  it.each<[string, NextStep["area"], string, string]>([
+    // Discord
+    ["connect_discord_in_patreon", "discord", "waiting", "waiting"],
+    ["link_discord_no_import", "discord", "waiting", "waiting"],
+    ["link_discord_paypal", "discord", "needs", "needs"],
+    ["discord_on_another_record", "discord", "needs", "needs"],
+    ["discord_differs", "discord", "needs", "needs"],
+    ["discord_reported_for_other_patron", "discord", "needs", "needs"],
+    // SteamID: whitelist applications matter later, and a Patreon founder needs no SteamID
+    ["no_whitelist_application", "steam", "later", "later"],
+    ["application_pending", "steam", "later", "later"],
+    ["application_in_progress", "steam", "later", "later"],
+    ["no_approved_application", "steam", "later", "later"],
+    ["application_not_confirmed", "steam", "later", "needs"],
+    ["several_steam_ids", "steam", "later", "needs"],
+    ["invalid_steam_id", "steam", "later", "needs"],
+    ["steam_shared", "steam", "later", "needs"],
+    ["steam_rejected_before", "steam", "later", "needs"],
+    ["steam_available", "steam", "later", "needs"],
+    ["source_application_revoked", "steam", "later", "needs"],
+    ["steam_differs_from_application", "steam", "later", "needs"],
+    ["linked_steam_shared", "steam", "later", "needs"],
+    // One person on two records is for staff on either provider.
+    ["steam_on_another_record", "steam", "needs", "needs"],
+    ["steam_ready_automatic", "steam", "waiting", "waiting"],
+    // Founder: what Gramps or Patreon settles waits, a conflict needs staff
+    ["founder_ready_automatic", "founder", "waiting", "waiting"],
+    ["founder_automatic_waiting", "founder", "waiting", "waiting"],
+    ["founder_ready_automatic_off", "founder", "waiting", "waiting"],
+    ["founder_below_minimum", "founder", "waiting", "waiting"],
+    ["founder_not_first_payment", "founder", "waiting", "waiting"],
+    ["founder_source_not_qualifying", "founder", "waiting", "waiting"],
+    ["founder_waiting_patreon", "founder", "waiting", "waiting"],
+    ["founder_waiting_discord", "founder", "waiting", "waiting"],
+    ["founder_needs_discord", "founder", "waiting", "needs"],
+    ["founder_ready_staff", "founder", "needs", "needs"],
+    ["founder_steam_on_another_record", "founder", "needs", "needs"],
+    ["founder_earlier_payment_other_record", "founder", "needs", "needs"],
+    ["founder_steam_applied_by_founder", "founder", "needs", "needs"],
+    ["founder_window_not_configured", "founder", "notes", "notes"],
+    // Notes: why a record is not a founder
+    ["founder_not_first_payment", "payment", "notes", "notes"],
+    ["founder_no_payment", "payment", "notes", "notes"],
+    ["founder_earlier_payment", "payment", "notes", "notes"],
+    ["founder_not_verified", "payment", "notes", "notes"],
+    ["founder_outside_window", "info", "notes", "notes"],
+    ["founder_already_founder", "info", "notes", "notes"],
+    ["founder_below_minimum", "info", "notes", "notes"],
+    // A step this page does not know is shown to staff, so nothing new is hidden.
+    ["something_new", "founder", "needs", "needs"],
+  ])("puts %s (%s) under %s for Patreon and %s for PayPal", (code, area, patreonList, paypalList) => {
+    const patreonState = rowState(withSteps(step(code, area)));
+    expect(placed(patreonState)).toBe(patreonList);
+    expect(placed(rowState(paypal(step(code, area))))).toBe(paypalList);
+    expect(patreonState.state).toBe(patreonList === "needs" ? "needs" : patreonList === "waiting" ? "waiting" : "set");
   });
 
-  it.each(["no_whitelist_application", "application_pending", "application_in_progress", "no_approved_application"])(
-    "keeps %s for later, so the row stays all set",
-    (code) => {
-      expect(rowState(withSteps(step(code)))).toMatchObject({ state: "set", later: [`Step ${code}.`], needs: [] });
-    },
-  );
-
-  it.each([
-    ["a payment step", step("founder_not_first_payment", "payment")],
-    ["a note", step("founder_outside_window", "info")],
-    ["unset founder dates", step("founder_window_not_configured", "founder")],
-    [
-      "a PayPal payment in another currency that staff did not mark as worth US$5",
-      step("founder_below_minimum", "info"),
-    ],
-  ])("keeps %s as a note, never a task", (_label, note) => {
-    expect(rowState(withSteps(note))).toMatchObject({ state: "set", notes: [note.message], needs: [] });
-  });
-
-  it("waits for each sync to check a Patreon payment in another currency against its tier", () => {
-    const tier = step("founder_below_minimum", "founder");
-    expect(rowState(withSteps(tier))).toMatchObject({ state: "waiting", waiting: [tier.message], needs: [] });
-  });
-
-  it("needs staff for a payment in the founder window that may have been their first", () => {
-    const check = step("founder_not_first_payment", "founder");
-    expect(rowState(withSteps(check))).toMatchObject({ state: "needs", needs: [check.message], notes: [] });
-  });
-
-  it.each([
-    "link_discord_paypal",
-    "discord_on_another_record",
-    "link_discord_no_import",
-    "discord_not_reported",
-    "discord_differs",
-    "discord_reported_for_other_patron",
-    "application_not_confirmed",
-    "several_steam_ids",
-    "invalid_steam_id",
-    "steam_shared",
-    "linked_steam_shared",
-    "steam_rejected_before",
-    "steam_on_another_record",
-    "steam_available",
-    "source_application_revoked",
-    "steam_differs_from_application",
-    "founder_needs_discord",
-    "founder_ready_staff",
-    "founder_ready_automatic_off",
-    "founder_steam_applied_by_founder",
-  ])("needs staff for %s", (code) => {
-    expect(rowState(withSteps(step(code)))).toMatchObject({ state: "needs", needs: [`Step ${code}.`] });
-  });
-
-  it("puts a step it does not know under Needs you", () => {
-    expect(rowState(withSteps(step("something_new", "founder")))).toMatchObject({
-      state: "needs",
-      needs: ["Step something_new."],
-    });
-  });
-
-  it("waits for an account only while the record has neither", () => {
+  it("waits for an account only while the record has neither, and needs staff for an invalid SteamID", () => {
     const missing = step("founder_no_identity", "founder");
     expect(rowState({ ...withSteps(missing), discordId: null, steamId: null }).state).toBe("waiting");
     expect(rowState({ ...withSteps(missing), discordId: null }).state).toBe("needs");
+    expect(rowState(withSteps(missing)).state).toBe("needs");
   });
 
   it("needs staff above waiting, and keeps every group", () => {
@@ -157,147 +139,89 @@ describe("row state", () => {
       withSteps(
         step("connect_discord_in_patreon", "discord"),
         step("steam_shared"),
+        step("steam_on_another_record"),
         step("no_whitelist_application"),
         step("founder_earlier_payment", "payment"),
       ),
     );
     expect(state).toEqual({
       state: "needs",
-      needs: ["Step steam_shared."],
+      needs: ["Step steam_on_another_record."],
       waiting: ["Step connect_discord_in_patreon."],
-      later: ["Step no_whitelist_application."],
+      later: ["Step steam_shared.", "Step no_whitelist_application."],
       notes: ["Step founder_earlier_payment."],
     });
   });
 
-  it("starts with a sentence for each founder payment to check on this record, then the server's steps", () => {
-    const sync = lists({
-      founderReviews: [review("unverified"), review("not_first_payment"), review("unverified", "another-record")],
-    });
-    expect(rowState(withSteps(step("steam_shared")), sync)).toMatchObject({
-      state: "needs",
-      needs: [
-        "Patreon no longer shows their founder payment as paid.",
-        "Their founder payment is no longer their first payment.",
-        "Step steam_shared.",
-      ],
-    });
-    // A founder with nothing else left still needs staff.
-    expect(rowState(record, sync).state).toBe("needs");
-    expect(rowState({ ...record, id: "unlisted" }, sync).state).toBe("set");
-  });
-
-  it("adds a Discord conflict unless a Discord step already needs staff", () => {
-    expect(rowState(record, lists({ conflictDetails: [conflict("discord-in-use")] })).needs).toEqual([
-      "Their Discord account is already on another supporter.",
-    ]);
-    expect(rowState(record, lists({ conflictDetails: [conflict("discord-differs")] })).needs).toEqual([
-      "Patreon shows a different Discord account.",
-    ]);
-    const differs = withSteps(step("discord_differs", "discord"));
-    expect(rowState(differs, lists({ conflictDetails: [conflict("discord-differs")] })).needs).toEqual([
-      "Step discord_differs.",
-    ]);
-    // A Discord step that only waits does not say what the conflict is.
-    const waiting = withSteps(step("connect_discord_in_patreon", "discord"));
-    expect(rowState(waiting, lists({ conflictDetails: [conflict("discord-in-use")] }))).toMatchObject({
-      state: "needs",
-      needs: ["Their Discord account is already on another supporter."],
-      waiting: ["Step connect_discord_in_patreon."],
-    });
-    expect(rowState(record, lists({ conflictDetails: [conflict("discord-in-use", "another-record")] })).state).toBe(
-      "set",
+  it("lists a line once when two steps wait for the same thing", () => {
+    const message = "Waiting for them to connect Discord on Patreon.";
+    const state = rowState(
+      withSteps(
+        { code: "connect_discord_in_patreon", area: "discord", message },
+        { code: "founder_waiting_discord", area: "founder", message },
+      ),
     );
+    expect(state).toMatchObject({ state: "waiting", waiting: [message] });
   });
 });
 
 describe("Add payment", () => {
   const patron = { ...record, founder: null };
-  it("shows on a Patreon record with a payment step or a first payment to check", () => {
-    expect(paymentOffered({ ...patron, nextSteps: [step("founder_no_payment", "payment")] })).toBe(true);
-    expect(paymentOffered({ ...patron, nextSteps: [step("founder_not_first_payment", "founder")] })).toBe(true);
+  it("never shows on a Patreon record while the Patreon import runs, which brings in every payment", () => {
+    for (const latestPayment of [null, payment])
+      for (const nextSteps of [[step("founder_no_payment", "payment")], [step("founder_not_first_payment", "founder")]])
+        expect(paymentOffered({ ...patron, latestPayment, nextSteps }, true)).toBe(false);
   });
-  it("shows on a Patreon record with no paid payment, whether or not the founder dates are set", () => {
+  it("shows on a Patreon record with a payment step while the import is off", () => {
+    expect(paymentOffered({ ...patron, nextSteps: [step("founder_no_payment", "payment")] }, false)).toBe(true);
+    expect(paymentOffered({ ...patron, nextSteps: [step("founder_not_first_payment", "payment")] }, false)).toBe(true);
+  });
+  it("shows on a Patreon record with no paid payment while the import is off, whether or not the dates are set", () => {
     const unset = [step("founder_window_not_configured", "founder")];
     for (const latestPayment of [
       null,
       { ...payment, source: "signed_status" as const, amountCents: null, verificationState: "unverified" as const },
       { ...payment, verificationState: "unverified" as const },
     ])
-      expect(paymentOffered({ ...patron, latestPayment, nextSteps: unset })).toBe(true);
+      expect(paymentOffered({ ...patron, latestPayment, nextSteps: unset }, false)).toBe(true);
     // One paid payment is enough for the Supporter role, so it stays out of the way.
-    expect(paymentOffered({ ...patron, nextSteps: unset })).toBe(false);
-    expect(paymentOffered({ ...patron, nextSteps: [step("founder_outside_window", "info")] })).toBe(false);
+    expect(paymentOffered({ ...patron, nextSteps: unset }, false)).toBe(false);
+    expect(paymentOffered({ ...patron, nextSteps: [step("founder_outside_window", "info")] }, false)).toBe(false);
   });
   it("never shows on a PayPal record, which records its payments in the PayPal form", () => {
-    expect(
-      paymentOffered({ ...patron, provider: "paypal", latestPayment: null, nextSteps: [step("x", "payment")] }),
-    ).toBe(false);
-  });
-});
-
-describe("marking a founder payment checked", () => {
-  it("sends the payment the import listed, with the record's revision", () => {
-    const values = new FormData();
-    values.set("reason", "Checked in Patreon");
-    values.set("paymentId", payment.id);
-    expect(reviewInput(record, "review", "action-id", values)).toEqual({
-      id: "action-id",
-      version: record.version,
-      confirm: record.confirmKey,
-      reason: "Checked in Patreon",
-      paymentId: payment.id,
-    });
-  });
-});
-
-describe("keeping a Discord account", () => {
-  it("restates the record's own Discord account, and needs one to keep", () => {
-    const values = new FormData();
-    values.set("reason", "Checked their Discord account");
-    expect(reviewInput(record, "keep", "action-id", values)).toEqual({
-      id: "action-id",
-      version: record.version,
-      confirm: record.confirmKey,
-      reason: "Checked their Discord account",
-      discordId: record.discordId,
-      discordConfirmed: true,
-    });
-    expect(() => reviewInput({ ...record, discordId: null }, "keep", "action-id", values)).toThrow(
-      "This record has no Discord account to keep.",
-    );
+    for (const importConfigured of [true, false])
+      expect(
+        paymentOffered(
+          { ...patron, provider: "paypal", latestPayment: null, nextSteps: [step("x", "payment")] },
+          importConfigured,
+        ),
+      ).toBe(false);
   });
 });
 
 describe("the Discord column", () => {
   const unlinked: Supporter = { ...record, discordId: null, discordSource: null };
-  it.each([
-    "discord_on_another_record",
-    "discord_not_reported",
-    "discord_differs",
-    "discord_reported_for_other_patron",
-  ])("asks staff to check the account for %s, before anything else", (code) => {
-    expect(discordCell(withSteps(step(code, "discord")))).toEqual({ text: "Check", warn: true, rank: 0 });
-  });
-  it("asks staff to check an account the last import found a conflict for", () => {
-    expect(discordCell(record, lists({ conflictDetails: [conflict("discord-in-use")] }))).toMatchObject({
-      text: "Check",
-      warn: true,
-    });
-    expect(discordCell(record, lists({ conflictDetails: [conflict("discord-in-use", "another-record")] })).text).toBe(
-      "Linked",
-    );
-  });
+  it.each(["discord_on_another_record", "discord_differs", "discord_reported_for_other_patron"])(
+    "asks staff to check the account for %s, before anything else",
+    (code) => {
+      expect(discordCell(withSteps(step(code, "discord")))).toEqual({ text: "Check", warn: true, rank: 0 });
+    },
+  );
   it("says where a linked account came from", () => {
     expect(discordCell(record)).toEqual({ text: "Linked", warn: false, detail: "Added by staff", rank: 4 });
     expect(discordCell({ ...record, discordSource: "patreon" }).detail).toBe("From Patreon");
     expect(discordCell({ ...record, discordSource: null }).detail).toBe("Added earlier");
   });
-  it("says an account is missing where staff must add it", () => {
-    const missing = { text: "Missing", warn: true, rank: 1 };
-    expect(discordCell({ ...unlinked, provider: "paypal", patreonMemberId: null })).toEqual(missing);
-    expect(discordCell({ ...unlinked, needsDiscordLink: true })).toEqual(missing);
-    expect(discordCell({ ...unlinked, nextSteps: [step("link_discord_no_import", "discord")] })).toEqual(missing);
+  it("says an account is missing only on a PayPal record, where staff add it", () => {
+    expect(discordCell({ ...unlinked, provider: "paypal", patreonMemberId: null })).toEqual({
+      text: "Missing",
+      warn: true,
+      rank: 1,
+    });
+    // A Patreon account arrives from Patreon, so a founder without one, or a record waiting for the import, waits.
+    const notConnected = { text: "Not connected", warn: false, rank: 2 };
+    expect(discordCell({ ...unlinked, needsDiscordLink: true })).toEqual(notConnected);
+    expect(discordCell({ ...unlinked, nextSteps: [step("link_discord_no_import", "discord")] })).toEqual(notConnected);
   });
   it("says Gramps links an account Patreon shows, and otherwise that none is connected", () => {
     expect(discordCell({ ...unlinked, patreonDiscordId: "34567890123456789" })).toEqual({
@@ -306,6 +230,27 @@ describe("the Discord column", () => {
       rank: 3,
     });
     expect(discordCell(unlinked)).toEqual({ text: "Not connected", warn: false, rank: 2 });
+  });
+  it("shows a link Patreon no longer reports as linked, not as a problem", () => {
+    expect(discordCell({ ...record, discordSource: "patreon", patreonDiscordId: null })).toMatchObject({
+      text: "Linked",
+      warn: false,
+    });
+  });
+});
+
+describe("the request body", () => {
+  it("sends a founder award on the payment the server named", () => {
+    const values = new FormData();
+    values.set("reason", "Founder confirmed");
+    const ready: Supporter = { ...record, founder: null, founderEligiblePayment: payment };
+    expect(reviewInput(ready, "founder", "action-id", values)).toEqual({
+      id: "action-id",
+      version: record.version,
+      confirm: record.confirmKey,
+      reason: "Founder confirmed",
+      paymentId: payment.id,
+    });
   });
 });
 
