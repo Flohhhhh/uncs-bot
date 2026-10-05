@@ -27,6 +27,16 @@ const longShotSql = (column: string, param: number) => {
   const code = `(CASE WHEN ${cause} LIKE 'id.item.%' THEN substr(${cause}, 9) WHEN ${cause} !~ '[./\\\\]' THEN ${cause} END)`;
   return `(regexp_replace(${code}, '[^a-z0-9]', '', 'g') = ANY($${param}::text[]) OR ${code} ~ '^wepn_?[0-9]{1,4}$')`;
 };
+/**
+ * The plausible-shot test on the `alias` row: above zero, at most 1,200 m, and not tagged as a vehicle
+ * explosion, roadkill or fall in any stored spelling. Binds no parameter.
+ */
+const plausibleShotSql = (alias = "") => {
+  const p = alias ? `${alias}.` : "";
+  const prefixes = ["", "Meta.Progression.Context.Player.KillContext.", "Meta.PlayerKillFlag.Player."];
+  const tags = ["VehicleExplosion", "RoadKill", "Falling"].flatMap((tag) => prefixes.map((x) => `'${x}${tag}'`));
+  return `${p}distance_centimeters > 0 AND ${p}distance_centimeters <= 120000 AND NOT (${p}context_tags ?| ARRAY[${tags.join(",")}])`;
+};
 const oneLine = (text: string) => text.replace(/\s+/g, " ");
 const serverInstance = randomUUID();
 const killed = () => ({ eventId: randomUUID(), type: "killed", eventTime: 3 });
@@ -288,9 +298,10 @@ describe("telemetry persistence contract", () => {
     expect(config.text).toContain(
       "ORDER BY kills.distance_centimeters DESC, kills.received_at, kills.event_time, kills.event_id LIMIT 1",
     );
-    // Long-distance call: firearm kills only, so artillery and rocket pods never take it.
+    // Long-distance call: plausible firearm shots only, so artillery, rocket pods and impossible
+    // distances never take it.
     expect(oneLine(config.text)).toContain(
-      `WHERE kills.distance_centimeters IS NOT NULL AND ${longShotSql("kills.cause", 5)} ORDER BY`,
+      `WHERE ${plausibleShotSql("kills")} AND ${longShotSql("kills.cause", 5)} ORDER BY`,
     );
     expect(config.text).toContain("LIMIT 50");
     // "Id.Item.AK74M" and "ID.Item.AK74M" are one weapon, so Old faithful counts them together.
@@ -355,6 +366,10 @@ describe("telemetry persistence contract", () => {
     expect(s1[0].text).toContain("NOT suicide AND killer_steam_id IS NOT NULL");
     expect(s1[0].text).toContain("extract(hour FROM received_at AT TIME ZONE 'UTC')");
     expect(s1[0].text).toContain("distance_centimeters <= 200000");
+    // A firearm's longest kill reads the plausible-shot maximum; the service picks it by kind.
+    expect(oneLine(s1[0].text)).toContain(
+      `max(distance_centimeters) FILTER (WHERE ${plausibleShotSql()}) AS "longestShotCentimeters"`,
+    );
     expect(s1[0].text).not.toContain("id.item.");
     expect(s1[0].text).toContain(
       "?| ARRAY['Penetration','Meta.Progression.Context.Player.KillContext.Penetration','Meta.PlayerKillFlag.Player.Penetration']",
@@ -378,9 +393,7 @@ describe("telemetry persistence contract", () => {
     };
     const best = cte("best", "longest");
     expect(best).toContain("NOT suicide AND killer_steam_id IS NOT NULL");
-    expect(oneLine(best)).toContain(
-      `distance_centimeters > 0 AND distance_centimeters <= 200000 AND ${longShotSql("cause", 4)} GROUP BY`,
-    );
+    expect(oneLine(best)).toContain(`${plausibleShotSql()} AND ${longShotSql("cause", 4)} GROUP BY`);
     expect(best).toContain("GROUP BY killer_steam_id");
     // Capped at ten before any name is looked up.
     expect(best).toContain("ORDER BY cm DESC, killer_steam_id LIMIT 10");
@@ -390,7 +403,9 @@ describe("telemetry persistence contract", () => {
       "c.server_id = $1 AND c.received_at >= $2 AND c.received_at <= $3 AND c.killer_steam_id = best.steam_id",
     );
     // The kill row is a long shot too, so a vehicle kill at the same centimetre cannot be shown instead.
-    expect(oneLine(longest)).toContain(`c.distance_centimeters = best.cm AND ${longShotSql("c.cause", 5)} ORDER BY`);
+    expect(oneLine(longest)).toContain(
+      `c.distance_centimeters = best.cm AND ${plausibleShotSql("c")} AND ${longShotSql("c.cause", 5)} ORDER BY`,
+    );
     expect(longest).toContain("ORDER BY c.received_at, c.event_id LIMIT 1");
     expect(s3[0].text).not.toContain("LIMIT 200");
     expect(s3[0].text).not.toContain("DISTINCT ON");
@@ -449,8 +464,10 @@ describe("telemetry persistence contract", () => {
       "server_id = $1 AND received_at >= $2 AND received_at <= $3 AND NOT suicide AND killer_steam_id IN ($4, $5)",
     );
     expect(weapons[0].text).toContain("GROUP BY killer_steam_id, lower(btrim(cause))");
-    expect(weapons[0].text).toContain("distance_centimeters <= 200000");
-    // longestKillMeters counts firearm kills only; the test runs once per player and cause.
+    expect(oneLine(weapons[0].text)).toContain(
+      `max(distance_centimeters) FILTER (WHERE ${plausibleShotSql()}) AS longest`,
+    );
+    // longestKillMeters counts plausible firearm shots only; the cause test runs once per player and cause.
     expect(oneLine(weapons[0].text)).toContain(
       `CASE WHEN ${longShotSql("cause", 6)} THEN longest END AS "longestCentimeters" FROM causes`,
     );

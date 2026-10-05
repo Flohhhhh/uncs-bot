@@ -847,16 +847,17 @@ describe("launch storage on isolated PostgreSQL", () => {
     expect(stats.totals).toEqual({ events: 213, deaths: 213, suicides: 0, falling: 0, players: 13 });
   });
 
-  it("counts only firearm kills as long shots in stats, row extras and the weekly highlight", async () => {
+  it("counts only plausible firearm shots as long shots in stats, row extras and the weekly highlight", async () => {
     const telemetry = new TelemetryStore(drizzle({ client, schema }));
     const now = new Date(),
       since = new Date(now.getTime() - 60_000);
-    const [ricky, annie, rita, tom, target] = [
+    const [ricky, annie, rita, tom, target, max] = [
       "76561198000000301",
       "76561198000000302",
       "76561198000000303",
       "76561198000000304",
       "76561198000000305",
+      "76561198000000306",
     ];
     const names: Record<string, string> = {
       [ricky]: "RifleRicky",
@@ -864,9 +865,10 @@ describe("launch storage on isolated PostgreSQL", () => {
       [rita]: "RocketRita",
       [tom]: "TankTom",
       [target]: "Target",
+      [max]: "MachineMax",
     };
     let eventTime = 0;
-    const kill = (killer: string, cause: string, distance: number) => ({
+    const kill = (killer: string, cause: string, distance: number, contextTags: string[] = []) => ({
       eventId: randomUUID(),
       type: "killed",
       eventTime: ++eventTime,
@@ -877,6 +879,7 @@ describe("launch storage on isolated PostgreSQL", () => {
       victimName: names[target],
       cause,
       distance,
+      contextTags,
     });
     const feed = parseFeed({
       serverId: randomUUID(),
@@ -893,14 +896,21 @@ describe("launch storage on isolated PostgreSQL", () => {
         kill(annie, "ID.Item.AK74M", 5_000),
         // An item without a label reads "New Rifle" but its kind is unknown, not firearm, so it does not count.
         kill(rita, "Id.Item.NewRifle", 1_000),
+        // Firearm kills that are not shots: 1,930 m is past any gun's reach, and the tags say a vehicle
+        // explosion or a fall did the killing. They count as kills, never as long shots.
+        kill(max, "Id.Item.MP9", 193_000),
+        kill(max, "Id.Item.A91", 90_000, ["Meta.Progression.Context.Player.KillContext.VehicleExplosion"]),
+        kill(max, "WEPN_029", 80_000, ["Falling"]),
+        kill(max, "Id.Item.MP9", 3_000),
       ],
     });
-    expect((await telemetry.ingest(feed, now, "east")).inserted).toBe(8);
+    expect((await telemetry.ingest(feed, now, "east")).inserted).toBe(12);
 
     const result = publicServerStats(await telemetry.serverStats(since, now, "east"));
     expect(result.longestKills).toEqual([
       { name: "RifleRicky", weapon: "SVDM", meters: 600, map: "Bakurani" },
       { name: "ArtilleryAnnie", weapon: "AK-74M", meters: 50, map: "Bakurani" },
+      { name: "MachineMax", weapon: "MP9", meters: 30, map: "Bakurani" },
     ]);
     // Each weapon's own longest kill still covers every kind.
     expect(result.weapons).toEqual(
@@ -908,10 +918,14 @@ describe("launch storage on isolated PostgreSQL", () => {
         { label: "Artillery", kind: "vehicle_weapon", kills: 1, headshotKills: 0, longestMeters: 2_000 },
         { label: "Rocket Pods", kind: "vehicle_weapon", kills: 1, headshotKills: 0, longestMeters: 1_500 },
         { label: "SVDM", kind: "firearm", kills: 1, headshotKills: 0, longestMeters: 600 },
+        // A firearm's own longest kill is its longest plausible shot.
+        { label: "MP9", kind: "firearm", kills: 2, headshotKills: 0, longestMeters: 30 },
+        { label: "A-91", kind: "firearm", kills: 1, headshotKills: 0, longestMeters: null },
+        { label: "Weapon 029", kind: "firearm", kills: 1, headshotKills: 0, longestMeters: null },
       ]),
     );
 
-    const extras = await telemetry.rowExtras(since, now, [ricky, annie, rita, tom], "east");
+    const extras = await telemetry.rowExtras(since, now, [ricky, annie, rita, tom, max], "east");
     expect(rowExtrasByPlayer(extras)).toEqual(
       new Map([
         [ricky, { topWeapon: "SVDM", longestKillMeters: 600, bestStreak: 1 }],
@@ -919,6 +933,7 @@ describe("launch storage on isolated PostgreSQL", () => {
         // No firearm kill, so no longest kill at all.
         [rita, { topWeapon: "New Rifle", bestStreak: 2 }],
         [tom, { topWeapon: "M67 grenade", bestStreak: 3 }],
+        [max, { topWeapon: "MP9", longestKillMeters: 30, bestStreak: 4 }],
       ]),
     );
 
