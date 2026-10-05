@@ -3159,6 +3159,36 @@ dialog .map-picker-fields > label {
   padding-inline: 0;
   font-size: var(--text-sm);
 }
+.player-history {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-sm);
+}
+.player-history p {
+  margin: 0 0 var(--space-1);
+}
+.player-history summary {
+  color: var(--muted);
+  cursor: pointer;
+}
+.player-history ul {
+  margin: var(--space-1) 0 0;
+  padding-left: var(--space-4);
+}
+.repeat-offenders ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.repeat-offenders li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--line);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
 .player-sheet-actions {
   border-top: 1px solid var(--line);
 }

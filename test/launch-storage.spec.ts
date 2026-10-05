@@ -539,6 +539,81 @@ describe("launch storage on isolated PostgreSQL", () => {
     expect((await admin.receipt(notable[0], "primary"))?.state).toBe("applied");
   });
 
+  it("counts each player's kicks and bans the game applied or accepted, on one server", async () => {
+    const [griefer, other, clean] = ["76561198000000001", "76561198000000002", "76561198000000003"];
+    const record = async (
+      action: "kick" | "ban",
+      steamId: string,
+      state: ActionResult["state"] | null,
+      daysAgo: number,
+      extra: { serverId?: string; name?: string; reason?: string } = {},
+    ) => {
+      const id = randomUUID();
+      const base = { id, steamId, reason: extra.reason ?? "Team killing", serverId: extra.serverId };
+      await admin.begin(
+        staff,
+        action === "ban" ? { ...base, action, confirm: steamId } : { ...base, action },
+        id,
+        extra.name,
+      );
+      if (state) await admin.finish(id, { state, message: `Recorded ${state}` });
+      await client.query("UPDATE admin_actions SET created_at = now() - make_interval(days => $1) WHERE id = $2", [
+        daysAgo,
+        id,
+      ]);
+      return id;
+    };
+    const oldest = await record("kick", griefer, "applied", 40, { name: "Old name", reason: "Spawn camping" });
+    await record("kick", griefer, "failed", 3, { name: "Refused" });
+    // Started (a crash before the result), unknown and pending kicks may never have reached the game.
+    const unfinished = await record("kick", griefer, null, 5, { name: "Unfinished" });
+    const unknown = await record("kick", griefer, "unknown", 6, { name: "Unknown result" });
+    const pending = await record("kick", griefer, "pending", 7, { name: "Pending result" });
+    const earlier = await record("kick", griefer, "applied", 4);
+    const accepted = await record("kick", griefer, "accepted", 2, { name: "Griefer" });
+    const ban = await record("ban", griefer, "applied", 1, { name: "Griefer", reason: "Cheating" });
+    await record("kick", griefer, "applied", 1, { serverId: "east", name: "Elsewhere" });
+    await record("kick", other, "applied", 10);
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60_000);
+
+    const summaries = await admin.moderationSummaries("primary", [griefer, other, clean], since);
+    expect([...summaries.keys()].sort()).toEqual([griefer, other]);
+    expect(summaries.get(griefer)).toEqual({
+      name: "Griefer",
+      kicks: { count: 3, recent: 2, lastAt: expect.any(Date), lastBy: staff.name, lastReason: "Team killing" },
+      bans: { count: 1, recent: 1, lastAt: expect.any(Date), lastBy: staff.name, lastReason: "Cheating" },
+    });
+    expect(summaries.get(griefer)!.bans!.lastAt.getTime()).toBeGreaterThan(
+      summaries.get(griefer)!.kicks!.lastAt.getTime(),
+    );
+    expect(summaries.get(other)).toMatchObject({ name: null, kicks: { count: 1, recent: 1 }, bans: null });
+    expect((await admin.moderationSummaries("east", [griefer])).get(griefer)).toMatchObject({
+      name: "Elsewhere",
+      kicks: { count: 1 },
+      bans: null,
+    });
+
+    // Recent entries list the unconfirmed kicks with their outcome; only refused ones are left out.
+    expect((await admin.moderationEntries("primary", griefer)).map((entry) => entry.id)).toEqual([
+      ban,
+      accepted,
+      earlier,
+      unfinished,
+      unknown,
+      pending,
+      oldest,
+    ]);
+    expect(await admin.repeatOffenders("primary", since, 2)).toEqual([
+      {
+        steamId: griefer,
+        name: "Griefer",
+        kicks: { count: 2, recent: 2, lastAt: expect.any(Date), lastBy: staff.name, lastReason: "Team killing" },
+      },
+    ]);
+    expect(await admin.repeatOffenders("primary", since, 3)).toEqual([]);
+    expect(await admin.repeatOffenders("east", since, 2)).toEqual([]);
+  });
+
   it("deduplicates and aggregates the same game event independently on two configured servers", async () => {
     const telemetry = new TelemetryStore(drizzle({ client, schema }));
     const now = new Date(),

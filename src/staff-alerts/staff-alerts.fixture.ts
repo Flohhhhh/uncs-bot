@@ -6,7 +6,7 @@ import type { Overview, WardogsClient } from "../admin/wardogs.client";
 import type { EnvService } from "../env/env.service";
 import type { FeedContextSource } from "./feed-context";
 import type { NetworkBanSource } from "./network-bans";
-import { StaffAlertsWorker } from "./staff-alerts.monitor";
+import { StaffAlertsWorker, type KickHistory } from "./staff-alerts.monitor";
 import { StaffAlerts } from "./staff-alerts.service";
 
 export const guild = "234567890123456789";
@@ -101,7 +101,12 @@ export function gameDouble(initial = snapshot([])) {
 
 export function workerFixture(
   values: Record<string, unknown> = {},
-  options: { sources?: NetworkBanSource[]; feed?: FeedContextSource | null; game?: ReturnType<typeof gameDouble> } = {},
+  options: {
+    sources?: NetworkBanSource[];
+    feed?: FeedContextSource | null;
+    game?: ReturnType<typeof gameDouble>;
+    history?: KickHistory | null;
+  } = {},
 ) {
   const env: Record<string, unknown> = {
     ADMIN_GUILD_ID: guild,
@@ -122,6 +127,7 @@ export function workerFixture(
     envService,
     options.sources ?? [],
     options.feed ?? null,
+    options.history ?? null,
   );
   /** Advances the clock and runs one pass against this roster, then lets its alert posts finish. */
   const pass = async (next?: Overview, advance = 10_000) => {

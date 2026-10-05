@@ -23,14 +23,17 @@ export const STAFF_ALERT_KINDS = [
   "performance-window",
   "performance-match",
   "watchlist-join",
+  /** A joining player kicked often through the dashboard recently. Grouped with the watch list. */
+  "repeat-offender-join",
   /** Map-vote and 50v50 automation that needs a person (StaffAlerts.send). */
   "automation",
 ] as const;
 export type StaffAlertKind = (typeof STAFF_ALERT_KINDS)[number];
 export type StaffAlertSeverity = "info" | "warning" | "high";
 /**
- * Dashboard filter and snooze group. Health and seeding share one hourly limit. Automation alerts
- * cannot be snoozed: a ballot or 50v50 that needs a person is never held back by a snooze.
+ * Dashboard filter and snooze group. Health and seeding share one hourly limit. Repeat-offender joins
+ * are watch-list alerts. Automation alerts cannot be snoozed: a ballot or 50v50 that needs a person is
+ * never held back by a snooze.
  */
 export type StaffAlertCategory = "health" | "seeding" | "performance" | "watchlist" | "automation";
 export const SNOOZE_CATEGORIES = ["health", "seeding", "performance", "watchlist", "all"] as const;
@@ -42,7 +45,7 @@ export function alertCategory(kind: StaffAlertKind): StaffAlertCategory {
   if (kind.startsWith("game-")) return "health";
   if (kind.startsWith("seeding-")) return "seeding";
   if (kind.startsWith("performance-")) return "performance";
-  if (kind.startsWith("watchlist-")) return "watchlist";
+  if (kind.startsWith("watchlist-") || kind === "repeat-offender-join") return "watchlist";
   return "automation";
 }
 /** Only performance alerts take "legit" or "never"; any alert can be acknowledged. */
@@ -178,6 +181,9 @@ export type StaffAlertsStatus = {
     watchlistCount: number;
     watchlistHighlightCommunities: number;
     watchlistCooldownMinutes: number;
+    /** 0 when repeat-offender alerts are off. */
+    repeatOffenderKicks: number;
+    repeatOffenderDays: number;
   };
   worker: StaffAlertsWorkerView;
   snoozes: StaffAlertsSnoozeView[];

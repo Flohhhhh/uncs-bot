@@ -43,6 +43,8 @@ describe("staff alert settings", () => {
       STAFF_ALERTS_WATCHLIST_ENABLED: false,
       STAFF_ALERTS_WATCHLIST_HIGHLIGHT_COMMUNITIES: 3,
       STAFF_ALERTS_WATCHLIST_COOLDOWN_MINUTES: 360,
+      STAFF_ALERTS_REPEAT_OFFENDER_KICKS: 3,
+      STAFF_ALERTS_REPEAT_OFFENDER_DAYS: 30,
     });
     expect(parsed.data?.STAFF_ALERTS_PERFORMANCE_KNOWN_GOOD).toBeUndefined();
     expect(parsed.data?.STAFF_ALERTS_WATCHLIST).toBeUndefined();
@@ -53,8 +55,27 @@ describe("staff alert settings", () => {
       health: { enabled: false },
       seeding: { enabled: false, primeWindows: [{ start: 1020, end: 1380 }] },
       performance: { mode: "off" },
-      watchlist: { enabled: false },
+      watchlist: { enabled: false, repeatKicks: 3, repeatDays: 30 },
     });
+  });
+
+  it("checks repeat offenders with the watch list, turns them off at 0 kicks and bounds both settings", () => {
+    const on = options({
+      STAFF_ALERTS_ENABLED: "true",
+      STAFF_ALERTS_WATCHLIST_ENABLED: "true",
+      STAFF_ALERTS_REPEAT_OFFENDER_KICKS: "5",
+      STAFF_ALERTS_REPEAT_OFFENDER_DAYS: "14",
+    });
+    expect(on.watchlist).toMatchObject({ enabled: true, repeatKicks: 5, repeatDays: 14 });
+    expect(settingsView(on, 0)).toMatchObject({ repeatOffenderKicks: 5, repeatOffenderDays: 14 });
+    expect(options({ STAFF_ALERTS_REPEAT_OFFENDER_KICKS: "0" }).watchlist.repeatKicks).toBe(0);
+    for (const values of [
+      { STAFF_ALERTS_REPEAT_OFFENDER_KICKS: "-1" },
+      { STAFF_ALERTS_REPEAT_OFFENDER_KICKS: "101" },
+      { STAFF_ALERTS_REPEAT_OFFENDER_DAYS: "0" },
+      { STAFF_ALERTS_REPEAT_OFFENDER_DAYS: "366" },
+    ] as Record<string, string>[])
+      expect(parse(values).success).toBe(false);
   });
 
   it("keeps features off unless the master switch is on, and starts only with a feature", () => {

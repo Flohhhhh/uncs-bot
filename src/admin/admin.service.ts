@@ -10,7 +10,7 @@ import { createHash } from "node:crypto";
 import { Subject } from "rxjs";
 import { z } from "zod";
 import { AdminStore } from "./admin.store";
-import { actionSchema, canAct, type ActionResult, type Staff } from "./admin.types";
+import { actionSchema, canAct, steamId, type ActionResult, type Staff } from "./admin.types";
 import { RconError } from "./wardogs.client";
 import { GameServers } from "./game-servers";
 import { auditAction } from "./server-configuration";
@@ -24,6 +24,10 @@ export type WhitelistRemoval = {
   actorName: string;
   state: "applied" | "pending";
 };
+
+/** The Repeat offenders list on Action history: players kicked this many times within this many days. */
+export const REPEAT_OFFENDER_LIST = { minimum: 2, days: 30 };
+const DAY_MS = 24 * 60 * 60_000;
 
 /** Returns a sentence to add to the staff member's result, or null. */
 export type UnchangedQueueListener = (staff: Staff, serverId: string) => Promise<string | null>;
@@ -133,9 +137,13 @@ export class AdminService {
     if (this.lastActions.size > 1000) this.lastActions.clear();
     this.lastActions.set(actorKey, Date.now());
     const requestHash = createHash("sha256").update(JSON.stringify(action)).digest("hex");
+    const playerName =
+      action.action === "kick" || action.action === "ban" ? this.rosterName(serverId, action.steamId) : undefined;
     let started: Awaited<ReturnType<AdminStore["begin"]>>;
     try {
-      started = await this.store.begin(staff, auditAction(action), requestHash);
+      started = await (playerName
+        ? this.store.begin(staff, auditAction(action), requestHash, playerName)
+        : this.store.begin(staff, auditAction(action), requestHash));
     } catch {
       throw new ServiceUnavailableException("The action could not be recorded, so nothing was sent to the game.");
     }
@@ -203,6 +211,45 @@ export class AdminService {
         if (note) result = { ...result, message: `${result.message} ${note}` };
       }
     return { id: action.id, ...result };
+  }
+
+  /** The player's name from the last roster read, for a kick or ban record. Never a game request or a reason to stop. */
+  private rosterName(serverId: string, player: string) {
+    try {
+      const name = this.servers.get(serverId).rosterName(player)?.trim();
+      return name ? [...name].slice(0, 64).join("") : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** One player's kicks and bans on this server for the player panel: counts, the newest of each and the last 10. */
+  async moderation(player: string, serverId?: string) {
+    const parsed = steamId.safeParse(player);
+    if (!parsed.success) throw new BadRequestException("Enter a 17-digit SteamID64 for a personal Steam account.");
+    const id = this.servers.resolve(serverId);
+    try {
+      const [summaries, entries] = await Promise.all([
+        this.store.moderationSummaries(id, [parsed.data]),
+        this.store.moderationEntries(id, parsed.data),
+      ]);
+      const summary = summaries.get(parsed.data);
+      return { kicks: summary?.kicks ?? null, bans: summary?.bans ?? null, entries };
+    } catch {
+      throw new ServiceUnavailableException("Kick and ban history could not be loaded. Try again shortly.");
+    }
+  }
+
+  /** Players kicked at least twice on this server in the last 30 days, most kicks first. */
+  async repeatOffenders(serverId?: string) {
+    const id = this.servers.resolve(serverId);
+    const { minimum, days } = REPEAT_OFFENDER_LIST;
+    try {
+      const players = await this.store.repeatOffenders(id, new Date(Date.now() - days * DAY_MS), minimum);
+      return { minimum, days, players };
+    } catch {
+      throw new ServiceUnavailableException("Repeat offenders could not be loaded. Try again shortly.");
+    }
   }
 
   /**

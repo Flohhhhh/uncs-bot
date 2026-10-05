@@ -7,6 +7,7 @@ import { Sheet } from "../../components/ui";
 import { CopyValue } from "../../components/data-table";
 import { actionDefinitions, allowed } from "../actions/policy";
 import { FactionChip, liveFactions, playerFaction } from "./factions";
+import { ModerationHistory } from "./moderation-history";
 import { TeamMoveDialog, type TeamMoveResult } from "./team-move";
 
 /** A player to show in the panel. `name` is used when the player is no longer in the live roster. */
@@ -165,6 +166,7 @@ export function PlayerSheet({
         <p className="player-sheet-id">
           <span className="muted">SteamID</span> <CopyValue value={steamId} />
         </p>
+        {linkable && <ModerationHistory steamId={steamId} />}
         {linkable && (
           <p className="player-sheet-links">
             <Link className="text-button" to={playerHistory(location.search, "combat", steamId)} onClick={onClose}>

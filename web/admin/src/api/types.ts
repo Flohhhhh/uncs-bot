@@ -61,7 +61,26 @@ export type Audit = {
   state: ActionResult["state"] | "started";
   message: string;
   createdAt: string;
-  details: { reason: string };
+  /** Kicks and bans also keep the player's name from the roster at the time, when it was known. */
+  details: { reason: string; playerName?: string };
+};
+/** One kind of action against a player: all of them, those in the asked period, and the newest one. */
+export type ModerationCount = {
+  count: number;
+  recent: number;
+  lastAt: string;
+  lastBy: string;
+  lastReason: string | null;
+};
+/**
+ * A player's dashboard kicks and bans on this server. Counts include only those the game applied or accepted;
+ * `entries` also lists unconfirmed ones with their outcome.
+ */
+export type PlayerModeration = { kicks: ModerationCount | null; bans: ModerationCount | null; entries: Audit[] };
+export type RepeatOffenderList = {
+  minimum: number;
+  days: number;
+  players: { steamId: string; name: string | null; kicks: ModerationCount }[];
 };
 export type Rotation = {
   enabled: boolean;
