@@ -300,7 +300,7 @@ describe("supporter reviews", () => {
       store.list.mockResolvedValue([record("primary")]);
       const [shown] = (await service.list(admin)).supporters;
       expect(shown.match.steam).toMatchObject({ steamId: "76561198000000009", serverId: "primary" });
-      expect(shown.nextSteps[0].message).toContain("SteamID 76561198000000009");
+      expect(shown.nextSteps[0].message).toContain("SteamID (76561198000000009)");
     });
     it("leave out the source application and keep the SteamID alert without its SteamID", async () => {
       const { service, store } = fixture();

@@ -215,21 +215,20 @@ export type FounderBlockedReason =
   | "no_identity"
   | "already_founder"
   | "steam_applied_by_founder";
+/** Shown to staff on the Supporters page, as the record's founder verdict and when the server refuses a founder. */
 export const founderBlockedMessages: Record<FounderBlockedReason | "no_payment", string> = {
-  window_not_configured: "The founder window is not configured.",
-  source_not_qualifying:
-    "Only a checked Patreon receipt, a Patreon API payment or a PayPal payment can qualify. A signed status alone cannot.",
-  not_verified: "This payment has not been verified, or Patreon no longer reports its charge as paid.",
-  not_first_payment: "Staff have not confirmed this was the supporter's first successful payment.",
-  earlier_payment:
-    "An earlier payment is recorded. Review the first successful payment before recording a founder promise.",
-  outside_window: "This payment was not made inside the founder window.",
-  below_minimum: "The payment is below US$5, or a non-USD payment has not been confirmed to be worth at least US$5.",
-  no_identity: "Link a Discord account or a valid SteamID64 first. A SteamID that is entered must be valid.",
-  already_founder: "This person already has a founder record. Each person can be a founder once.",
+  window_not_configured: "Founder dates are not set.",
+  source_not_qualifying: "Patreon has not confirmed a payment yet.",
+  not_verified: "This payment is not confirmed as paid.",
+  not_first_payment: "Not confirmed as their first payment.",
+  earlier_payment: "They have an earlier payment.",
+  outside_window: "Paid outside the founder window.",
+  below_minimum: "Paid less than US$5.",
+  no_identity: "Add a Discord account first.",
+  already_founder: "They are already a founder.",
   steam_applied_by_founder:
     "A founder with no SteamID linked applied for the whitelist with this SteamID. Link that founder's SteamID first.",
-  no_payment: "No payment is recorded for this supporter.",
+  no_payment: "No payment yet.",
 };
 export type FounderPaymentFacts = {
   source: string;
