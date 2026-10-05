@@ -1,6 +1,6 @@
 # Rotating passwords and tokens
 
-Step-by-step owner runbook for changing each secret Gramps uses. Rotate a secret when it may have been seen by someone or something that should not have it: a third-party bot with RCON or config access, a pasted screenshot, a departed staff member with host access, or a leaked log. Otherwise there is no schedule.
+Step-by-step owner runbook for changing each secret Gramps uses. Rotate a secret when it may have been seen by someone or something that should not have it: a third-party bot with RCON or config access, a pasted screenshot, a departed staff member with host access, or a leaked log. When the project changes hands, rotate every secret below, because the previous owner could see them all. Otherwise there is no schedule.
 
 ## Before you start
 
@@ -14,6 +14,7 @@ Step-by-step owner runbook for changing each secret Gramps uses. Rotate a secret
 - Never paste a secret into Discord, a ticket, a PR, a screenshot or a chat with anyone, including Claude. Paste it only into the host panel or the Railway variable.
 - Use a different value for every secret. The feed token must never equal the RCON password.
 - In Railway, editing a variable stages the change. Choose **Deploy** to apply it; the bot restarts with the new value. The previous deployment stays in the history if you need to roll back code, but a rolled-back deployment uses the current variables.
+- To rotate several secrets at once, change each one at its provider, stage every Railway edit, then deploy once. All the gaps below then overlap in one short outage.
 - Where this guide says `WARDOGS_RCON_PASSWORD` or `WARDOGS_FEED_TOKEN`, a deployment that uses `WARDOGS_SERVERS` keeps those values in each server's `password` and `feedToken` instead. Edit that JSON carefully and keep every other field as it is.
 
 ## RCON password
@@ -50,7 +51,19 @@ Kills sent between steps 1 and 2 are refused and may be lost for good, so do thi
 
 ## Dashboard session secret
 
-`ADMIN_SESSION_SECRET` protects the short-lived sign-in state, not the sessions themselves. Changing it and deploying only cancels sign-ins that are halfway through. To sign everyone out, a database operator must delete the dashboard session records; see [Admin security](ADMIN_SECURITY.md#deployment-and-incident-checks). To lock the dashboard during an incident, set `ADMIN_ENABLED=false` and deploy.
+`ADMIN_SESSION_SECRET` signs two things: the short-lived sign-in state, and applicant sessions on the website. Applicant sessions are signed cookies that last 30 minutes, so anyone holding the secret could create one for any Discord account and use the application pages as that person. Treat it like a password.
+
+Changing it and deploying cancels sign-ins that are halfway through and signs every applicant out. Staff dashboard sessions are stored in the database and keep working. To sign every staff member out, a database operator must delete the dashboard session records; see [Admin security](ADMIN_SECURITY.md#deployment-and-incident-checks). To lock the dashboard during an incident, set `ADMIN_ENABLED=false` and deploy.
+
+## Database password
+
+`DATABASE_URL` contains the password of the database role Gramps signs in with. Production runs on Neon.
+
+1. In the Neon console, reset the password of that role on the production branch. Neon resets are branch-scoped, so also reset it on every other branch that holds a copy of production data, or delete those branches. Then restart the compute, so connections made with the old password close.
+2. In Railway, set `DATABASE_URL` to the new connection string and deploy. The pre-deploy migration uses the same value.
+3. Check: the deploy finishes (startup stops if the database check fails) and the dashboard overview loads.
+
+Between steps 1 and 2 Gramps cannot reach the database, so do this with the server empty.
 
 ## Patreon
 
