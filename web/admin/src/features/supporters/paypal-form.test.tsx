@@ -381,7 +381,8 @@ describe("Add PayPal supporter", () => {
     expect(paypalSchema.safeParse(body).success).toBe(true);
     const status = screen.getByRole("status");
     expect(status).toHaveTextContent("Saved as a founder.");
-    expect(status).toHaveFocus();
+    // The result moves focus in an effect, which can run after the save's last render.
+    await waitFor(() => expect(status).toHaveFocus());
     expect(screen.getByText("Dana Donor")).toBeInTheDocument();
     expect(screen.getByText(/^5\.00 USD · /)).toBeInTheDocument();
     expect(screen.getByText(`Transaction ${transactionId}`)).toBeInTheDocument();
