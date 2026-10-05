@@ -6,9 +6,9 @@ Updated October 5, 2026. This records the current implementation and the develop
 
 The standalone Next.js app lives in `apps/web`. Nest still owns Discord OAuth, session storage, permissions and CSRF validation. The web app has no separate auth database or Better Auth installation.
 
-There is a development database, but no separately running development backend yet. The local preview is a simulated backend; it is not a development instance of the real authentication service.
+There is a development database, and a local development backend wrapper now exists in `apps/backend`. Its credentials and database URL still need local configuration. The local preview is a simulated backend; it is not a development instance of the real authentication service.
 
-The existing bot, backend and old dashboard still share the normal Nest application. A backend-only startup command has been proposed, but has **not been implemented**.
+The existing bot, backend and old dashboard still share the normal Nest application. A backend-only development startup is implemented separately in `apps/backend`; see [its README](../../apps/backend/README.md).
 
 ## What the preview is
 
@@ -75,19 +75,23 @@ Keep localhost or 127.0.0.1 consistent between the browser, `ADMIN_ORIGIN` and r
 
 Using the real auth implementation does not require using the production backend. Connecting to production creates real production sessions; future write actions could affect live data or game servers.
 
-## Development backend gap and recommended next step
+## Development backend wrapper and remaining setup
 
 Running the normal Nest startup locally also imports the Discord bot and scheduled/background modules. Pointing it at a development database alone does not isolate Discord or game-server integrations. Using production bot credentials locally could start another instance against the live Discord community.
 
-The recommended next increment is a local backend-only startup command that uses real Nest OAuth, session storage and admin API with the development database, while excluding the Discord gateway bot and background jobs. Its outbound integrations and game-action targets also need deliberate development configuration. This entry point does not exist yet.
+The local `apps/backend` wrapper now reuses the existing admin module with a dedicated environment file and database connection. It excludes the gateway bot and background jobs, binds to loopback, and allows reads and logout while blocking other writes. The root bot startup remains unchanged.
 
-The preview remains useful for UI work without credentials while that setup is established.
+Set the development PostgreSQL URL and Discord auth settings in the ignored `apps/backend/.env`, set web `BACKEND_URL=http://127.0.0.1:4321`, then run `npm --prefix apps/backend run dev`. The development database must already have the required schema; no migrations are generated or applied by this startup. A live development database/OAuth flow still needs verification after configuration. See [backend setup](../../apps/backend/README.md).
+
+The development backend also supports `BACKEND_GAME_MODE=sample`, which replaces only game data with the shared preview fixtures. Real Discord auth, roles and database sessions remain active, and Next.js keeps using port 4321. The web status indicator labels this as **Sample game data**, separate from demo authentication. See [backend sample-mode setup](../../apps/backend/README.md).
+
+The standalone preview remains useful for UI work without credentials.
 
 ## Verification and boundaries
 
 Completed verification:
 
-- 35 app-local unit tests under `apps/web/tests/unit/auth` and `apps/web/tests/unit/preview`, covering sessions, UI gating, logout, CSRF forwarding, mocked OAuth responses, and preview identity behavior.
+- 36 app-local unit tests under `apps/web/tests/unit/auth` and `apps/web/tests/unit/preview`, covering sessions, UI gating, logout, CSRF forwarding, mocked OAuth responses, and preview identity behavior.
 - Simulated browser login, admin reload, logout and direct-navigation protection.
 - Simulated access-denied and backend-unavailable browser states.
 - Web and backend builds, touched-file lint/typecheck, global formatting and whitespace checks.

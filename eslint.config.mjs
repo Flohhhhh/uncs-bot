@@ -64,7 +64,16 @@ const backendConfigs = [
 ];
 
 export default [
-  { ignores: ["apps/web/node_modules/**", "apps/web/.next/**", ...(!webInstalled ? ["apps/web/**"] : [])] },
+  {
+    ignores: [
+      "apps/backend/dist/**",
+      "apps/backend/node_modules/**",
+      "apps/backend/coverage/**",
+      "apps/web/node_modules/**",
+      "apps/web/.next/**",
+      ...(!webInstalled ? ["apps/web/**"] : []),
+    ],
+  },
   ...backendConfigs.map((config) =>
     Object.keys(config).every((key) => ["ignores", "name"].includes(key))
       ? config

@@ -13,10 +13,24 @@ if (configFile.error) {
 
 const parsedConfig = ts.parseJsonConfigFileContent(configFile.config, ts.sys, ROOT);
 const requestedFiles = process.argv.slice(2);
+const backendAppRoot = path.join(ROOT, "apps", "backend");
+const backendAppFiles = requestedFiles.filter((file) =>
+  path.resolve(process.cwd(), file).startsWith(`${backendAppRoot}${path.sep}`),
+);
+if (backendAppFiles.length) {
+  const result = spawnSync("npm", ["run", "typecheck"], { cwd: backendAppRoot, stdio: "inherit" });
+  if (result.error) {
+    console.error("Unable to check backend app files. Install root dependencies first.");
+    process.exit(1);
+  }
+  if (result.status !== 0) process.exit(result.status ?? 1);
+}
+const remainingFiles = requestedFiles.filter((file) => !backendAppFiles.includes(file));
+if (requestedFiles.length && !remainingFiles.length) process.exit(0);
 const webRoot = path.join(ROOT, "apps", "web");
 const isWebFile = (file: string) => path.resolve(process.cwd(), file).startsWith(`${webRoot}${path.sep}`);
-const webFiles = requestedFiles.filter(isWebFile);
-const backendFiles = requestedFiles.filter((file) => !isWebFile(file));
+const webFiles = remainingFiles.filter(isWebFile);
+const backendFiles = remainingFiles.filter((file) => !isWebFile(file));
 
 if (webFiles.length) {
   const result = spawnSync("npm", ["run", "typecheck"], { cwd: webRoot, stdio: "inherit" });

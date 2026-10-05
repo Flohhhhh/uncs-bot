@@ -14,7 +14,15 @@ const webRoot = path.join(ROOT, "apps", "web");
 const isWebFile = (file: string) => path.resolve(process.cwd(), file).startsWith(`${webRoot}${path.sep}`);
 const backendFiles = requestedFiles.length
   ? requestedFiles.filter((file) => !isWebFile(file))
-  : ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "web/admin/**/*.{ts,tsx,mts,css,html,json}"];
+  : [
+      "src/**/*.ts",
+      "test/**/*.ts",
+      "scripts/**/*.ts",
+      "apps/backend/src/**/*.ts",
+      "apps/backend/tests/**/*.ts",
+      "apps/backend/*.{mjs,json,md}",
+      "web/admin/**/*.{ts,tsx,mts,css,html,json}",
+    ];
 const webFiles = requestedFiles.length
   ? requestedFiles.filter(isWebFile).map((file) => path.relative(webRoot, path.resolve(process.cwd(), file)))
   : ["src/**/*.{ts,tsx,css}", "tests/**/*.{ts,tsx}", "*.{ts,mjs,json,md}", "!package-lock.json", "!next-env.d.ts"];

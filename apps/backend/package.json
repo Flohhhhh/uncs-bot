@@ -1,0 +1,17 @@
+{
+  "name": "@uncs/backend",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.23.3 <23"
+  },
+  "scripts": {
+    "dev": "node --watch --require ../../node_modules/ts-node/register src/main.ts",
+    "build": "node ../../node_modules/typescript/bin/tsc -p tsconfig.build.json",
+    "start": "node dist/apps/backend/src/main.js",
+    "typecheck": "node ../../node_modules/typescript/bin/tsc --noEmit -p tsconfig.json",
+    "lint": "node ../../node_modules/eslint/bin/eslint.js src tests --max-warnings 0",
+    "test": "node ../../node_modules/jest/bin/jest.js --config jest.config.mjs --runInBand",
+    "check": "npm run lint && npm run typecheck && npm test"
+  }
+}
