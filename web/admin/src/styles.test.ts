@@ -138,3 +138,55 @@ describe("buttons", () => {
     expect(declared(dimmed, "cursor", 1024)).toBe("not-allowed");
   });
 });
+
+describe("Discord roles ledger", () => {
+  it.each([320, 375, 700])("wraps a ledger message inside its full-width phone card at %ipx", (width) => {
+    // A 220px minimum in a half-width card cell pushed the Recent role changes card into a sideways scroll.
+    expect(declared("td small.roles-ledger-message", "min-width", width)).toBe("0");
+    expect(declared('[data-mobile="cards"] td:has(.roles-ledger-message)', "grid-column", width)).toBe("1 / -1");
+  });
+  it("keeps the readable message width in the desktop table", () => {
+    expect(declared("td small.roles-ledger-message", "min-width", 1024)).toBe("220px");
+    expect(declared('[data-mobile="cards"] td:has(.roles-ledger-message)', "grid-column", 1024)).toBeUndefined();
+  });
+});
+
+describe("Supporters table", () => {
+  it("wraps the next step in a narrow column on a 1280px desktop", () => {
+    expect(declared("td small.supporter-wrap", "min-width", 1280)).toBe("120px");
+    expect(declared("td small.supporter-wrap", "white-space", 1280)).toBe("normal");
+  });
+  it.each([320, 390, 700])("keeps card rows at %ipx, with the next step across the card's full width", (width) => {
+    // A 120px minimum in a half-width card cell would push the card into a sideways scroll.
+    expect(declared("td small.supporter-wrap", "min-width", width)).toBe("0");
+    expect(declared('[data-mobile="cards"] tbody tr', "display", width)).toBe("grid");
+    // The Next cell is marked wide, and Open sits in its own row-actions wrapper.
+    expect(declared('[data-mobile="cards"] td.wide', "grid-column", width)).toBe("1 / -1");
+    expect(
+      declared(
+        '[data-mobile="cards"] td:has(.audit-detail, .row-actions, .action-list, details)',
+        "grid-column",
+        width,
+      ),
+    ).toBe("1 / -1");
+  });
+});
+
+describe("Patreon status line", () => {
+  it("styles only what the status line renders", () => {
+    // Its Details panel holds counts and a button. The founder review lists it once had are gone, with their rules.
+    const selectors = rules
+      .flatMap((rule) => rule.selectors)
+      .filter((selector) => selector.includes(".supporter-sync"));
+    expect(selectors).toEqual([".supporter-sync > .button"]);
+  });
+});
+
+describe("Applications requests header", () => {
+  it.each([320, 390, 430, 768, 1280])("drops the select-all under the title when both do not fit at %ipx", (width) => {
+    // On one row with the long subtitle, "Select all pending" was squeezed to 70px at 390px and broke into
+    // three lines. It broke into two at 768px, where the sidebar takes the room.
+    expect(declared(".application-requests .card-header", "flex-wrap", width)).toBe("wrap");
+    expect(declared(".application-requests .selection-label", "white-space", width)).toBe("nowrap");
+  });
+});

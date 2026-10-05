@@ -7,7 +7,7 @@ import type { Overview } from "../../api/types";
 import { useGameAdmin as useAdmin } from "../../app/context";
 import { Badge, Card, Empty, Modal, date } from "../../components/ui";
 import { CopyValue, DataTable } from "../../components/data-table";
-import { hasRoundTiming, RoundTimingNotice } from "../../components/round-timing";
+import { RoundStatusNotice } from "../../components/round-timing";
 import { errorMessage } from "../actions/policy";
 import { FactionChip, FactionOptions, liveFactions, type Faction } from "../players/factions";
 
@@ -26,8 +26,6 @@ const labels = {
 };
 const stateLabel = (event: Event) =>
   event.stop && !["complete", "needs_review"].includes(event.state) ? "Stop requested" : labels[event.state];
-
-const timingMessage = "Round timing is unavailable. 50v50 needs it to start sorting at the right time.";
 
 /** "● Red · Valkyra vs ● Blue · Lonestar", colored by the teams' current colors where the game reports them. */
 function EventTeams({ names, teams }: { names: readonly string[]; teams: Faction[] }) {
@@ -63,8 +61,8 @@ function EventReview({
   const settings = useResource<SettingsSnapshot>(review.kind === "restore" ? "settings" : null);
   const roster = useResource<Overview>(review.kind === "start" ? "overview" : null);
   const teams = liveFactions(roster.data ?? overview);
-  const canStart =
-    review.kind !== "start" || (!roster.loading && !roster.refreshing && !roster.error && hasRoundTiming(roster.data));
+  // The server checks that the round is live when the event is armed; a match clock is never required.
+  const canStart = review.kind !== "start" || (!roster.loading && !roster.refreshing && !roster.error);
   const confirmation = review.kind === "start" ? "START 50V50" : review.kind === "restore" ? "RESTORE TEAM LOCK" : null;
   const lock = settings.data?.fields.find((field) => field.id === "lockOverpopulated");
   const canRestore =
@@ -190,7 +188,7 @@ function EventReview({
       ) : (
         <form onSubmit={(event) => void submit(event)}>
           {blocked && <p role="alert">Refresh event history before continuing.</p>}
-          {review.kind === "start" && <RoundTimingNotice resource={roster} busy={busy} message={timingMessage} />}
+          {review.kind === "start" && <RoundStatusNotice resource={roster} busy={busy} />}
           <div className="dialog-actions">
             <button type="button" className="button secondary" disabled={busy} onClick={close}>
               Back
@@ -248,7 +246,6 @@ function EventDraft({
     statusUnavailable || settings.loading || roster.loading || !!settings.error || !!roster.error || admin.busy;
   const ready =
     !unavailable &&
-    hasRoundTiming(roster.data) &&
     !stale &&
     typeof lock?.value === "boolean" &&
     (!lock.value || lock.editable) &&
@@ -278,7 +275,7 @@ function EventDraft({
             )}
           </div>
         )}
-        <RoundTimingNotice resource={roster} busy={admin.busy} message={timingMessage} />
+        <RoundStatusNotice resource={roster} busy={admin.busy} />
         <div className="settings-grid event-fields">
           {([0, 1] as const).map((index) => (
             <label key={index}>

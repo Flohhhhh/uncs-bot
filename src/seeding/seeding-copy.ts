@@ -53,7 +53,7 @@ export const STAFF_COPY = {
 export const ROLE_PROBLEMS: Record<RoleProblem, string> = {
   missing: "Seeder role not found. Check `SEEDING_ROLE_ID`.",
   unsafe:
-    "The Seeder role isn't safe to hand out: it's @everyone, a managed or staff role, or has moderation permissions (server-wide or in a channel override). Use a plain role with no permissions.",
+    "The Seeder role isn't safe to hand out: it's @everyone, a managed or staff role, one of the UNC, Founder or Supporter roles Gramps manages, or has moderation permissions (server-wide or in a channel override). Use a plain role with no permissions.",
   unassignable:
     "Gramps can't assign the Seeder role. Give Gramps Manage Roles and drag Seeder below Gramps in Server Settings → Roles.",
   unavailable: "Discord didn't answer about the Seeder role. Try again shortly.",

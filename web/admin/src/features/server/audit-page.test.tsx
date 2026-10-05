@@ -155,7 +155,7 @@ describe("stored action receipt recovery", () => {
     expect(screen.queryByText("Admin")).not.toBeInTheDocument();
     expect(screen.getByText("Mod")).toBeInTheDocument();
   });
-  it("opens the player panel from a target name without reading anything else", async () => {
+  it("opens the player panel from a target name, reading only that player's kick and ban record", async () => {
     request.mockResolvedValue([{ ...older, target: alice.steamId }]);
     mount();
     fireEvent.click(await screen.findByRole("button", { name: alice.name }));
@@ -164,6 +164,23 @@ describe("stored action receipt recovery", () => {
       "href",
       `/activity?server=primary&view=combat&player=${alice.steamId}`,
     );
-    expect(request.mock.calls.every(([path, options]) => path === "audit" && !options?.method)).toBe(true);
+    await waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+    expect(request.mock.calls.map(([path, options]) => [path, options?.method])).toEqual([
+      ["audit", undefined],
+      [`moderation/players/${alice.steamId}`, undefined],
+    ]);
+  });
+  it("names a kicked player from the receipt once they have left the roster", async () => {
+    const gone = "76561198000000009";
+    request.mockResolvedValue([
+      { ...older, target: gone, details: { reason: "Team killing", playerName: "Griefer" } },
+      { ...older, id: otherId, actorName: "Other staff", target: "76561198000000008" },
+    ]);
+    mount();
+    const row = (await screen.findByRole("button", { name: "Griefer" })).closest("tr")!;
+    expect(within(row).getByText(gone)).toBeInTheDocument();
+    search("griefer");
+    expect(screen.getByRole("button", { name: "Griefer" })).toBeInTheDocument();
+    expect(screen.queryByText("Other staff")).not.toBeInTheDocument();
   });
 });

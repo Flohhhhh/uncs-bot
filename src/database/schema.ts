@@ -22,6 +22,7 @@ import type {
 } from "../server-events/server-events.types";
 export * from "./telemetry.schema";
 export * from "./supporters.schema";
+export * from "./discord-roles.schema";
 
 export const guildWelcomeSettings = pgTable("guild_welcome_settings", {
   guildId: text("guild_id").primaryKey(),
@@ -82,7 +83,7 @@ export const whitelistApplications = pgTable(
     contactConsentAt: timestamp("contact_consent_at", { withTimezone: true }),
     rulesAcceptedAt: timestamp("rules_accepted_at", { withTimezone: true }).notNull(),
     status: text("status")
-      .$type<"pending" | "processing" | "approved" | "declined" | "needs_review">()
+      .$type<"pending" | "processing" | "approved" | "declined" | "needs_review" | "revoking" | "revoked">()
       .notNull()
       .default("pending"),
     submittedAt: timestamp("submitted_at", { withTimezone: true }).notNull().defaultNow(),
@@ -92,12 +93,18 @@ export const whitelistApplications = pgTable(
     reviewReason: text("review_reason"),
     actionId: uuid("action_id").unique(),
     reviewId: uuid("review_id").unique(),
-    reviewKind: text("review_kind").$type<"approve" | "decline" | "recheck">(),
+    reviewKind: text("review_kind").$type<"approve" | "decline" | "recheck" | "revoke">(),
     lastActionState: text("last_action_state"),
     lastActionMessage: text("last_action_message"),
+    // Whether the latest whitelist operation is a grant or a revocation; a recheck reads it.
+    accessIntent: text("access_intent").$type<"grant" | "revoke">().notNull().default("grant"),
+    // How approval was recorded: a whitelist grant, or a confirmed existing entry. Null when not recorded.
+    whitelistGrant: text("whitelist_grant").$type<"granted" | "existing">(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
   },
   (table) => [
     index("whitelist_applications_submitted_idx").on(table.serverId, table.submittedAt),
+    index("whitelist_applications_discord_idx").on(table.discordUserId),
     uniqueIndex("whitelist_applications_server_discord_idx").on(table.serverId, table.discordUserId),
     uniqueIndex("whitelist_applications_server_steam_idx").on(table.serverId, table.steamId),
   ],
@@ -112,7 +119,7 @@ export const whitelistApplicationReviews = pgTable(
     applicationId: uuid("application_id")
       .notNull()
       .references(() => whitelistApplications.id),
-    kind: text("kind").$type<"approve" | "decline" | "recheck">().notNull(),
+    kind: text("kind").$type<"approve" | "decline" | "recheck" | "revoke">().notNull(),
     actorId: text("actor_id").notNull(),
     actorName: text("actor_name").notNull(),
     reason: text("reason").notNull(),

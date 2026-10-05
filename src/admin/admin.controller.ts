@@ -60,6 +60,7 @@ export class AdminPageController {
     "whitelist",
     "applications",
     "supporters",
+    "discord-roles",
     "bans",
     "announcements",
     "match",
@@ -157,5 +158,13 @@ export class AdminGameController {
   @Get("audit/:id")
   receipt(@Req() req: StaffRequest, @Param("id") id: string) {
     return this.service.receipt(id, req.staff.serverId);
+  }
+  @Get("moderation/repeat-offenders")
+  repeatOffenders(@Req() req: StaffRequest) {
+    return this.service.repeatOffenders(req.staff.serverId);
+  }
+  @Get("moderation/players/:steamId")
+  moderation(@Req() req: StaffRequest, @Param("steamId") steamId: string) {
+    return this.service.moderation(steamId, req.staff.serverId);
   }
 }

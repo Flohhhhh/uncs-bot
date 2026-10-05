@@ -1287,6 +1287,49 @@ td strong {
   font-size: var(--text-sm);
   line-height: 1.6;
 }
+.combat-event-types {
+  margin-top: var(--space-5);
+}
+.combat-event-types ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.combat-event-types li {
+  padding: var(--space-3) var(--space-5);
+  border-bottom: 1px solid var(--line);
+  min-width: 0;
+}
+.combat-event-types li:last-child {
+  border-bottom: 0;
+}
+.combat-event-types li p {
+  margin: 0;
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+.combat-event-types code {
+  font: var(--text-sm) monospace;
+}
+.combat-event-types summary {
+  margin-top: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--muted);
+  cursor: pointer;
+}
+.combat-event-types pre {
+  margin: var(--space-2) 0 0;
+  padding: var(--space-3);
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font: var(--text-xs) monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 @media (max-width: 740px) {
   .combat-filters {
     flex-wrap: wrap;
@@ -1320,11 +1363,6 @@ td strong {
 .supporter-dialog {
   width: min(680px, calc(100vw - 32px));
 }
-.supporter-next p {
-  color: var(--muted);
-  font-size: var(--text-sm);
-  line-height: 1.7;
-}
 .supporter-form-grid small,
 .supporter-check small {
   color: var(--muted);
@@ -1332,11 +1370,67 @@ td strong {
   line-height: 1.6;
   font-weight: 400;
 }
-.supporter-next {
-  padding-top: 8px;
+/* The member ID, or the name while a form is open, just under the dialog title. */
+.supporter-member {
+  margin: calc(-1 * var(--space-2)) 0 var(--space-3);
+  color: var(--muted);
+  font:
+    var(--text-xs) ui-monospace,
+    Consolas,
+    monospace;
+  overflow-wrap: anywhere;
 }
-.supporter-next h3 {
-  margin-bottom: 8px;
+.supporter-steps {
+  padding: var(--space-3) 0 var(--space-1);
+}
+.supporter-steps h3 {
+  margin-bottom: var(--space-1);
+  font-size: var(--text-md);
+}
+.supporter-steps ul {
+  margin: 0 0 var(--space-2);
+  padding-left: var(--space-4);
+  line-height: 1.7;
+}
+.supporter-founder-payment {
+  margin: 0;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.supporter-founder-payment small {
+  display: block;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+.supporter-facts {
+  margin-bottom: var(--space-4);
+}
+/* Step text runs long; it wraps so the table stays usable on a phone. */
+td small.supporter-wrap {
+  min-width: 120px;
+  max-width: 320px;
+  line-height: 1.6;
+  white-space: normal;
+}
+/* On phones each supporter row is a card: the step takes the card's full width and wraps inside it. */
+@media (max-width: 700px) {
+  td small.supporter-wrap {
+    min-width: 0;
+    max-width: none;
+  }
+}
+.supporter-offer {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-4);
+}
+.supporter-offer p {
+  margin: 0;
+}
+.warning-text {
+  color: var(--warn);
 }
 .supporter-form-grid {
   display: grid;
@@ -1603,6 +1697,77 @@ dialog .supporter-check input {
   .team-review-players li {
     align-items: flex-start;
     gap: 14px;
+  }
+}
+/* Bulk approval: the list of applicants in the dialog, and the result kept on the page. */
+.bulk-approve-list li > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.bulk-approve-list li > span {
+  flex-shrink: 0;
+}
+.bulk-approve-list p {
+  margin: 6px 0 0;
+  color: var(--cream);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+.bulk-approve-list:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* This header has a long subtitle beside its tools, so the tools drop under the title when both do not fit. */
+.application-requests .card-header {
+  flex-wrap: wrap;
+}
+.application-requests .selection-label {
+  white-space: nowrap;
+}
+.bulk-approve-results {
+  margin-bottom: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--warn-line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  font-size: var(--text-sm);
+}
+.bulk-approve-results > p {
+  margin: 0;
+  line-height: 1.6;
+}
+.bulk-approve-results .bulk-approve-list {
+  max-height: none;
+  margin-top: var(--space-3);
+}
+.bulk-approve-results .text-button {
+  margin-top: var(--space-2);
+  padding-left: 0;
+}
+/* On phones the tick box sits in the corner of the request's card, with a full-size touch target. */
+@media (max-width: 700px) {
+  .application-requests [data-mobile="cards"] tbody tr {
+    position: relative;
+  }
+  .application-requests .application-applicant {
+    grid-column: 1 / -1;
+    padding-right: 44px;
+  }
+  .application-requests [data-mobile="cards"] td.application-applicant::before {
+    content: none;
+  }
+  .application-requests .select-cell {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 44px;
+    height: 44px;
+    display: grid;
+    place-items: center;
+  }
+  .application-requests .select-cell input {
+    width: 22px;
+    height: 22px;
   }
 }
 .text-button {
@@ -2423,6 +2588,17 @@ dialog.sheet {
 .mode-choices input {
   width: auto;
 }
+/* Ballot settings share the switches' bordered group; their number fields fill the grid columns. */
+.ballot-settings .settings-grid {
+  gap: var(--space-3);
+}
+.ballot-settings .settings-grid label {
+  align-items: stretch;
+  margin: 0;
+}
+.ballot-settings .settings-grid input {
+  width: 100%;
+}
 .rotation-editor {
   padding: 0;
   list-style: none;
@@ -3029,6 +3205,36 @@ dialog .map-picker-fields > label {
 .player-sheet-links .text-button {
   padding-inline: 0;
   font-size: var(--text-sm);
+}
+.player-history {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-sm);
+}
+.player-history p {
+  margin: 0 0 var(--space-1);
+}
+.player-history summary {
+  color: var(--muted);
+  cursor: pointer;
+}
+.player-history ul {
+  margin: var(--space-1) 0 0;
+  padding-left: var(--space-4);
+}
+.repeat-offenders ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.repeat-offenders li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--line);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
 }
 .player-sheet-actions {
   border-top: 1px solid var(--line);
@@ -3798,19 +4004,6 @@ tr.audit-more[hidden] {
   }
 }
 /* Supporters and applications */
-.supporter-summary {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2) var(--space-3);
-  margin-bottom: var(--space-4);
-  font-size: var(--text-sm);
-}
-.supporter-summary p {
-  flex-basis: 100%;
-  margin: 0;
-  color: var(--muted);
-}
 .sync-counts {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -3830,18 +4023,15 @@ tr.audit-more[hidden] {
   font-weight: 650;
   font-variant-numeric: tabular-nums;
 }
-.supporter-sync h3 {
-  margin: var(--space-3) 0 var(--space-1);
-  font-size: var(--text-sm);
+/* The founder window's exact times are long, so they take the panel's full width. */
+.sync-counts > .supporter-window {
+  grid-column: 1 / -1;
 }
-.supporter-sync ul {
-  margin: 0 0 var(--space-3);
-  padding-left: var(--space-4);
+.sync-counts > .supporter-window dd {
+  text-align: right;
 }
-.supporter-sync li small {
-  display: block;
-  color: var(--muted);
-  font-size: var(--text-xs);
+.supporter-details .status-about-panel > .button {
+  margin-top: var(--space-1);
 }
 .supporter-search {
   display: flex;
@@ -3862,11 +4052,216 @@ tr.audit-more[hidden] {
     max-width: none;
   }
   .supporter-search .button,
-  .supporter-search + .button {
+  .supporter-search ~ .button {
     flex: 1 1 auto;
     margin-left: 0;
   }
   .supporter-sync > .button {
+    min-height: 44px;
+  }
+}
+/* Discord roles */
+.roles-page {
+  margin-bottom: var(--space-5);
+}
+.roles-checks,
+.roles-attention,
+.roles-plan-group ul,
+.roles-candidates ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.roles-checks > li {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--line);
+  font-size: var(--text-sm);
+}
+.roles-check-head,
+.roles-attention-who,
+.roles-plan-who {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+}
+.roles-check-head {
+  justify-content: space-between;
+}
+.roles-checks p,
+.roles-attention p {
+  margin: 0;
+}
+.roles-check-name {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.roles-check-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-5);
+  margin: 0;
+}
+.roles-check-facts > div {
+  display: flex;
+  gap: var(--space-2);
+}
+.roles-check-facts dt {
+  color: var(--muted);
+}
+.roles-check-facts dd {
+  margin: 0;
+  font-weight: 650;
+}
+.roles-fix {
+  color: var(--warn);
+  line-height: 1.6;
+}
+.roles-fix.optional {
+  color: var(--muted);
+}
+.roles-candidates {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.roles-candidates li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.roles-checks-summary {
+  margin: 0;
+  padding: var(--space-3) var(--space-5);
+}
+.roles-counts {
+  margin: 0;
+}
+.roles-passes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: var(--space-5);
+}
+.roles-pass h4,
+.roles-plan-group h4 {
+  margin: 0 0 var(--space-1);
+  font-size: var(--text-sm);
+}
+.roles-pass .muted {
+  margin: 0 0 var(--space-3);
+}
+.roles-attention > li {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-5);
+  border-bottom: 1px solid var(--line);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+.roles-attention > li:last-child {
+  border-bottom: 0;
+}
+.roles-attention small {
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+.roles-actions {
+  margin-bottom: var(--space-2);
+}
+.roles-action-note {
+  margin: 0;
+}
+.roles-action-note:not(:empty) {
+  margin-bottom: var(--space-2);
+}
+.roles-preview {
+  display: grid;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--line);
+}
+.roles-preview > p,
+.roles-preview > .notice {
+  margin: 0;
+}
+.roles-plan-counts {
+  margin: 0;
+}
+.roles-remove-count dt,
+.roles-remove-count dd {
+  color: var(--bad);
+}
+.roles-plan-group {
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.roles-plan-group.remove {
+  border-color: var(--bad-line);
+  border-left: 4px solid var(--bad);
+  background: var(--bad-bg);
+}
+.roles-plan-group li {
+  display: grid;
+  gap: 2px;
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--line);
+  font-size: var(--text-sm);
+}
+.roles-plan-group.remove li {
+  border-top-color: var(--bad-line);
+}
+.roles-plan-group small {
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+.roles-plan-group.remove small {
+  color: var(--cream);
+}
+.roles-plan-group .muted {
+  margin: 0;
+}
+.roles-preview .status-about .roles-plan-group {
+  margin-top: var(--space-2);
+}
+/* Ledger messages are full sentences; let them wrap inside the otherwise single-line table. */
+td small.roles-ledger-message {
+  min-width: 220px;
+  max-width: 420px;
+  white-space: normal;
+}
+/* On phones each ledger row is a card: the result takes the card's full width and its message wraps inside it,
+   instead of pushing the card into a sideways scroll. */
+@media (max-width: 700px) {
+  td small.roles-ledger-message {
+    min-width: 0;
+    max-width: none;
+  }
+  [data-mobile="cards"] td:has(.roles-ledger-message) {
+    grid-column: 1 / -1;
+  }
+}
+.roles-dialog .notice {
+  margin-top: var(--space-3);
+}
+.roles-confirm strong {
+  font-size: var(--text-sm);
+}
+@media (max-width: 740px) {
+  .roles-checks > li,
+  .roles-attention > li,
+  .roles-checks-summary {
+    padding-inline: var(--space-4);
+  }
+  .roles-actions .button {
+    flex: 1 1 auto;
     min-height: 44px;
   }
 }

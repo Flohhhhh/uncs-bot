@@ -42,6 +42,14 @@ export class AdminSettings {
     return this.identity(this.env.get("APPLICATION_ORIGIN"));
   }
 
+  /**
+   * The Discord sign-in for "Link Patreon" on the dashboard's own origin. Unlike get() and applicant(), it needs
+   * neither the dashboard nor website applications switched on.
+   */
+  patronLink() {
+    return this.identity(this.env.get("ADMIN_ORIGIN"));
+  }
+
   private identity(origin: string | undefined) {
     const clientId = this.env.get("ADMIN_DISCORD_CLIENT_ID");
     const clientSecret = this.env.get("ADMIN_DISCORD_CLIENT_SECRET");

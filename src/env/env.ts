@@ -195,6 +195,12 @@ export const Env = z.object({
   ).optional(),
   STAFF_ALERTS_WATCHLIST_HIGHLIGHT_COMMUNITIES: count(1, 100, 3),
   STAFF_ALERTS_WATCHLIST_COOLDOWN_MINUTES: count(0, 10_080, 360),
+  /**
+   * Checked with the watch list: a join by a player with this many dashboard kicks within
+   * STAFF_ALERTS_REPEAT_OFFENDER_DAYS raises a repeat-offender alert. 0 turns it off. Alert-only.
+   */
+  STAFF_ALERTS_REPEAT_OFFENDER_KICKS: count(0, 100, 3),
+  STAFF_ALERTS_REPEAT_OFFENDER_DAYS: count(1, 365, 30),
   /** Optional event automation; requires a human-reviewed schema and controlled game rehearsal. */
   SERVER_EVENTS_ENABLED: z
     .enum(["true", "false"])
@@ -299,6 +305,63 @@ export const Env = z.object({
     .optional()
     .transform((value) => value || undefined),
   PATREON_SYNC_INTERVAL_MINUTES: z.coerce.number().int().min(10).max(1440).default(30),
+  /**
+   * "Link Patreon": a patron signs in to Discord and Patreon to link their membership to their Discord account. Off
+   * by default. While off, /patreon is not registered and the sign-in pages only say linking is off.
+   */
+  PATREON_LINK_ENABLED: flag(),
+  /**
+   * The Patreon client's ID and secret (the client behind the Creator's Access Token), used only for the patron's
+   * sign-in. Never logged or returned. A malformed value leaves linking unconfigured instead of stopping the bot.
+   */
+  PATREON_CLIENT_ID: z
+    .string()
+    .trim()
+    .optional()
+    .transform((value) => value || undefined),
+  PATREON_CLIENT_SECRET: z
+    .string()
+    .trim()
+    .optional()
+    .transform((value) => value || undefined),
+  /** Provider-neutral founder window (Patreon and PayPal). A complete pair wins over PATREON_FOUNDER_*. */
+  SUPPORTER_FOUNDER_START_AT: z.iso.datetime({ offset: true }).optional(),
+  SUPPORTER_FOUNDER_END_AT: z.iso.datetime({ offset: true }).optional(),
+  /**
+   * Automatic supporter matching, for Patreon supporters only. Both switches are off by default. The SteamID fill
+   * copies an empty SteamID from the supporter's approved whitelist application. Automatic founders record founder
+   * promises under a stricter rule than staff awards; a founder promise cannot be undone yet, so leave it off until
+   * staff can void one (see the Patreon supporters guide).
+   */
+  SUPPORTER_AUTO_STEAM_FILL_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  SUPPORTER_AUTO_FOUNDER_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  /**
+   * Hours an imported first payment must stand (Patreon's refund window) before an automatic founder promise. A blank
+   * value keeps the default rather than becoming 0, which would switch the wait off.
+   */
+  SUPPORTER_AUTO_FOUNDER_HOLD_HOURS: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.coerce.number().int().min(0).max(720).default(72),
+  ),
+
+  /**
+   * Automatic UNC member, Founder and Supporter roles in ADMIN_GUILD_ID. Off by default; the status page
+   * and dry runs still work while off. Requires Manage Roles and a bot role above every configured role.
+   * A role whose ID is not set is skipped.
+   */
+  DISCORD_ROLES_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  DISCORD_MEMBER_ROLE_ID: discordId.optional(),
+  DISCORD_FOUNDER_ROLE_ID: discordId.optional(),
+  DISCORD_SUPPORTER_ROLE_ID: discordId.optional(),
 
   /** Website requests remain disabled until the reviewed schema is deployed. */
   WHITELIST_APPLICATIONS_ENABLED: z
@@ -309,6 +372,14 @@ export const Env = z.object({
   WHITELIST_APPLICATION_EMAIL_REQUIRED: z
     .enum(["true", "false"])
     .default("true")
+    .transform((value) => value === "true"),
+  /**
+   * Refuse (409) approving a SteamID already on the running whitelist until the request carries
+   * existingAccessConfirmed. Off by default: the dashboard must send that confirmation first.
+   */
+  WHITELIST_APPLICATION_EXISTING_CONFIRMATION_REQUIRED: z
+    .enum(["true", "false"])
+    .default("false")
     .transform((value) => value === "true"),
 
   /** A Discord server (guild) ID to use for development */

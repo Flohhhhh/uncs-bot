@@ -3,13 +3,19 @@ import { GameServers } from "../admin/game-servers";
 import { feedCredentials, feedServer } from "./telemetry.credentials";
 
 export type FeedRejection = { at: string; status: number; reason: string };
-/** accepted: valid killed events (repeats included); skipped: other types plus invalid entries. */
+/**
+ * accepted: valid killed events (repeats included); skipped: other types plus invalid entries;
+ * types: distinct valid event types; typesOverLimit: of those, types new today that were not counted
+ * because the server already had the daily limit of types.
+ */
 export type FeedBatchReceipt = {
   at: string;
   accepted: number;
   skipped: number;
   invalid: number;
   firstInvalid: string | null;
+  types: number;
+  typesOverLimit: number;
 };
 export type FeedDeliveryStatus = {
   lastBatch: FeedBatchReceipt | null;
@@ -56,8 +62,24 @@ export class TelemetryDeliveries {
   /** Records a stored batch for a resolved server, including how many entries were skipped. */
   accepted(serverId: string, batch: Omit<FeedBatchReceipt, "at">) {
     const now = new Date();
-    const { accepted, skipped, invalid, firstInvalid } = batch;
-    this.batches.set(serverId, { at: now.toISOString(), accepted, skipped, invalid, firstInvalid });
+    const { accepted, skipped, invalid, firstInvalid, types, typesOverLimit } = batch;
+    this.batches.set(serverId, {
+      at: now.toISOString(),
+      accepted,
+      skipped,
+      invalid,
+      firstInvalid,
+      types,
+      typesOverLimit,
+    });
+    // Counts only: type names come from the feed and are never logged.
+    if (typesOverLimit)
+      this.warn(
+        `types:${serverId}`,
+        `Accepted a game feed batch for server ${serverId} but did not count ${typesOverLimit} new event ` +
+          `${typesOverLimit === 1 ? "type" : "types"}: the daily limit of event types was reached.`,
+        now.getTime(),
+      );
     if (invalid)
       this.warn(
         `invalid:${serverId}`,

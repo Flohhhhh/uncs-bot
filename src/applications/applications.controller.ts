@@ -137,4 +137,9 @@ export class StaffApplicationsController {
   recheck(@Req() req: StaffRequest, @Param("id") id: string, @Body() body: unknown) {
     return this.service.review(req.staff, id, "recheck", body);
   }
+  @Post(":id/revoke")
+  @UseGuards(ApplicationsEnabledGuard)
+  revoke(@Req() req: StaffRequest, @Param("id") id: string, @Body() body: unknown) {
+    return this.service.review(req.staff, id, "revoke", body);
+  }
 }

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { UNKNOWN_WEAPON } from "../../../../../src/common/cause-labels";
 import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 import { useResource } from "../../api/use-resource";
 import { useAdmin } from "../../app/context";
@@ -9,6 +10,7 @@ import type {
   CombatEvent,
   CombatEventKind,
   CombatFeedDeliveries,
+  CombatFeedEventType,
   CombatPeriod,
   CombatPlayer,
   CombatResponse,
@@ -25,6 +27,16 @@ const headshotShare = (player: CombatPlayer) =>
 const shareOfKills = (part: number, kills: number) =>
   kills > 0 && Number.isFinite(part) ? `${Math.round((part / kills) * 100)}% of kills` : undefined;
 const plural = (value: number, one: string, many: string) => `${count(value)} ${value === 1 ? one : many}`;
+/**
+ * The weapon filter's value for a cause. Causes that read the same ("Id.Item.AK74M" and "ID.Item.AK74M"
+ * are both "AK-74M") share one option; a cause with no readable name keeps its raw value, so each one
+ * stays its own option. A readable name never equals such a raw value.
+ */
+const causeFilter = (cause: string | null | undefined) => {
+  const label = weaponLabel(cause);
+  return label === UNKNOWN_WEAPON ? (cause ?? "").trim() : label;
+};
+const causeOption = (value: string) => (weaponLabel(value) === UNKNOWN_WEAPON ? `${UNKNOWN_WEAPON} (${value})` : value);
 
 // Why deliveries that reached Gramps were refused or partly skipped, since it last started. A
 // receipt time alone cannot show that every event of a batch was invalid or that the game's
@@ -40,6 +52,12 @@ function FeedDeliveries({ feed }: { feed: CombatFeedDeliveries }) {
           {date(lastRejected.at)}: HTTP {lastRejected.status}, {lastRejected.reason}.{" "}
           {refusedLast ? "No batch has been accepted since. " : "Later batches were accepted. "}
           {plural(rejectedCount, "delivery", "deliveries")} with the feed token refused since Gramps started.
+        </p>
+      )}
+      {lastBatch && (lastBatch.typesOverLimit ?? 0) > 0 && (
+        <p className="notice warning">
+          <strong>Daily event type limit reached.</strong> {date(lastBatch.at)}:{" "}
+          {plural(lastBatch.typesOverLimit ?? 0, "new event type", "new event types")} not counted.
         </p>
       )}
       {lastBatch && lastBatch.invalid > 0 && (
@@ -59,6 +77,39 @@ function FeedDeliveries({ feed }: { feed: CombatFeedDeliveries }) {
         </p>
       )}
     </>
+  );
+}
+
+// Every event type the game feed sent in the window, counted per UTC day, with the latest kept entry
+// of each, so staff can learn what the game sends. Only killed events are stored one by one. React
+// escapes the sample text, so a sample can never become markup.
+function FeedEventTypes({ types }: { types: CombatFeedEventType[] }) {
+  return (
+    <Card
+      title="Game events received"
+      subtitle="By type · whole UTC days · latest sample per type"
+      className="combat-event-types"
+    >
+      {types.length ? (
+        <ul aria-label="Game events received">
+          {types.map((entry) => (
+            <li key={entry.type}>
+              <p>
+                <code>{entry.type}</code> · {count(entry.count)} · last seen <When at={entry.lastReceivedAt} />
+              </p>
+              {entry.sample !== null && entry.sample !== undefined && (
+                <details>
+                  <summary>Latest sample</summary>
+                  <pre>{JSON.stringify(entry.sample, null, 2)}</pre>
+                </details>
+              )}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <Empty title="No game events counted in this period" />
+      )}
+    </Card>
   );
 }
 
@@ -231,14 +282,19 @@ function CombatView({
   const search = query.trim().toLowerCase();
   const matches = (values: (string | null)[]) => values.some((value) => (value ?? "").toLowerCase().includes(search));
   const players = leaderboard.filter((entry) => matches([entry.name, entry.steamId]));
-  const causes = [
-    ...new Set(events.map((event) => event.cause).filter((value): value is string => Boolean(value))),
-  ].sort();
+  const causes = [...new Set(events.map((event) => causeFilter(event.cause)).filter(Boolean))].sort();
   const filtered = events.filter(
     (event) =>
-      matches([event.killerName, event.killerSteamId, event.victimName, event.victimSteamId, event.cause]) &&
+      matches([
+        event.killerName,
+        event.killerSteamId,
+        event.victimName,
+        event.victimSteamId,
+        event.cause,
+        weaponLabel(event.cause),
+      ]) &&
       (eventKind !== "headshot" || event.headshot) &&
-      (!cause || event.cause === cause),
+      (!cause || causeFilter(event.cause) === cause),
   );
   // Feed status is unknown while the latest read failed; never show the old state as current.
   const feed = error
@@ -404,11 +460,11 @@ function CombatView({
                 <select value={cause} disabled={disabled} onChange={(event) => onCause(event.target.value)}>
                   <option value="">All reported causes</option>
                   {cause && !causes.includes(cause) && (
-                    <option value={cause}>{weaponLabel(cause)} (not in recent events)</option>
+                    <option value={cause}>{causeOption(cause)} (not in recent events)</option>
                   )}
                   {causes.map((value) => (
                     <option key={value} value={value}>
-                      {weaponLabel(value)}
+                      {causeOption(value)}
                     </option>
                   ))}
                 </select>
@@ -441,6 +497,7 @@ function CombatView({
               />
             )}
           </Card>
+          {!playerId && "otherEvents" in data && data.otherEvents && <FeedEventTypes types={data.otherEvents} />}
         </>
       )}
     </div>

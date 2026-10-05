@@ -35,6 +35,9 @@ describe("admin HTTP boundaries", () => {
     begin: jest.fn(),
     finish: jest.fn(),
     history: jest.fn(),
+    moderationSummaries: jest.fn(),
+    moderationEntries: jest.fn(),
+    repeatOffenders: jest.fn(),
   };
   const game = { overview: jest.fn(), execute: jest.fn(), configuration: jest.fn() };
   const votes = {
@@ -177,7 +180,7 @@ describe("admin HTTP boundaries", () => {
     }
   });
   it("supports dashboard deep links without swallowing API, auth, or missing-file errors", async () => {
-    for (const path of ["players", "applications", "supporters", "combat", "match", "votes"]) {
+    for (const path of ["players", "applications", "supporters", "discord-roles", "combat", "match", "votes"]) {
       const page = await request(app.getHttpServer()).get(`/admin/${path}`).expect(200);
       expect(page.text).toContain('<div id="root"></div>');
       expect(page.headers["content-security-policy"]).toContain("script-src 'self'");
@@ -419,6 +422,41 @@ describe("admin HTTP boundaries", () => {
       .send({ id: randomUUID(), action: "broadcast", message: "Hello", reason: "Community welcome" })
       .expect(403);
     expect(game.execute).not.toHaveBeenCalled();
+  });
+  it.each(["viewer", "moderator"])(
+    "lets a %s read a player's kicks and bans and the repeat offenders",
+    async (role) => {
+      jest.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ roles: [role] })));
+      const player = "76561198066952872";
+      const kicks = { count: 2, recent: 2, lastAt: "2026-10-02T18:00:00.000Z", lastBy: "Mod", lastReason: "Spam" };
+      store.moderationSummaries.mockResolvedValue(new Map([[player, { name: "Griefer", kicks, bans: null }]]));
+      store.moderationEntries.mockResolvedValue([]);
+      store.repeatOffenders.mockResolvedValue([{ steamId: player, name: "Griefer", kicks }]);
+      for (const prefix of ["/admin/api", "/admin/api/servers/primary"]) {
+        const record = await request(app.getHttpServer())
+          .get(`${prefix}/moderation/players/${player}`)
+          .set("Cookie", `__Host-uncs_admin_session=${token}`)
+          .expect(200);
+        expect(record.body).toEqual({ kicks, bans: null, entries: [] });
+        const list = await request(app.getHttpServer())
+          .get(`${prefix}/moderation/repeat-offenders`)
+          .set("Cookie", `__Host-uncs_admin_session=${token}`)
+          .expect(200);
+        expect(list.body).toEqual({ minimum: 2, days: 30, players: [{ steamId: player, name: "Griefer", kicks }] });
+      }
+      expect(store.moderationSummaries).toHaveBeenCalledWith("primary", [player]);
+      expect(game.execute).not.toHaveBeenCalled();
+    },
+  );
+  it("refuses anonymous kick and ban reads and invalid SteamIDs before reading the database", async () => {
+    await request(app.getHttpServer()).get("/admin/api/moderation/players/76561198066952872").expect(401);
+    await request(app.getHttpServer()).get("/admin/api/moderation/repeat-offenders").expect(401);
+    await request(app.getHttpServer())
+      .get("/admin/api/moderation/players/76561197960265728")
+      .set("Cookie", `__Host-uncs_admin_session=${token}`)
+      .expect(400);
+    expect(store.moderationSummaries).not.toHaveBeenCalled();
+    expect(store.repeatOffenders).not.toHaveBeenCalled();
   });
   it("enforces viewer permissions on the server instead of trusting hidden controls", async () => {
     jest.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ roles: ["viewer"] })));
