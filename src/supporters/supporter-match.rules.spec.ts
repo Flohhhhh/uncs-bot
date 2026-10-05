@@ -724,13 +724,15 @@ describe("next steps for patrons who link their own Discord account", () => {
       area: "discord",
       message: "Ask the patron to tap Link Patreon in Discord, or link it here.",
     });
-    expect(supporterNextSteps(supporterFixture(), { ...patronOn, patronLink: false })[0].message).toBe(
-      "Ask the patron to connect Discord on Patreon, or link it here.",
-    );
+    // Off or omitted, the step keeps its usual text, whatever the page's wording is.
+    const usual = supporterNextSteps(supporterFixture(), { ...patronOn, patronLink: false })[0];
+    expect(usual).toMatchObject({ code: "connect_discord_in_patreon", area: "discord" });
+    expect(usual.message).not.toContain("Link Patreon");
+    expect(supporterNextSteps(supporterFixture(), on)[0]).toEqual(usual);
     // An account Patreon already reports is linked by the next sync either way.
-    expect(supporterNextSteps(supporterFixture({ patreonDiscordId: discordId }), patronOn)[0].message).toBe(
-      `Patreon reports Discord account ${discordId}; the next sync links it.`,
-    );
+    const reported = supporterFixture({ patreonDiscordId: discordId });
+    expect(supporterNextSteps(reported, patronOn)[0]).toEqual(supporterNextSteps(reported, on)[0]);
+    expect(supporterNextSteps(reported, patronOn)[0].message).not.toContain("Link Patreon");
   });
   it.each([
     [
@@ -764,18 +766,77 @@ describe("next steps for patrons who link their own Discord account", () => {
     expect(codes(patron, patronOn)).not.toContain("discord_not_reported");
     expect(codes({ ...patron, patreonDiscordId: otherDiscord }, patronOn)).toContain("discord_differs");
   });
-  it("tells staff when the patron's link is still inside the waiting period", () => {
-    const steps = supporterNextSteps(
-      ready({ discordSource: "patron_signin", automaticBlockedReason: "patron_link_too_recent" }),
-      patronOn,
-    );
-    expect(steps).toEqual([
-      {
-        code: "founder_ready_staff",
-        area: "founder",
-        message:
-          "Ready for staff to record. Not automatic: The patron linked this Discord account inside the waiting period.",
-      },
-    ]);
+  describe("while the patron's own link is inside the waiting period", () => {
+    // The payment is from October 1, 12:00 UTC.
+    const held = (patronLinkedAt: string | null, overrides: Partial<SupporterView> = {}) =>
+      ready({
+        discordSource: "patron_signin",
+        patreonDiscordId: null,
+        automaticBlockedReason: "patron_link_too_recent",
+        automaticPayment: paymentFixture(),
+        patronLinkedAt,
+        ...overrides,
+      });
+    it("says when Gramps records it on its own, so staff check the link before then", () => {
+      expect(supporterNextSteps(held("2026-10-05T09:30:00.000Z"), patronOn)).toEqual([
+        {
+          code: "founder_patron_link_waiting",
+          area: "founder",
+          message:
+            "Gramps records it on its own at 2026-10-08 09:30 UTC, once the patron's own link and payment are 72 hours old, so check the link before then.",
+        },
+      ]);
+      expect(supporterNextSteps(held("2026-10-05T09:30:00.000Z"), { ...patronOn, holdHours: 24 })[0].message).toBe(
+        "Gramps records it on its own at 2026-10-06 09:30 UTC, once the patron's own link and payment are 24 hours old, so check the link before then.",
+      );
+    });
+    it("gives the payment's time when the payment came after the link", () => {
+      const step = supporterNextSteps(
+        held("2026-09-30T08:00:00.000Z", { automaticPayment: paymentFixture({ paidAt: "2026-10-01T12:00:00.000Z" }) }),
+        patronOn,
+      )[0];
+      expect(step.message).toContain(" at 2026-10-04 12:00 UTC,");
+      // With no payment to read, the link's time stands alone.
+      expect(
+        supporterNextSteps(held("2026-09-30T08:00:00.000Z", { automaticPayment: null }), patronOn)[0].message,
+      ).toContain(" at 2026-10-03 08:00 UTC,");
+    });
+    it("stays one sentence with no semicolon, and appears whether or not linking is still on", () => {
+      const [step] = supporterNextSteps(held("2026-10-05T09:30:00.000Z"), { ...patronOn, patronLink: false });
+      expect(step.code).toBe("founder_patron_link_waiting");
+      expect(step.message).not.toContain(";");
+      expect(step.message.match(/\./g)).toHaveLength(1);
+    });
+    it("leaves it to staff when nothing records it on its own: automation off, or no readable link time", () => {
+      for (const [record, context] of [
+        [held("2026-10-05T09:30:00.000Z"), { ...patronOn, founderAuto: false }],
+        [held(null), patronOn],
+        [held("not a time"), patronOn],
+        [held(null, { patronLinkedAt: undefined }), patronOn],
+      ] as const) {
+        const steps = supporterNextSteps(record, context);
+        expect(steps).toEqual([expect.objectContaining({ code: "founder_ready_staff", area: "founder" })]);
+        expect(steps[0].message).not.toContain("on its own");
+      }
+    });
+    it("is never offered for any other reason, or once a founder is recorded", () => {
+      expect(
+        codes(held("2026-10-05T09:30:00.000Z", { automaticBlockedReason: "payment_too_recent" }), patronOn),
+      ).toEqual(["founder_automatic_waiting"]);
+      expect(codes(held("2026-10-05T09:30:00.000Z", { automaticBlockedReason: null }), patronOn)).toEqual([
+        "founder_ready_automatic",
+      ]);
+      expect(
+        codes(
+          held("2026-10-05T09:30:00.000Z", {
+            founder: { awardedAt: "2026-10-02T00:00:00Z", paymentId: "p", source: "patreon_api", automatic: false },
+          }),
+          patronOn,
+        ),
+      ).toEqual([]);
+      expect(codes(held("2026-10-05T09:30:00.000Z", { founderBlockedReason: "outside_window" }), patronOn)).toEqual([
+        "founder_outside_window",
+      ]);
+    });
   });
 });

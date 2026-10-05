@@ -374,6 +374,8 @@ export type SupporterView = {
    * or a later Discord link by the patron or the import, settles it. Null otherwise.
    */
   patronLinkConflict: PatronLinkConflict | null;
+  /** When the patron linked the current Discord account with "Link Patreon", from its audit row. Null otherwise. */
+  patronLinkedAt: string | null;
   steamId: string | null;
   /** Who made the SteamID link; null when unlinked, or for an older link that is not classified yet. */
   steamSource: SupporterSteamSource | null;

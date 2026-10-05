@@ -98,6 +98,7 @@ type StoredSupporter = Omit<
   | "automaticPayment"
   | "automaticBlockedReason"
   | "automaticBlockedMessage"
+  | "patronLinkedAt"
 > & {
   founderCandidate: { payment: PaymentView; earlier: boolean; copyUnverified: boolean } | null;
   otherFounder: boolean;
@@ -704,6 +705,7 @@ export class SupportersStore {
     return {
       ...supporter,
       patronLinkConflict: supporter.patronLinkConflict ?? null,
+      patronLinkedAt: facts.patronLinkedAt,
       payments: supporter.payments ?? [],
       founderBlockedReason,
       founderBlockedMessage: founderBlockedReason ? founderBlockedMessages[founderBlockedReason] : null,

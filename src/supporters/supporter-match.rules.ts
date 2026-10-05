@@ -307,6 +307,8 @@ export type NextStep = { code: string; area: NextStepArea; message: string };
 export type NextStepRecord = MatchMember & {
   /** A refused patron sign-in staff have not settled yet. Omitted, none. */
   patronLinkConflict?: PatronLinkConflict | null;
+  /** When the patron linked the current Discord account with "Link Patreon" (MatchFacts). Omitted, never. */
+  patronLinkedAt?: string | null;
   founder: { automatic: boolean } | null;
   founderBlockedReason: FounderBlockedReason | "no_payment" | null;
   founderEligiblePayment: PaymentView | null;
@@ -415,6 +417,25 @@ const patronLinkConflictMessages: Record<PatronLinkConflictReason, (conflict: Pa
 };
 
 /**
+ * A founder promise that waits only for the patron's own link to stand for the waiting period. Automatic matching
+ * records it on its own once both the link and the first payment are that old, so staff get the time to check the
+ * link by. Null for anything else, and for a link with no readable time, which never passes on its own.
+ */
+function patronLinkWaiting(record: NextStepRecord, context: NextStepContext): NextStep | null {
+  if (record.provider !== "patreon" || record.automaticBlockedReason !== "patron_link_too_recent") return null;
+  const linkedAt = Date.parse(record.patronLinkedAt ?? "");
+  if (!context.founderAuto || !Number.isFinite(linkedAt)) return null;
+  const paidAt = record.automaticPayment ? Date.parse(record.automaticPayment.paidAt) : NaN;
+  const at = Math.max(linkedAt, Number.isFinite(paidAt) ? paidAt : linkedAt) + context.holdHours * 3_600_000;
+  const when = `${new Date(at).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+  return {
+    code: "founder_patron_link_waiting",
+    area: "founder",
+    message: `Gramps records it on its own at ${when}, once the patron's own link and payment are ${context.holdHours} hours old, so check the link before then.`,
+  };
+}
+
+/**
  * The steps still needed for one record, in the order staff take them: Discord, SteamID, payment, founder. Alerts
  * (a refused patron sign-in, a different Discord account reported by Patreon, a revoked source application) come
  * first in their area.
@@ -435,14 +456,15 @@ export function supporterNextSteps(record: NextStepRecord, context: NextStepCont
         "discord_on_another_record",
         `Patreon reports Discord account ${record.patreonDiscordId}, which another supporter record already links. Check both records.`,
       );
+    // With Link Patreon on, the patron can link it in Discord without Patreon's integration.
+    else if (context.importConfigured && context.patronLink && !record.patreonDiscordId)
+      discord("connect_discord_in_patreon", "Ask the patron to tap Link Patreon in Discord, or link it here.");
     else if (context.importConfigured)
       discord(
         "connect_discord_in_patreon",
         record.patreonDiscordId
           ? `Patreon reports Discord account ${record.patreonDiscordId}; the next sync links it.`
-          : context.patronLink
-            ? "Ask the patron to tap Link Patreon in Discord, or link it here."
-            : "Ask the patron to connect Discord on Patreon, or link it here.",
+          : "Ask the patron to connect Discord on Patreon, or link it here.",
       );
     else
       discord(
@@ -518,6 +540,12 @@ export function supporterNextSteps(record: NextStepRecord, context: NextStepCont
     return steps;
   }
   const automatic = record.automaticBlockedReason;
+  // Gramps records this one itself once the patron's own link has stood for the wait, so the step is to check the link.
+  const patronLinkWait = patronLinkWaiting(record, context);
+  if (patronLinkWait) {
+    steps.push(patronLinkWait);
+    return steps;
+  }
   if (record.provider === "patreon" && automatic === null)
     steps.push(
       context.founderAuto

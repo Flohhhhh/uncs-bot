@@ -178,6 +178,25 @@ describe("private supporters HTTP boundary", () => {
       ],
     });
   });
+  it.each([true, false, undefined])(
+    "points staff at Link Patreon only while PATREON_LINK_ENABLED is %p",
+    async (enabled) => {
+      store.list.mockResolvedValue([supporterFixture()]);
+      values.PATREON_LINK_ENABLED = enabled;
+      try {
+        const result = await request(app.getHttpServer())
+          .get("/admin/api/supporters")
+          .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+          .expect(200);
+        const [step] = result.body.supporters[0].nextSteps;
+        expect(step).toMatchObject({ code: "connect_discord_in_patreon", area: "discord" });
+        if (enabled) expect(step.message).toBe("Ask the patron to tap Link Patreon in Discord, or link it here.");
+        else expect(step.message).not.toContain("Link Patreon");
+      } finally {
+        delete values.PATREON_LINK_ENABLED;
+      }
+    },
+  );
   it("returns the record as read again after a staff link fills the SteamID", async () => {
     store.mutate.mockResolvedValueOnce({ ok: true, replayed: false, supporter: supporterFixture({ version: 2 }) });
     store.get.mockResolvedValueOnce(supporterFixture({ version: 3, steamSource: "application" }));

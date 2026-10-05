@@ -2699,7 +2699,7 @@ describe("launch storage on isolated PostgreSQL", () => {
 
     it("fills the empty link as the patron's own, bumps the version once and audits it, then writes nothing again", async () => {
       const record = await importPatron("self-linked");
-      expect(record).toMatchObject({ discordId: null, identityState: "unlinked" });
+      expect(record).toMatchObject({ discordId: null, identityState: "unlinked", patronLinkedAt: null });
       expect(await patronLink.linked(campaign, patron)).toBe(false);
       expect(await patronLink.link(signIn("self-linked"))).toEqual({ outcome: "linked", memberId: record.id });
       const view = (await supporters.get(record.id, campaign, automaticPolicy))!;
@@ -2937,6 +2937,9 @@ describe("launch storage on isolated PostgreSQL", () => {
         memberId: record.id,
       });
       const held = { ...policy, automaticHoldHours: 72 };
+      // The page reads the link's time from its audit row, so it can say when Gramps records the founder.
+      const linkedView = (await supporters.get(record.id, campaign, held))!;
+      expect(Date.parse(linkedView.patronLinkedAt!)).toBe(linkedAt.getTime());
       const options = (now: string): AutoMatchOptions => ({
         campaignId: campaign,
         policy: held,
