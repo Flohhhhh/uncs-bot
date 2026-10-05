@@ -7,9 +7,16 @@ import { setTimeout as delay } from "node:timers/promises";
 import * as schema from "../src/database/schema";
 import { ApplicationsStore } from "../src/applications/applications.store";
 import { SupportersStore } from "../src/supporters/supporters.store";
+import {
+  SupporterMatchStore,
+  type AutoMatchOptions,
+  type AutoMatchResult,
+} from "../src/supporters/supporter-match.store";
+import { supporterNextSteps } from "../src/supporters/supporter-match.rules";
 import type {
   FounderPolicy,
   ManualMemberInput,
+  PaypalInput,
   SupporterMutation,
   SupporterView,
 } from "../src/supporters/supporters.types";
@@ -18,11 +25,16 @@ import { AdminStore, COMMUNITY_MESSAGES_ACTOR_ID } from "../src/admin/admin.stor
 import type { ActionResult, AdminAction, Staff } from "../src/admin/admin.types";
 import { MapVotesStore } from "../src/map-votes/map-votes.store";
 import { ServerEventsStore } from "../src/server-events/server-events.store";
-import { eventFixture, eventStaff } from "../src/server-events/event-fixtures";
+import { eventFixture, eventStaff, voteEventFixture } from "../src/server-events/event-fixtures";
 import { operation } from "../src/server-events/event-planner";
 import { TelemetryStore } from "../src/telemetry/telemetry.store";
+import { publicServerStats, rowExtrasByPlayer } from "../src/telemetry/telemetry.service";
+import { DiscordRolesStore } from "../src/discord-roles/discord-roles.store";
+import { PATRON_LINK_ACTOR, PatronLinkStore, type PatronLinkResult } from "../src/patron-link/patron-link.store";
+import { PATRON_LINK_FOUNDER_REASON } from "../src/supporters/supporter-match.rules";
 import { parseFeed } from "../src/telemetry/telemetry.types";
-import { defaultVotingPolicy } from "../src/common/voting-policy";
+import { describeCause } from "../src/common/cause-labels";
+import { defaultVotingPolicy, defaultVotingSettings } from "../src/common/voting-policy";
 
 // Only the port is configurable. Never load the application's configuration or
 // DATABASE_URL: this suite requires an empty, disposable loopback test database.
@@ -31,11 +43,18 @@ describe("launch storage on isolated PostgreSQL", () => {
   let workers: ReturnType<typeof worker>[] = [];
   let initialized = false;
   let supporters: SupportersStore;
+  let match: SupporterMatchStore;
   let applications: ApplicationsStore;
   let admin: AdminStore;
   let votes: MapVotesStore;
   let events: ServerEventsStore;
+  let roles: DiscordRolesStore;
+  let patronLink: PatronLinkStore;
+  let migratedApplicationAccess: unknown[] | undefined;
   let migratedLegacyData: Record<string, unknown[]>;
+  let migratedSupporterData: unknown[] | undefined;
+  let migratedDiscordSources: unknown[] | undefined;
+  const legacySupporterId = randomUUID();
   const legacyApplicationId = randomUUID();
   const legacyServerInstanceId = randomUUID();
   const legacyEventId = randomUUID();
@@ -46,6 +65,8 @@ describe("launch storage on isolated PostgreSQL", () => {
     return {
       pool,
       supporters: new SupportersStore(db),
+      match: new SupporterMatchStore(db),
+      patronLink: new PatronLinkStore(db),
       applications: new ApplicationsStore(db),
       votes: new MapVotesStore(db),
       events: new ServerEventsStore(db),
@@ -100,6 +121,7 @@ describe("launch storage on isolated PostgreSQL", () => {
     currency: "USD",
     startsAt: "2026-09-30T04:00:00.000Z",
     endsAt: "2026-10-15T04:00:00.000Z",
+    source: "SUPPORTER_FOUNDER",
   };
   const memberInput = (patreonMemberId = "sample-member"): ManualMemberInput => ({
     id: randomUUID(),
@@ -111,7 +133,7 @@ describe("launch storage on isolated PostgreSQL", () => {
   const review = (record: SupporterView) => ({
     id: randomUUID(),
     version: record.version,
-    confirm: record.patreonMemberId,
+    confirm: record.confirmKey,
     reason: "Reviewed fictional evidence",
   });
   async function register(name?: string) {
@@ -161,6 +183,7 @@ describe("launch storage on isolated PostgreSQL", () => {
     lastChargeStatus: "Paid",
     lastChargeAt: events.at(-1)?.date ?? null,
     discordId: null,
+    discordKnown: true,
     events,
     historyComplete,
   });
@@ -220,8 +243,54 @@ describe("launch storage on isolated PostgreSQL", () => {
           [legacyFirstReceivedAt, legacyLastReceivedAt],
         );
       }
+      if (file.startsWith("0005_")) {
+        // Supporter records written before the provider-neutral ledger must stay valid Patreon records.
+        await client.query(
+          `INSERT INTO supporter_members (id, campaign_id, patreon_member_id, display_name, observed_at, discord_id,
+             steam_id)
+           VALUES ($1, '999001', 'legacy-member', 'Legacy supporter', $2, $3, '76561198000000001')`,
+          [legacySupporterId, legacyFirstReceivedAt, staff.id],
+        );
+        await client.query(
+          `INSERT INTO supporter_payments (id, member_id, campaign_id, paid_at, amount_cents, currency, source,
+             reference, verification_state, first_successful_payment_verified, verified_by, recorded_at)
+           VALUES (gen_random_uuid(), $1, '999001', $2, 500, 'USD', 'manual_receipt', 'legacy-receipt',
+             'verified', true, $3, $2)`,
+          [legacySupporterId, legacyFirstReceivedAt, staff.id],
+        );
+      }
+      if (file.startsWith("0006_")) {
+        // Discord sources recorded before patron sign-in links must stay valid under the widened check.
+        await client.query(
+          `INSERT INTO supporter_members (id, provider, campaign_id, patreon_member_id, observed_at, discord_id,
+             discord_source, patreon_discord_id)
+           VALUES ($1, 'patreon', '999001', 'imported-member', $3, '234567890123456781', 'patreon',
+             '234567890123456781'),
+             ($2, 'paypal', NULL, NULL, $3, '234567890123456782', 'staff', NULL)`,
+          [randomUUID(), randomUUID(), legacyFirstReceivedAt],
+        );
+      }
       await client.query(await readFile(join(directory, file), "utf8"));
     }
+    migratedDiscordSources = (
+      await client.query(
+        "SELECT provider, discord_source FROM supporter_members WHERE discord_source IS NOT NULL ORDER BY provider",
+      )
+    ).rows;
+    migratedApplicationAccess = (
+      await client.query(
+        "SELECT status, access_intent, whitelist_grant, revoked_at FROM whitelist_applications WHERE id = $1",
+        [legacyApplicationId],
+      )
+    ).rows;
+    migratedSupporterData = (
+      await client.query(
+        `SELECT m.provider, m.campaign_id, m.patreon_member_id, m.discord_source, m.patreon_discord_id,
+        m.steam_source, m.steam_application_id, p.source, p.minimum_confirmed,
+        p.recorded_by FROM supporter_members m JOIN supporter_payments p ON p.member_id = m.id WHERE m.id = $1`,
+        [legacySupporterId],
+      )
+    ).rows;
     migratedLegacyData = {
       applications: (
         await client.query("SELECT id, server_id, discord_user_id, steam_id, email, status FROM whitelist_applications")
@@ -232,10 +301,13 @@ describe("launch storage on isolated PostgreSQL", () => {
     };
     const db = drizzle({ client, schema });
     supporters = new SupportersStore(db);
+    match = new SupporterMatchStore(db);
     applications = new ApplicationsStore(db);
     admin = new AdminStore(db);
     votes = new MapVotesStore(db);
     events = new ServerEventsStore(db);
+    roles = new DiscordRolesStore(db);
+    patronLink = new PatronLinkStore(db);
     workers = ["a", "b"].map((name) =>
       worker(new Pool({ ...connection, max: 1, application_name: `uncs_launch_worker_${name}` })),
     );
@@ -244,7 +316,7 @@ describe("launch storage on isolated PostgreSQL", () => {
   beforeEach(async () => {
     if (!initialized) return;
     await client.query(
-      "TRUNCATE combat_events, combat_tracking, server_event_operations, server_events, map_vote_ballots, map_votes, map_vote_policies, supporter_actions, supporter_founders, supporter_payments, supporter_observations, supporter_members, whitelist_application_reviews, whitelist_applications, admin_actions, admin_sessions CASCADE",
+      "TRUNCATE combat_events, combat_tracking, game_feed_event_types, server_event_operations, server_events, map_vote_ballots, map_votes, map_vote_policies, discord_role_actions, supporter_actions, supporter_founders, supporter_payments, supporter_observations, supporter_members, whitelist_application_reviews, whitelist_applications, admin_actions, admin_sessions CASCADE",
     );
   });
   afterAll(async () => {
@@ -280,6 +352,110 @@ describe("launch storage on isolated PostgreSQL", () => {
         },
       ],
     });
+  });
+
+  it("keeps applications from before revocation support as granted, unrevoked records", () => {
+    expect(migratedApplicationAccess).toEqual([
+      { status: "approved", access_intent: "grant", whitelist_grant: null, revoked_at: null },
+    ]);
+  });
+
+  it("keeps supporter records from before the provider-neutral ledger as Patreon records", () => {
+    expect(migratedSupporterData).toEqual([
+      {
+        provider: "patreon",
+        campaign_id: "999001",
+        patreon_member_id: "legacy-member",
+        // Links made before sources were recorded stay unclassified until the startup classification runs.
+        discord_source: null,
+        patreon_discord_id: null,
+        steam_source: null,
+        steam_application_id: null,
+        source: "manual_receipt",
+        minimum_confirmed: false,
+        recorded_by: null,
+      },
+    ]);
+  });
+
+  it("keeps Discord sources recorded before patron sign-in links", () => {
+    expect(migratedDiscordSources).toEqual([
+      { provider: "patreon", discord_source: "patreon" },
+      { provider: "paypal", discord_source: "staff" },
+    ]);
+  });
+
+  it("rejects identity sources that do not match the record's identities or provider", async () => {
+    const insert = (values: {
+      provider?: "patreon" | "paypal";
+      discordId?: string | null;
+      discordSource?: string | null;
+      patreonDiscordId?: string | null;
+      steamId?: string | null;
+      steamSource?: string | null;
+      steamApplicationId?: string | null;
+    }) => {
+      const provider = values.provider ?? "patreon";
+      return client.query(
+        `INSERT INTO supporter_members (id, provider, campaign_id, patreon_member_id, observed_at, discord_id,
+           discord_source, patreon_discord_id, steam_id, steam_source, steam_application_id)
+         VALUES ($1, $2, $3, $4, now(), $5, $6, $7, $8, $9, $10)`,
+        [
+          randomUUID(),
+          provider,
+          provider === "patreon" ? campaign : null,
+          provider === "patreon" ? randomUUID() : null,
+          values.discordId ?? null,
+          values.discordSource ?? null,
+          values.patreonDiscordId ?? null,
+          values.steamId ?? null,
+          values.steamSource ?? null,
+          values.steamApplicationId ?? null,
+        ],
+      );
+    };
+    const discordSource = "supporter_members_discord_source_check",
+      steamSource = "supporter_members_steam_source_check",
+      steamApplication = "supporter_members_steam_application_check",
+      patreonDiscord = "supporter_members_patreon_discord_check";
+    for (const [values, constraint] of [
+      [{ discordSource: "staff" }, discordSource],
+      [{ discordId: staff.id, discordSource: "someone" }, discordSource],
+      [{ provider: "paypal", discordId: staff.id, discordSource: "patreon" }, discordSource],
+      [{ discordSource: "patron_signin" }, discordSource],
+      [{ provider: "paypal", discordId: staff.id, discordSource: "patron_signin" }, discordSource],
+      [{ steamSource: "staff" }, steamSource],
+      [
+        {
+          provider: "paypal",
+          steamId: "76561198000000001",
+          steamSource: "application",
+          steamApplicationId: randomUUID(),
+        },
+        steamSource,
+      ],
+      [{ steamId: "76561198000000001", steamSource: "application" }, steamApplication],
+      [{ steamId: "76561198000000001", steamSource: "staff", steamApplicationId: randomUUID() }, steamApplication],
+      [{ provider: "paypal", patreonDiscordId: staff.id }, patreonDiscord],
+    ] as const)
+      await expect(insert(values)).rejects.toMatchObject({ code: "23514", constraint });
+    await insert({
+      discordId: staff.id,
+      discordSource: "patreon",
+      patreonDiscordId: staff.id,
+      steamId: "76561198000000001",
+      steamSource: "application",
+      steamApplicationId: randomUUID(),
+    });
+    await insert({
+      provider: "paypal",
+      discordId: staff.id,
+      discordSource: "staff",
+      steamId: "76561198000000002",
+      steamSource: "staff",
+    });
+    // A patron's own sign-in link is a Patreon record's.
+    await insert({ discordId: "234567890123456783", discordSource: "patron_signin" });
   });
 
   const ballotInput = () => ({
@@ -399,6 +575,81 @@ describe("launch storage on isolated PostgreSQL", () => {
     expect((await admin.receipt(notable[0], "primary"))?.state).toBe("applied");
   });
 
+  it("counts each player's kicks and bans the game applied or accepted, on one server", async () => {
+    const [griefer, other, clean] = ["76561198000000001", "76561198000000002", "76561198000000003"];
+    const record = async (
+      action: "kick" | "ban",
+      steamId: string,
+      state: ActionResult["state"] | null,
+      daysAgo: number,
+      extra: { serverId?: string; name?: string; reason?: string } = {},
+    ) => {
+      const id = randomUUID();
+      const base = { id, steamId, reason: extra.reason ?? "Team killing", serverId: extra.serverId };
+      await admin.begin(
+        staff,
+        action === "ban" ? { ...base, action, confirm: steamId } : { ...base, action },
+        id,
+        extra.name,
+      );
+      if (state) await admin.finish(id, { state, message: `Recorded ${state}` });
+      await client.query("UPDATE admin_actions SET created_at = now() - make_interval(days => $1) WHERE id = $2", [
+        daysAgo,
+        id,
+      ]);
+      return id;
+    };
+    const oldest = await record("kick", griefer, "applied", 40, { name: "Old name", reason: "Spawn camping" });
+    await record("kick", griefer, "failed", 3, { name: "Refused" });
+    // Started (a crash before the result), unknown and pending kicks may never have reached the game.
+    const unfinished = await record("kick", griefer, null, 5, { name: "Unfinished" });
+    const unknown = await record("kick", griefer, "unknown", 6, { name: "Unknown result" });
+    const pending = await record("kick", griefer, "pending", 7, { name: "Pending result" });
+    const earlier = await record("kick", griefer, "applied", 4);
+    const accepted = await record("kick", griefer, "accepted", 2, { name: "Griefer" });
+    const ban = await record("ban", griefer, "applied", 1, { name: "Griefer", reason: "Cheating" });
+    await record("kick", griefer, "applied", 1, { serverId: "east", name: "Elsewhere" });
+    await record("kick", other, "applied", 10);
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60_000);
+
+    const summaries = await admin.moderationSummaries("primary", [griefer, other, clean], since);
+    expect([...summaries.keys()].sort()).toEqual([griefer, other]);
+    expect(summaries.get(griefer)).toEqual({
+      name: "Griefer",
+      kicks: { count: 3, recent: 2, lastAt: expect.any(Date), lastBy: staff.name, lastReason: "Team killing" },
+      bans: { count: 1, recent: 1, lastAt: expect.any(Date), lastBy: staff.name, lastReason: "Cheating" },
+    });
+    expect(summaries.get(griefer)!.bans!.lastAt.getTime()).toBeGreaterThan(
+      summaries.get(griefer)!.kicks!.lastAt.getTime(),
+    );
+    expect(summaries.get(other)).toMatchObject({ name: null, kicks: { count: 1, recent: 1 }, bans: null });
+    expect((await admin.moderationSummaries("east", [griefer])).get(griefer)).toMatchObject({
+      name: "Elsewhere",
+      kicks: { count: 1 },
+      bans: null,
+    });
+
+    // Recent entries list the unconfirmed kicks with their outcome; only refused ones are left out.
+    expect((await admin.moderationEntries("primary", griefer)).map((entry) => entry.id)).toEqual([
+      ban,
+      accepted,
+      earlier,
+      unfinished,
+      unknown,
+      pending,
+      oldest,
+    ]);
+    expect(await admin.repeatOffenders("primary", since, 2)).toEqual([
+      {
+        steamId: griefer,
+        name: "Griefer",
+        kicks: { count: 2, recent: 2, lastAt: expect.any(Date), lastBy: staff.name, lastReason: "Team killing" },
+      },
+    ]);
+    expect(await admin.repeatOffenders("primary", since, 3)).toEqual([]);
+    expect(await admin.repeatOffenders("east", since, 2)).toEqual([]);
+  });
+
   it("deduplicates and aggregates the same game event independently on two configured servers", async () => {
     const telemetry = new TelemetryStore(drizzle({ client, schema }));
     const now = new Date(),
@@ -426,6 +677,329 @@ describe("launch storage on isolated PostgreSQL", () => {
     expect((await telemetry.tracking("east"))?.lastReceivedAt).toEqual(now);
   });
 
+  it("aggregates public server stats and leaderboard row extras from stored events", async () => {
+    const telemetry = new TelemetryStore(drizzle({ client, schema }));
+    const now = new Date(),
+      since = new Date(now.getTime() - 60_000);
+    const [oldMan, mossy, tea] = ["76561198000000001", "76561198000000002", "76561198000000003"];
+    const names: Record<string, string> = { [oldMan]: "OldManRiver", [mossy]: "MossyBoots", [tea]: "TeaAndTanks" };
+    const tag = (name: string) => `Meta.Progression.Context.Player.KillContext.${name}`;
+    let eventTime = 0;
+    // One batch: every event shares a receipt time, so the game clock orders them.
+    const kill = (
+      killer: string | null,
+      victim: string,
+      fields: { cause?: string; distance?: number; mapName?: string; contextTags?: string[] } = {},
+    ) => ({
+      eventId: randomUUID(),
+      type: "killed",
+      eventTime: ++eventTime,
+      mapName: "Europe",
+      killerSteamId: killer,
+      killerName: killer ? names[killer] : null,
+      victimSteamId: victim,
+      victimName: names[victim],
+      ...fields,
+    });
+    const feed = parseFeed({
+      serverId: randomUUID(),
+      serverName: "Game label",
+      events: [
+        kill(oldMan, mossy, {
+          cause: "Id.Item.AK74M",
+          distance: 41_200,
+          mapName: "Kavkazi",
+          contextTags: [tag("Headshot"), tag("Penetration")],
+        }),
+        // Over the 2 km cap: a kill, but never the longest.
+        kill(oldMan, tea, { cause: "ID.Item.AK74M", distance: 250_000, mapName: "Bakurani" }),
+        kill(oldMan, mossy, {
+          cause: "Id.Item.M4",
+          distance: 1_000,
+          contextTags: ["Meta.PlayerKillFlag.Player.WeaponMelee"],
+        }),
+        kill(mossy, oldMan, { cause: "Vehicle.Variant.Land.Wheeled.Humvee.Default", contextTags: [tag("RoadKill")] }),
+        kill(oldMan, tea, { cause: "Id.Item.AK74M", distance: 5_000 }),
+        kill(null, tea, { contextTags: [tag("Falling")] }),
+        kill(mossy, mossy, { contextTags: ["Meta.PlayerKillFlag.Player.Suicide"] }),
+      ],
+    });
+    expect((await telemetry.ingest(feed, now, "east")).inserted).toBe(7);
+    // Another server's events never count.
+    await telemetry.ingest({ ...feed, serverId: randomUUID() }, now, "central");
+
+    const stats = await telemetry.serverStats(since, now, "east");
+    const all = stats.groups.find((row) => row.set === 7);
+    expect(all).toMatchObject({
+      kills: 5,
+      headshotKills: 1,
+      melee: 1,
+      roadkill: 1,
+      vehicleExplosion: 0,
+      penetration: 1,
+    });
+    expect(stats.totals).toEqual({ events: 7, deaths: 7, suicides: 1, falling: 1, players: 3 });
+    const snapshot = await telemetry.snapshot(since, now, undefined, "east");
+    expect(snapshot.totals).toEqual({ events: 7, kills: 5, deaths: 7, headshotKills: 1, players: 3 });
+    expect(
+      stats.groups
+        .filter((row) => row.set === 3)
+        .map(({ causeKey, kills, longestCentimeters }) => ({ causeKey, kills, longestCentimeters }))
+        .sort((a, b) => b.kills - a.kills),
+    ).toEqual([
+      { causeKey: "id.item.ak74m", kills: 3, longestCentimeters: 41_200 },
+      expect.objectContaining({ kills: 1 }),
+      expect.objectContaining({ kills: 1 }),
+    ]);
+    expect(stats.groups.filter((row) => row.set === 6)).toEqual([
+      expect.objectContaining({ hour: now.getUTCHours(), kills: 5 }),
+    ]);
+    const result = publicServerStats(stats);
+    expect(result.totals).toEqual({ ...snapshot.totals, suicides: 1 });
+    expect(result.weapons).toEqual([
+      { label: "AK-74M", kind: "firearm", kills: 3, headshotKills: 1, longestMeters: 412 },
+      { label: "Humvee", kind: "vehicle", kills: 1, headshotKills: 0, longestMeters: null },
+      { label: "M4", kind: "firearm", kills: 1, headshotKills: 0, longestMeters: 10 },
+    ]);
+    expect(result.maps).toEqual([
+      { label: "Ozeti", kills: 3 },
+      { label: "Bakurani", kills: 2 },
+    ]);
+    expect(result.longestKills).toEqual([{ name: "OldManRiver", weapon: "AK-74M", meters: 412, map: "Bakurani" }]);
+    expect(result.tags).toEqual({
+      melee: 1,
+      roadkill: 1,
+      vehicleExplosion: 0,
+      penetration: 1,
+      ricochet: 0,
+      falling: 1,
+      suicide: 1,
+    });
+    expect(result.tagLeaders).toEqual({
+      melee: [{ name: "OldManRiver", count: 1 }],
+      roadkill: [{ name: "MossyBoots", count: 1 }],
+      vehicleExplosion: [],
+      penetration: [{ name: "OldManRiver", count: 1 }],
+      ricochet: [],
+      falling: [{ name: "TeaAndTanks", count: 1 }],
+    });
+    expect(JSON.stringify(result)).not.toMatch(/steamId|\d{17}/);
+
+    const extras = await telemetry.rowExtras(since, now, [oldMan, mossy, tea, "not-an-id"], "east");
+    expect(extras.streaks.sort((a, b) => a.steamId.localeCompare(b.steamId))).toEqual([
+      // Three kills, then run over; the kill after that starts a new streak.
+      { steamId: oldMan, bestStreak: 3 },
+      { steamId: mossy, bestStreak: 1 },
+      { steamId: tea, bestStreak: 0 },
+    ]);
+    expect(rowExtrasByPlayer(extras)).toEqual(
+      new Map([
+        [oldMan, { topWeapon: "AK-74M", longestKillMeters: 412, bestStreak: 3 }],
+        [mossy, { topWeapon: "Humvee", bestStreak: 1 }],
+        [tea, {}],
+      ]),
+    );
+    expect(await telemetry.rowExtras(since, now, [], "east")).toEqual({ weapons: [], streaks: [] });
+  });
+
+  it("ranks long-distance calls by each player's own best shot, so one sniper cannot crowd out the list", async () => {
+    const telemetry = new TelemetryStore(drizzle({ client, schema }));
+    const now = new Date(),
+      since = new Date(now.getTime() - 60_000),
+      earlier = new Date(now.getTime() - 30_000);
+    const sniper = "76561198000000101",
+      target = "76561198000000102";
+    const others = Array.from({ length: 11 }, (_, index) => `765611980000002${String(index).padStart(2, "0")}`);
+    let eventTime = 0;
+    const kill = (killer: string, killerName: string, distance: number, victim = target, victimName = "Target") => ({
+      eventId: randomUUID(),
+      type: "killed",
+      eventTime: ++eventTime,
+      killerSteamId: killer,
+      killerName,
+      victimSteamId: victim,
+      victimName,
+      cause: "Id.Item.SR_04",
+      distance,
+    });
+    const batch = (events: unknown[]) => parseFeed({ serverId: randomUUID(), serverName: "Game label", events });
+    // 201 sniper shots, every one longer than anyone else's best: the 200 longest kills are all his.
+    const shots = Array.from({ length: 201 }, (_, index) => kill(sniper, "LongShotLarry", 150_000 + index));
+    const spread = others.map((id, index) => kill(id, `Player ${index}`, 10_000 + index * 100));
+    for (const events of [shots.slice(0, 100), shots.slice(100, 200), [...shots.slice(200), ...spread]])
+      await telemetry.ingest(batch(events), earlier, "west");
+    // A later name, seen only as a victim, is the one shown.
+    await telemetry.ingest(batch([kill(sniper, "LongShotLarry", 500, others[10], "Renamed Ten")]), now, "west");
+
+    const stats = await telemetry.serverStats(since, now, "west");
+    expect(stats.longest).toHaveLength(10);
+    expect(publicServerStats(stats).longestKills.map(({ name, weapon, meters }) => ({ name, weapon, meters }))).toEqual(
+      [
+        { name: "LongShotLarry", weapon: "SR-04", meters: 1502 },
+        { name: "Renamed Ten", weapon: "SR-04", meters: 110 },
+        ...[9, 8, 7, 6, 5, 4, 3, 2].map((index) => ({
+          name: `Player ${index}`,
+          weapon: "SR-04",
+          meters: 100 + index,
+        })),
+      ],
+    );
+    expect(stats.totals).toEqual({ events: 213, deaths: 213, suicides: 0, falling: 0, players: 13 });
+  });
+
+  it("counts only firearm kills as long shots in stats, row extras and the weekly highlight", async () => {
+    const telemetry = new TelemetryStore(drizzle({ client, schema }));
+    const now = new Date(),
+      since = new Date(now.getTime() - 60_000);
+    const [ricky, annie, rita, tom, target] = [
+      "76561198000000301",
+      "76561198000000302",
+      "76561198000000303",
+      "76561198000000304",
+      "76561198000000305",
+    ];
+    const names: Record<string, string> = {
+      [ricky]: "RifleRicky",
+      [annie]: "ArtilleryAnnie",
+      [rita]: "RocketRita",
+      [tom]: "TankTom",
+      [target]: "Target",
+    };
+    let eventTime = 0;
+    const kill = (killer: string, cause: string, distance: number) => ({
+      eventId: randomUUID(),
+      type: "killed",
+      eventTime: ++eventTime,
+      mapName: "Bakurani",
+      killerSteamId: killer,
+      killerName: names[killer],
+      victimSteamId: target,
+      victimName: names[target],
+      cause,
+      distance,
+    });
+    const feed = parseFeed({
+      serverId: randomUUID(),
+      serverName: "Game label",
+      events: [
+        // Artillery, rocket pods, a tank gun, a grenade and an unlabelled bare code all reach farther than
+        // any rifle here, and none of them is a long shot.
+        kill(annie, "Id.Vehicle.WeaponExtension.Artillery", 200_000),
+        kill(rita, "Id.Vehicle.WeaponExtension.ROT_04.RocketPods", 150_000),
+        kill(tom, "Id.Vehicle.WeaponExtension.MBT_01.MainBarrel", 180_000),
+        kill(tom, "ID.Item.M67Grenade", 90_000),
+        kill(tom, "Mortar", 199_000),
+        kill(ricky, "Id.Item.SVDM", 60_000),
+        kill(annie, "ID.Item.AK74M", 5_000),
+        // An item without a label reads "New Rifle" but its kind is unknown, not firearm, so it does not count.
+        kill(rita, "Id.Item.NewRifle", 1_000),
+      ],
+    });
+    expect((await telemetry.ingest(feed, now, "east")).inserted).toBe(8);
+
+    const result = publicServerStats(await telemetry.serverStats(since, now, "east"));
+    expect(result.longestKills).toEqual([
+      { name: "RifleRicky", weapon: "SVDM", meters: 600, map: "Bakurani" },
+      { name: "ArtilleryAnnie", weapon: "AK-74M", meters: 50, map: "Bakurani" },
+    ]);
+    // Each weapon's own longest kill still covers every kind.
+    expect(result.weapons).toEqual(
+      expect.arrayContaining([
+        { label: "Artillery", kind: "vehicle_weapon", kills: 1, headshotKills: 0, longestMeters: 2_000 },
+        { label: "Rocket Pods", kind: "vehicle_weapon", kills: 1, headshotKills: 0, longestMeters: 1_500 },
+        { label: "SVDM", kind: "firearm", kills: 1, headshotKills: 0, longestMeters: 600 },
+      ]),
+    );
+
+    const extras = await telemetry.rowExtras(since, now, [ricky, annie, rita, tom], "east");
+    expect(rowExtrasByPlayer(extras)).toEqual(
+      new Map([
+        [ricky, { topWeapon: "SVDM", longestKillMeters: 600, bestStreak: 1 }],
+        [annie, { topWeapon: "AK-74M", longestKillMeters: 50, bestStreak: 2 }],
+        // No firearm kill, so no longest kill at all.
+        [rita, { topWeapon: "New Rifle", bestStreak: 2 }],
+        [tom, { topWeapon: "M67 grenade", bestStreak: 3 }],
+      ]),
+    );
+
+    expect((await telemetry.weeklyHighlights(since, now, "east")).longestKill).toEqual({
+      steamId: ricky,
+      name: "RifleRicky",
+      distanceCentimeters: 60_000,
+      cause: "Id.Item.SVDM",
+      mapName: "Bakurani",
+    });
+  });
+
+  it("matches describeCause()'s firearm kind in SQL for every cause shape the labels handle", async () => {
+    const telemetry = new TelemetryStore(drizzle({ client, schema }));
+    const now = new Date(),
+      since = new Date(now.getTime() - 60_000);
+    const [asSent, lowered, target] = ["76561198000000311", "76561198000000312", "76561198000000313"];
+    const firearms = [
+      ...["Id.Item.AK74M", "ID.Item.SVDM", "ID.ITEM.MOSIN", "Id.Item.SR_04", "Id.Item.Mosin.Nagant", "Id.Item.M500"],
+      ...["Id.Item.A91", "Id.Item.MK22", "Id.Item.Vector", "Id.Item.WEPN_029", "ID.Item.WEPN7", "AK-47", "SVD"],
+      ...["Compound Bow", "WEPN_030"],
+    ];
+    const others = [
+      // Unlabelled items and family codes read as names but are not firearms until they are labelled.
+      ...["Id.Item.SMG_03", "SMG_03", "Id.Item.NewRifle", "Id.Item.NewThing.Variant", "Id.Item.Foo.WEPN_029"],
+      ...["Id.Item.WEPN_", "Id.Item.WEPN_12345", "Id.Item.", "Id.Item.76561198000000009", "Id.Item.Free_Gun", "Mortar"],
+      ...[
+        "ID.Item.M67Grenade",
+        "Id.Item.M67",
+        "Id.Item.RPG7",
+        "Id.Item.CGM4",
+        "ID.Item.ATMine",
+        "RPG7",
+        "ID.Item.Fists",
+      ],
+      ...["Id.Item.Knife", "ID.Item.Defibrillator", "ID.Item.SupplyPallet", "BP_AK74M", "AK74M_C"],
+      ...["ID.Item.BuildTool.Hammer.Large", "Id.Item.BuildTool.SVDM", "Id.Item.Buildables.SandBags"],
+      ...[
+        "Id.Item.Buildable.AK74M",
+        "Id.Vehicle.WeaponExtension.Artillery",
+        "Id.Vehicle.WeaponExtension.ROT_04.RocketPods",
+      ],
+      ...["Id.Vehicle.WeaponExtension.MBT_01.MainBarrel", "Vehicle.Variant.Air.Rotary.ROT_04.Default"],
+      ...[
+        "Id.Vehicle.Humvee",
+        "Id.Vehicle.Item.AK74M",
+        "Item.AK74M",
+        "Id.Items.AK74M",
+        "Weapons/AK74M",
+        "Weapons\\AK74M",
+      ],
+    ];
+    let eventTime = 0;
+    const kill = (killer: string, cause: string) => ({
+      eventId: randomUUID(),
+      type: "killed",
+      eventTime: ++eventTime,
+      killerSteamId: killer,
+      victimSteamId: target,
+      cause,
+      distance: 10_000,
+    });
+    const causes = [...firearms, ...others];
+    const events = [
+      ...causes.map((cause) => kill(asSent, cause)),
+      ...causes.map((cause) => kill(lowered, cause.toLowerCase())),
+    ];
+    const feed = parseFeed({ serverId: randomUUID(), serverName: "Game label", events });
+    expect((await telemetry.ingest(feed, now, "east")).inserted).toBe(events.length);
+
+    // Row extras keep each cause's longest kill only when the SQL calls it a long shot.
+    const { weapons } = await telemetry.rowExtras(since, now, [asSent, lowered], "east");
+    expect(weapons).toHaveLength(events.length);
+    const firearm = new Set(firearms.map((cause) => cause.toLowerCase()));
+    for (const { cause, longestCentimeters } of weapons) {
+      const expected = firearm.has(cause!.toLowerCase());
+      expect({ cause, longShot: longestCentimeters !== null }).toEqual({ cause, longShot: expected });
+      expect({ cause, firearm: describeCause(cause).kind === "firearm" }).toEqual({ cause, firearm: expected });
+    }
+  });
+
   it("stores game GUIDs that are not RFC 4122 UUIDs and deduplicates them across letter case", async () => {
     const telemetry = new TelemetryStore(drizzle({ client, schema }));
     const now = new Date(),
@@ -440,11 +1014,17 @@ describe("launch storage on isolated PostgreSQL", () => {
         serverName: "Game label",
         events: [{ eventId: id, type: "killed", eventTime: 1, matchId }],
       });
-    expect(await telemetry.ingest(feed(eventId), now, "east")).toEqual({ inserted: 1, duplicates: 0, skipped: 0 });
+    expect(await telemetry.ingest(feed(eventId), now, "east")).toEqual({
+      inserted: 1,
+      duplicates: 0,
+      skipped: 0,
+      typesOverLimit: 0,
+    });
     expect(await telemetry.ingest(feed(eventId.toLowerCase()), now, "east")).toEqual({
       inserted: 0,
       duplicates: 1,
       skipped: 0,
+      typesOverLimit: 0,
     });
     expect(await telemetry.events(since, now, undefined, "east")).toEqual([
       expect.objectContaining({
@@ -452,6 +1032,117 @@ describe("launch storage on isolated PostgreSQL", () => {
         serverInstanceId: serverId.toLowerCase(),
         matchId: matchId.toLowerCase(),
       }),
+    ]);
+  });
+  it("counts each feed event type per server and UTC day with one latest sample, capped and purged", async () => {
+    const telemetry = new TelemetryStore(drizzle({ client, schema }));
+    const morning = new Date("2026-10-04T10:00:00.000Z"),
+      evening = new Date("2026-10-04T23:00:00.000Z");
+    const feed = (events: unknown[]) => parseFeed({ serverId: randomUUID(), serverName: "Game label", events });
+    const kill = () => ({ eventId: randomUUID(), type: "killed", eventTime: 1 });
+    const big = (type: string) => ({ type, padding: "x".repeat(5_000) });
+    const rows = async () =>
+      (
+        await client.query(`SELECT server_id, type, day::text AS day, count::int AS count, first_received_at,
+          last_received_at, sample FROM game_feed_event_types WHERE type IN ('killed', 'spawn', 'bulk')
+          ORDER BY server_id, type`)
+      ).rows;
+    await telemetry.ingest(
+      feed([kill(), { type: "spawn", n: 1, at: "203.0.113.7" }, { type: "spawn", n: 2 }]),
+      morning,
+      "east",
+    );
+    // A repeat delivery counts again; an oversized entry keeps the stored sample or leaves a size marker.
+    await telemetry.ingest(feed([kill(), big("spawn"), big("bulk")]), evening, "east");
+    await telemetry.ingest(feed([{ type: "spawn", n: 3 }]), morning, "central");
+    expect(await rows()).toEqual([
+      {
+        server_id: "central",
+        type: "spawn",
+        day: "2026-10-04",
+        count: 1,
+        first_received_at: morning,
+        last_received_at: morning,
+        sample: { type: "spawn", n: 3 },
+      },
+      {
+        server_id: "east",
+        type: "bulk",
+        day: "2026-10-04",
+        count: 1,
+        first_received_at: evening,
+        last_received_at: evening,
+        sample: { tooLarge: true, bytes: Buffer.byteLength(JSON.stringify(big("bulk"))) },
+      },
+      {
+        server_id: "east",
+        type: "killed",
+        day: "2026-10-04",
+        count: 2,
+        first_received_at: morning,
+        last_received_at: evening,
+        sample: null,
+      },
+      {
+        server_id: "east",
+        type: "spawn",
+        day: "2026-10-04",
+        count: 3,
+        first_received_at: morning,
+        last_received_at: evening,
+        sample: { type: "spawn", n: 2 },
+      },
+    ]);
+    // Killed events keep their own rows, unchanged.
+    expect((await client.query("SELECT count(*)::int AS count FROM combat_events")).rows).toEqual([{ count: 2 }]);
+    // A later real sample replaces a size marker.
+    await telemetry.ingest(feed([{ type: "bulk", ok: true }]), evening, "east");
+    expect(await telemetry.eventTypes(new Date("2026-10-04T00:00:00.000Z"), evening, "east")).toEqual([
+      { type: "spawn", count: 3, firstReceivedAt: morning, lastReceivedAt: evening, sample: { type: "spawn", n: 2 } },
+      { type: "bulk", count: 2, firstReceivedAt: evening, lastReceivedAt: evening, sample: { type: "bulk", ok: true } },
+      { type: "killed", count: 2, firstReceivedAt: morning, lastReceivedAt: evening, sample: null },
+    ]);
+    expect(await telemetry.eventTypes(morning, evening, "west")).toEqual([]);
+    // East has 2 types besides killed today, so 198 of 200 new ones fit; killed and known types still count.
+    const many = Array.from({ length: 200 }, (_, index) => ({ type: `t${index}` }));
+    expect((await telemetry.ingest(feed(many), evening, "east")).typesOverLimit).toBe(2);
+    expect(
+      (await telemetry.ingest(feed([kill(), { type: "t0" }, { type: "overflow" }]), evening, "east")).typesOverLimit,
+    ).toBe(1);
+    const today = await client.query(
+      `SELECT type, count::int AS count FROM game_feed_event_types
+       WHERE server_id = 'east' AND day = '2026-10-04' AND type IN ('killed', 't0', 't199', 'overflow')`,
+    );
+    expect(today.rows.sort((a, b) => a.type.localeCompare(b.type))).toEqual([
+      { type: "killed", count: 3 },
+      { type: "t0", count: 2 },
+    ]);
+    expect(
+      (
+        await client.query(
+          "SELECT count(*)::int AS count FROM game_feed_event_types WHERE server_id = 'east' AND type <> 'killed'",
+        )
+      ).rows,
+    ).toEqual([{ count: 200 }]);
+    // A new UTC day starts its own rows, and the daily cleanup drops this server's days before the cutoff.
+    const nextDay = new Date("2026-10-06T00:00:00.000Z");
+    await client.query(
+      `INSERT INTO game_feed_event_types (server_id, type, day, count, first_received_at, last_received_at)
+       VALUES ('east', 'old', '2026-07-07', 1, $1, $1), ('east', 'kept', '2026-07-08', 1, $1, $1),
+         ('central', 'old', '2026-07-07', 1, $1, $1)`,
+      [new Date("2026-07-07T12:00:00.000Z")],
+    );
+    expect((await telemetry.ingest(feed([{ type: "overflow" }]), nextDay, "east")).typesOverLimit).toBe(0);
+    expect(
+      (
+        await client.query(
+          "SELECT server_id, type, day::text AS day FROM game_feed_event_types WHERE type IN ('old', 'kept', 'overflow') ORDER BY server_id, type",
+        )
+      ).rows,
+    ).toEqual([
+      { server_id: "central", type: "old", day: "2026-07-07" },
+      { server_id: "east", type: "kept", day: "2026-07-08" },
+      { server_id: "east", type: "overflow", day: "2026-10-06" },
     ]);
   });
   function eventInput() {
@@ -573,6 +1264,63 @@ describe("launch storage on isolated PostgreSQL", () => {
     const settled = (await events.get(event.id))!;
     expect((await events.completeUnchanged(event.id, settled.version))?.state).toBe("complete");
   });
+  it("halts a voted event atomically, settling only its own stale operation as unknown", async () => {
+    const { operation: _operation, ...vote } = voteEventFixture();
+    const event = (await events.create(vote)).event;
+    expect(event.options).toEqual(vote.options);
+    expect(event.progress).toEqual(vote.progress);
+    const op = operation(event, "move", { action: "team" });
+    const claimed = (await events.claim(event.id, event.version, op, eventStaff, event.progress))!;
+    expect(await events.halt(event.id, "Interrupted.", randomUUID())).toBeNull();
+    const halted = (await events.halt(event.id, "Interrupted.", op.id))!;
+    expect(halted).toMatchObject({
+      state: "stopping",
+      operation: null,
+      lastActionId: op.id,
+      stop: { actorId: "system:event-halt", reason: "Interrupted." },
+    });
+    expect(halted.version).toBe(claimed.version + 1);
+    expect((await events.operations(event.id))[0]).toMatchObject({ id: op.id, state: "unknown" });
+    // A late settlement cannot reopen the event, and only the notice and the restore may start now.
+    await events.settle(
+      event.id,
+      op.id,
+      { state: "applied", message: "Late" },
+      { state: "active", progress: event.progress, message: "Late" },
+    );
+    expect(await events.get(event.id)).toMatchObject({ state: "stopping" });
+    const move = operation(event, "move", { action: "team" });
+    expect(await events.claim(event.id, halted.version, move, eventStaff, event.progress)).toBeNull();
+    const ended = operation(event, "ended", { action: "broadcast", message: "50v50 is over." });
+    expect(await events.claim(event.id, halted.version, ended, eventStaff, event.progress)).toMatchObject({
+      state: "stopping",
+    });
+    await events.settle(
+      event.id,
+      ended.id,
+      { state: "applied", message: "Sent" },
+      { state: "stopping", progress: event.progress, message: "Sent" },
+    );
+    const stopped = (await events.get(event.id))!;
+    expect(await events.halt(event.id, "Again.")).toMatchObject({ stop: halted.stop });
+    // The lock already reads its original value: complete without a write, only from stopping.
+    expect((await events.completeRestored(event.id, stopped.version, "Already restored."))?.state).toBe("stopping");
+    const current = (await events.get(event.id))!;
+    expect(await events.completeRestored(event.id, current.version, "Already restored.")).toMatchObject({
+      state: "complete",
+      message: "Already restored.",
+    });
+    expect(await events.halt(event.id, "After completion.")).toBeNull();
+  });
+  it("never halts an event that waits for staff review", async () => {
+    const { operation: _operation, ...vote } = voteEventFixture();
+    const event = (await events.create(vote)).event;
+    const op = operation(event, "move", { action: "team" });
+    const claimed = (await events.claim(event.id, event.version, op, eventStaff, event.progress))!;
+    await events.recover(claimed, new Date(claimed.updatedAt.getTime() + 121_000));
+    expect(await events.halt(event.id, "Interrupted.", op.id)).toBeNull();
+    expect(await events.get(event.id)).toMatchObject({ state: "needs_review", stop: null });
+  });
   it("fails closed when the inflight-operation pointer cannot be resolved", async () => {
     const event = (await events.create(eventInput())).event;
     await client.query("UPDATE server_events SET operation_id = $1 WHERE id = $2", [randomUUID(), event.id]);
@@ -605,7 +1353,7 @@ describe("launch storage on isolated PostgreSQL", () => {
       finalReminder: true,
     };
     await votes.savePolicy(input.serverId, 0, policy, staff, input.connectionHash);
-    await votes.create({ ...input, automation: { policy, highestScore: 50, reminders: {} } });
+    await votes.create({ ...input, automation: { policy, policyVersion: 1, highestScore: 50, reminders: {} } });
     await votes.published(input.id, messageId);
     return { input, policy };
   }
@@ -648,6 +1396,74 @@ describe("launch storage on isolated PostgreSQL", () => {
     expect(await votes.observeScore(input.id, 85)).toBe(true);
     expect(await votes.observeScore(input.id, 0)).toBe(false);
     expect((await votes.get(input.id))?.automation?.highestScore).toBe(85);
+  });
+  it("merges a partial save with the stored settings under the version check", async () => {
+    const settings = { ...defaultVotingSettings, closeAtScore: 90 };
+    await votes.savePolicy("primary", 0, { ...defaultVotingPolicy, settings }, staff, "connection");
+    const result = await votes.savePolicy(
+      "primary",
+      1,
+      (previous) => ({ ...defaultVotingPolicy, modeChoices: true, settings: previous?.settings }),
+      staff,
+      "connection",
+    );
+    expect(result.saved.policy).toMatchObject({ modeChoices: true, settings: { closeAtScore: 90 } });
+    await expect(votes.savePolicy("primary", 1, (previous) => previous!, staff, "connection")).rejects.toMatchObject({
+      status: 409,
+    });
+    expect((await votes.policy("primary"))?.version).toBe(2);
+  });
+  it("opens an automatic ballot only under the saved controls version", async () => {
+    const input = ballotInput();
+    const policy = { ...defaultVotingPolicy, enabled: true };
+    await votes.savePolicy(input.serverId, 0, policy, staff, input.connectionHash);
+    await expect(
+      votes.create({ ...input, automation: { policy, policyVersion: 0, highestScore: 10, reminders: {} } }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(
+      (await votes.create({ ...input, automation: { policy, policyVersion: 1, highestScore: 10, reminders: {} } }))
+        .created,
+    ).toBe(true);
+  });
+  it("closes at the snapshot's early score with its tie rule and records a refusal", async () => {
+    const input = ballotInput();
+    const policy = { ...defaultVotingPolicy, enabled: true };
+    await votes.savePolicy(input.serverId, 0, policy, staff, input.connectionHash);
+    const settings = { ...defaultVotingSettings, closeAtScore: 90, tieRule: "first_option" as const };
+    await votes.create({
+      ...input,
+      automation: { policy, policyVersion: 1, settings, highestScore: 70, maxStep: 0, reminders: {} },
+    });
+    await votes.published(input.id, messageId);
+    await votes.cast(input.id, staff.id, 0, input.guildId, input.channelId, messageId);
+    await votes.cast(input.id, "999999999999999999", 1, input.guildId, input.channelId, messageId);
+    expect(await votes.observeScore(input.id, 80, 12)).toBe(true);
+    expect(await votes.claimClose(input.id, true)).toBeNull();
+    expect(await votes.observeScore(input.id, 88, 8)).toBe(true);
+    expect((await votes.get(input.id))?.automation).toMatchObject({ highestScore: 88, maxStep: 12 });
+    expect(await votes.claimClose(input.id, true)).toMatchObject({ state: "closing", counts: [1, 1], winner: 0 });
+    expect(await votes.finish(input.id, "cancelled", "Not queued.", { outcome: "refused" })).toMatchObject({
+      state: "cancelled",
+      automation: { outcome: "refused", maxStep: 12 },
+    });
+  });
+  it("patches automation only in allowed states and moves a ballot out of review once", async () => {
+    const { input } = await scoreBallot();
+    expect(await votes.patchAutomation(input.id, { outcome: "refused" }, ["closing"])).toBeNull();
+    expect((await votes.patchAutomation(input.id, { maxStep: 4 }))?.automation).toMatchObject({ maxStep: 4 });
+    expect(await votes.resolveReview(input.id, "cancelled", "Still open.", {})).toBeNull();
+    await client.query("UPDATE map_votes SET state = 'needs_review', message_id = NULL WHERE id = $1", [input.id]);
+    expect(await votes.needsReview()).toMatchObject([{ id: input.id }]);
+    const resolved = await votes.resolveReview(
+      input.id,
+      "cancelled",
+      "Published late.",
+      { outcome: "unposted" },
+      messageId,
+    );
+    expect(resolved).toMatchObject({ state: "cancelled", messageId, automation: { outcome: "unposted", maxStep: 4 } });
+    expect(await votes.resolveReview(input.id, "queued", "Again.", {})).toBeNull();
+    expect(await votes.needsReview()).toEqual([]);
   });
   it("refuses an automatic publication using controls superseded before its creation", async () => {
     const input = ballotInput();
@@ -847,7 +1663,7 @@ describe("launch storage on isolated PostgreSQL", () => {
     const observation = {
       hash: "c".repeat(64),
       campaignId: campaign,
-      patreonMemberId: record.patreonMemberId,
+      patreonMemberId: record.patreonMemberId!,
       displayName: null,
       patronStatus: "former_patron",
       lastChargeStatus: null,
@@ -855,7 +1671,12 @@ describe("launch storage on isolated PostgreSQL", () => {
       receivedAt: new Date(),
       trigger: "members:delete",
     };
-    expect(await supporters.ingest(observation)).toEqual({ duplicate: false });
+    // A new observation reports the linked Discord account so its roles can be checked.
+    expect(await supporters.ingest(observation)).toEqual({
+      duplicate: false,
+      memberId: record.id,
+      discordId: staff.id,
+    });
     expect(await supporters.ingest(observation)).toEqual({ duplicate: true });
     const saved = await supporters.get(record.id, campaign, policy);
     expect(saved).toMatchObject({
@@ -881,7 +1702,7 @@ describe("launch storage on isolated PostgreSQL", () => {
         receivedAt: new Date("2026-09-30T12:00:05.000Z"),
         trigger: "members:pledge:create",
       }),
-    ).toEqual({ duplicate: false });
+    ).toEqual({ duplicate: false, memberId: created.id, discordId: staff.id });
     let record = await payment(
       (await supporters.get(created.id, campaign, policy))!,
       "2026-10-01T12:00:00.000Z",
@@ -925,6 +1746,7 @@ describe("launch storage on isolated PostgreSQL", () => {
       lastChargeStatus: "Paid",
       lastChargeAt: new Date("2026-09-30T12:00:00.000Z"),
       discordId: staff.id,
+      discordKnown: true,
       events: [
         {
           id: "pledge_start:1001",
@@ -951,8 +1773,11 @@ describe("launch storage on isolated PostgreSQL", () => {
     let [record] = await supporters.list(campaign, policy, undefined, "api-member");
     expect(record).toMatchObject({
       discordId: staff.id,
+      discordSource: "patreon",
+      patreonDiscordId: staff.id,
       steamId: null,
-      identityState: "unlinked",
+      steamSource: null,
+      identityState: "partial",
       reviewState: "pending",
       founderEligiblePayment: {
         source: "patreon_api",
@@ -975,6 +1800,8 @@ describe("launch storage on isolated PostgreSQL", () => {
         policy,
       )
     ).supporter!;
+    // Resending the Discord ID Patreon filled in keeps it a Patreon link; only the new SteamID is a staff link.
+    expect(record).toMatchObject({ identityState: "patreon_linked", discordSource: "patreon", steamSource: "staff" });
     record = (
       await supporters.mutate(
         record.id,
@@ -987,20 +1814,18 @@ describe("launch storage on isolated PostgreSQL", () => {
     expect(record.founder).not.toBeNull();
     const refunded = { ...snapshot, events: [{ ...snapshot.events[0], paymentStatus: "Refunded" }] };
     expect(await supporters.importApiMember(campaign, refunded, new Date())).toMatchObject({ revoked: 1 });
+    // The promise stands. The record notes that Patreon no longer shows its payment as paid; nothing is for staff.
     expect(await supporters.get(record.id, campaign, policy)).toMatchObject({
-      founder: record.founder,
+      founder: { ...record.founder, paymentVerified: false, paymentFirst: false },
       founderEligiblePayment: null,
     });
-    expect(await supporters.founderReviews(campaign)).toEqual([
-      expect.objectContaining({ supporterId: record.id, paymentSource: "patreon_api", reference: "pledge_start:1001" }),
-    ]);
     const kinds = (
       await client.query<{ kind: string }>("SELECT kind FROM supporter_actions WHERE member_id = $1", [record.id])
     ).rows.map((row) => row.kind);
     expect(kinds.sort()).toEqual(["founder", "link", "patreon-discord-link", "patreon-payment-status"]);
   });
 
-  it("keeps a staff receipt eligible beside the earlier imported copy of its charge and reviews its founder after a refund", async () => {
+  it("keeps a staff receipt eligible beside the earlier imported copy of its charge and notes a refund of that copy", async () => {
     // The receipt's time was estimated from Patreon's date-only history; the real charge was earlier that morning.
     let record = await payment(
       await linked("receipt-member", "76561198000000003"),
@@ -1024,31 +1849,17 @@ describe("launch storage on isolated PostgreSQL", () => {
         policy,
       )
     ).supporter!;
-    expect(record.founder).toMatchObject({ paymentId: receipt.id });
-    expect(await supporters.founderReviews(campaign)).toEqual([]);
+    expect(record.founder).toMatchObject({ paymentId: receipt.id, paymentVerified: true, paymentFirst: true });
     const refunded = apiMember(
       "receipt-member",
       [{ ...snapshot.events[0], paymentStatus: "Refunded" }],
       snapshot.historyComplete,
     );
     expect(await supporters.importApiMember(campaign, refunded, new Date())).toMatchObject({ revoked: 1 });
-    const [copy] = (
-      await client.query<{ id: string }>("SELECT id FROM supporter_payments WHERE reference = 'pledge_start:2001'")
-    ).rows;
-    expect(await supporters.founderReviews(campaign)).toEqual([
-      {
-        supporterId: record.id,
-        patreonMemberId: "receipt-member",
-        paymentId: receipt.id,
-        paymentSource: "manual_receipt",
-        reference: "receipt-2001",
-        unverifiedPaymentId: copy.id,
-        unverifiedReference: "pledge_start:2001",
-      },
-    ]);
-    // The promise is never changed, but the refunded charge no longer qualifies the receipt.
+    // The promise is never changed, but the refunded charge no longer qualifies the receipt. The receipt is still
+    // its first payment; Patreon no longer shows the charge behind it as paid.
     expect(await supporters.get(record.id, campaign, policy)).toMatchObject({
-      founder: record.founder,
+      founder: { ...record.founder, paymentVerified: false, paymentFirst: true },
       founderEligiblePayment: null,
     });
   });
@@ -1141,6 +1952,56 @@ describe("launch storage on isolated PostgreSQL", () => {
     },
   );
 
+  it("awards a Patreon API founder on the Discord ID the import linked and gives them the Founder role basis", async () => {
+    const patron = "678901234567890123";
+    const snapshot: PatreonMemberSnapshot = {
+      ...apiMember("sync-founder", [charge("pledge_start:7001", "2026-10-01T12:00:00.000Z")], true),
+      discordId: patron,
+    };
+    expect(await supporters.importApiMember(campaign, snapshot, new Date())).toMatchObject({
+      created: true,
+      payments: 1,
+      discordLinked: true,
+    });
+    let [record] = await supporters.list(campaign, policy, undefined, "sync-founder");
+    // Patreon supplied the Discord ID; staff linked nothing. One linked identity is enough for every provider.
+    expect(record).toMatchObject({
+      discordId: patron,
+      steamId: null,
+      founderBlockedReason: null,
+      founderEligiblePayment: {
+        source: "patreon_api",
+        reference: "pledge_start:7001",
+        firstSuccessfulPaymentVerified: true,
+        recordedBy: "system:patreon-sync",
+      },
+    });
+    expect((await roles.desired([patron])).founder.size).toBe(0);
+    record = (
+      await supporters.mutate(
+        record.id,
+        { ...review(record), kind: "founder", paymentId: record.founderEligiblePayment!.id },
+        staff,
+        campaign,
+        policy,
+      )
+    ).supporter!;
+    expect(record).toMatchObject({ founder: { source: "patreon_api" }, needsDiscordLink: false });
+    expect((await roles.desired([patron])).founder).toEqual(new Map([[patron, record.id]]));
+    expect(await roles.foundersWithoutDiscord()).toEqual([]);
+    expect(
+      (
+        await client.query<{ actor_id: string; kind: string }>(
+          "SELECT actor_id, kind FROM supporter_actions WHERE member_id = $1 ORDER BY created_at",
+          [record.id],
+        )
+      ).rows,
+    ).toEqual([
+      { actor_id: "system:patreon-sync", kind: "patreon-discord-link" },
+      { actor_id: staff.id, kind: "founder" },
+    ]);
+  });
+
   it("rolls back duplicate payment receipts and stale reviews without advancing the member", async () => {
     const original = await register("first-member");
     await payment(original, policy.startsAt!, "receipt-same");
@@ -1153,6 +2014,1906 @@ describe("launch storage on isolated PostgreSQL", () => {
     expect((await client.query("SELECT kind FROM supporter_actions WHERE member_id = $1", [other.id])).rows).toEqual([
       { kind: "manual-member" },
     ]);
+  });
+
+  const paypalDonor = "345678901234567890";
+  const paypalInput = (overrides: Partial<PaypalInput> = {}): PaypalInput => ({
+    id: randomUUID(),
+    displayName: "Fictional PayPal donor",
+    discordId: paypalDonor,
+    paidAt: new Date("2026-10-01T16:00:00.000Z"),
+    amountCents: 500,
+    currency: "USD",
+    transactionId: "8AB12345CD678901E",
+    completedPaymentVerified: true,
+    firstSuccessfulPaymentVerified: true,
+    minimumConfirmed: false,
+    awardFounder: false,
+    reason: "Checked a fictional completed PayPal payment",
+    ...overrides,
+  });
+  async function supporterCounts() {
+    return (
+      await client.query(`SELECT (SELECT count(*)::int FROM supporter_members) AS members,
+        (SELECT count(*)::int FROM supporter_payments) AS payments,
+        (SELECT count(*)::int FROM supporter_actions) AS actions,
+        (SELECT count(*)::int FROM supporter_founders) AS founders`)
+    ).rows[0];
+  }
+
+  it("records a PayPal founder with only a Discord link and lists PayPal rows without a Patreon campaign", async () => {
+    const result = await supporters.recordPaypal(paypalInput({ awardFounder: true }), staff, null, policy);
+    expect(result).toMatchObject({
+      ok: true,
+      replayed: false,
+      founder: { awarded: true, eligible: true, blockedReason: null },
+      payment: {
+        source: "paypal",
+        reference: "8AB12345CD678901E",
+        amountCents: 500,
+        currency: "USD",
+        verificationState: "verified",
+        minimumConfirmed: false,
+        recordedBy: staff.id,
+      },
+      supporter: {
+        provider: "paypal",
+        patreonMemberId: null,
+        discordId: paypalDonor,
+        steamId: null,
+        reviewState: "verified",
+        version: 1,
+        founderBlockedReason: null,
+        needsDiscordLink: false,
+      },
+    });
+    expect(result.supporter.confirmKey).toBe(result.supporter.id);
+    expect(result.supporter.founder).toMatchObject({ paymentId: result.payment.id, source: "paypal" });
+    expect(result.supporter.payments).toMatchObject([{ id: result.payment.id, source: "paypal" }]);
+    const patreonRecord = await register();
+    expect((await supporters.list(null, policy)).map((record) => record.id)).toEqual([result.supporter.id]);
+    expect((await supporters.list(campaign, policy)).map((record) => record.id).sort()).toEqual(
+      [result.supporter.id, patreonRecord.id].sort(),
+    );
+    expect(await supporters.list(campaign, policy, undefined, "", "patreon")).toMatchObject([{ id: patreonRecord.id }]);
+    expect(await supporters.list(null, policy, undefined, "8ab12345cd")).toMatchObject([{ id: result.supporter.id }]);
+    expect(
+      (
+        await client.query(
+          "SELECT details->>'founderAwarded' AS founder, details->>'createdMember' AS created FROM supporter_actions WHERE kind = 'paypal-payment'",
+        )
+      ).rows,
+    ).toEqual([{ founder: "1", created: "1" }]);
+  });
+
+  it("attaches later PayPal payments to the same supporter and replays retries without writing again", async () => {
+    const first = paypalInput();
+    const created = await supporters.recordPaypal(first, staff, null, policy);
+    expect(await supporters.recordPaypal(first, staff, null, policy)).toMatchObject({
+      replayed: true,
+      payment: { id: created.payment.id },
+    });
+    // Another reviewer recording the same transaction with matching details receives the existing records.
+    expect(
+      await supporters.recordPaypal(
+        { ...first, id: randomUUID() },
+        { ...staff, id: "234567890123456789" },
+        null,
+        policy,
+      ),
+    ).toMatchObject({ replayed: true, supporter: { id: created.supporter.id } });
+    await expect(
+      supporters.recordPaypal({ ...first, id: randomUUID(), amountCents: 600 }, staff, null, policy),
+    ).rejects.toMatchObject({ status: 409 });
+    await expect(
+      supporters.recordPaypal({ ...first, reason: "Changed reason" }, staff, null, policy),
+    ).rejects.toMatchObject({ status: 409 });
+    await expect(
+      supporters.recordPaypal({ ...first, id: randomUUID(), awardFounder: true }, staff, null, policy),
+    ).rejects.toMatchObject({ status: 409, message: "Already recorded; use the founder action." });
+    const second = await supporters.recordPaypal(
+      paypalInput({
+        transactionId: "9ZY98765XW432101V",
+        displayName: "Renamed donor",
+        paidAt: new Date("2026-11-01T16:00:00.000Z"),
+        steamId: "76561198000000002",
+        firstSuccessfulPaymentVerified: false,
+      }),
+      staff,
+      null,
+      policy,
+    );
+    expect(second.supporter).toMatchObject({
+      id: created.supporter.id,
+      version: 2,
+      steamId: "76561198000000002",
+      displayName: "Fictional PayPal donor",
+    });
+    expect(second.supporter.payments.map((item) => item.reference)).toEqual(["9ZY98765XW432101V", "8AB12345CD678901E"]);
+    expect(second.founder).toEqual({ awarded: false, eligible: false, blockedReason: "not_first_payment" });
+    // Attaching by record ID needs the current version, and never replaces a linked account.
+    const attach = paypalInput({
+      transactionId: "AAAA1111BBBB2222",
+      discordId: undefined,
+      memberId: created.supporter.id,
+    });
+    await expect(supporters.recordPaypal({ ...attach, version: 1 }, staff, null, policy)).rejects.toMatchObject({
+      status: 409,
+    });
+    await expect(
+      supporters.recordPaypal({ ...attach, version: 2, discordId: "456789012345678901" }, staff, null, policy),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(await supporterCounts()).toEqual({ members: 1, payments: 2, actions: 2, founders: 0 });
+  });
+
+  it("records a non-USD founder only after staff confirm the minimum and rolls back a refused award", async () => {
+    const input = paypalInput({
+      currency: "CAD",
+      amountCents: 700,
+      awardFounder: true,
+      discordId: undefined,
+      steamId: "76561198000000003",
+    });
+    await expect(supporters.recordPaypal(input, staff, null, policy)).rejects.toMatchObject({
+      status: 409,
+      response: { blockedReason: "below_minimum" },
+    });
+    expect(await supporterCounts()).toEqual({ members: 0, payments: 0, actions: 0, founders: 0 });
+    const confirmed = await supporters.recordPaypal(
+      { ...input, id: randomUUID(), minimumConfirmed: true },
+      staff,
+      null,
+      policy,
+    );
+    expect(confirmed).toMatchObject({
+      founder: { awarded: true },
+      payment: { currency: "CAD", amountCents: 700, minimumConfirmed: true },
+      supporter: { discordId: null, steamId: "76561198000000003", needsDiscordLink: true },
+    });
+  });
+
+  it("allows one founder per person across Patreon and PayPal records", async () => {
+    let record = await register();
+    record = (
+      await supporters.mutate(
+        record.id,
+        { ...review(record), kind: "link", discordId: paypalDonor },
+        staff,
+        campaign,
+        policy,
+      )
+    ).supporter!;
+    expect(record).toMatchObject({ discordId: paypalDonor, steamId: null });
+    record = await payment(record);
+    expect(record.founderBlockedReason).toBeNull();
+    record = (
+      await supporters.mutate(
+        record.id,
+        { ...review(record), kind: "founder", paymentId: record.founderEligiblePayment!.id },
+        staff,
+        campaign,
+        policy,
+      )
+    ).supporter!;
+    expect(record.founder).toMatchObject({ source: "manual_receipt" });
+    await expect(
+      supporters.recordPaypal(paypalInput({ awardFounder: true }), staff, null, policy),
+    ).rejects.toMatchObject({
+      status: 409,
+      response: { blockedReason: "already_founder" },
+    });
+    const recorded = await supporters.recordPaypal(paypalInput(), staff, null, policy);
+    expect(recorded.founder).toEqual({ awarded: false, eligible: false, blockedReason: "already_founder" });
+    expect(recorded.supporter.founderBlockedReason).toBe("already_founder");
+  });
+
+  it("enforces each provider's record shape in the database", async () => {
+    for (const values of [
+      "'patreon', NULL, NULL",
+      "'paypal', '999001', 'paypal-with-campaign'",
+      "'stripe', NULL, NULL",
+    ])
+      await expect(
+        client.query(
+          `INSERT INTO supporter_members (id, provider, campaign_id, patreon_member_id, observed_at)
+           VALUES (gen_random_uuid(), ${values}, now())`,
+        ),
+      ).rejects.toMatchObject({ code: "23514" });
+    const { supporter } = await supporters.recordPaypal(paypalInput(), staff, null, policy);
+    await expect(
+      client.query(
+        `INSERT INTO supporter_payments (id, member_id, campaign_id, paid_at, amount_cents, currency, source, reference,
+           verification_state, recorded_at)
+         VALUES (gen_random_uuid(), $1, NULL, now(), 500, 'USD', 'paypal', 'UNVERIFIED1234', 'unverified', now())`,
+        [supporter.id],
+      ),
+    ).rejects.toMatchObject({ code: "23514" });
+    await expect(
+      client.query(
+        `INSERT INTO supporter_payments (id, member_id, campaign_id, paid_at, amount_cents, currency, source, reference,
+           verification_state, recorded_at)
+         VALUES (gen_random_uuid(), $1, NULL, now(), 500, 'USD', 'paypal', '8AB12345CD678901E', 'verified', now())`,
+        [supporter.id],
+      ),
+    ).rejects.toMatchObject({ code: "23505" });
+  });
+
+  it("serializes simultaneous copies of one PayPal transaction into one payment", async () => {
+    const input = paypalInput();
+    const save =
+      (id: string) =>
+      ({ supporters }: ReturnType<typeof worker>) =>
+        supporters.recordPaypal({ ...input, id }, staff, null, policy);
+    const results = await overlap("supporter_payments", save(randomUUID()), save(randomUUID()));
+    expect(results.every((result) => result.status === "fulfilled")).toBe(true);
+    const values = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+    expect(values.map((value) => value.replayed).sort()).toEqual([false, true]);
+    expect(values[0].payment.id).toBe(values[1].payment.id);
+    expect(await supporterCounts()).toEqual({ members: 1, payments: 1, actions: 1, founders: 0 });
+  });
+
+  it("attaches simultaneous transactions from one donor to one PayPal supporter", async () => {
+    const save =
+      (transactionId: string) =>
+      ({ supporters }: ReturnType<typeof worker>) =>
+        supporters.recordPaypal(paypalInput({ transactionId }), staff, null, policy);
+    const results = await overlap("supporter_members", save("8AB12345CD678901E"), save("9ZY98765XW432101V"));
+    expect(results.every((result) => result.status === "fulfilled")).toBe(true);
+    const values = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+    expect(values[0].supporter.id).toBe(values[1].supporter.id);
+    expect(await supporterCounts()).toEqual({ members: 1, payments: 2, actions: 2, founders: 0 });
+  });
+
+  it("allows only one PayPal supporter to link the same SteamID", async () => {
+    const records = [
+      (await supporters.recordPaypal(paypalInput(), staff, null, policy)).supporter,
+      (
+        await supporters.recordPaypal(
+          paypalInput({ transactionId: "9ZY98765XW432101V", discordId: "456789012345678901" }),
+          staff,
+          null,
+          policy,
+        )
+      ).supporter,
+    ];
+    const save =
+      (index: number) =>
+      ({ supporters }: ReturnType<typeof worker>) =>
+        supporters.mutate(
+          records[index].id,
+          { ...review(records[index]), kind: "link", steamId: "76561198000000004" },
+          staff,
+          null,
+          policy,
+        );
+    const results = await overlap("supporter_members", save(0), save(1));
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.find((result) => result.status === "rejected")).toMatchObject({
+      reason: { cause: { code: "23505" } },
+    });
+    expect((await supporters.list(null, policy)).filter((record) => record.steamId !== null)).toHaveLength(1);
+  });
+
+  const uncApplication = (serverId: string, discordUserId = "345678901234567890", steamId = "76561198000000011") => ({
+    ...applicationInput(discordUserId, steamId),
+    serverId,
+    relationship: "unc_member" as const,
+  });
+  async function approve(id: string, serverId: string, grant: "granted" | "existing" = "granted") {
+    const review = { id: randomUUID(), reason: "Reviewed fictional member" };
+    expect((await applications.claim(id, review, "approve", { ...staff, serverId })).claimed).toBe(true);
+    return applications.finishApproval(id, review.id, { state: "applied", message: "Confirmed" }, grant);
+  }
+
+  it("registers an existing whitelist entry, revokes it once and records each step", async () => {
+    const created = (await applications.create(uncApplication("primary")))!;
+    expect(await approve(created.id, "primary", "existing")).toMatchObject({
+      status: "approved",
+      whitelistGrant: "existing",
+      accessIntent: "grant",
+    });
+    const actor = { ...staff, serverId: "primary" };
+    const review = { id: randomUUID(), reason: "Left the fictional community" };
+    const claim = await applications.claimRevoke(created.id, review, actor);
+    expect(claim).toMatchObject({ claimed: true, application: { status: "revoking", accessIntent: "revoke" } });
+    expect(
+      (await applications.claimRevoke(created.id, { id: randomUUID(), reason: "Second reviewer" }, actor)).claimed,
+    ).toBe(false);
+    const revoked = await applications.finishRevoke(created.id, review.id, { state: "applied", message: "Removed" });
+    expect(revoked).toMatchObject({ status: "revoked", accessIntent: "revoke", revokedAt: expect.any(Date) });
+    await expect(
+      applications.finishRevoke(created.id, review.id, { state: "applied", message: "Removed again" }),
+    ).rejects.toThrow("no longer matches its original claim");
+    expect(
+      (
+        await client.query(
+          "SELECT kind, state FROM whitelist_application_reviews WHERE application_id = $1 ORDER BY created_at, kind",
+          [created.id],
+        )
+      ).rows,
+    ).toEqual([
+      { kind: "approve", state: "applied" },
+      { kind: "revoke", state: "applied" },
+    ]);
+  });
+
+  it("restores approved access when the game refuses a revocation and allows a retry after an uncertain one", async () => {
+    const created = (await applications.create(uncApplication("primary")))!;
+    await approve(created.id, "primary");
+    const actor = { ...staff, serverId: "primary" };
+    const refused = { id: randomUUID(), reason: "First attempt" };
+    await applications.claimRevoke(created.id, refused, actor);
+    expect(
+      await applications.finishRevoke(created.id, refused.id, { state: "failed", message: "Refused" }),
+    ).toMatchObject({ status: "approved", accessIntent: "grant" });
+    const uncertain = { id: randomUUID(), reason: "Second attempt" };
+    await applications.claimRevoke(created.id, uncertain, actor);
+    expect(
+      await applications.finishRevoke(created.id, uncertain.id, { state: "unknown", message: "Lost response" }),
+    ).toMatchObject({ status: "needs_review", accessIntent: "revoke" });
+    expect((await applications.claimRevoke(created.id, { id: randomUUID(), reason: "Retry" }, actor)).claimed).toBe(
+      true,
+    );
+  });
+
+  it("revokes the approved application when its SteamID is removed on the Whitelist page, on that server only", async () => {
+    const east = (await applications.create(uncApplication("east")))!;
+    const central = (await applications.create(uncApplication("central")))!;
+    await approve(east.id, "east");
+    await approve(central.id, "central");
+    const actionId = randomUUID();
+    const revoked = await applications.recordExternalRevoke({
+      serverId: "east",
+      steamId: "76561198000000011",
+      actionId,
+      actorId: staff.id,
+      actorName: staff.name,
+      state: "applied",
+    });
+    expect(revoked.map((application) => application.id)).toEqual([east.id]);
+    expect((await applications.get(central.id, "central"))?.status).toBe("approved");
+    expect(
+      (await client.query("SELECT actor_id, reason, state FROM whitelist_application_reviews WHERE kind = 'revoke'"))
+        .rows,
+    ).toEqual([
+      { actor_id: staff.id, reason: `Removed from the Whitelist page (action ${actionId}).`, state: "applied" },
+    ]);
+    // The UNC role stays while another approved UNC application remains.
+    expect((await roles.desired()).member.get("345678901234567890")).toBe(central.id);
+    expect(await roles.revokedBasis()).toEqual(new Map());
+    await applications.recordExternalRevoke({
+      serverId: "central",
+      steamId: "76561198000000011",
+      actionId: randomUUID(),
+      actorId: staff.id,
+      actorName: staff.name,
+      state: "pending",
+    });
+    expect((await roles.desired()).member.size).toBe(0);
+    expect((await roles.revokedBasis()).has("345678901234567890")).toBe(true);
+  });
+
+  describe("automatic supporter matching", () => {
+    const patron = "456789012345678901";
+    const patronSteam = "76561198000000021";
+    // No waiting period, so list() verdicts do not depend on when the suite runs.
+    const automaticPolicy: FounderPolicy = { ...policy, automaticHoldHours: 0 };
+    const options = (overrides: Partial<AutoMatchOptions> = {}): AutoMatchOptions => ({
+      campaignId: campaign,
+      policy: automaticPolicy,
+      fillSteam: true,
+      recordFounder: true,
+      now: new Date(),
+      ...overrides,
+    });
+    async function importPatron(
+      patreonMemberId = "auto-patron",
+      discordId: string | null = patron,
+      event = charge(`pledge_start:${patreonMemberId}`, "2026-10-01T12:00:00.000Z"),
+    ) {
+      await supporters.importApiMember(
+        campaign,
+        { ...apiMember(patreonMemberId, [event], true), discordId },
+        new Date(),
+      );
+      return (await supporters.list(campaign, automaticPolicy, undefined, patreonMemberId))[0];
+    }
+    async function application(discordUserId = patron, steamId = patronSteam, serverId = "primary") {
+      return (await applications.create({ ...applicationInput(discordUserId, steamId), serverId }))!;
+    }
+    // The store's view has no steps: the service adds them, as the page receives them, with every switch on.
+    const stepCodes = (view: SupporterView | null) =>
+      supporterNextSteps(view!, { steamFill: true, founderAuto: true, importConfigured: true, holdHours: 0 }).map(
+        (step) => step.code,
+      );
+    const kinds = async (memberId: string) =>
+      (
+        await client.query<{ actor_id: string; kind: string }>(
+          "SELECT actor_id, kind FROM supporter_actions WHERE member_id = $1 ORDER BY created_at, kind",
+          [memberId],
+        )
+      ).rows;
+
+    it("labels older links by the action that made them, once, without touching versions", async () => {
+      const fromPatreon = await importPatron("labelled-patreon");
+      // An older dashboard resent the Patreon Discord ID with the SteamID; that Link did not change the account.
+      await supporters.mutate(
+        fromPatreon.id,
+        { ...review(fromPatreon), kind: "link", discordId: patron, steamId: patronSteam },
+        staff,
+        campaign,
+        policy,
+      );
+      const relinked = await importPatron("labelled-staff", "567890123456789012");
+      await supporters.mutate(
+        relinked.id,
+        { ...review(relinked), kind: "link", discordId: "567890123456789013" },
+        staff,
+        campaign,
+        policy,
+      );
+      // Patreon linked one account, staff moved the link to another and then back: the last Link set it, so staff.
+      const returned = await importPatron("labelled-returned", "567890123456789014");
+      const moved = (
+        await supporters.mutate(
+          returned.id,
+          { ...review(returned), kind: "link", discordId: "567890123456789015" },
+          staff,
+          campaign,
+          policy,
+        )
+      ).supporter!;
+      await supporters.mutate(
+        returned.id,
+        { ...review(moved), kind: "link", discordId: "567890123456789014" },
+        staff,
+        campaign,
+        policy,
+      );
+      await client.query(
+        "UPDATE supporter_members SET discord_source = NULL, steam_source = NULL, steam_application_id = NULL",
+      );
+      const versions = async () => (await client.query("SELECT id, version FROM supporter_members ORDER BY id")).rows;
+      const before = await versions();
+      expect(await match.backfillSources()).toEqual({ discord: 3, steam: 1 });
+      expect(
+        (
+          await client.query(
+            "SELECT patreon_member_id, discord_source, steam_source FROM supporter_members ORDER BY patreon_member_id",
+          )
+        ).rows,
+      ).toEqual([
+        { patreon_member_id: "labelled-patreon", discord_source: "patreon", steam_source: "staff" },
+        { patreon_member_id: "labelled-returned", discord_source: "staff", steam_source: null },
+        { patreon_member_id: "labelled-staff", discord_source: "staff", steam_source: null },
+      ]);
+      expect(await match.backfillSources()).toEqual({ discord: 0, steam: 0 });
+      expect(await versions()).toEqual(before);
+    });
+
+    it("copies the approved SteamID and records an automatic founder with its Founder role basis, once", async () => {
+      const record = await importPatron();
+      expect(record).toMatchObject({ identityState: "partial", discordSource: "patreon", patreonDiscordId: patron });
+      const created = await application();
+      expect(await approve(created.id, "primary")).toMatchObject({ whitelistGrant: "granted" });
+      // No SteamID is linked yet, and the automatic founder does not wait for one.
+      expect((await supporters.get(record.id, campaign, automaticPolicy))?.automaticBlockedReason).toBeNull();
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        steamFilled: true,
+        founderRecorded: true,
+        blocked: [],
+      });
+      const view = (await supporters.get(record.id, campaign, automaticPolicy))!;
+      expect(view).toMatchObject({
+        steamId: patronSteam,
+        steamSource: "application",
+        steamApplicationId: created.id,
+        identityState: "patreon_linked",
+        version: record.version + 1,
+        founder: { automatic: true, source: "patreon_api" },
+        match: { sourceApplication: { id: created.id, serverId: "primary", status: "approved" } },
+      });
+      expect(await kinds(record.id)).toEqual([
+        { actor_id: "system:patreon-sync", kind: "patreon-discord-link" },
+        { actor_id: "system:supporter-match", kind: "application-steam-link" },
+        { actor_id: "system:supporter-match", kind: "founder" },
+      ]);
+      expect((await roles.desired([patron])).founder).toEqual(new Map([[patron, record.id]]));
+      // A second run, from any trigger, writes nothing.
+      expect(await match.autoMatch(record.id, options())).toMatchObject({ steamFilled: false, founderRecorded: false });
+      expect(await kinds(record.id)).toHaveLength(3);
+      expect((await supporters.get(record.id, campaign, automaticPolicy))?.version).toBe(view.version);
+      expect(
+        await match.candidates(campaign, automaticPolicy, { fillSteam: true, recordFounder: true }, null, 10),
+      ).toEqual([]);
+      // After a refund the record notes it, and the promise itself is untouched.
+      await supporters.importApiMember(
+        campaign,
+        {
+          ...apiMember(
+            "auto-patron",
+            [{ ...charge("pledge_start:auto-patron", "2026-10-01T12:00:00.000Z"), paymentStatus: "Refunded" }],
+            true,
+          ),
+          discordId: patron,
+        },
+        new Date(),
+      );
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        founder: { automatic: true, paymentId: view.founder!.paymentId, paymentVerified: false, paymentFirst: false },
+      });
+      expect((await roles.desired([patron])).founder).toEqual(new Map([[patron, record.id]]));
+    });
+
+    it("records an automatic founder with only a Discord account and copies the SteamID once it is approved", async () => {
+      const record = await importPatron();
+      expect(record).toMatchObject({
+        identityState: "partial",
+        steamId: null,
+        founderBlockedReason: null,
+        automaticBlockedReason: null,
+      });
+      const steps = { fillSteam: true, recordFounder: true };
+      expect(await match.candidates(campaign, automaticPolicy, steps, null, 10)).toEqual([record.id]);
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        steamFilled: false,
+        founderRecorded: true,
+        blocked: ["no_application"],
+      });
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        steamId: null,
+        identityState: "partial",
+        version: record.version + 1,
+        founder: { automatic: true, source: "patreon_api" },
+        needsDiscordLink: false,
+        automaticBlockedReason: null,
+      });
+      expect((await roles.desired([patron])).founder).toEqual(new Map([[patron, record.id]]));
+      expect((await kinds(record.id)).map((row) => row.kind).sort()).toEqual(["founder", "patreon-discord-link"]);
+      expect(
+        (
+          await client.query(
+            "SELECT details->>'discordId' AS discord, details->>'steamId' AS steam FROM supporter_actions WHERE member_id = $1 AND kind = 'founder'",
+            [record.id],
+          )
+        ).rows,
+      ).toEqual([{ discord: patron, steam: null }]);
+      // Nothing is left for automation until an application is approved.
+      expect(await match.candidates(campaign, automaticPolicy, steps, null, 10)).toEqual([]);
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        steamFilled: false,
+        founderRecorded: false,
+        blocked: ["no_application"],
+      });
+      await approve((await application()).id, "primary");
+      expect(await match.candidates(campaign, automaticPolicy, steps, null, 10)).toEqual([record.id]);
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        steamFilled: true,
+        founderRecorded: false,
+        blocked: [],
+      });
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        steamId: patronSteam,
+        steamSource: "application",
+        identityState: "patreon_linked",
+        version: record.version + 2,
+        founder: { automatic: true },
+      });
+      expect((await client.query("SELECT count(*)::int AS count FROM supporter_founders")).rows).toEqual([
+        { count: 1 },
+      ]);
+    });
+
+    it("leaves an approval without a recorded grant for staff, showing the SteamID to check", async () => {
+      const record = await importPatron();
+      const created = await application();
+      const reviewed = { id: randomUUID(), reason: "Approved before grants were recorded" };
+      await applications.claim(created.id, reviewed, "approve", { ...staff, serverId: "primary" });
+      await applications.finishApproval(created.id, reviewed.id, { state: "applied", message: "Confirmed" }, null);
+      expect(await match.autoMatch(record.id, options({ recordFounder: false }))).toMatchObject({
+        steamFilled: false,
+        blocked: ["application_not_confirmed"],
+      });
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        steamId: null,
+        match: { steam: { reason: "application_not_confirmed", steamId: patronSteam, applicationId: created.id } },
+      });
+    });
+
+    it("lets staff win for both identities and keeps what Patreon reports later", async () => {
+      let record = await importPatron();
+      await approve((await application()).id, "primary");
+      record = (
+        await supporters.mutate(
+          record.id,
+          { ...review(record), kind: "link", discordId: "567890123456789018", steamId: "76561198000000022" },
+          staff,
+          campaign,
+          policy,
+        )
+      ).supporter!;
+      expect(await match.autoMatch(record.id, options({ recordFounder: false }))).toMatchObject({ steamFilled: false });
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        discordId: "567890123456789018",
+        discordSource: "staff",
+        steamId: "76561198000000022",
+        steamSource: "staff",
+      });
+      expect(
+        await supporters.importApiMember(
+          campaign,
+          {
+            ...apiMember("auto-patron", [charge("pledge_start:auto-patron", "2026-10-01T12:00:00.000Z")], true),
+            discordId: "567890123456789014",
+          },
+          new Date(),
+        ),
+      ).toMatchObject({ discordLinked: false, conflict: "discord-differs" });
+      const differs = await supporters.get(record.id, campaign, automaticPolicy);
+      expect(differs).toMatchObject({
+        discordId: "567890123456789018",
+        discordSource: "staff",
+        patreonDiscordId: "567890123456789014",
+        automaticBlockedReason: "discord_not_from_patreon",
+      });
+      expect(stepCodes(differs)).toContain("discord_differs");
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        founderRecorded: false,
+        blocked: ["discord_not_from_patreon"],
+      });
+    });
+
+    it("follows the account Patreon reports for a Patreon link, and confirms a staff link Patreon reports", async () => {
+      const record = await importPatron("following-patron");
+      const report = (discordId: string | null) =>
+        supporters.importApiMember(
+          campaign,
+          {
+            ...apiMember(
+              "following-patron",
+              [charge("pledge_start:following-patron", "2026-10-01T12:00:00.000Z")],
+              true,
+            ),
+            discordId,
+          },
+          new Date(),
+        );
+      // Patreon no longer reports any account: the link is kept.
+      expect(await report(null)).toMatchObject({ discordLinked: false, patreonDiscordChanged: true });
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        discordId: patron,
+        discordSource: "patreon",
+        patreonDiscordId: null,
+        automaticBlockedReason: null,
+      });
+      // Patreon reports another account: the Patreon link follows it.
+      expect(await report("567890123456789019")).toMatchObject({
+        discordLinked: true,
+        discordId: "567890123456789019",
+        releasedDiscordIds: [patron],
+      });
+      let view = (await supporters.get(record.id, campaign, automaticPolicy))!;
+      expect(view).toMatchObject({ discordId: "567890123456789019", discordSource: "patreon" });
+      // Staff link another account, and Patreon later reports exactly that one: it becomes a Patreon link.
+      view = (
+        await supporters.mutate(
+          record.id,
+          { ...review(view), kind: "link", discordId: "567890123456789020" },
+          staff,
+          campaign,
+          policy,
+        )
+      ).supporter!;
+      expect(view.discordSource).toBe("staff");
+      expect(await report("567890123456789020")).toMatchObject({ discordConfirmed: true, conflict: null });
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        discordId: "567890123456789020",
+        discordSource: "patreon",
+      });
+      expect((await kinds(record.id)).map((row) => row.kind)).toEqual([
+        "patreon-discord-link",
+        "patreon-discord-link",
+        "link",
+        "patreon-discord-confirmed",
+      ]);
+    });
+
+    it("moves an account to the patron Patreon now reports it for, from a record Patreon no longer reports it for", async () => {
+      const earlier = await importPatron("earlier-patron");
+      // Patreon stops reporting the account for the first patron, then reports it for a second one.
+      await supporters.importApiMember(
+        campaign,
+        {
+          ...apiMember("earlier-patron", [charge("pledge_start:earlier-patron", "2026-10-01T12:00:00.000Z")], true),
+          discordId: null,
+        },
+        new Date(),
+      );
+      const later = await importPatron("later-patron");
+      expect(later).toMatchObject({ discordId: patron, discordSource: "patreon", patreonDiscordId: patron });
+      expect(await supporters.get(earlier.id, campaign, automaticPolicy)).toMatchObject({
+        discordId: null,
+        discordSource: null,
+      });
+      expect((await kinds(earlier.id)).map((row) => row.kind)).toEqual([
+        "patreon-discord-link",
+        "patreon-discord-moved",
+      ]);
+      // Once that patron is a founder, the account stays where it is.
+      const founder = await importPatron("founder-patron", "567890123456789021");
+      await match.autoMatch(founder.id, options({ fillSteam: false }));
+      await supporters.importApiMember(
+        campaign,
+        {
+          ...apiMember("founder-patron", [charge("pledge_start:founder-patron", "2026-10-01T12:00:00.000Z")], true),
+          discordId: null,
+        },
+        new Date(),
+      );
+      const kept = await importPatron("kept-patron", "567890123456789021");
+      expect(kept).toMatchObject({ discordId: null, patreonDiscordId: "567890123456789021" });
+      expect(await supporters.get(founder.id, campaign, automaticPolicy)).toMatchObject({
+        discordId: "567890123456789021",
+        founder: { automatic: true },
+      });
+    });
+
+    it("still sees the earlier payment on a record Patreon took the Discord account from", async () => {
+      const beforeWindow = (id: string) => charge(`pledge_start:${id}`, "2026-09-01T12:00:00.000Z");
+      const report = (id: string, discordId: string | null) =>
+        supporters.importApiMember(campaign, { ...apiMember(id, [beforeWindow(id)], true), discordId }, new Date());
+      // The person paid before the window on one Patreon account, then connected Discord to a second one instead
+      // and paid in the window there. Patreon moves the account to the second record.
+      const moved = "567890123456789024";
+      const first = await importPatron("paid-before-patron", moved, beforeWindow("paid-before-patron"));
+      await report("paid-before-patron", null);
+      const second = await importPatron("paid-in-window-patron", moved);
+      expect(await supporters.get(first.id, campaign, automaticPolicy)).toMatchObject({ discordId: null });
+      expect(second).toMatchObject({
+        discordId: moved,
+        discordSource: "patreon",
+        founderBlockedReason: null,
+        automaticBlockedReason: "earlier_payment_other_record",
+      });
+      // A note, not a task: Gramps decided they are not a founder. The SteamID step is for the whitelist later.
+      expect(stepCodes(second)).toEqual(["no_whitelist_application", "founder_earlier_payment_other_record"]);
+      expect(await match.autoMatch(second.id, options({ fillSteam: false }))).toMatchObject({
+        founderRecorded: false,
+        blocked: ["earlier_payment_other_record"],
+      });
+      // The same when a Patreon link followed another account and the account it gave up turns up elsewhere.
+      const released = "567890123456789025";
+      const relinked = await importPatron("relinked-patron", released, beforeWindow("relinked-patron"));
+      await report("relinked-patron", "567890123456789026");
+      expect(await supporters.get(relinked.id, campaign, automaticPolicy)).toMatchObject({
+        discordId: "567890123456789026",
+      });
+      const later = await importPatron("released-to-patron", released);
+      expect(later).toMatchObject({ discordId: released, automaticBlockedReason: "earlier_payment_other_record" });
+      expect(await match.autoMatch(later.id, options({ fillSteam: false }))).toMatchObject({ founderRecorded: false });
+      expect((await client.query("SELECT count(*)::int AS count FROM supporter_founders")).rows).toEqual([
+        { count: 0 },
+      ]);
+    });
+
+    it("knows a payment in another currency on a tier under US$5 is not worth it, so nothing waits", async () => {
+      const cheap = {
+        ...charge("pledge_start:cheap-tier-patron", "2026-10-01T12:00:00.000Z"),
+        amountCents: 400,
+        currency: "CAD",
+        tierId: "222",
+        tierAmountCents: 300,
+      };
+      const record = await importPatron("cheap-tier-patron", patron, cheap);
+      expect(record).toMatchObject({
+        founderBlockedReason: "below_minimum",
+        founderTierBelowMinimum: true,
+        founderBlockedMessage: "Their tier costs less than US$5.",
+        automaticBlockedReason: "below_minimum",
+      });
+      expect(
+        supporterNextSteps(record, { steamFill: true, founderAuto: true, importConfigured: true, holdHours: 0 }),
+      ).toEqual([{ code: "founder_below_minimum", area: "info", message: "Their tier costs less than US$5." }]);
+      // The next sync at the same price writes nothing.
+      expect(
+        await supporters.importApiMember(
+          campaign,
+          { ...apiMember("cheap-tier-patron", [cheap], true), discordId: patron },
+          new Date(),
+        ),
+      ).toMatchObject({ updated: false, tierUnconfirmed: 1 });
+      expect((await supporters.get(record.id, campaign, automaticPolicy))?.version).toBe(record.version);
+      expect(
+        (
+          await client.query(
+            "SELECT actor_id, details FROM supporter_actions WHERE member_id = $1 AND kind = 'patreon-payment-below-minimum'",
+            [record.id],
+          )
+        ).rows,
+      ).toEqual([
+        {
+          actor_id: "system:patreon-sync",
+          details: expect.objectContaining({ reference: "pledge_start:cheap-tier-patron", tierAmountCents: 300 }),
+        },
+      ]);
+    });
+
+    it("records an automatic founder on a history that starts with a renewal, once the refund wait is over", async () => {
+      // Patreon returned the patron's whole history, which starts with a renewal rather than the pledge start.
+      const record = await importPatron(
+        "renewal-patron",
+        patron,
+        charge("subscription:renewal-patron", "2026-10-01T12:00:00.000Z", "subscription"),
+      );
+      expect(record).toMatchObject({
+        founderBlockedReason: null,
+        founderFirstPaymentWaiting: false,
+        founderEligiblePayment: { reference: "subscription:renewal-patron", firstSuccessfulPaymentVerified: true },
+      });
+      const waiting = { ...policy, automaticHoldHours: 72 };
+      expect(
+        await match.autoMatch(
+          record.id,
+          options({ policy: waiting, fillSteam: false, now: new Date("2026-10-02T12:00:00.000Z") }),
+        ),
+      ).toMatchObject({ founderRecorded: false, blocked: ["payment_too_recent"] });
+      expect(
+        await match.autoMatch(
+          record.id,
+          options({ policy: waiting, fillSteam: false, now: new Date("2026-10-04T12:00:00.000Z") }),
+        ),
+      ).toMatchObject({ founderRecorded: true, blocked: [] });
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        founder: { automatic: true, paymentVerified: true, paymentFirst: true },
+      });
+    });
+
+    it("asks staff to confirm the previous Discord account's SteamID before it follows a new account", async () => {
+      const record = await importPatron();
+      await application();
+      const moved = { ...review(record), kind: "link" as const, discordId: "567890123456789017", steamId: patronSteam };
+      await expect(supporters.mutate(record.id, moved, staff, campaign, policy)).rejects.toMatchObject({
+        status: 409,
+        response: { blockedReason: "steam_from_application" },
+      });
+      expect(
+        (
+          await supporters.mutate(
+            record.id,
+            { ...moved, id: randomUUID(), steamConfirmed: true },
+            staff,
+            campaign,
+            policy,
+          )
+        ).supporter,
+      ).toMatchObject({ discordId: "567890123456789017", steamId: patronSteam, steamSource: "staff" });
+    });
+
+    it("records an automatic founder on a staff SteamID another Discord account applied with, and keeps the alert", async () => {
+      const record = await importPatron();
+      await supporters.mutate(
+        record.id,
+        { ...review(record), kind: "link", steamId: patronSteam },
+        staff,
+        campaign,
+        policy,
+      );
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        steamSource: "staff",
+        match: { linkedSteamShared: false },
+        automaticBlockedReason: null,
+      });
+      await application("567890123456789016", patronSteam);
+      // A founder needs no SteamID. The alert matters for the whitelist promise later.
+      const shared = await supporters.get(record.id, campaign, automaticPolicy);
+      expect(shared).toMatchObject({ match: { linkedSteamShared: true }, automaticBlockedReason: null });
+      expect(stepCodes(shared)).toContain("linked_steam_shared");
+      expect(await match.autoMatch(record.id, options())).toMatchObject({ founderRecorded: true, blocked: [] });
+    });
+
+    it("shows a Discord account Patreon reports for one record while another links it", async () => {
+      const linked = await register("linked-by-staff");
+      await supporters.mutate(
+        linked.id,
+        { ...review(linked), kind: "link", discordId: patron },
+        staff,
+        campaign,
+        policy,
+      );
+      const reported = await importPatron("reported-by-patreon");
+      expect(reported).toMatchObject({
+        discordId: null,
+        patreonDiscordId: patron,
+        match: { patreonDiscordElsewhere: true },
+      });
+      expect(await supporters.get(linked.id, campaign, automaticPolicy)).toMatchObject({
+        discordSource: "staff",
+        match: { discordReportedForOtherPatron: true },
+        automaticBlockedReason: "discord_not_from_patreon",
+      });
+    });
+
+    it("keeps a copied SteamID when its application is revoked, flags it, and copies nothing during a review", async () => {
+      const record = await importPatron();
+      const created = await application();
+      await approve(created.id, "primary");
+      expect(await match.autoMatch(record.id, options({ recordFounder: false }))).toMatchObject({ steamFilled: true });
+      const actor = { ...staff, serverId: "primary" };
+      const revocation = { id: randomUUID(), reason: "Left the fictional community" };
+      await applications.claimRevoke(created.id, revocation, actor);
+      // A founder needs no SteamID, so the revocation never stops one.
+      expect(await match.autoMatch(record.id, options())).toMatchObject({ founderRecorded: true, blocked: [] });
+      await applications.finishRevoke(created.id, revocation.id, { state: "applied", message: "Removed" });
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        steamId: patronSteam,
+        steamSource: "application",
+        match: { sourceApplicationRevoked: true, steam: { reason: "no_approved_application" } },
+      });
+      const other = await importPatron("reviewing-patron", "567890123456789015");
+      const pending = await application("567890123456789015", "76561198000000023");
+      await applications.claim(pending.id, { id: randomUUID(), reason: "Approving" }, "approve", actor);
+      expect(await match.autoMatch(other.id, options({ recordFounder: false }))).toMatchObject({
+        steamFilled: false,
+        blocked: ["application_in_progress"],
+      });
+    });
+
+    it("makes a revocation claim wait for a SteamID copy that holds the application", async () => {
+      const created = await application();
+      await approve(created.id, "primary");
+      const holder = await client.connect();
+      let claim: Promise<unknown> | undefined;
+      try {
+        await holder.query("BEGIN");
+        // The lock automatic matching takes before reading the applications.
+        await holder.query("SELECT id FROM whitelist_applications WHERE discord_user_id = $1 ORDER BY id FOR SHARE", [
+          patron,
+        ]);
+        claim = workers[0].applications.claimRevoke(
+          created.id,
+          { id: randomUUID(), reason: "Left the fictional community" },
+          { ...staff, serverId: "primary" },
+        );
+        await waitForBlockedWorkers(1);
+      } finally {
+        await holder.query("COMMIT");
+        holder.release();
+      }
+      await expect(claim).resolves.toMatchObject({ claimed: true });
+    });
+
+    it("refuses to copy a SteamID that another record links while the copy waits for its lock", async () => {
+      const record = await importPatron();
+      await approve((await application()).id, "primary");
+      const holder = await client.connect();
+      let fill: Promise<unknown> | undefined;
+      try {
+        await holder.query("BEGIN");
+        // The lock a staff Link or a PayPal record takes before it writes this SteamID.
+        await holder.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`supporter:steam:${patronSteam}`]);
+        fill = workers[0].match.autoMatch(record.id, options({ recordFounder: false }));
+        await waitForBlockedWorkers(1);
+        await holder.query(
+          "INSERT INTO supporter_members (id, provider, observed_at, steam_id, steam_source) VALUES ($1, 'paypal', now(), $2, 'staff')",
+          [randomUUID(), patronSteam],
+        );
+      } finally {
+        await holder.query("COMMIT");
+        holder.release();
+      }
+      await expect(fill).resolves.toMatchObject({ steamFilled: false, blocked: ["steam_on_another_record"] });
+      expect((await supporters.get(record.id, campaign, automaticPolicy))?.steamId).toBeNull();
+    });
+
+    it("fills the SteamID and records the founder once when two matches overlap", async () => {
+      const record = await importPatron();
+      await approve((await application()).id, "primary");
+      const results = await overlap(
+        "supporter_members",
+        ({ match }) => match.autoMatch(record.id, options()),
+        ({ match }) => match.autoMatch(record.id, options()),
+      );
+      expect(results.every((result) => result.status === "fulfilled")).toBe(true);
+      const values = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+      expect(values.filter((value) => value.steamFilled)).toHaveLength(1);
+      expect(values.filter((value) => value.founderRecorded)).toHaveLength(1);
+      expect((await kinds(record.id)).map((row) => row.kind)).toEqual([
+        "patreon-discord-link",
+        "application-steam-link",
+        "founder",
+      ]);
+    });
+
+    it("records one founder when an automatic match and a PayPal founder award for the same person overlap", async () => {
+      const record = await importPatron();
+      await approve((await application()).id, "primary");
+      const results = await overlap<unknown>(
+        "supporter_members",
+        ({ match }) => match.autoMatch(record.id, options()),
+        ({ supporters }) =>
+          supporters.recordPaypal(
+            paypalInput({ discordId: patron, paidAt: new Date("2026-10-02T12:00:00.000Z"), awardFounder: true }),
+            staff,
+            null,
+            policy,
+          ),
+      );
+      expect((await client.query("SELECT count(*)::int AS count FROM supporter_founders")).rows).toEqual([
+        { count: 1 },
+      ]);
+      const automatic = results[0] as PromiseSettledResult<AutoMatchResult>;
+      const paypal = results[1];
+      if (automatic.status === "fulfilled" && automatic.value.founderRecorded)
+        expect(paypal).toMatchObject({
+          status: "rejected",
+          reason: { response: { blockedReason: "already_founder" } },
+        });
+      else {
+        expect(paypal.status).toBe("fulfilled");
+        expect(automatic).toMatchObject({ status: "fulfilled", value: { founderRecorded: false } });
+      }
+    });
+
+    it("leaves no partial records when a staff link takes the same SteamID first", async () => {
+      const record = await importPatron();
+      await approve((await application()).id, "primary");
+      const other = await register("staff-linked");
+      const results = await overlap<unknown>(
+        "supporter_members",
+        ({ match }) => match.autoMatch(record.id, options()),
+        ({ supporters }) =>
+          supporters.mutate(
+            other.id,
+            { ...review(other), kind: "link", steamId: patronSteam },
+            staff,
+            campaign,
+            policy,
+          ),
+      );
+      const holders = (
+        await client.query<{ id: string }>("SELECT id FROM supporter_members WHERE steam_id = $1", [patronSteam])
+      ).rows;
+      expect(holders).toHaveLength(1);
+      if (holders[0].id === other.id) {
+        // Both writes take the SteamID lock first, so the match waits, sees the staff link and fills nothing. The
+        // record that took the SteamID may be the same person's, so no founder is recorded either.
+        expect(results[0]).toMatchObject({
+          status: "fulfilled",
+          value: { steamFilled: false, founderRecorded: false, blocked: ["steam_on_another_record"] },
+        });
+        expect((await kinds(record.id)).map((row) => row.kind)).toEqual(["patreon-discord-link"]);
+        expect((await client.query("SELECT count(*)::int AS count FROM supporter_founders")).rows).toEqual([
+          { count: 0 },
+        ]);
+      } else expect(results[1].status).toBe("rejected");
+    });
+
+    it("records no second founder for a person another record already knows by their SteamID", async () => {
+      // A PayPal founder recorded with a SteamID and no Discord account.
+      const paypal = await supporters.recordPaypal(
+        paypalInput({ discordId: undefined, steamId: patronSteam, awardFounder: true }),
+        staff,
+        null,
+        policy,
+      );
+      expect(paypal).toMatchObject({
+        founder: { awarded: true },
+        supporter: { discordId: null, steamId: patronSteam },
+      });
+      // The same person joins Patreon, connects Discord and applies with that SteamID.
+      const record = await importPatron();
+      await approve((await application()).id, "primary");
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        steamId: null,
+        automaticBlockedReason: "steam_on_another_record",
+        match: { steam: { reason: "steam_on_another_record", steamId: patronSteam } },
+      });
+      for (const fillSteam of [true, false])
+        expect(await match.autoMatch(record.id, options({ fillSteam }))).toMatchObject({
+          steamFilled: false,
+          founderRecorded: false,
+          blocked: ["steam_on_another_record"],
+        });
+      expect((await client.query<{ member_id: string }>("SELECT member_id FROM supporter_founders")).rows).toEqual([
+        { member_id: paypal.supporter.id },
+      ]);
+      expect((await kinds(record.id)).map((row) => row.kind)).toEqual(["patreon-discord-link"]);
+    });
+
+    it("refuses a founder by SteamID for a person already recorded on the Discord account that applied with it", async () => {
+      // Patreon first: the patron connected Discord and applied, and no SteamID is linked to the record.
+      const record = await importPatron();
+      await approve((await application()).id, "primary");
+      expect(await match.autoMatch(record.id, options({ fillSteam: false }))).toMatchObject({
+        steamFilled: false,
+        founderRecorded: true,
+        blocked: [],
+      });
+      // Staff then record the same person's PayPal payment by SteamID alone and ask for a founder promise.
+      const award = paypalInput({ discordId: undefined, steamId: patronSteam, awardFounder: true });
+      await expect(supporters.recordPaypal(award, staff, null, policy)).rejects.toMatchObject({
+        status: 409,
+        response: { blockedReason: "steam_applied_by_founder" },
+      });
+      expect(await supporterCounts()).toMatchObject({ members: 1, payments: 1, founders: 1 });
+      // The payment alone is recorded, and its record says why no founder promise can be recorded on it.
+      const paypal = await supporters.recordPaypal(
+        { ...award, id: randomUUID(), awardFounder: false },
+        staff,
+        null,
+        policy,
+      );
+      expect(paypal).toMatchObject({
+        founder: { awarded: false, eligible: false, blockedReason: "steam_applied_by_founder" },
+        supporter: { discordId: null, steamId: patronSteam, founderBlockedReason: "steam_applied_by_founder" },
+      });
+      await expect(
+        supporters.mutate(
+          paypal.supporter.id,
+          { ...review(paypal.supporter), kind: "founder", paymentId: paypal.payment.id },
+          staff,
+          null,
+          policy,
+        ),
+      ).rejects.toMatchObject({ status: 409, response: { blockedReason: "steam_applied_by_founder" } });
+      // Staff link the SteamID on the founder's record. Both records then hold it, and the plain rule applies.
+      const founder = (await supporters.get(record.id, campaign, automaticPolicy))!;
+      expect(founder).toMatchObject({
+        steamId: null,
+        founder: { automatic: true },
+        match: { steam: { reason: "steam_on_another_record", steamId: patronSteam } },
+      });
+      expect(
+        (
+          await supporters.mutate(
+            record.id,
+            { ...review(founder), kind: "link", steamId: patronSteam },
+            staff,
+            campaign,
+            policy,
+          )
+        ).supporter,
+      ).toMatchObject({ steamId: patronSteam, steamSource: "staff", founder: { automatic: true } });
+      expect((await supporters.get(paypal.supporter.id, null, policy))?.founderBlockedReason).toBe("already_founder");
+      expect((await client.query<{ member_id: string }>("SELECT member_id FROM supporter_founders")).rows).toEqual([
+        { member_id: record.id },
+      ]);
+    });
+
+    it("records one founder when a match on a Discord account and a PayPal founder award for its SteamID overlap", async () => {
+      const record = await importPatron();
+      await approve((await application()).id, "primary");
+      const results = await overlap<unknown>(
+        "supporter_members",
+        // No SteamID is linked, so the match records the founder on the Discord account alone.
+        ({ match }) => match.autoMatch(record.id, options({ fillSteam: false })),
+        ({ supporters }) =>
+          supporters.recordPaypal(
+            paypalInput({ discordId: undefined, steamId: patronSteam, awardFounder: true }),
+            staff,
+            null,
+            policy,
+          ),
+      );
+      expect((await client.query("SELECT count(*)::int AS count FROM supporter_founders")).rows).toEqual([
+        { count: 1 },
+      ]);
+      const automatic = results[0] as PromiseSettledResult<AutoMatchResult>;
+      const paypal = results[1];
+      if (automatic.status === "fulfilled" && automatic.value.founderRecorded)
+        // The award waited for the SteamID lock, then found the founder through the whitelist application.
+        expect(paypal).toMatchObject({
+          status: "rejected",
+          reason: { response: { blockedReason: "steam_applied_by_founder" } },
+        });
+      else {
+        // The match waited for the SteamID lock, then found the PayPal record that holds the SteamID.
+        expect(paypal.status).toBe("fulfilled");
+        expect(automatic).toMatchObject({
+          status: "fulfilled",
+          value: { steamFilled: false, founderRecorded: false, blocked: ["steam_on_another_record"] },
+        });
+      }
+    });
+
+    it("leaves the founder to staff, with the SteamID fill on or off, while another record holds a second SteamID the account applied with", async () => {
+      // The patron's approved application is clean. On another server they applied with a second SteamID, and a
+      // PayPal founder record holds that one.
+      const secondSteam = "76561198000000024";
+      const paypal = await supporters.recordPaypal(
+        paypalInput({ discordId: undefined, steamId: secondSteam, awardFounder: true }),
+        staff,
+        null,
+        policy,
+      );
+      const record = await importPatron();
+      await approve((await application()).id, "primary");
+      await application(patron, secondSteam, "east");
+      const blocked = { automaticBlockedReason: "steam_on_another_record", founder: null, founderBlockedReason: null };
+      // Before the fill: the approved SteamID can be copied, and the page already says the founder is not automatic.
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        ...blocked,
+        steamId: null,
+        match: { steam: { reason: null, steamId: patronSteam } },
+      });
+      expect(await match.autoMatch(record.id, options({ fillSteam: false }))).toMatchObject({
+        steamFilled: false,
+        founderRecorded: false,
+        blocked: ["steam_on_another_record"],
+      });
+      // The fill copies the approved SteamID and changes nothing about the founder, in that run or the next.
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        steamFilled: true,
+        founderRecorded: false,
+        blocked: ["steam_on_another_record"],
+      });
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        ...blocked,
+        steamId: patronSteam,
+        steamSource: "application",
+      });
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        steamFilled: false,
+        founderRecorded: false,
+        blocked: ["steam_on_another_record"],
+      });
+      expect((await client.query<{ member_id: string }>("SELECT member_id FROM supporter_founders")).rows).toEqual([
+        { member_id: paypal.supporter.id },
+      ]);
+      expect((await kinds(record.id)).map((row) => row.kind).sort()).toEqual([
+        "application-steam-link",
+        "patreon-discord-link",
+      ]);
+    });
+
+    it("records no automatic founder on a first payment in another currency", async () => {
+      const record = await importPatron("euro-patron", patron, {
+        ...charge("pledge_start:euro-patron", "2026-10-01T12:00:00.000Z"),
+        currency: "EUR",
+      });
+      await approve((await application()).id, "primary");
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        steamFilled: true,
+        founderRecorded: false,
+        blocked: ["below_minimum"],
+      });
+    });
+
+    it("confirms an earlier payment in another currency by its tier's price, then records the founder", async () => {
+      const cad = {
+        ...charge("pledge_start:cad-patron", "2026-10-01T12:00:00.000Z"),
+        amountCents: 750,
+        currency: "CAD",
+      };
+      // Imported before tier prices were read: the payment is verified, but not confirmed as US$5 or more.
+      const record = await importPatron("cad-patron", patron, cad);
+      expect(record).toMatchObject({
+        founderEligiblePayment: null,
+        founderBlockedReason: "below_minimum",
+        // No tier price was read, so Gramps still waits for one.
+        founderTierBelowMinimum: false,
+        automaticBlockedReason: "below_minimum",
+        latestPayment: { amountCents: 750, currency: "CAD", minimumConfirmed: false },
+      });
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        founderRecorded: false,
+        blocked: ["no_application", "below_minimum"],
+      });
+      // The next sync learns that the tier costs US$5. The member is otherwise unchanged.
+      const priced = {
+        ...apiMember("cad-patron", [{ ...cad, tierId: "111", tierAmountCents: 500 }], true),
+        discordId: patron,
+      };
+      expect(await supporters.importApiMember(campaign, priced, new Date())).toMatchObject({
+        created: false,
+        updated: false,
+        payments: 0,
+        tierConfirmed: 1,
+        tierConfirmedNew: 1,
+        tierUnconfirmed: 0,
+      });
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        version: record.version + 1,
+        founderBlockedReason: null,
+        automaticBlockedReason: null,
+        founderEligiblePayment: {
+          source: "patreon_api",
+          amountCents: 750,
+          currency: "CAD",
+          minimumConfirmed: true,
+          firstSuccessfulPaymentVerified: true,
+        },
+      });
+      // A later sync without the tier, or with a cheaper one, never takes the confirmation back.
+      for (const event of [cad, { ...cad, tierId: "111", tierAmountCents: 100 }])
+        expect(
+          await supporters.importApiMember(
+            campaign,
+            { ...apiMember("cad-patron", [event], true), discordId: patron },
+            new Date(),
+          ),
+        ).toMatchObject({ updated: false, tierConfirmed: 1, tierConfirmedNew: 0, tierUnconfirmed: 0 });
+      expect(
+        (await client.query("SELECT minimum_confirmed FROM supporter_payments WHERE member_id = $1", [record.id])).rows,
+      ).toEqual([{ minimum_confirmed: true }]);
+      expect((await supporters.get(record.id, campaign, automaticPolicy))?.version).toBe(record.version + 1);
+      expect(
+        (
+          await client.query(
+            "SELECT actor_id, details FROM supporter_actions WHERE member_id = $1 AND kind = 'patreon-payment-minimum'",
+            [record.id],
+          )
+        ).rows,
+      ).toEqual([
+        {
+          actor_id: "system:patreon-sync",
+          details: expect.objectContaining({
+            reference: "pledge_start:cad-patron",
+            amountCents: 750,
+            currency: "CAD",
+            tierId: "111",
+            tierAmountCents: 500,
+            minimumConfirmed: 1,
+          }),
+        },
+      ]);
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        steamFilled: false,
+        founderRecorded: true,
+        blocked: ["no_application"],
+      });
+      expect((await roles.desired([patron])).founder).toEqual(new Map([[patron, record.id]]));
+    });
+
+    it("waits out the hold after the first payment", async () => {
+      const record = await importPatron();
+      await approve((await application()).id, "primary");
+      expect(
+        await match.autoMatch(
+          record.id,
+          options({ policy: { ...policy, automaticHoldHours: 72 }, now: new Date("2026-10-02T12:00:00.000Z") }),
+        ),
+      ).toMatchObject({ steamFilled: true, founderRecorded: false, blocked: ["payment_too_recent"] });
+    });
+  });
+
+  describe("Link Patreon sign-ins", () => {
+    const patron = "456789012345678911";
+    const otherAccount = "456789012345678912";
+    const automaticPolicy: FounderPolicy = { ...policy, automaticHoldHours: 0 };
+    const signIn = (patreonMemberId: string, discordId = patron, now = new Date()) => ({
+      campaignId: campaign,
+      patreonMemberId,
+      discordId,
+      now,
+    });
+    async function importPatron(patreonMemberId: string, discordId: string | null = null) {
+      await supporters.importApiMember(
+        campaign,
+        {
+          ...apiMember(patreonMemberId, [charge(`pledge_start:${patreonMemberId}`, "2026-10-01T12:00:00.000Z")], true),
+          discordId,
+        },
+        new Date(),
+      );
+      return (await supporters.list(campaign, automaticPolicy, undefined, patreonMemberId))[0];
+    }
+    const actions = async (memberId: string) =>
+      (
+        await client.query<{ actor_id: string; kind: string; details: Record<string, unknown> }>(
+          "SELECT actor_id, kind, details FROM supporter_actions WHERE member_id = $1 ORDER BY created_at, kind",
+          [memberId],
+        )
+      ).rows;
+    const refusals = async () =>
+      (
+        await client.query<{ count: number }>(
+          "SELECT count(*)::int AS count FROM supporter_actions WHERE kind = 'patron-link-conflict'",
+        )
+      ).rows[0].count;
+
+    it("fills the empty link as the patron's own, bumps the version once and audits it, then writes nothing again", async () => {
+      const record = await importPatron("self-linked");
+      expect(record).toMatchObject({ discordId: null, identityState: "unlinked" });
+      expect(await patronLink.linked(campaign, patron)).toBe(false);
+      expect(await patronLink.link(signIn("self-linked"))).toEqual({ outcome: "linked", memberId: record.id });
+      const view = (await supporters.get(record.id, campaign, automaticPolicy))!;
+      expect(view).toMatchObject({
+        discordId: patron,
+        discordSource: "patron_signin",
+        identityState: "partial",
+        version: record.version + 1,
+        patronLinkConflict: null,
+      });
+      expect(await actions(record.id)).toEqual([
+        {
+          actor_id: PATRON_LINK_ACTOR.id,
+          kind: "patron-discord-link",
+          details: {
+            discordId: patron,
+            previousDiscordId: null,
+            patreonMemberId: "self-linked",
+            patreonDiscordId: null,
+            memberCreated: 0,
+          },
+        },
+      ]);
+      expect(await patronLink.linked(campaign, patron)).toBe(true);
+      // Signing in again for the same link changes nothing.
+      expect(await patronLink.link(signIn("self-linked"))).toEqual({ outcome: "already", memberId: record.id });
+      expect(await actions(record.id)).toHaveLength(1);
+      expect((await supporters.get(record.id, campaign, automaticPolicy))?.version).toBe(view.version);
+      // The next import keeps the patron's link, even when Patreon reports no Discord account.
+      await importPatron("self-linked");
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        discordId: patron,
+        discordSource: "patron_signin",
+      });
+      // Patreon reporting the same account leaves it the patron's own link, never one "staff linked".
+      await importPatron("self-linked", patron);
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        discordId: patron,
+        discordSource: "patron_signin",
+        patreonDiscordId: patron,
+      });
+      // Another account Patreon reports never replaces it: the record keeps the link and shows the conflict.
+      await importPatron("self-linked", otherAccount);
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        discordId: patron,
+        discordSource: "patron_signin",
+        patreonDiscordId: otherAccount,
+      });
+      const importKinds = (await actions(record.id)).map(({ kind }) => kind);
+      expect(importKinds).not.toContain("patreon-discord-confirmed");
+      expect(importKinds).not.toContain("patreon-discord-link");
+    });
+
+    it("creates the import's minimal record for a membership the import has not seen, pending until a payment", async () => {
+      const result = await patronLink.link(signIn("not-imported-yet"));
+      expect(result).toMatchObject({ outcome: "pending" });
+      expect(
+        (
+          await client.query(
+            `SELECT provider, campaign_id, patreon_member_id, display_name, review_state, discord_id, discord_source,
+              version FROM supporter_members WHERE id = $1`,
+            [result.memberId],
+          )
+        ).rows,
+      ).toEqual([
+        {
+          provider: "patreon",
+          campaign_id: campaign,
+          patreon_member_id: "not-imported-yet",
+          display_name: null,
+          review_state: "pending",
+          discord_id: patron,
+          discord_source: "patron_signin",
+          version: 2,
+        },
+      ]);
+      expect((await actions(result.memberId)).map(({ details }) => details.memberCreated)).toEqual([1]);
+      // The import then fills in the membership and its payment around the patron's link.
+      expect(await importPatron("not-imported-yet")).toMatchObject({
+        id: result.memberId,
+        discordId: patron,
+        discordSource: "patron_signin",
+        latestPayment: { source: "patreon_api" },
+      });
+    });
+
+    it("never replaces a link, and shows the refusal to staff once a day until staff keep the accounts", async () => {
+      const record = await importPatron("linked-elsewhere", patron);
+      // Patreon linked the account three days ago, before any sign-in.
+      await client.query(
+        "UPDATE supporter_actions SET created_at = created_at - interval '3 days' WHERE member_id = $1",
+        [record.id],
+      );
+      const day = 24 * 3_600_000;
+      const firstAt = new Date(Date.now() - 2 * day);
+      expect(await patronLink.link(signIn("linked-elsewhere", otherAccount, firstAt))).toEqual({
+        outcome: "conflict",
+        conflict: "membership_linked",
+        memberId: record.id,
+      });
+      let view = (await supporters.get(record.id, campaign, automaticPolicy))!;
+      expect(view).toMatchObject({
+        discordId: patron,
+        discordSource: "patreon",
+        version: record.version,
+        patronLinkConflict: { discordId: otherAccount, conflict: "membership_linked", linkedDiscordId: patron },
+      });
+      expect((await actions(record.id)).at(-1)).toEqual({
+        actor_id: PATRON_LINK_ACTOR.id,
+        kind: "patron-link-conflict",
+        details: {
+          discordId: otherAccount,
+          conflict: "membership_linked",
+          linkedDiscordId: patron,
+          patreonMemberId: "linked-elsewhere",
+        },
+      });
+      // The same refusal within a day is recorded once. A day later it is recorded again.
+      await patronLink.link(signIn("linked-elsewhere", otherAccount, new Date(firstAt.getTime() + 3_600_000)));
+      expect(await refusals()).toBe(1);
+      await patronLink.link(signIn("linked-elsewhere", otherAccount, new Date(firstAt.getTime() + day + 3_600_000)));
+      expect(await refusals()).toBe(2);
+      // Staff keeping the accounts as they are (the dialog's Keep accounts, a review) settles every earlier refusal.
+      await supporters.mutate(record.id, { ...review(view), kind: "review" }, staff, campaign, policy);
+      view = (await supporters.get(record.id, campaign, automaticPolicy))!;
+      expect(view.patronLinkConflict).toBeNull();
+      // A sign-in after the review is a new refusal, even within the day.
+      await patronLink.link(signIn("linked-elsewhere", otherAccount));
+      expect(await refusals()).toBe(3);
+      expect((await supporters.get(record.id, campaign, automaticPolicy))?.patronLinkConflict).toMatchObject({
+        discordId: otherAccount,
+      });
+    });
+
+    it("never takes an account another Patreon record links, a PayPal record does not block, and a link clears the refusal", async () => {
+      await importPatron("holder", patron);
+      const record = await importPatron("taker");
+      expect(await patronLink.link(signIn("taker", patron, new Date(Date.now() - 60_000)))).toEqual({
+        outcome: "conflict",
+        conflict: "discord_linked",
+        memberId: record.id,
+      });
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        discordId: null,
+        version: record.version,
+        patronLinkConflict: { discordId: patron, conflict: "discord_linked", linkedDiscordId: null },
+      });
+      await supporters.recordPaypal(paypalInput({ discordId: otherAccount }), staff, null, policy);
+      expect(await patronLink.link(signIn("taker", otherAccount))).toEqual({ outcome: "linked", memberId: record.id });
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        discordId: otherAccount,
+        discordSource: "patron_signin",
+        patronLinkConflict: null,
+      });
+    });
+
+    it("drops a refusal from the page by itself once it no longer holds", async () => {
+      // membership_linked: the import moves the record's Patreon account to the patron Patreon now reports it for.
+      const moved = await importPatron("moved-from", patron);
+      // Patreon linked the account an hour before the patron signed in with another, so the link is not a later
+      // action that settles the refusal.
+      await client.query(
+        "UPDATE supporter_actions SET created_at = created_at - interval '1 hour' WHERE member_id = $1",
+        [moved.id],
+      );
+      expect(await patronLink.link(signIn("moved-from", otherAccount, new Date(Date.now() - 60_000)))).toMatchObject({
+        outcome: "conflict",
+        conflict: "membership_linked",
+      });
+      await importPatron("moved-from");
+      expect((await supporters.get(moved.id, campaign, automaticPolicy))?.patronLinkConflict).toMatchObject({
+        conflict: "membership_linked",
+      });
+      await importPatron("moved-to", patron);
+      expect(await supporters.get(moved.id, campaign, automaticPolicy)).toMatchObject({
+        discordId: null,
+        patronLinkConflict: null,
+      });
+      expect((await actions(moved.id)).map(({ kind }) => kind)).toContain("patreon-discord-moved");
+      // discord_linked: the record that held the account no longer does, though nothing happened on this record.
+      const holder = (await supporters.list(campaign, automaticPolicy, undefined, "moved-to"))[0];
+      const taker = await importPatron("late-taker");
+      expect(await patronLink.link(signIn("late-taker", patron, new Date(Date.now() - 60_000)))).toMatchObject({
+        outcome: "conflict",
+        conflict: "discord_linked",
+      });
+      expect((await supporters.get(taker.id, campaign, automaticPolicy))?.patronLinkConflict).toMatchObject({
+        discordId: patron,
+        conflict: "discord_linked",
+      });
+      await supporters.mutate(
+        holder.id,
+        { ...review(holder), kind: "link", discordId: "456789012345678913" },
+        staff,
+        campaign,
+        policy,
+      );
+      expect(await supporters.get(taker.id, campaign, automaticPolicy)).toMatchObject({
+        discordId: null,
+        patronLinkConflict: null,
+      });
+      expect((await actions(taker.id)).map(({ kind }) => kind)).toEqual(["patron-link-conflict"]);
+    });
+
+    it("gives a founder record no Discord account another founder holds", async () => {
+      await supporters.recordPaypal(paypalInput({ discordId: otherAccount, awardFounder: true }), staff, null, policy);
+      let record = await register("steam-only-founder");
+      record = (
+        await supporters.mutate(
+          record.id,
+          { ...review(record), kind: "link", steamId: "76561198000000041" },
+          staff,
+          campaign,
+          policy,
+        )
+      ).supporter!;
+      record = await payment(record);
+      record = (
+        await supporters.mutate(
+          record.id,
+          { ...review(record), kind: "founder", paymentId: record.founderEligiblePayment!.id },
+          staff,
+          campaign,
+          policy,
+        )
+      ).supporter!;
+      expect(record.founder).not.toBeNull();
+      expect(await patronLink.link(signIn("steam-only-founder", otherAccount))).toEqual({
+        outcome: "conflict",
+        conflict: "founder_tie",
+        memberId: record.id,
+      });
+      expect(await supporters.get(record.id, campaign, policy)).toMatchObject({ discordId: null });
+      // An account no founder holds is fine.
+      expect(await patronLink.link(signIn("steam-only-founder", patron))).toMatchObject({ memberId: record.id });
+      expect(await supporters.get(record.id, campaign, policy)).toMatchObject({
+        discordId: patron,
+        discordSource: "patron_signin",
+      });
+    });
+
+    it("links one of two Discord accounts that sign in for the same membership at once", async () => {
+      const record = await importPatron("raced-membership");
+      // One clock for both: a refusal stays shown until a link made after it.
+      const at = new Date();
+      const results = await overlap(
+        "supporter_members",
+        ({ patronLink }) => patronLink.link(signIn("raced-membership", patron, at)),
+        ({ patronLink }) => patronLink.link(signIn("raced-membership", otherAccount, at)),
+      );
+      expect(results.every((result) => result.status === "fulfilled")).toBe(true);
+      const outcomes = results.map((result) => (result as PromiseFulfilledResult<PatronLinkResult>).value);
+      expect(outcomes.map(({ outcome }) => outcome).sort()).toEqual(["conflict", "linked"]);
+      expect(outcomes.find(({ outcome }) => outcome === "conflict")).toMatchObject({ conflict: "membership_linked" });
+      const view = (await supporters.get(record.id, campaign, automaticPolicy))!;
+      const loser = view.discordId === patron ? otherAccount : patron;
+      expect(view).toMatchObject({ discordSource: "patron_signin", version: record.version + 1 });
+      expect(view.patronLinkConflict).toEqual({
+        discordId: loser,
+        conflict: "membership_linked",
+        linkedDiscordId: view.discordId,
+      });
+      expect((await actions(record.id)).map(({ kind }) => kind).sort()).toEqual([
+        "patron-discord-link",
+        "patron-link-conflict",
+      ]);
+    });
+
+    it("links one of two memberships that sign in with the same Discord account at once", async () => {
+      const records = [await importPatron("raced-one"), await importPatron("raced-two")];
+      const results = await overlap(
+        "supporter_members",
+        ({ patronLink }) => patronLink.link(signIn("raced-one")),
+        ({ patronLink }) => patronLink.link(signIn("raced-two")),
+      );
+      expect(results.every((result) => result.status === "fulfilled")).toBe(true);
+      const outcomes = results.map((result) => (result as PromiseFulfilledResult<PatronLinkResult>).value);
+      expect(outcomes.map(({ outcome }) => outcome).sort()).toEqual(["conflict", "linked"]);
+      const lost = outcomes.find(({ outcome }) => outcome === "conflict")!;
+      expect(lost).toMatchObject({ conflict: "discord_linked" });
+      const won = outcomes.find(({ outcome }) => outcome === "linked")!;
+      expect(await supporters.get(won.memberId, campaign, automaticPolicy)).toMatchObject({
+        discordId: patron,
+        discordSource: "patron_signin",
+      });
+      // The losing record is unchanged apart from the refusal staff see.
+      expect(await supporters.get(lost.memberId, campaign, automaticPolicy)).toMatchObject({
+        discordId: null,
+        version: records.find(({ id }) => id === lost.memberId)!.version,
+        patronLinkConflict: { discordId: patron, conflict: "discord_linked", linkedDiscordId: null },
+      });
+      expect((await actions(lost.memberId)).map(({ kind }) => kind)).toEqual(["patron-link-conflict"]);
+    });
+
+    it("records an automatic founder on a new patron link once the first payment has passed its refund wait, with its own reason", async () => {
+      const record = await importPatron("own-link");
+      const linkedAt = new Date("2026-10-08T12:00:00.000Z");
+      expect(await patronLink.link(signIn("own-link", patron, linkedAt))).toEqual({
+        outcome: "linked",
+        memberId: record.id,
+      });
+      const held = { ...policy, automaticHoldHours: 72 };
+      const options = (now: string): AutoMatchOptions => ({
+        campaignId: campaign,
+        policy: held,
+        fillSteam: true,
+        recordFounder: true,
+        now: new Date(now),
+      });
+      // The first payment, from October 1 at 12:00 UTC, waits out Patreon's refund window whoever linked the account.
+      expect(await match.autoMatch(record.id, options("2026-10-04T11:59:59.999Z"))).toMatchObject({
+        founderRecorded: false,
+        blocked: expect.arrayContaining(["payment_too_recent"]),
+      });
+      expect(await supporters.get(record.id, campaign, held)).toMatchObject({ founder: null });
+      // The link itself waits for nothing: a moment after it, the founder is recorded.
+      expect(await match.autoMatch(record.id, options("2026-10-08T12:00:00.001Z"))).toMatchObject({
+        founderRecorded: true,
+      });
+      expect(await supporters.get(record.id, campaign, held)).toMatchObject({ founder: { automatic: true } });
+      expect(
+        (await client.query("SELECT reason FROM supporter_founders WHERE member_id = $1", [record.id])).rows,
+      ).toEqual([{ reason: PATRON_LINK_FOUNDER_REASON }]);
+      expect((await actions(record.id)).map(({ actor_id, kind }) => ({ actor_id, kind }))).toEqual([
+        { actor_id: PATRON_LINK_ACTOR.id, kind: "patron-discord-link" },
+        { actor_id: "system:supporter-match", kind: "founder" },
+      ]);
+      expect(
+        (
+          await client.query("SELECT reason FROM supporter_actions WHERE member_id = $1 AND kind = 'founder'", [
+            record.id,
+          ])
+        ).rows,
+      ).toEqual([{ reason: PATRON_LINK_FOUNDER_REASON }]);
+    });
+  });
+
+  it("reads who should hold each role and keeps an ordered role ledger", async () => {
+    const member = (await applications.create(uncApplication("primary")))!;
+    await approve(member.id, "primary");
+    const friend = (await applications.create({
+      ...applicationInput("456789012345678901", "76561198000000012"),
+      relationship: "friend_regular" as const,
+    }))!;
+    await approve(friend.id, "primary");
+    const founder = await supporters.recordPaypal(
+      {
+        id: randomUUID(),
+        displayName: "Fictional founder",
+        discordId: "567890123456789012",
+        paidAt: new Date("2026-10-01T16:00:00.000Z"),
+        amountCents: 500,
+        currency: "USD",
+        transactionId: "8AB12345CD678901E",
+        completedPaymentVerified: true,
+        firstSuccessfulPaymentVerified: true,
+        minimumConfirmed: false,
+        awardFounder: true,
+        reason: "Checked a fictional completed PayPal payment",
+      },
+      staff,
+      null,
+      policy,
+    );
+    await supporters.recordPaypal(
+      {
+        id: randomUUID(),
+        displayName: "Fictional unlinked founder",
+        steamId: "76561198000000013",
+        paidAt: new Date("2026-10-02T16:00:00.000Z"),
+        amountCents: 500,
+        currency: "USD",
+        transactionId: "9ZY98765XW432101V",
+        completedPaymentVerified: true,
+        firstSuccessfulPaymentVerified: true,
+        minimumConfirmed: false,
+        awardFounder: true,
+        reason: "Checked a fictional completed PayPal payment",
+      },
+      staff,
+      null,
+      policy,
+    );
+    const desired = await roles.desired();
+    expect(desired.member).toEqual(new Map([["345678901234567890", member.id]]));
+    expect(desired.founder).toEqual(new Map([["567890123456789012", founder.supporter.id]]));
+    expect((await roles.desired(["567890123456789012"])).member.size).toBe(0);
+    expect(await roles.foundersWithoutDiscord()).toMatchObject([
+      { displayName: "Fictional unlinked founder", provider: "paypal" },
+    ]);
+    expect(await roles.summary()).toEqual({ memberEligible: 1, founders: 2, foundersWithoutDiscord: 1 });
+    const base = {
+      trigger: "event" as const,
+      requestedBy: null,
+      guildId: "678901234567890123",
+      discordUserId: "345678901234567890",
+      roleKind: "member" as const,
+      roleId: "789012345678901234",
+      basisType: "application" as const,
+      basisId: member.id,
+    };
+    const last = (roleKind: "member" | "founder" = "member", roleId = base.roleId) =>
+      roles.lastEffective(base.guildId, base.discordUserId, roleKind, roleId);
+    const added = await roles.begin({ ...base, operation: "add" });
+    expect(await last()).toMatchObject({ id: added, state: "started" });
+    // History recorded for another role ID (a recreated role or a corrected setting) does not count.
+    expect(await last("member", "789012345678901299")).toBeNull();
+    await roles.finish(added, "unknown", false, "Lost response");
+    // Confirming it as the wrong operation changes nothing.
+    await roles.confirm(added, "remove");
+    expect(await last()).toMatchObject({ id: added, state: "unknown" });
+    await roles.confirm(added, "add");
+    expect(await last()).toMatchObject({ id: added, state: "applied", changed: true });
+    const failed = await roles.begin({ ...base, operation: "remove" });
+    await roles.finish(failed, "failed", false, "Refused");
+    // A failed attempt never replaces the latest effective change.
+    expect((await last())?.id).toBe(added);
+    await roles.note({ ...base, roleKind: "founder" });
+    expect(await last("founder")).toMatchObject({
+      operation: "note",
+      changed: false,
+      state: "applied",
+    });
+    expect((await roles.recent(25)).map((row) => row.actorId)).toEqual([
+      "system:discord-roles",
+      "system:discord-roles",
+      "system:discord-roles",
+    ]);
+  });
+
+  it("reads who supports right now for the Supporter role and which Supporter roles Gramps still holds", async () => {
+    const donor = "567890123456789013";
+    const patron = "567890123456789014";
+    const paypal = await supporters.recordPaypal(
+      {
+        id: randomUUID(),
+        displayName: "Fictional PayPal supporter",
+        discordId: donor,
+        paidAt: new Date("2026-11-01T12:00:00.000Z"),
+        amountCents: 500,
+        currency: "USD",
+        transactionId: "7AB12345CD678901E",
+        completedPaymentVerified: true,
+        firstSuccessfulPaymentVerified: true,
+        minimumConfirmed: false,
+        awardFounder: false,
+        reason: "Checked a fictional completed PayPal payment",
+      },
+      staff,
+      null,
+      policy,
+    );
+    const imported = await supporters.importApiMember(
+      campaign,
+      {
+        ...apiMember("supporter-sync", [charge("pledge_start:9001", "2026-11-02T12:00:00.000Z")], true),
+        discordId: patron,
+      },
+      new Date("2026-11-02T13:00:00.000Z"),
+    );
+    expect(imported).toMatchObject({ discordLinked: true, discordId: patron });
+    const within = new Date("2026-11-20T00:00:00.000Z");
+    expect(await roles.supporterDesired(undefined, campaign, within)).toEqual(
+      new Map([
+        [donor, paypal.supporter.id],
+        [patron, imported.memberId],
+      ]),
+    );
+    expect(await roles.supporterDesired([patron], campaign, within)).toEqual(new Map([[patron, imported.memberId]]));
+    // Patreon records count only for the configured campaign; with Patreon off only PayPal records count.
+    for (const other of [null, "999999"])
+      expect(await roles.supporterDesired(undefined, other, within)).toEqual(new Map([[donor, paypal.supporter.id]]));
+    // 31 days after the PayPal payment it no longer counts; the active patron still does.
+    expect(await roles.supporterDesired(undefined, campaign, new Date("2026-12-02T12:00:00.000Z"))).toEqual(
+      new Map([[patron, imported.memberId]]),
+    );
+    const base = {
+      trigger: "event" as const,
+      requestedBy: null,
+      guildId: "678901234567890123",
+      discordUserId: donor,
+      roleKind: "supporter" as const,
+      roleId: "789012345678901235",
+      basisType: "supporter" as const,
+      basisId: paypal.supporter.id,
+    };
+    const held = (roleId = base.roleId) => roles.heldBasis(base.guildId, "supporter", roleId);
+    expect(await held()).toEqual(new Map());
+    await roles.note({ ...base, discordUserId: patron, basisId: imported.memberId });
+    const added = await roles.begin({ ...base, operation: "add" });
+    await roles.finish(added, "applied", true, "Role added.");
+    // A noted role is never Gramps' own; history for another role ID does not count.
+    expect(await held()).toEqual(new Map([[donor, paypal.supporter.id]]));
+    expect(await held("789012345678901299")).toEqual(new Map());
+    const removal = await roles.begin({ ...base, operation: "remove" });
+    await roles.finish(removal, "unknown", false, "Lost response");
+    expect(await held()).toEqual(new Map([[donor, paypal.supporter.id]]));
+    await roles.confirm(removal, "remove");
+    expect(await held()).toEqual(new Map());
   });
 
   it("keeps duplicate applicant identities and SteamIDs from creating additional requests", async () => {

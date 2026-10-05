@@ -195,6 +195,8 @@ describe("weekly board renderer", () => {
 
   it("stays within Discord's 2,000 characters with the longest labels allowed", () => {
     const long = "W".repeat(500);
+    // The feed keeps at most 200 characters of a cause; describeCause() names nothing longer.
+    const longCause = "W".repeat(200);
     const rows = Array.from({ length: 100 }, (_, index) =>
       stats(FIXTURE_IDS[index % 23], `${long}${index}`, 1_000 - index),
     );
@@ -212,12 +214,12 @@ describe("weekly board renderer", () => {
             steamId: FIXTURE_IDS[2],
             name: long,
             distanceCentimeters: 199_999,
-            cause: long,
+            cause: longCause,
             mapName: long,
           },
           kills: 99_999,
           killsWithCause: 99_999,
-          topCause: { cause: long, kills: 99_999 },
+          topCause: { cause: longCause, kills: 99_999 },
           maps: [
             { mapName: long, kills: 99_999 },
             { mapName: "Europe", kills: 5 },
@@ -336,10 +338,34 @@ describe("weekly board renderer", () => {
     expect(causeLabel("M1 Garand")).toBe("M1 Garand");
     expect(causeLabel("Grenade_Frag")).toBe("Grenade Frag");
     expect(causeLabel("x".repeat(60))).toBe("x".repeat(40));
+    // The game writes both prefix casings; each reads as the same shared label.
+    expect(causeLabel("Id.Item.AK74M")).toBe("AK-74M");
+    expect(causeLabel("ID.Item.AK74M")).toBe("AK-74M");
+    expect(causeLabel("Vehicle.Variant.Air.Rotary.ROT_04.Default")).toBe("ROT-04 helicopter");
+    expect(causeLabel("Id.Item.WEPN_029")).toBe("Weapon 029");
     expect(mapName("NorthAmerica")).toBe("Zestafona");
     expect(mapName("Kavkazi")).toBe("Bakurani");
     expect(mapName("Some_New_Map")).toBe("Some New Map");
     expect(mapName(null)).toBeNull();
+  });
+
+  it("names the game's dotted weapon ids in the shout-outs", () => {
+    expect(
+      labels({
+        longestKill: {
+          steamId: FIXTURE_IDS[0],
+          name: "Grandpa Joe",
+          distanceCentimeters: 30_000,
+          cause: "ID.Item.AK74M",
+          mapName: "Kavkazi",
+        },
+        kills: 40,
+        killsWithCause: 40,
+        topCause: { cause: "Id.Item.AK74M", kills: 30 },
+      }),
+    ).toEqual(["Long-distance call: Grandpa Joe, 300 m with AK-74M on Bakurani", "Old faithful: AK-74M, 30 kills"]);
+    // An id describeCause() cannot name still leaves the weapon out rather than showing it raw.
+    expect(labels({ kills: 40, killsWithCause: 40, topCause: { cause: "Meta.Unknown.Thing", kills: 30 } })).toEqual([]);
   });
 
   it("keeps rewards, prizes, points, whitelist and 'free' out of the template text", () => {

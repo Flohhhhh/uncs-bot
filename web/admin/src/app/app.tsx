@@ -1,46 +1,54 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { NavLink, Navigate, Route, Routes, useLocation, useNavigate, type To } from "react-router-dom";
 import { api, configureSession, isReadPending } from "../api/client";
 import { validateOverview, validateStaff, validateServers } from "../api/validation";
 import type { ActionName, Overview, Staff } from "../api/types";
-import { AdminContext, type SelectedServer } from "./context";
-import { Badge, Empty } from "../components/ui";
-import {
-  OverviewPage,
-  WhitelistPage,
-  BansPage,
-  AnnouncementsPage,
-  MatchPage,
-  AuditPage,
-} from "../features/server/pages";
+import { AdminContext, type ActionOptions, type SelectedServer } from "./context";
+import { Empty, Sheet } from "../components/ui";
+import { OverviewPage, WhitelistPage, BansPage, AnnouncementsPage } from "../features/server/pages";
+import { MatchPage } from "../features/server/match-page";
 import { PlayersPage } from "../features/players/players-page";
 import { ActionsDialog } from "../features/actions/actions-dialog";
 import { ApplicationsPage } from "../features/applications";
 import { SupportersPage } from "../features/supporters";
-import { CombatPage } from "../features/combat/combat-page";
+import { DiscordRolesPage } from "../features/discord-roles";
 import { SettingsPage, PermissionsPage } from "../features/server/settings-page";
 import { NavigationGuard } from "./navigation-guard";
-import { MapVotesPage } from "../features/map-votes/map-votes-page";
-import { EventsPage } from "../features/events/events-page";
+import { serverSearch } from "./server-link";
+import { ServerChoices, ServerSwitcher } from "./server-switcher";
+import { AccountDetails, AccountMenu, StatusPill } from "./shell";
 import { ActivityPage } from "../features/server/activity-page";
 
+type Page = { icon: string; label: string; title: string; short?: string };
+/** `label` names the page in navigation and the tab title; `title` is its heading; `short` fits the phone tab bar. */
 const pages = {
-  overview: ["◫", "Overview", "Server overview", "Current match and server status."],
-  players: ["♟", "Live players", "Live players", "Player search and moderation."],
-  match: ["◇", "Match & maps", "Match & maps", "Current match, next round, rotation and community voting."],
-  activity: ["◷", "Server activity", "Server activity", "Game events, players, match changes and staff actions."],
-  combat: ["⌁", "Combat history", "Combat history", "Recorded kills, player history, and the server leaderboard."],
-  whitelist: ["☷", "Whitelist", "Community whitelist", "Manage community queue access."],
-  applications: ["✉", "Applications", "Whitelist applications", "Review and approve community requests."],
-  supporters: ["✳", "Supporters", "Community supporters", "Patreon records and founder promises."],
-  bans: ["⊘", "Bans", "Server bans", "Review restrictions and keep moderation decisions accountable."],
-  announcements: ["↗", "Announcements", "Announcements", "Send a message to the server."],
-  votes: ["✓", "Map & mode votes", "Map & mode votes", "Let the community choose the next round in Discord."],
-  events: ["⚑", "Events", "Optional events", "Run supervised 50v50 events and review their actions."],
-  audit: ["◷", "Action history", "Action history", "Dashboard receipts and recent game requests."],
-  settings: ["⚙", "Server settings", "Server settings", "Identity, joining, gameplay and map rotation."],
-  permissions: ["◈", "Permissions", "Staff permissions", "Which controls each staff role can use."],
-} as const;
+  overview: { icon: "◫", label: "Overview", title: "Server overview", short: "Overview" },
+  players: { icon: "♟", label: "Players", title: "Live players", short: "Players" },
+  match: { icon: "◇", label: "Match & maps", title: "Match & maps", short: "Match" },
+  activity: { icon: "◷", label: "Server activity", title: "Server activity", short: "Activity" },
+  whitelist: { icon: "☷", label: "Whitelist", title: "Community whitelist" },
+  applications: { icon: "✉", label: "Applications", title: "Whitelist applications" },
+  bans: { icon: "⊘", label: "Bans", title: "Server bans" },
+  announcements: { icon: "↗", label: "Announcements", title: "Announcements" },
+  supporters: { icon: "✳", label: "Supporters", title: "Community supporters" },
+  "discord-roles": { icon: "◎", label: "Discord roles", title: "Discord roles" },
+  settings: { icon: "⚙", label: "Settings", title: "Server settings" },
+  permissions: { icon: "◈", label: "Permissions", title: "Staff permissions" },
+} satisfies Record<string, Page>;
+type PageId = keyof typeof pages;
+/** The first group is the phone tab bar; the others open from More. */
+const navigation: { label: string; pages: PageId[] }[] = [
+  { label: "Live", pages: ["overview", "players", "match", "activity"] },
+  { label: "Community", pages: ["whitelist", "applications", "bans", "announcements", "supporters", "discord-roles"] },
+  { label: "Server", pages: ["settings"] },
+];
+/** Old standalone pages are now views of a hub. The redirect keeps the server and any other parameters. */
+function ViewRedirect({ to, view }: { to: string; view: string }) {
+  const { search } = useLocation();
+  const params = new URLSearchParams(search);
+  params.set("view", view);
+  return <Navigate to={{ pathname: to, search: `?${params}` }} replace />;
+}
 function Brand({ className = "" }: { className?: string }) {
   return (
     <a className={`wordmark ${className}`} href="https://theuncsgaming.com/" aria-label="The UNCs home">
@@ -179,17 +187,7 @@ function CardServerChoice({
             : "Select the server you want to manage."}
         </p>
         {servers.length ? (
-          <label>
-            Game server
-            <select value="" onChange={(event) => choose(event.target.value)}>
-              <option value="">Choose a server</option>
-              {servers.map((server) => (
-                <option key={server.id} value={server.id}>
-                  {server.name} · {server.role}
-                </option>
-              ))}
-            </select>
-          </label>
+          <ServerChoices servers={servers} choose={choose} />
         ) : (
           <p>No game servers are available to this staff account.</p>
         )}
@@ -211,21 +209,17 @@ function Dashboard({
   const location = useLocation();
   const navigate = useNavigate();
   const key = location.pathname.split("/").filter(Boolean)[0] || "overview";
-  const navigationKey = ["votes", "events"].includes(key)
-    ? "match"
-    : ["audit", "combat"].includes(key)
-      ? "activity"
-      : key;
-  const page = Object.hasOwn(pages, key) ? (key as keyof typeof pages) : "overview";
-  const visiblePages = Object.entries(pages)
-    .filter(([id]) => !["combat", "audit", "votes", "events"].includes(id))
-    .filter(([id]) =>
-      id === "supporters"
-        ? me.role === "admin"
-        : ["applications", "settings", "votes", "events"].includes(id)
-          ? server.role === "admin"
-          : true,
-    );
+  const page: PageId = Object.hasOwn(pages, key) ? (key as PageId) : "overview";
+  const canOpen = (id: PageId) =>
+    id === "supporters" || id === "discord-roles"
+      ? me.role === "admin"
+      : ["applications", "settings"].includes(id)
+        ? server.role === "admin"
+        : true;
+  const groups = navigation
+    .map((group) => ({ ...group, pages: group.pages.filter(canOpen) }))
+    .filter((group) => group.pages.length);
+  const moreActive = key === "permissions" || groups.slice(1).some((group) => (group.pages as string[]).includes(key));
   const gamePage = ["overview", "players", "whitelist", "bans", "announcements", "match"].includes(key);
   const [overview, setOverview] = useState<Overview | null>(null);
   const [stale, setStale] = useState(true);
@@ -235,25 +229,51 @@ function Dashboard({
   const [unsavedChanges, setUnsavedChanges] = useState(false);
   const [logoutRequested, setLogoutRequested] = useState(false);
   const [refreshVersion, setRefreshVersion] = useState(0);
+  // Records pages do not read the live game, except for a player panel opened on them, which asks for the roster.
+  const [rosterWatchers, setRosterWatchers] = useState(0);
+  const liveRoster = gamePage || rosterWatchers > 0;
+  // The refresh that the latest finished overview read answered; null while no read is wanted.
+  const [answered, setAnswered] = useState<number | null>(null);
+  const checking = liveRoster && answered !== refreshVersion;
   const [logoutError, setLogoutError] = useState("");
-  const [action, setAction] = useState<{ action: ActionName; steamId?: string; key: string } | null>(null);
+  const [moreOpen, setMoreOpen] = useState(false);
+  // A link inside a review waits until the review has closed, so the navigation guard lets it through.
+  const [afterDialog, setAfterDialog] = useState<To | null>(null);
+  const [action, setAction] = useState<{
+    action: ActionName;
+    steamId?: string;
+    initialMessage?: string;
+    key: string;
+  } | null>(null);
   const pause = useRef(false);
   const freshness = useRef(0);
   const heading = useRef<HTMLHeadingElement>(null);
-  pause.current = busy || dialogOpen;
+  const locked = busy || dialogOpen;
+  pause.current = locked;
   const refresh = useCallback(() => setRefreshVersion((value) => value + 1), []);
   const invalidateOverview = useCallback(() => {
     freshness.current++;
     setStale(true);
   }, []);
+  const watchRoster = useCallback(() => {
+    setRosterWatchers((count) => count + 1);
+    return () => setRosterWatchers((count) => count - 1);
+  }, []);
   const openAction = useCallback(
-    (action: ActionName, steamId?: string) => setAction({ action, steamId, key: crypto.randomUUID() }),
+    (action: ActionName, steamId?: string, options?: ActionOptions) =>
+      setAction({ action, steamId, initialMessage: options?.initialMessage, key: crypto.randomUUID() }),
     [],
   );
   useEffect(() => {
-    document.title = `${pages[page][1]} · The UNCs Admin`;
+    document.title = `${pages[page].label} · The UNCs Admin`;
     heading.current?.focus();
   }, [location.pathname, page]);
+  useEffect(() => setMoreOpen(false), [location.pathname, location.search]);
+  useEffect(() => {
+    if (!afterDialog || locked) return;
+    setAfterDialog(null);
+    navigate(afterDialog);
+  }, [afterDialog, locked, navigate]);
   useEffect(() => {
     const tick = () => {
       if (!document.hidden && !pause.current && !isReadPending()) refresh();
@@ -271,28 +291,32 @@ function Dashboard({
     };
   }, [refresh, invalidateOverview]);
   useEffect(() => {
-    if (!gamePage) {
+    if (!liveRoster) {
       setStale(true);
+      setAnswered(null);
       return;
     }
     const controller = new AbortController();
     const requestedFreshness = freshness.current;
+    const requestedVersion = refreshVersion;
     void api<Overview>(`servers/${server.id}/overview`, { signal: controller.signal })
       .then((value) => {
         if (!controller.signal.aborted) {
           setOverview(validateOverview(value));
           setStale(document.hidden || requestedFreshness !== freshness.current);
           setError("");
+          setAnswered(requestedVersion);
         }
       })
       .catch((error: unknown) => {
         if (!controller.signal.aborted) {
           setStale(true);
           setError(error instanceof Error ? error.message : "The server could not be read.");
+          setAnswered(requestedVersion);
         }
       });
     return () => controller.abort();
-  }, [gamePage, refreshVersion, server.id]);
+  }, [liveRoster, refreshVersion, server.id]);
   useEffect(() => {
     if (!overview) return;
     // Expire an unattended confirmation without adding another polling loop.
@@ -313,16 +337,48 @@ function Dashboard({
     }
   }
   function requestLogout() {
-    if (busy || dialogOpen) return;
+    if (locked) return;
     if (unsavedChanges) setLogoutRequested(true);
     else void logout();
   }
+  const switchServer = (id: string) => navigate({ pathname: location.pathname, search: `?server=${id}` });
   const staffPage = (element: React.ReactNode, game = false) =>
     (game ? server.role : me.role) === "admin" ? (
       element
     ) : (
-      <Navigate to={{ pathname: "/overview", search: location.search }} replace />
+      <Navigate to={{ pathname: "/overview", search: serverSearch(location.search) }} replace />
     );
+  const sectionLink = (id: PageId, onNavigate?: () => void) => {
+    const item: Page = pages[id];
+    return (
+      <NavLink
+        // Only the server follows staff to another section; page views such as `?view=` stay behind.
+        to={{ pathname: `/${id}`, search: serverSearch(location.search) }}
+        className={({ isActive }) => (isActive || id === key ? "active" : "")}
+        aria-current={id === key ? "page" : undefined}
+        onClick={(event) => {
+          if (locked) event.preventDefault();
+          else onNavigate?.();
+        }}
+      >
+        <span className="nav-icon" aria-hidden="true">
+          {item.icon}
+        </span>
+        <span className="nav-text">{item.label}</span>
+        {item.short && (
+          <span className="nav-short" aria-hidden="true">
+            {item.short}
+          </span>
+        )}
+      </NavLink>
+    );
+  };
+  const account = {
+    me,
+    role: server.role,
+    build: gamePage ? overview?.capabilities.build : undefined,
+    disabled: locked,
+  };
   return (
     <AdminContext.Provider
       value={{
@@ -330,6 +386,8 @@ function Dashboard({
         server,
         overview,
         stale,
+        checking,
+        watchRoster,
         busy,
         setBusy,
         dialogOpen,
@@ -350,144 +408,76 @@ function Dashboard({
             <Brand />
             <span className="admin-label">SERVER ADMIN</span>
           </div>
-          <p className="nav-label">SERVER OPERATIONS</p>
-          <label className="mobile-navigation">
-            Dashboard section
-            <select
-              value={visiblePages.some(([id]) => id === key) ? key : ""}
-              disabled={busy || dialogOpen}
-              onChange={(event) => navigate({ pathname: `/${event.target.value}`, search: location.search })}
-            >
-              <option value="" disabled>
-                Choose a section
-              </option>
-              {visiblePages.map(([id, item]) => (
-                <option key={id} value={id}>
-                  {item[1]}
-                </option>
-              ))}
-            </select>
-          </label>
-          <nav aria-label="Dashboard sections">
-            {visiblePages.map(([id, item]) => (
-              <NavLink
-                key={id}
-                to={{ pathname: `/${id}`, search: location.search }}
-                className={({ isActive }) => (isActive || id === navigationKey ? "active" : "")}
-                aria-current={id === navigationKey ? "page" : undefined}
-                onClick={(event) => {
-                  if (busy || dialogOpen) event.preventDefault();
-                }}
-              >
-                <span>{item[0]}</span>
-                {item[1]}
-              </NavLink>
-            ))}
-          </nav>
-          <div className="sidebar-bottom">
-            <a className="community" href="https://theuncsgaming.com/">
-              ↖ Back to the community<small>Good games. Older knees.</small>
-            </a>
-            <div className="staff">
-              <div className="avatar">{me.name.slice(0, 1).toUpperCase()}</div>
-              <div>
-                <strong>{me.name}</strong>
-                <small>{me.role}</small>
+          <nav aria-label="Dashboard sections" className="sections">
+            {groups.map((group, index) => (
+              <div key={group.label} className={`nav-group${index === 0 ? " nav-primary" : ""}`}>
+                <p className="nav-label" id={`nav-${group.label.toLowerCase()}`}>
+                  {group.label}
+                </p>
+                <ul aria-labelledby={`nav-${group.label.toLowerCase()}`}>
+                  {group.pages.map((id) => (
+                    <li key={id}>{sectionLink(id)}</li>
+                  ))}
+                </ul>
               </div>
-              <button
-                className="icon-button"
-                title="Sign out"
-                aria-label="Sign out"
-                disabled={busy || dialogOpen}
-                onClick={requestLogout}
-              >
-                ↪
-              </button>
-            </div>
-          </div>
+            ))}
+            <button
+              type="button"
+              className={`nav-more${moreActive ? " active" : ""}`}
+              aria-label="More sections"
+              aria-haspopup="dialog"
+              aria-expanded={moreOpen}
+              disabled={locked}
+              onClick={() => setMoreOpen(true)}
+            >
+              <span className="nav-icon" aria-hidden="true">
+                ☰
+              </span>
+              <span>More</span>
+            </button>
+          </nav>
         </aside>
         <main id="main-content" tabIndex={-1}>
           {me.demo && (
             <div className="demo-banner">
-              LOCAL PREVIEW{" "}
-              <span>Sample players and simulated actions. This preview cannot control the live server.</span>
+              <strong>Local preview</strong> <span>Sample data. Not the live server.</span>
             </div>
           )}
           <header className="topbar">
-            <label className="server-selection">
-              Game server
-              <select
-                value={server.id}
-                disabled={busy || dialogOpen}
-                onChange={(event) => navigate({ pathname: location.pathname, search: `?server=${event.target.value}` })}
-              >
-                {servers.map((option) => (
-                  <option key={option.id} value={option.id}>
-                    {option.name} · {option.role}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <ServerSwitcher servers={servers} current={server} disabled={locked} choose={switchServer} />
+            <p className="topbar-server">
+              <span className="sr-only">Game server:</span> <strong>{server.name}</strong>{" "}
+              <span className="server-role">{server.role}</span>
+            </p>
             <div className="topbar-right">
               {gamePage && (
-                <Badge kind={stale ? "warn" : "good"}>
-                  {stale ? (!overview && !error ? "Connecting…" : "Connection needs attention") : "● Server responding"}
-                </Badge>
+                <StatusPill overview={overview} stale={stale} error={error} disabled={locked} retry={refresh} />
               )}
-              <span className="private-label">STAFF ONLY</span>
               <button
-                className="icon-button mobile-only"
-                title="Sign out"
-                aria-label="Sign out"
-                disabled={busy || dialogOpen}
-                onClick={requestLogout}
+                type="button"
+                className="icon-button refresh-button"
+                aria-label="Refresh dashboard"
+                title="Refresh"
+                disabled={locked}
+                onClick={refresh}
               >
-                ↪
+                ↻
               </button>
+              <AccountMenu {...account} signOut={requestLogout} />
             </div>
           </header>
           <div className="content">
             <div className="page-heading">
-              <div>
-                <p className="eyebrow">✳ WARDOGS / COMMUNITY SERVER</p>
-                <h1 ref={heading} tabIndex={-1}>
-                  {pages[page][2]}
-                </h1>
-                <p>{pages[page][3]}</p>
-              </div>
-              <button
-                className="button secondary"
-                aria-label="Refresh dashboard"
-                disabled={busy || dialogOpen}
-                onClick={refresh}
-              >
-                ↻ <span>Refresh</span>
-              </button>
+              <h1 ref={heading} tabIndex={-1}>
+                {pages[page].title}
+              </h1>
             </div>
-            {gamePage && (
-              <div className="server-strip">
-                <span className="server-symbol" aria-hidden="true">
-                  ✳
-                </span>
-                <div>
-                  <strong>{overview?.status.serverName || "Connecting to the server…"}</strong>
-                  <small>
-                    {overview
-                      ? `${stale ? "Last successful check" : "Last checked"} ${new Date(overview.observedAt).toLocaleTimeString()}`
-                      : "Waiting for a response"}
-                  </small>
-                </div>
-                <span className="build">{overview?.capabilities.build}</span>
-              </div>
-            )}
             {gamePage && error && (
-              <div className="notice error" role="alert">
-                {error}
-              </div>
-            )}
-            {gamePage && overview && stale && !error && (
-              <div className="notice" role="status">
-                Server details need a fresh check. Close any open dialog and refresh before making changes.
+              <div className="notice error notice-retry" role="alert">
+                <p>{error}</p>
+                <button type="button" className="button secondary small" disabled={locked} onClick={refresh}>
+                  Retry
+                </button>
               </div>
             )}
             {logoutError && (
@@ -495,7 +485,7 @@ function Dashboard({
                 {logoutError}
               </div>
             )}
-            <section id="page">
+            <section id="page" data-stale={gamePage && overview && stale ? "" : undefined}>
               <Routes>
                 <Route index element={<Navigate to={{ pathname: "/overview", search: location.search }} replace />} />
                 <Route path="overview" element={<OverviewPage />} />
@@ -505,14 +495,15 @@ function Dashboard({
                 <Route path="bans" element={<BansPage />} />
                 <Route path="announcements" element={<AnnouncementsPage />} />
                 <Route path="match" element={<MatchPage />} />
-                <Route path="votes" element={staffPage(<MapVotesPage />, true)} />
-                <Route path="events" element={staffPage(<EventsPage />, true)} />
-                <Route path="audit" element={<AuditPage />} />
+                <Route path="votes" element={<ViewRedirect to="/match" view="voting" />} />
+                <Route path="events" element={<ViewRedirect to="/match" view="events" />} />
+                <Route path="audit" element={<ViewRedirect to="/activity" view="actions" />} />
+                <Route path="combat" element={<ViewRedirect to="/activity" view="combat" />} />
                 <Route path="settings" element={staffPage(<SettingsPage />, true)} />
                 <Route path="permissions" element={<PermissionsPage />} />
-                <Route path="combat" element={<CombatPage />} />
                 <Route path="applications" element={staffPage(<ApplicationsPage />, true)} />
                 <Route path="supporters" element={staffPage(<SupportersPage />)} />
+                <Route path="discord-roles" element={staffPage(<DiscordRolesPage />)} />
                 <Route
                   path="*"
                   element={<Empty title="Page not found" detail="Choose a section from the staff menu." />}
@@ -520,18 +511,57 @@ function Dashboard({
               </Routes>
             </section>
             <footer>
-              <span>THE UNCs ✳ POWERED BY GRAMPS</span>
-              <span>Updates every 20 seconds while visible</span>
+              THE UNCs <span aria-hidden="true">✳</span> POWERED BY GRAMPS
             </footer>
           </div>
         </main>
       </div>
+      {moreOpen && (
+        <Sheet title="More" onClose={() => setMoreOpen(false)} className="more-sheet">
+          <ServerSwitcher
+            servers={servers}
+            current={server}
+            disabled={locked}
+            choose={(id) => {
+              setMoreOpen(false);
+              switchServer(id);
+            }}
+          />
+          <nav aria-label="More sections" className="more-sections">
+            {groups.slice(1).map((group) => (
+              <div key={group.label}>
+                <p className="nav-label" id={`more-${group.label.toLowerCase()}`}>
+                  {group.label}
+                </p>
+                <ul aria-labelledby={`more-${group.label.toLowerCase()}`}>
+                  {group.pages.map((id) => (
+                    <li key={id}>{sectionLink(id, () => setMoreOpen(false))}</li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </nav>
+          <AccountDetails
+            {...account}
+            onNavigate={() => setMoreOpen(false)}
+            signOut={() => {
+              setMoreOpen(false);
+              requestLogout();
+            }}
+          />
+        </Sheet>
+      )}
       {action && (
         <ActionsDialog
           key={action.key}
           action={action.action}
           steamId={action.steamId}
+          initialMessage={action.initialMessage}
           onClose={() => setAction(null)}
+          onNavigate={(to) => {
+            setAction(null);
+            setAfterDialog(to);
+          }}
         />
       )}
       <NavigationGuard

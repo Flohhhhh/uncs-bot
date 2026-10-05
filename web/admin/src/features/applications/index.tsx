@@ -2,8 +2,10 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useGameApi } from "../../api/server-client";
 import { useResource } from "../../api/use-resource";
 import { useGameAdmin as useAdmin } from "../../app/context";
-import { Badge, Card, Empty, Modal, ReasonField, Search, date } from "../../components/ui";
+import { Badge, Card, Empty, Modal, ReasonField, Search, date, focusPageHeading } from "../../components/ui";
 import { CopyValue, DataTable } from "../../components/data-table";
+import { BulkApproveDialog, BulkProblems, bulkProblems, bulkSummary, type BulkApproveResult } from "./bulk-approve";
+import { approveReason, reasonProblem } from "./review";
 import type {
   ApplicationDecision,
   ApplicationReviewResponse,
@@ -29,7 +31,7 @@ const decisions = {
     description:
       "Review the Discord account and requested SteamID below. Approval adds this SteamID to the existing whitelist; it does not change anyone else’s access.",
     confirmation: "Grant whitelist access to",
-    reason: "Website whitelist application reviewed and approved.",
+    reason: approveReason,
     submit: "Approve this SteamID",
   },
   decline: {
@@ -122,7 +124,7 @@ function ApplicationDetails({ record }: { record: WhitelistApplication }) {
         )}
       </dl>
       {record.lastActionState && (
-        <div className={`notice ${record.status === "approved" ? "" : "warning"}`}>
+        <div className={`notice ${record.status === "approved" ? "success" : "warning"}`}>
           <strong>Last review: {record.lastActionState}</strong>
           <br />
           {record.lastActionMessage || "No additional details were recorded."}
@@ -183,12 +185,9 @@ function ApplicationReview({
     event.preventDefault();
     if (!review || busy || unavailable || submitted.current || !canReview(record, review.decision)) return;
     const reason = String(new FormData(event.currentTarget).get("reason") ?? "").trim();
-    if (
-      reason.length < 3 ||
-      reason.length > 200 ||
-      [...reason].some((character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)
-    ) {
-      setValidation("Enter a single-line review reason between 3 and 200 characters.");
+    const problem = reasonProblem(reason);
+    if (problem) {
+      setValidation(problem);
       return;
     }
     submitted.current = true;
@@ -255,6 +254,7 @@ function ApplicationReview({
       }
       busy={sending}
       onClose={onClose}
+      eyebrow={result ? null : undefined}
     >
       <form onSubmit={submit}>
         <ApplicationDetails record={record} />
@@ -312,7 +312,7 @@ function ApplicationReview({
           </p>
         )}
         {result && (
-          <p className={`notice ${result.complete ? "" : "warning"}`} role="status">
+          <p className={`notice ${result.complete ? "success" : "warning"}`} role="status">
             {result.message}
           </p>
         )}
@@ -331,12 +331,32 @@ function ApplicationReview({
   );
 }
 
+type ApplicationFilter = "" | "pending" | "follow-up" | "approved" | "declined";
+const applicationFilters: {
+  id: ApplicationFilter;
+  label: string;
+  matches: (record: WhitelistApplication) => boolean;
+}[] = [
+  { id: "", label: "All", matches: () => true },
+  { id: "pending", label: "Awaiting review", matches: (record) => record.status === "pending" },
+  {
+    id: "follow-up",
+    label: "Need follow-up",
+    matches: (record) => ["processing", "needs_review"].includes(record.status),
+  },
+  { id: "approved", label: "Approved", matches: (record) => record.status === "approved" },
+  { id: "declined", label: "Declined", matches: (record) => record.status === "declined" },
+];
+
 function AdminApplications() {
   const { busy } = useAdmin();
   const resource = useResource<ApplicationsResponse>("applications");
   const [query, setQuery] = useState("");
-  const [status, setStatus] = useState("");
+  const [status, setStatus] = useState<ApplicationFilter>("");
   const [selected, setSelected] = useState<WhitelistApplication | null>(null);
+  const [ticked, setTicked] = useState<Set<string>>(() => new Set());
+  const [bulk, setBulk] = useState<{ applications: WhitelistApplication[]; key: string } | null>(null);
+  const [lastBulk, setLastBulk] = useState<BulkApproveResult | null>(null);
   const off = resource.data?.enabled === false;
   const records = resource.data?.applications;
   // A failed read while the feature looked off cannot confirm it is still off, so report the failure.
@@ -356,13 +376,41 @@ function AdminApplications() {
       />
     );
   const needle = query.trim().toLocaleLowerCase();
+  const chosen = applicationFilters.find((entry) => entry.id === status) ?? applicationFilters[0];
   const rows = records.filter(
     (record) =>
-      (!status || record.status === status) &&
+      chosen.matches(record) &&
       [record.discordDisplayName, record.discordUserId, record.steamId].some((value) =>
         value.toLocaleLowerCase().includes(needle),
       ),
   );
+  // Only a request still awaiting its first decision can be ticked. Anything else keeps its own review.
+  const pending = records.filter((record) => record.status === "pending");
+  // The server lists waiting requests oldest first. A batch keeps that order however the table is sorted.
+  const selection = pending.filter((record) => ticked.has(record.id));
+  const shownPending = rows.filter((record) => record.status === "pending");
+  const allShownTicked = shownPending.length > 0 && shownPending.every((record) => ticked.has(record.id));
+  const notShown = selection.filter((record) => !rows.includes(record)).length;
+  // As for a single review, a batch starts only from a list that has just been read.
+  const unavailable = Boolean(resource.error) || resource.loading || resource.refreshing;
+  function tick(ids: string[], checked: boolean) {
+    if (busy) return;
+    setTicked((previous) => {
+      const next = new Set([...previous].filter((id) => pending.some((record) => record.id === id)));
+      for (const id of ids) {
+        if (checked) next.add(id);
+        else next.delete(id);
+      }
+      return next;
+    });
+  }
+  function completed(result: BulkApproveResult) {
+    // Whatever was sent leaves the selection, approved or not. What was never sent stays ticked.
+    const sent = new Set(result.items.filter((item) => item.state !== "queued").map((item) => item.id));
+    setTicked((previous) => new Set([...previous].filter((id) => !sent.has(id))));
+    setLastBulk(bulkProblems(result.items).length ? result : null);
+    void resource.refresh();
+  }
   return (
     <>
       {resource.error && (
@@ -370,48 +418,99 @@ function AdminApplications() {
           Applications could not be refreshed. Refresh before reviewing a request.
         </p>
       )}
-      <div className="application-counts">
-        <span>
-          <strong>{records.filter((record) => record.status === "pending").length}</strong> awaiting review in this list
-        </span>
-        <span>
-          <strong>{records.filter((record) => ["processing", "needs_review"].includes(record.status)).length}</strong>{" "}
-          need follow-up
-        </span>
-        <span>Up to 100 requests; awaiting review first</span>
-      </div>
       <Search value={query} onChange={setQuery} placeholder="Search Discord name, Discord ID, or SteamID">
-        <select aria-label="Application status" value={status} onChange={(event) => setStatus(event.target.value)}>
-          <option value="">All statuses</option>
-          {Object.entries(statuses).map(([value, label]) => (
-            <option key={value} value={value}>
-              {label}
-            </option>
+        <div className="filter-chips" role="group" aria-label="Application status">
+          {applicationFilters.map((entry) => (
+            <button
+              type="button"
+              key={entry.id || "all"}
+              className="filter-chip"
+              aria-pressed={status === entry.id}
+              onClick={() => setStatus(entry.id)}
+            >
+              {entry.label} <span className="chip-count">{records.filter(entry.matches).length}</span>
+            </button>
           ))}
-        </select>
-        {status && (
+        </div>
+      </Search>
+      <div className={selection.length ? "bulk-team-bar" : "sr-only"}>
+        <span className="selection-count" role="status">
+          {selection.length} selected
+          {notShown > 0 && ` (${notShown} not shown)`}
+        </span>
+        {selection.length > 0 && (
+          <div className="bulk-team-controls">
+            <button
+              type="button"
+              className="button primary small"
+              disabled={busy || unavailable}
+              onClick={() => setBulk({ applications: selection, key: crypto.randomUUID() })}
+            >
+              Approve {selection.length}
+            </button>
+            <button
+              type="button"
+              className="text-button"
+              disabled={busy}
+              onClick={() => {
+                setTicked(new Set());
+                // This button goes with the selection, so focus moves on before it is removed.
+                focusPageHeading();
+              }}
+            >
+              Clear
+            </button>
+          </div>
+        )}
+      </div>
+      {lastBulk && (
+        <section className="bulk-approve-results" aria-label="Last bulk approval">
+          <p>
+            <strong>Last bulk approval:</strong> {bulkSummary(lastBulk.items)}
+          </p>
+          <BulkProblems items={bulkProblems(lastBulk.items)} />
           <button
             type="button"
-            className="button secondary"
+            className="text-button"
             onClick={() => {
-              setStatus("");
-              setQuery("");
+              setLastBulk(null);
+              focusPageHeading();
             }}
           >
-            Reset filters
+            Dismiss
           </button>
-        )}
-      </Search>
+        </section>
+      )}
       <Card
+        className="application-requests"
         title="Community requests"
-        subtitle={`${rows.length} shown of ${records.length} loaded · private email inside each request`}
-        badge={<Badge>ADMIN ONLY</Badge>}
+        subtitle={`${rows.length} shown of ${records.length} loaded · up to 100, awaiting review first`}
+        badge={
+          <div className="roster-tools">
+            <label className="selection-label">
+              <input
+                type="checkbox"
+                checked={allShownTicked}
+                disabled={busy || !shownPending.length}
+                onChange={(event) =>
+                  tick(
+                    shownPending.map((record) => record.id),
+                    event.target.checked,
+                  )
+                }
+              />
+              Select all pending
+            </label>
+            <Badge>ADMIN ONLY</Badge>
+          </div>
+        }
       >
         {rows.length ? (
           <DataTable
             label="Community requests"
             rows={rows}
             columns={[
+              { label: "Select", hideLabel: true },
               { label: "Discord / SteamID", value: (record) => record.discordDisplayName },
               { label: "Community connection", value: (record) => relationships[record.relationship] },
               { label: "Submitted", value: (record) => Date.parse(record.submittedAt), firstDirection: "descending" },
@@ -420,7 +519,18 @@ function AdminApplications() {
             ]}
             renderRow={(record) => (
               <tr key={record.id}>
-                <td>
+                <td className="select-cell">
+                  {record.status === "pending" && (
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${record.discordDisplayName}`}
+                      checked={ticked.has(record.id)}
+                      disabled={busy}
+                      onChange={(event) => tick([record.id], event.target.checked)}
+                    />
+                  )}
+                </td>
+                <td className="application-applicant">
                   <strong>{record.discordDisplayName}</strong>
                   <small>
                     <CopyValue value={record.steamId} />
@@ -453,11 +563,21 @@ function AdminApplications() {
       {selected && (
         <ApplicationReview
           record={selected}
-          unavailable={Boolean(resource.error) || resource.loading || resource.refreshing}
+          unavailable={unavailable}
           onClose={() => setSelected(null)}
           onReviewed={() => {
             void resource.refresh();
           }}
+        />
+      )}
+      {bulk && (
+        <BulkApproveDialog
+          key={bulk.key}
+          applications={bulk.applications}
+          defaultReason={approveReason}
+          unavailable={unavailable}
+          onClose={() => setBulk(null)}
+          onComplete={completed}
         />
       )}
     </>

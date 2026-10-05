@@ -1,115 +1,105 @@
-import { useState } from "react";
-import type { ServerActivityView } from "../../../../../src/admin/server-activity";
-import { useResource } from "../../api/use-resource";
-import type { Audit } from "../../api/types";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useSearchParams } from "react-router-dom";
+import { isPublicIndividualSteamId } from "../../../../../src/common/steam-id";
 import { useGameAdmin } from "../../app/context";
-import { Badge, Card, Empty, Search, date } from "../../components/ui";
+import { Card, Empty, Search, Tabs, date, type TabOption } from "../../components/ui";
 import { DataTable } from "../../components/data-table";
-import { actionDefinitions } from "../actions/policy";
 import { CombatPage } from "../combat/combat-page";
-import type { CombatResponse } from "../combat/combat.types";
-import { DashboardHistory } from "./pages";
+import { PlayerSheet, type SheetPlayer } from "../players/player-actions";
+import { DashboardHistory, actionIdPattern } from "./pages";
 import { GameLogView } from "./game-log";
+import { RepeatOffenders } from "./repeat-offenders";
+import {
+  ActivityLine,
+  When,
+  categories,
+  useActivityEntries,
+  type ActivityEntry,
+  type Category,
+} from "./activity-entries";
 
-type Category = "players" | "match" | "connection" | "combat" | "staff";
-type Entry = {
-  id: string;
-  at: string;
-  category: Category;
-  message: string;
-  detail?: string;
-  search?: string;
-  source: string;
-};
-const categories: Record<Category, string> = {
-  players: "Players & teams",
-  match: "Match changes",
-  connection: "Connection",
-  combat: "Kills & deaths",
-  staff: "Staff & automation",
-};
+/** A "?" popover that closes on Escape or a click elsewhere. */
+function HelpPopover({ label, children }: { label: string; children: ReactNode }) {
+  const popover = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    const close = (event: PointerEvent | KeyboardEvent) => {
+      const element = popover.current;
+      if (!element?.open) return;
+      if (event instanceof KeyboardEvent) {
+        if (event.key !== "Escape") return;
+        element.open = false;
+        element.querySelector("summary")?.focus();
+      } else if (!element.contains(event.target as Node)) element.open = false;
+    };
+    document.addEventListener("pointerdown", close);
+    document.addEventListener("keydown", close);
+    return () => {
+      document.removeEventListener("pointerdown", close);
+      document.removeEventListener("keydown", close);
+    };
+  }, []);
+  return (
+    <details ref={popover} className="activity-help">
+      <summary aria-label={label} title={label}>
+        ?
+      </summary>
+      <div className="activity-help-panel">{children}</div>
+    </details>
+  );
+}
+
+// Kills are most of the feed; staff turn them on when they need them.
+const defaultCategories: Category[] = ["players", "match", "connection", "staff"];
 
 export function ActivityFeed() {
-  const observed = useResource<ServerActivityView>("activity");
-  const combat = useResource<CombatResponse>("combat?period=day");
-  const actions = useResource<Audit[]>("audit-notable");
+  const { entries, observed, combat, failed, loading } = useActivityEntries(true);
   const [query, setQuery] = useState("");
-  const [category, setCategory] = useState("");
-  const [paused, setPaused] = useState<Entry[] | null>(null);
-  const entries: Entry[] = [
-    ...(observed.data?.events ?? []).map((event) => ({
-      id: event.id,
-      at: event.observedAt,
-      category: event.category,
-      message: event.message,
-      detail: event.steamId,
-      source: "Observed in game",
-    })),
-    ...(combat.data?.events ?? []).map((event) => ({
-      id: `combat:${event.serverInstanceId}:${event.eventId}`,
-      at: event.receivedAt,
-      category: "combat" as const,
-      message: event.suicide
-        ? `${event.victimName || event.victimSteamId || "Player"} died (suicide)`
-        : `${event.killerName || event.killerSteamId || "Unknown killer"} killed ${event.victimName || event.victimSteamId || "unknown player"}`,
-      detail: [
-        event.cause,
-        event.headshot ? "Headshot" : "",
-        event.distanceMeters == null ? "" : `${Math.round(event.distanceMeters)} m`,
-      ]
-        .filter(Boolean)
-        .join(" · "),
-      search: [event.killerSteamId, event.victimSteamId].join(" "),
-      source: "Game event · received",
-    })),
-    ...(actions.data ?? []).map((action) => ({
-      id: `action:${action.id}`,
-      at: action.createdAt,
-      category: "staff" as const,
-      message: `${action.actorName} · ${actionDefinitions[action.action]?.[0] || action.action} · ${action.state === "started" ? "Unconfirmed" : action.state}`,
-      detail: [action.target === "server" ? "" : action.target, action.message].filter(Boolean).join(" · "),
-      source: "Action receipt",
-    })),
-  ].sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
-  const rows = (paused ?? entries).filter(
-    (event) =>
-      (!category || event.category === category) &&
-      [event.message, event.detail, event.source, event.search].some((value) =>
-        value?.toLowerCase().includes(query.trim().toLowerCase()),
-      ),
-  );
-  const failed = [
-    observed.error && "Server observations",
-    combat.error && "Combat events",
-    actions.error && "Action receipts",
-  ].filter(Boolean);
-  const loading =
-    !observed.data && !combat.data && !actions.data && (observed.loading || combat.loading || actions.loading);
+  const [shown, setShown] = useState<ReadonlySet<Category>>(() => new Set(defaultCategories));
+  const [paused, setPaused] = useState<ActivityEntry[] | null>(null);
+  const [sheet, setSheet] = useState<SheetPlayer | null>(null);
+  const search = query.trim().toLowerCase();
+  const matching = (paused ?? entries).filter((entry) => entry.search.includes(search));
+  const rows = matching.filter((entry) => shown.has(entry.category));
+  const game = observed.error
+    ? "Game status unavailable"
+    : observed.data?.connection === "available"
+      ? "Game connected"
+      : observed.data?.connection === "unavailable"
+        ? "Game connection unavailable"
+        : "Checking game";
+  const feed = combat.error
+    ? "unavailable"
+    : !combat.data
+      ? "checking"
+      : !combat.data.enabled
+        ? "off"
+        : combat.data.feedStatus === "receiving"
+          ? "receiving"
+          : combat.data.feedStatus === "quiet"
+            ? "no recent batch"
+            : "awaiting first batch";
+  const attention = !!observed.error || observed.data?.connection === "unavailable" || !!combat.error;
   return (
     <>
-      <div className="toolbar activity-sources">
-        <Badge kind={observed.error || observed.data?.connection === "unavailable" ? "warn" : "neutral"}>
-          {observed.error
-            ? "Game status unavailable"
-            : observed.data?.connection === "available"
-              ? "Game connected"
-              : observed.data?.connection === "unavailable"
-                ? "Game connection unavailable"
-                : "Checking game"}
-        </Badge>
-        <Badge>
-          {combat.error
-            ? "Combat feed unavailable"
-            : !combat.data
-              ? "Checking combat feed"
-              : !combat.data.enabled
-                ? "Combat feed off"
-                : combat.data.feedStatus === "receiving"
-                  ? "Combat feed receiving"
-                  : combat.data.feedStatus === "quiet"
-                    ? "No recent combat batch"
-                    : "Awaiting first combat batch"}
-        </Badge>
+      <div className="activity-head">
+        <p className={`activity-status${attention ? " attention" : ""}`}>
+          {game} · Combat feed: {feed}
+        </p>
+        <HelpPopover label="What this feed records">
+          <p>
+            Joins, departures, team changes, map, rule, zone and lighting changes, the round clock and the connection
+            come from normal server reads, so changes between reads can be missed. Gaps are marked.
+          </p>
+          <p>
+            Up to {observed.data?.limit ?? 300} recent observations are kept while Gramps runs; this run began{" "}
+            {date(observed.data?.startedAt)}. Staff actions and combat events have their own stored history.
+          </p>
+          <p>
+            Staff and automation entries show their actual outcome; accepted or pending does not mean applied.
+            Acknowledged automatic welcome and round messages are only in Action history. Kills appear when the game
+            feed delivers them. Game chat is not recorded.
+          </p>
+        </HelpPopover>
         <button type="button" className="button secondary small" onClick={() => setPaused(paused ? null : entries)}>
           {paused ? "Resume display" : "Pause display"}
         </button>
@@ -125,16 +115,33 @@ export function ActivityFeed() {
         </p>
       )}
       <Search value={query} onChange={setQuery} placeholder="Search activity, player or SteamID">
-        <select aria-label="Activity type" value={category} onChange={(event) => setCategory(event.target.value)}>
-          <option value="">All activity</option>
-          {Object.entries(categories).map(([key, label]) => (
-            <option key={key} value={key}>
-              {label}
-            </option>
+        <div className="filter-chips" role="group" aria-label="Activity types">
+          {(Object.keys(categories) as Category[]).map((category) => (
+            <button
+              type="button"
+              key={category}
+              className="filter-chip"
+              aria-pressed={shown.has(category)}
+              onClick={() =>
+                setShown((previous) => {
+                  const next = new Set(previous);
+                  if (next.has(category)) next.delete(category);
+                  else next.add(category);
+                  return next;
+                })
+              }
+            >
+              {categories[category]}{" "}
+              <span className="chip-count">{matching.filter((entry) => entry.category === category).length}</span>
+            </button>
           ))}
-        </select>
+        </div>
       </Search>
-      <Card title="Server activity" subtitle={`${rows.length} recent entries`}>
+      <Card
+        className="activity-feed"
+        title={`${rows.length} recent ${rows.length === 1 ? "entry" : "entries"}`}
+        subtitle={matching.length > rows.length ? `${matching.length - rows.length} more in hidden types` : undefined}
+      >
         {loading ? (
           <Empty title="Loading server activity…" />
         ) : rows.length ? (
@@ -142,20 +149,17 @@ export function ActivityFeed() {
             label="Server activity"
             rows={rows}
             columns={[
-              { label: "When", value: (event) => Date.parse(event.at), firstDirection: "descending" },
-              { label: "Type", value: (event) => categories[event.category] },
-              { label: "Activity", value: (event) => event.message },
-              { label: "Source", value: (event) => event.source },
+              { label: "When", value: (entry) => Date.parse(entry.at), firstDirection: "descending" },
+              { label: "Activity", value: (entry) => entry.text },
             ]}
-            renderRow={(event) => (
-              <tr key={event.id}>
-                <td>{date(event.at)}</td>
-                <td>{categories[event.category]}</td>
-                <td>
-                  <strong>{event.message}</strong>
-                  {event.detail && <small className="audit-detail">{event.detail}</small>}
+            renderRow={(entry) => (
+              <tr key={entry.id}>
+                <td className="activity-when">
+                  <When at={entry.at} />
                 </td>
-                <td>{event.source}</td>
+                <td>
+                  <ActivityLine entry={entry} onPlayer={setSheet} />
+                </td>
               </tr>
             )}
           />
@@ -163,60 +167,65 @@ export function ActivityFeed() {
           <Empty title={failed.length ? "Activity could not be fully loaded" : "No matching activity yet"} />
         )}
       </Card>
-      <details className="activity-coverage">
-        <summary>What this feed records</summary>
-        <p>
-          Player joins, departures, team changes, map/rule/zone/lighting changes, round-clock changes and connection
-          changes are observations from normal server reads. They can miss events between reads. Gaps are marked.
-        </p>
-        <p>
-          Recent observations are held while Gramps is running (up to {observed.data?.limit ?? 300}); they restart with
-          Gramps. This run began {date(observed.data?.startedAt)}. Staff actions and received combat events have
-          separate stored histories.
-        </p>
-        <p>
-          Action receipts include moderation, announcements, map/settings changes and automation, with their actual
-          outcome. Accepted or pending does not mean applied. Automatic welcome and round messages the game acknowledged
-          are listed only in Action history; failed or unconfirmed ones appear here. Kills and deaths appear when the
-          native game feed delivers them. Game chat and events the server does not expose are not recorded.
-        </p>
-      </details>
+      {sheet && <PlayerSheet player={sheet} onClose={() => setSheet(null)} />}
     </>
   );
 }
 
-export function ActivityPage({ initialView = "feed" }: { initialView?: "feed" | "combat" | "actions" }) {
+type View = "feed" | "combat" | "actions" | "commands";
+
+/**
+ * The activity hub. The view and a focused player live in the URL (`?view=combat&player=…`) beside `server`.
+ * `?view=actions&id=<action ID>` opens that action's stored receipt.
+ */
+export function ActivityPage() {
   const { me } = useGameAdmin();
-  const [view, setView] = useState<string>(initialView);
+  const [params, setParams] = useSearchParams();
+  const tabs: TabOption<View>[] = [
+    { id: "feed", label: "All activity" },
+    { id: "combat", label: "Combat history" },
+    { id: "actions", label: "Action history" },
+    ...(me.role === "admin" ? [{ id: "commands" as const, label: "Game command log" }] : []),
+  ];
+  const view = tabs.find((tab) => tab.id === params.get("view"))?.id ?? "feed";
+  const requested = params.get("player") ?? "";
+  const player = isPublicIndividualSteamId(requested) ? requested : "";
+  const requestedId = params.get("id")?.trim() ?? "";
+  const receipt = actionIdPattern.test(requestedId) ? requestedId.toLowerCase() : "";
+  const update = (changes: Record<string, string>) =>
+    setParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        for (const [key, value] of Object.entries(changes)) {
+          if (value) next.set(key, value);
+          else next.delete(key);
+        }
+        return next;
+      },
+      { replace: true },
+    );
   return (
-    <>
-      <div className="settings-tabs" role="group" aria-label="Activity views">
-        {[
-          ["feed", "All activity"],
-          ["combat", "Combat history"],
-          ["actions", "Action history"],
-          ...(me.role === "admin" ? [["game", "Game command log"]] : []),
-        ].map(([key, label]) => (
-          <button
-            type="button"
-            className="button secondary"
-            key={key}
-            aria-pressed={view === key}
-            onClick={() => setView(key)}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-      {view === "feed" ? (
-        <ActivityFeed />
-      ) : view === "combat" ? (
-        <CombatPage />
-      ) : view === "game" && me.role === "admin" ? (
-        <GameLogView />
-      ) : (
-        <DashboardHistory />
-      )}
-    </>
+    <Tabs
+      label="Activity views"
+      tabs={tabs}
+      value={view}
+      onChange={(next) => update({ view: next, player: "", id: "" })}
+    >
+      {(selected) =>
+        selected === "combat" ? (
+          <CombatPage playerId={player} onPlayerChange={(id) => update({ player: id })} />
+        ) : selected === "actions" ? (
+          <>
+            {/* A linked receipt or player is a lookup; the list is for browsing Action history. */}
+            {!receipt && !player && <RepeatOffenders />}
+            <DashboardHistory key={receipt || player} initialQuery={receipt || player} />
+          </>
+        ) : selected === "commands" ? (
+          <GameLogView />
+        ) : (
+          <ActivityFeed />
+        )
+      }
+    </Tabs>
   );
 }

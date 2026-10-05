@@ -1,22 +1,38 @@
 import { Logger } from "@nestjs/common";
+import type { DiscordRolesDiscord, RoleMember } from "../discord-roles/discord-roles.discord";
+import { DiscordRolesService } from "../discord-roles/discord-roles.service";
+import type { DiscordRolesStore } from "../discord-roles/discord-roles.store";
+import type { RoleCheckView } from "../discord-roles/discord-roles.types";
 import { Env } from "../env/env";
 import type { EnvService } from "../env/env.service";
 import {
   firstPaidEventId,
   PATREON_HISTORY_CAP,
+  PATREON_MAX_MEMBER_BYTES,
+  PATREON_PAGE_DELAY_MS,
   PATREON_TOKEN_REJECTED,
   PatreonApiError,
   PatreonClient,
   type PatreonPledgeEvent,
 } from "./patreon.client";
-import { PATREON_SYNC_STARTUP_DELAY_MS, PatreonSyncService } from "./patreon-sync.service";
-import type { ApiImportResult, SupportersStore } from "./supporters.store";
+import { deploymentSecrets, PATREON_SYNC_STARTUP_DELAY_MS, PatreonSyncService } from "./patreon-sync.service";
+import type { SupporterMatchService } from "./supporter-match.service";
+import { apiSnapshotHash, type ApiImportResult, type SupportersStore } from "./supporters.store";
 
 const token = "creator-token-PRIVATE-0123456789abcdef";
 const campaign = "16880209";
 const discordId = "123456789012345678";
 
-type EventInput = { id: string; date: string; status: string; amount?: number; currency?: string; type?: string };
+type EventInput = {
+  id: string;
+  date: string;
+  status: string;
+  amount?: number;
+  currency?: string;
+  type?: string;
+  /** The event's `tier_id`, exactly as Patreon would send it. Left out, the event names no tier. */
+  tier?: unknown;
+};
 function member(id: string, events: EventInput[] = [], options: { name?: unknown; user?: string } = {}) {
   return {
     id,
@@ -47,9 +63,26 @@ function event(input: EventInput) {
       payment_status: input.status,
       type: input.type ?? "subscription",
       tier_title: "Supporter",
+      ...("tier" in input ? { tier_id: input.tier } : {}),
     },
   };
 }
+const tier = (id: unknown, amount: unknown) => ({ id, type: "tier", attributes: { amount_cents: amount } });
+/** The campaign with its tiers, as `include=tiers&fields[tier]=amount_cents` returns it. */
+function tiers(included: unknown[], id: unknown = campaign) {
+  return {
+    data: { id, type: "campaign", attributes: {}, relationships: { tiers: { data: [] } } },
+    included,
+  };
+}
+/** A first payment in Canadian dollars on the tier with this ID. */
+const cad = (id: string, tierId: unknown = "111"): EventInput => ({
+  ...start(id),
+  amount: 750,
+  currency: "CAD",
+  tier: tierId,
+});
+type Paced = { pause: () => Promise<void> };
 function user(id: string, discord: unknown = { user_id: discordId, scopes: ["identify"] }) {
   return {
     id,
@@ -78,11 +111,22 @@ const imported = (overrides: Partial<ApiImportResult> = {}): ApiImportResult => 
   updated: false,
   payments: 1,
   revoked: 0,
+  tierConfirmed: 0,
+  tierConfirmedNew: 0,
+  tierUnconfirmed: 0,
   discordLinked: false,
+  discordConfirmed: false,
+  discordMoved: false,
   conflict: null,
+  discordId: null,
+  releasedDiscordIds: [],
+  patreonDiscordChanged: false,
   ...overrides,
 });
-function fixture(overrides: Record<string, unknown> = {}) {
+function fixture(
+  overrides: Record<string, unknown> = {},
+  roles: Pick<DiscordRolesService, "supporterChanged"> = { supporterChanged: jest.fn() },
+) {
   const values: Record<string, unknown> = {
     PATREON_ENABLED: true,
     PATREON_CAMPAIGN_ID: campaign,
@@ -91,23 +135,27 @@ function fixture(overrides: Record<string, unknown> = {}) {
     ADMIN_SESSION_SECRET: "s".repeat(40),
     ...overrides,
   };
-  const store = {
-    importApiMember: jest.fn().mockResolvedValue(imported()),
-    founderReviews: jest.fn().mockResolvedValue([]),
-  };
+  const store = { importApiMember: jest.fn().mockResolvedValue(imported()) };
+  const match = { sweep: jest.fn(async (_trigger: string) => undefined) };
   const service = new PatreonSyncService(
     new PatreonClient(),
     store as unknown as SupportersStore,
     { get: (key: string) => values[key] } as EnvService,
+    roles as DiscordRolesService,
+    match as unknown as SupporterMatchService,
   );
-  return { service, store };
+  return { service, store, roles, match };
 }
 let fetchMock: jest.SpyInstance;
+/** The client's wait between requests, skipped here so no test waits in real time. */
+let pause: jest.SpyInstance;
 let warn: jest.SpyInstance;
 let log: jest.SpyInstance;
 const services: PatreonSyncService[] = [];
 beforeEach(() => {
-  fetchMock = jest.spyOn(globalThis, "fetch");
+  // A request no test prepared fails here instead of reaching the network.
+  fetchMock = jest.spyOn(globalThis, "fetch").mockRejectedValue(new Error("No response was prepared."));
+  pause = jest.spyOn(PatreonClient.prototype as unknown as Paced, "pause").mockResolvedValue(undefined);
   warn = jest.spyOn(Logger.prototype, "warn").mockImplementation(() => undefined);
   log = jest.spyOn(Logger.prototype, "log").mockImplementation(() => undefined);
 });
@@ -116,8 +164,8 @@ afterEach(() => {
   jest.useRealTimers();
   jest.restoreAllMocks();
 });
-function tracked(overrides: Record<string, unknown> = {}) {
-  const result = fixture(overrides);
+function tracked(overrides: Record<string, unknown> = {}, roles?: Pick<DiscordRolesService, "supporterChanged">) {
+  const result = fixture(overrides, roles);
   services.push(result.service);
   return result;
 }
@@ -146,7 +194,9 @@ describe("Patreon API client", () => {
       "full_name,patron_status,last_charge_status,last_charge_date",
     );
     expect(first.searchParams.get("fields[user]")).toBe("social_connections");
-    expect(first.searchParams.get("fields[pledge-event]")).toBe("amount_cents,currency_code,date,payment_status,type");
+    expect(first.searchParams.get("fields[pledge-event]")).toBe(
+      "amount_cents,currency_code,date,payment_status,type,tier_id",
+    );
     expect(first.searchParams.get("page[count]")).toBe("50");
     expect(first.searchParams.has("page[cursor]")).toBe(false);
     expect(first.toString()).not.toMatch(/email|address|note/);
@@ -158,6 +208,22 @@ describe("Patreon API client", () => {
     });
     const [second] = fetchMock.mock.calls[1] as [URL];
     expect(second.searchParams.get("page[cursor]")).toBe("cursor-2");
+    // Every payment is in US dollars, so no tier prices are requested.
+    expect(result.tierPrices).toBe("not_requested");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // One wait, between the two pages.
+    expect(pause).toHaveBeenCalledTimes(1);
+  });
+  it("waits long enough between requests to stay under 100 a minute", async () => {
+    pause.mockRestore();
+    jest.useFakeTimers();
+    const done = jest.fn();
+    void (new PatreonClient() as unknown as Paced).pause().then(done);
+    await jest.advanceTimersByTimeAsync(PATREON_PAGE_DELAY_MS - 1);
+    expect(done).not.toHaveBeenCalled();
+    await jest.advanceTimersByTimeAsync(1);
+    expect(done).toHaveBeenCalledTimes(1);
+    expect(PATREON_PAGE_DELAY_MS).toBeGreaterThan(60_000 / 100);
   });
   it("keeps only the display name, statuses, charges and connected Discord ID", async () => {
     fetchMock.mockResolvedValueOnce(
@@ -176,6 +242,7 @@ describe("Patreon API client", () => {
       lastChargeStatus: "Paid",
       lastChargeAt: new Date("2026-10-01T12:00:00Z"),
       discordId,
+      discordKnown: true,
       events: [
         {
           id: "pledge_start:1",
@@ -199,11 +266,41 @@ describe("Patreon API client", () => {
     const { members } = await new PatreonClient().members(campaign, token);
     expect(members[0].displayName).toBe(expected);
   });
-  it("ignores a malformed Discord connection instead of linking it", async () => {
+  it("ignores a malformed Discord connection instead of linking it, and reports it as unknown", async () => {
     fetchMock.mockResolvedValueOnce(
       json(page([member("member-1", [], { user: "user-1" })], [user("user-1", { user_id: "not-a-snowflake" })])),
     );
-    expect((await new PatreonClient().members(campaign, token)).members[0].discordId).toBeNull();
+    expect((await new PatreonClient().members(campaign, token)).members[0]).toMatchObject({
+      discordId: null,
+      discordKnown: false,
+    });
+  });
+  it.each([
+    ["no Discord connection", [user("user-1", null)], { discordId: null, discordKnown: true }],
+    [
+      "a Discord connection without an ID",
+      [user("user-1", { user_id: null })],
+      { discordId: null, discordKnown: true },
+    ],
+    [
+      "no connections at all",
+      [{ id: "user-1", type: "user", attributes: { social_connections: null } }],
+      { discordId: null, discordKnown: true },
+    ],
+    [
+      "connections left out of the response",
+      [{ id: "user-1", type: "user", attributes: {} }],
+      { discordId: null, discordKnown: false },
+    ],
+    [
+      "malformed connections",
+      [{ id: "user-1", type: "user", attributes: { social_connections: "discord" } }],
+      { discordId: null, discordKnown: false },
+    ],
+    ["a user missing from the response", [], { discordId: null, discordKnown: false }],
+  ])("tells a disconnected Discord from an unreadable one: %s", async (_name, included, expected) => {
+    fetchMock.mockResolvedValueOnce(json(page([member("member-1", [], { user: "user-1" })], included)));
+    expect((await new PatreonClient().members(campaign, token)).members[0]).toMatchObject(expected);
   });
   it.each([
     ["a non-member resource", page([{ ...member("member-1"), type: "user" }])],
@@ -218,16 +315,21 @@ describe("Patreon API client", () => {
     ["an invalid amount", page([member("member-1")], [event({ ...start("pledge_start:1"), amount: -5 })])],
     ["a missing data array", { included: [] }],
   ])("rejects %s before importing anything", async (_name, body) => {
-    fetchMock.mockResolvedValueOnce(json(body));
+    // The same answer to the request with the tier field and to the original request it falls back to.
+    fetchMock.mockImplementation(async () => json(body));
     await expect(new PatreonClient().members(campaign, token)).rejects.toMatchObject({ kind: "schema" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
   it("rejects oversized responses and repeated pagination cursors", async () => {
-    fetchMock.mockResolvedValueOnce(new Response("{}", { headers: { "Content-Length": String(9 * 1024 * 1024) } }));
+    const oversized = async () => new Response("{}", { headers: { "Content-Length": String(9 * 1024 * 1024) } });
+    fetchMock.mockImplementationOnce(oversized).mockImplementationOnce(oversized);
     await expect(new PatreonClient().members(campaign, token)).rejects.toMatchObject({ kind: "schema" });
-    fetchMock
-      .mockResolvedValueOnce(json(page([member("member-1")], [], "same")))
-      .mockResolvedValueOnce(json(page([member("member-2")], [], "same")));
+    for (let attempt = 0; attempt < 2; attempt++)
+      fetchMock
+        .mockResolvedValueOnce(json(page([member("member-1")], [], "same")))
+        .mockResolvedValueOnce(json(page([member("member-2")], [], "same")));
     await expect(new PatreonClient().members(campaign, token)).rejects.toMatchObject({ kind: "schema" });
+    expect(fetchMock).toHaveBeenCalledTimes(6);
   });
   it.each([401, 403])("maps %s to a token rejection with renewal instructions", async (status) => {
     fetchMock.mockResolvedValueOnce(json({ errors: [{ status: String(status), detail: token }] }, { status }));
@@ -251,37 +353,356 @@ describe("Patreon API client", () => {
   it("maps network failures and server errors to a retryable outage", async () => {
     fetchMock.mockRejectedValueOnce(new TypeError(`fetch failed for ${token}`));
     await expect(new PatreonClient().members(campaign, token)).rejects.toMatchObject({ kind: "unavailable" });
-    fetchMock.mockResolvedValueOnce(new Response("oops", { status: 502 }));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    fetchMock.mockImplementation(async () => new Response("oops", { status: 502 }));
     await expect(new PatreonClient().members(campaign, token)).rejects.toMatchObject({ kind: "unavailable" });
   });
-  it("marks histories incomplete when events are missing, capped or do not start with the pledge", async () => {
-    const many = Array.from({ length: PATREON_HISTORY_CAP }, (_, index) => ({
-      id: `subscription:${index}`,
-      date: new Date(Date.UTC(2026, 8, 1, 0, index)).toISOString(),
-      status: "Paid",
-      type: index ? "subscription" : "pledge_start",
-    }));
-    const midChain: EventInput = { id: "subscription:9", date: "2026-10-01T00:00:00Z", status: "Paid" };
+  it("marks a history incomplete when an event is missing, in the future or at Patreon's cut-off", async () => {
+    const history = (count: number) =>
+      Array.from({ length: count }, (_, index) => ({
+        id: `subscription:${count}-${index}`,
+        date: new Date(Date.UTC(2026, 8, 1, 0, index)).toISOString(),
+        status: "Paid",
+        type: index ? "subscription" : "pledge_start",
+      }));
+    const capped = history(PATREON_HISTORY_CAP);
+    const long = history(PATREON_HISTORY_CAP - 1);
+    const future: EventInput = { id: "subscription:7", date: "2099-01-01T00:00:00Z", status: "Paid" };
+    // Patreon trims only long histories, so one that starts with a renewal is still the whole history.
+    const renewal: EventInput = { id: "subscription:9", date: "2026-10-01T00:00:00Z", status: "Paid" };
     fetchMock.mockResolvedValueOnce(
       json(
         page(
           [
             member("missing", [start("pledge_start:1"), start("pledge_start:2")]),
-            member("capped", many),
-            member("mid-chain", [midChain]),
+            member("future", [start("pledge_start:4"), future]),
+            member("capped", capped),
+            member("long", long),
+            member("renewal-first", [renewal]),
             member("complete", [start("pledge_start:3")]),
+            member("empty"),
           ],
-          [event(start("pledge_start:1")), ...many.map(event), event(midChain), event(start("pledge_start:3"))],
+          [
+            event(start("pledge_start:1")),
+            event(start("pledge_start:4")),
+            event(future),
+            ...capped.map(event),
+            ...long.map(event),
+            event(renewal),
+            event(start("pledge_start:3")),
+          ],
         ),
       ),
     );
     const { members } = await new PatreonClient().members(campaign, token);
     expect(members.map((item) => [item.patreonMemberId, item.historyComplete])).toEqual([
       ["missing", false],
+      ["future", false],
       ["capped", false],
-      ["mid-chain", false],
+      ["long", true],
+      ["renewal-first", true],
       ["complete", true],
+      ["empty", true],
     ]);
+    // A future event is never imported.
+    expect(members[1].events.map((item) => item.id)).toEqual(["pledge_start:4"]);
+  });
+});
+
+describe("Patreon tier prices", () => {
+  const cadPage = (tierId: unknown = "111") =>
+    json(page([member("member-1", [cad("pledge_start:1", tierId)])], [event(cad("pledge_start:1", tierId))]));
+  const events = async () => (await new PatreonClient().members(campaign, token)).members[0].events;
+
+  it("reads each paid event's tier and the campaign's tier prices with one paced, read-only request", async () => {
+    fetchMock.mockResolvedValueOnce(cadPage()).mockResolvedValueOnce(json(tiers([tier("111", 500), tier("222", 300)])));
+    const result = await new PatreonClient().members(campaign, token);
+    expect(result).toMatchObject({ complete: true, tierPrices: "read" });
+    expect(result.retryAfterMs).toBeUndefined();
+    expect(result.members[0].events).toEqual([
+      expect.objectContaining({ id: "pledge_start:1", amountCents: 750, currency: "CAD", tierId: "111" }),
+    ]);
+    expect(result.members[0].events[0].tierAmountCents).toBe(500);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [url, init] = fetchMock.mock.calls[1] as [URL, RequestInit];
+    expect(url.origin + url.pathname).toBe(`https://www.patreon.com/api/oauth2/v2/campaigns/${campaign}`);
+    expect([...url.searchParams.keys()].sort()).toEqual(["fields[tier]", "include"]);
+    expect(url.searchParams.get("include")).toBe("tiers");
+    expect(url.searchParams.get("fields[tier]")).toBe("amount_cents");
+    expect(init.method).toBeUndefined();
+    expect(init.redirect).toBe("error");
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect(init.headers).toMatchObject({
+      Authorization: `Bearer ${token}`,
+      "User-Agent": expect.stringMatching(/UNCs/),
+    });
+    // One wait between the member page and the tier request, like the wait between pages.
+    expect(pause).toHaveBeenCalledTimes(1);
+  });
+  it("does not ask for tier prices when no paid event in another currency names a tier", async () => {
+    const usd = { ...start("pledge_start:1"), tier: "111" };
+    const declined = { ...cad("subscription:2"), status: "Declined", type: "subscription" };
+    const noTier = { ...cad("subscription:3"), type: "subscription" };
+    delete noTier.tier;
+    fetchMock.mockResolvedValueOnce(
+      json(page([member("member-1", [usd, declined, noTier])], [event(usd), event(declined), event(noTier)])),
+    );
+    const result = await new PatreonClient().members(campaign, token);
+    expect(result.tierPrices).toBe("not_requested");
+    expect(result.members[0].events.map((item) => [item.id, item.tierId, item.tierAmountCents])).toEqual([
+      ["pledge_start:1", "111", undefined],
+      ["subscription:2", "111", undefined],
+      ["subscription:3", undefined, undefined],
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(pause).not.toHaveBeenCalled();
+  });
+  it.each([
+    ["a number", 111, "111"],
+    ["null", null, undefined],
+    ["an empty string", "", undefined],
+    ["an object", { id: "111" }, undefined],
+    ["text that is not an ID", "tier 111!", undefined],
+    ["an overlong ID", "1".repeat(65), undefined],
+  ])("reads an event's tier leniently and never rejects the page: %s", async (_name, value, expected) => {
+    fetchMock.mockResolvedValueOnce(cadPage(value)).mockResolvedValueOnce(json(tiers([tier("111", 500)])));
+    const [first] = await events();
+    expect(first).toMatchObject({ id: "pledge_start:1", amountCents: 750, currency: "CAD" });
+    expect(first.tierId).toBe(expected);
+  });
+  it("leaves out tiers it cannot read and events whose tier has no price", async () => {
+    const known = cad("pledge_start:1", "111");
+    const unknown = { ...cad("subscription:2", "999"), type: "subscription" };
+    fetchMock
+      .mockResolvedValueOnce(json(page([member("member-1", [known, unknown])], [event(known), event(unknown)])))
+      .mockResolvedValueOnce(
+        json(
+          tiers([
+            tier(111, 500),
+            tier("222", "500"),
+            tier("333", -1),
+            tier("444", 5.5),
+            tier({ id: "555" }, 500),
+            { id: "666", type: "tier" },
+            { id: "999", type: "benefit", attributes: { amount_cents: 900 } },
+            "tier",
+            null,
+          ]),
+        ),
+      );
+    const result = await new PatreonClient().members(campaign, token);
+    expect(result.tierPrices).toBe("read");
+    expect(result.members[0].events.map((item) => [item.tierId, item.tierAmountCents])).toEqual([
+      ["111", 500],
+      ["999", undefined],
+    ]);
+  });
+  it.each<[string, () => unknown]>([
+    ["a network error", () => Promise.reject(new TypeError(`fetch failed for ${token}`))],
+    ["a server error", () => new Response("oops", { status: 502 })],
+    ["a refused token", () => json({ errors: [{ detail: token }] }, { status: 403 })],
+    ["a refused request", () => json({ errors: [{ detail: "bad include" }] }, { status: 400 })],
+    ["a missing campaign", () => json({}, { status: 404 })],
+    ["a body that is not JSON", () => new Response("<html>", { status: 200 })],
+    ["an unexpected body", () => json({ data: [], included: [tier("111", 500)] })],
+    ["another campaign's tiers", () => json(tiers([tier("111", 500)], "999"))],
+    ["an oversized body", () => new Response("{}", { headers: { "Content-Length": String(2 * 1024 * 1024) } })],
+  ])("keeps the whole member list when the tier request ends in %s", async (_name, response) => {
+    fetchMock.mockResolvedValueOnce(cadPage()).mockImplementationOnce(async () => response());
+    const result = await new PatreonClient().members(campaign, token);
+    expect(result).toMatchObject({ complete: true, tierPrices: "unavailable" });
+    expect(result.retryAfterMs).toBeUndefined();
+    expect(result.members).toHaveLength(1);
+    expect(result.members[0]).toMatchObject({ patreonMemberId: "member-1", historyComplete: true });
+    expect(result.members[0].events[0]).toMatchObject({ id: "pledge_start:1", tierId: "111" });
+    expect(result.members[0].events[0].tierAmountCents).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(result)).not.toContain(token);
+  });
+  it("reports Patreon's wait when only the tier request is rate limited", async () => {
+    fetchMock
+      .mockResolvedValueOnce(cadPage())
+      .mockResolvedValueOnce(new Response("", { status: 429, headers: { "Retry-After": "90" } }));
+    const result = await new PatreonClient().members(campaign, token);
+    expect(result).toMatchObject({ tierPrices: "unavailable", retryAfterMs: 90_000 });
+    expect(result.members).toHaveLength(1);
+  });
+  it("repeats the sync with the original request when Patreon refuses the tier field", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        json({ errors: [{ status: "400", detail: `Invalid field for ${token}` }] }, { status: 400 }),
+      )
+      .mockResolvedValueOnce(
+        json(page([member("member-1", [cad("pledge_start:1")])], [event(cad("pledge_start:1"))], "cursor-2")),
+      )
+      .mockResolvedValueOnce(
+        json(page([member("member-2", [start("pledge_start:2")])], [event(start("pledge_start:2"))])),
+      );
+    const result = await new PatreonClient().members(campaign, token);
+    expect(result).toMatchObject({ complete: true, tierPrices: "refused" });
+    expect(result.members.map((item) => item.patreonMemberId)).toEqual(["member-1", "member-2"]);
+    // No tier is read from a request that did not ask for one, and no tier prices are requested.
+    expect(result.members.flatMap((item) => item.events).map((item) => item.tierId ?? null)).toEqual([null, null]);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const urls = fetchMock.mock.calls.map(([url]) => url as URL);
+    expect(urls.map((url) => url.pathname)).toEqual(Array(3).fill(`/api/oauth2/v2/campaigns/${campaign}/members`));
+    expect(urls.map((url) => url.searchParams.get("fields[pledge-event]"))).toEqual([
+      "amount_cents,currency_code,date,payment_status,type,tier_id",
+      "amount_cents,currency_code,date,payment_status,type",
+      "amount_cents,currency_code,date,payment_status,type",
+    ]);
+    // The repeated request is the one the import sent before tiers were read.
+    expect([...urls[1].searchParams.entries()]).toEqual([
+      ["include", "user,pledge_history"],
+      ["fields[member]", "full_name,patron_status,last_charge_status,last_charge_date"],
+      ["fields[user]", "social_connections"],
+      ["fields[pledge-event]", "amount_cents,currency_code,date,payment_status,type"],
+      ["page[count]", "50"],
+    ]);
+    expect(urls[2].searchParams.get("page[cursor]")).toBe("cursor-2");
+    // Paced before the repeat and between its pages.
+    expect(pause).toHaveBeenCalledTimes(2);
+  });
+  it.each<[string, () => Response]>([
+    ["a server error", () => new Response("oops", { status: 500 })],
+    ["an unavailable service", () => new Response("", { status: 503 })],
+    ["an unexpected status", () => new Response("", { status: 422 })],
+    ["a body that is not JSON", () => new Response("<html>", { status: 200 })],
+    ["a member list it cannot use", () => json({ data: [{ id: "x", type: "campaign" }] })],
+    ["an oversized page", () => new Response("{}", { headers: { "Content-Length": String(9 * 1024 * 1024) } })],
+  ])("also repeats the sync with the original request after %s", async (_name, failure) => {
+    fetchMock
+      .mockImplementationOnce(async () => failure())
+      .mockResolvedValueOnce(json(page([member("member-1", [cad("pledge_start:1")])], [event(cad("pledge_start:1"))])));
+    const result = await new PatreonClient().members(campaign, token);
+    expect(result).toMatchObject({ complete: true, tierPrices: "refused" });
+    expect(result.members.map((item) => item.patreonMemberId)).toEqual(["member-1"]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [, repeated] = fetchMock.mock.calls.map(([url]) => url as URL);
+    expect(repeated.searchParams.get("fields[pledge-event]")).toBe(
+      "amount_cents,currency_code,date,payment_status,type",
+    );
+    expect(pause).toHaveBeenCalledTimes(1);
+  });
+  it("fails as before when Patreon also refuses the original request", async () => {
+    fetchMock.mockImplementation(async () => json({ errors: [{ status: "400" }] }, { status: 400 }));
+    await expect(new PatreonClient().members(campaign, token)).rejects.toMatchObject({ kind: "unavailable" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+  it.each<[string, () => unknown]>([
+    ["a refused token (401)", () => json({}, { status: 401 })],
+    ["a refused token (403)", () => json({}, { status: 403 })],
+    ["a missing campaign", () => json({}, { status: 404 })],
+    ["a rate limit", () => json({}, { status: 429 })],
+    ["a network failure", () => Promise.reject(new TypeError("fetch failed"))],
+  ])("does not repeat the member request after %s", async (_name, failure) => {
+    fetchMock.mockImplementationOnce(async () => failure());
+    await expect(new PatreonClient().members(campaign, token)).rejects.toBeInstanceOf(PatreonApiError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(pause).not.toHaveBeenCalled();
+  });
+});
+
+describe("one Patreon member, read for a patron's own sign-in", () => {
+  const events: EventInput[] = [
+    start("pledge_start:1"),
+    { id: "subscription:2", date: "2026-10-03T12:00:00.000+00:00", status: "Paid", tier: "111" },
+  ];
+  function single(campaignId: unknown = campaign, userId = "user-1") {
+    const value = member("member-1", events, { user: userId });
+    const data = {
+      ...value,
+      relationships: { ...value.relationships, campaign: { data: { id: campaignId, type: "campaign" } } },
+    };
+    const included = [...events.map(event), user(userId), { id: String(campaignId), type: "campaign" }];
+    return { data, included };
+  }
+  it("asks for the list's fields, the campaign and each event's tier, and gives the same snapshot and hash", async () => {
+    const { data, included } = single();
+    fetchMock.mockResolvedValueOnce(json(page([data], included))).mockResolvedValueOnce(json({ data, included }));
+    const client = new PatreonClient();
+    const [listed] = (await client.members(campaign, token)).members;
+    const found = await client.member("member-1", token);
+    expect(found).toEqual({ snapshot: listed, campaignId: campaign, userId: "user-1" });
+    expect(found!.snapshot.events.map((item) => item.tierId)).toEqual([undefined, "111"]);
+    expect(apiSnapshotHash(campaign, found!.snapshot)).toBe(apiSnapshotHash(campaign, listed));
+    const [url, init] = fetchMock.mock.calls[1] as [URL, RequestInit];
+    expect(url.origin + url.pathname).toBe("https://www.patreon.com/api/oauth2/v2/members/member-1");
+    expect(url.searchParams.get("include")).toBe("user,campaign,pledge_history");
+    expect(url.searchParams.get("fields[member]")).toBe("full_name,patron_status,last_charge_status,last_charge_date");
+    expect(url.searchParams.get("fields[user]")).toBe("social_connections");
+    expect(url.searchParams.get("fields[pledge-event]")).toBe(
+      "amount_cents,currency_code,date,payment_status,type,tier_id",
+    );
+    expect(url.toString()).not.toMatch(/email|address|note/);
+    expect(init).toMatchObject({ redirect: "error", headers: { Authorization: `Bearer ${token}` } });
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    // One request for one member: no pages, no tier prices, no pacing.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+  it("reports another campaign and another user as Patreon names them, and a missing campaign as null", async () => {
+    fetchMock.mockResolvedValueOnce(json(single(999, "user-2")));
+    expect(await new PatreonClient().member("member-1", token)).toMatchObject({ campaignId: "999", userId: "user-2" });
+    const { data, included } = single();
+    fetchMock.mockResolvedValueOnce(
+      json({ data: { ...data, relationships: member("member-1").relationships }, included }),
+    );
+    expect(await new PatreonClient().member("member-1", token)).toMatchObject({ campaignId: null, userId: null });
+  });
+  it("returns null when Patreon has no such member", async () => {
+    fetchMock.mockResolvedValueOnce(json({ errors: [{ detail: "private detail" }] }, { status: 404 }));
+    expect(await new PatreonClient().member("member-1", token)).toBeNull();
+  });
+  it("refuses a valid answer over 1 MB, declared or streamed, and reads one of exactly 1 MB", async () => {
+    const tooLarge = {
+      kind: "schema",
+      message: "Patreon returned a larger response than expected. Nothing was imported; the next sync will retry.",
+    };
+    // A real member answer, so only the size cap can refuse it. JSON allows the trailing spaces.
+    const body = JSON.stringify(single());
+    expect(PATREON_MAX_MEMBER_BYTES).toBe(1_048_576);
+    const declared = new Response(body, { headers: { "content-length": String(PATREON_MAX_MEMBER_BYTES + 1) } });
+    fetchMock.mockResolvedValueOnce(declared);
+    await expect(new PatreonClient().member("member-1", token)).rejects.toMatchObject(tooLarge);
+    fetchMock.mockResolvedValueOnce(new Response(body.padEnd(PATREON_MAX_MEMBER_BYTES + 1, " ")));
+    await expect(new PatreonClient().member("member-1", token)).rejects.toMatchObject(tooLarge);
+    fetchMock.mockResolvedValueOnce(new Response(body.padEnd(PATREON_MAX_MEMBER_BYTES, " ")));
+    expect(await new PatreonClient().member("member-1", token)).toMatchObject({ campaignId: campaign });
+  });
+  it("refuses an answer for another member", async () => {
+    fetchMock.mockResolvedValueOnce(json(single()));
+    await expect(new PatreonClient().member("member-2", token)).rejects.toMatchObject({
+      kind: "schema",
+      message: "Patreon returned an unexpected member list. Nothing was imported; the next sync will retry.",
+    });
+  });
+  it("maps a refused token, a rate limit, an outage and a broken answer to fixed errors without the token", async () => {
+    const outcomes: [Response | Error, string][] = [
+      [json({}, { status: 401 }), "token"],
+      [json({}, { status: 429, headers: { "Retry-After": "5" } }), "rate"],
+      [json({}, { status: 503 }), "unavailable"],
+      [new Error(`network ${token}`), "unavailable"],
+      [new Response("not json"), "schema"],
+      [json({ data: { id: "not a member id", type: "member", attributes: {} } }), "schema"],
+    ];
+    for (const [answer, kind] of outcomes) {
+      if (answer instanceof Error) fetchMock.mockRejectedValueOnce(answer);
+      else fetchMock.mockResolvedValueOnce(answer);
+      const failure = await new PatreonClient().member("member-1", token).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(PatreonApiError);
+      expect(failure).toMatchObject({ kind });
+      expect(String((failure as Error).message)).not.toContain(token);
+    }
+  });
+});
+
+describe("deployment secrets a Patreon credential must not reuse", () => {
+  it("include the Patreon client secret, except for the client secret's own check", () => {
+    const values: Record<string, unknown> = { DISCORD_BOT_TOKEN: "bot", PATREON_CLIENT_SECRET: "client-secret" };
+    const env = { get: (key: string) => values[key] } as EnvService;
+    expect(deploymentSecrets(env)).toContain("client-secret");
+    expect(deploymentSecrets(env, { clientSecret: false })).not.toContain("client-secret");
+    expect(deploymentSecrets(env, { clientSecret: false })).toContain("bot");
   });
 });
 
@@ -315,16 +736,51 @@ describe("first successful payment derivation", () => {
     ];
     expect(firstPaidEventId(events, true)).toBe("pledge_start:1");
     expect(firstPaidEventId(events, false)).toBeNull();
+    expect(firstPaidEventId([], true)).toBeNull();
   });
-  it("skips declined attempts but refuses to guess after an earlier refund, fraud or tie", () => {
+  it("decides a history that starts with a renewal rather than the pledge start", () => {
+    const events = [
+      at("subscription:3", "2026-11-01T00:00:00Z", "Paid"),
+      at("subscription:2", "2026-10-01T00:00:00Z", "Paid"),
+    ];
+    expect(firstPaidEventId(events, true)).toBe("subscription:2");
+  });
+  it("orders events at the same time by the pledge start, then by event ID", () => {
+    const time = "2026-10-01T12:00:00Z";
+    expect(
+      firstPaidEventId([at("subscription:2", time, "Paid"), at("pledge_start:9", time, "Paid", "pledge_start")], true),
+    ).toBe("pledge_start:9");
+    expect(firstPaidEventId([at("subscription:b", time, "Paid"), at("subscription:a", time, "Paid")], true)).toBe(
+      "subscription:a",
+    );
+    // A reversed charge first at the same time decides the same way.
+    expect(
+      firstPaidEventId([at("subscription:a", time, "Refunded"), at("subscription:b", time, "Paid")], true),
+    ).toBeNull();
+  });
+  it("lets the first charge taken decide: a reversed one means no later payment is the first", () => {
     const paid = at("subscription:2", "2026-10-02T00:00:00Z", "Paid");
-    expect(firstPaidEventId([at("pledge_start:1", "2026-10-01T00:00:00Z", "Declined"), paid], true)).toBe(
+    for (const status of ["Refunded", "Partially Refunded", "Fraud", "Refunded by Patreon", "Refund Pending", "Other"])
+      expect(firstPaidEventId([at("pledge_start:1", "2026-10-01T00:00:00Z", status), paid], true)).toBeNull();
+  });
+  it("counts a charge whose refund Patreon declined as paid, so it can be the first payment", () => {
+    const declinedRefund = at("pledge_start:1", "2026-10-01T00:00:00Z", "Refund Declined", "pledge_start");
+    expect(firstPaidEventId([declinedRefund, at("subscription:2", "2026-11-01T00:00:00Z", "Paid")], true)).toBe(
+      "pledge_start:1",
+    );
+  });
+  it("ignores events that are not charges, and waits while an earlier charge is pending", () => {
+    const paid = at("subscription:2", "2026-10-02T00:00:00Z", "Paid");
+    for (const status of ["Declined", "Free Trial", "Deleted", null])
+      expect(firstPaidEventId([at("pledge_start:1", "2026-10-01T00:00:00Z", status!), paid], true)).toBe(
+        "subscription:2",
+      );
+    // Patreon may still take the pending charge, so which payment is the first is not known yet.
+    expect(firstPaidEventId([at("pledge_start:1", "2026-10-01T00:00:00Z", "Pending"), paid], true)).toBeNull();
+    // A charge pending after the first payment changes nothing.
+    expect(firstPaidEventId([paid, at("subscription:3", "2026-11-01T00:00:00Z", "Pending")], true)).toBe(
       "subscription:2",
     );
-    for (const status of ["Refunded", "Partially Refunded", "Fraud", "Refunded by Patreon"])
-      expect(firstPaidEventId([at("pledge_start:1", "2026-10-01T00:00:00Z", status), paid], true)).toBeNull();
-    expect(firstPaidEventId([paid, at("subscription:3", "2026-10-02T00:00:00Z", "Paid")], true)).toBeNull();
-    expect(firstPaidEventId([], true)).toBeNull();
   });
 });
 
@@ -361,19 +817,313 @@ describe("Patreon sync worker", () => {
       memberListComplete: true,
     });
     expect(status.lastSuccessAt).not.toBeNull();
-    expect(store.founderReviews).toHaveBeenCalledWith(campaign);
+    // Founder payments are a note on each record, never a list to work through.
+    expect(status).not.toHaveProperty("founderReviews");
     expectNoToken();
+  });
+  it("counts who Patreon reported a Discord account for and who has a completed payment", async () => {
+    const { service } = tracked();
+    const declined = { ...start("pledge_start:3"), status: "Declined" };
+    fetchMock.mockResolvedValueOnce(
+      json(
+        page(
+          [
+            member("member-1", [start("pledge_start:1")], { user: "user-1" }),
+            member("member-2", [start("pledge_start:2")], { user: "user-2" }),
+            member("member-3", [declined], { user: "user-3" }),
+            member("member-4"),
+          ],
+          [
+            event(start("pledge_start:1")),
+            event(start("pledge_start:2")),
+            event(declined),
+            user("user-1"),
+            user("user-2", null),
+            user("user-3", null),
+          ],
+        ),
+      ),
+    );
+    expect(await service.sync()).toMatchObject({ members: 4, paidMembers: 2, discordReported: 1 });
+    // The live case: paying members, and Patreon reports a Discord account for none of them.
+    fetchMock.mockResolvedValueOnce(
+      json(
+        page(
+          [member("member-1", [start("pledge_start:1")], { user: "user-1" })],
+          [event(start("pledge_start:1")), user("user-1", null)],
+        ),
+      ),
+    );
+    jest.spyOn(Date, "now").mockReturnValue(Date.now() + 60_000);
+    expect(await service.sync()).toMatchObject({ members: 1, paidMembers: 1, discordReported: 0 });
+  });
+  it("hands each payment's tier price to the store and reports what it counted, logging the result once", async () => {
+    const { service, store } = tracked();
+    const cadSync = () =>
+      fetchMock
+        .mockResolvedValueOnce(
+          json(page([member("member-1", [cad("pledge_start:1")])], [event(cad("pledge_start:1"))])),
+        )
+        .mockResolvedValueOnce(json(tiers([tier("111", 500)])));
+    cadSync();
+    store.importApiMember.mockResolvedValueOnce(
+      imported({ created: false, payments: 0, tierConfirmed: 2, tierConfirmedNew: 1, tierUnconfirmed: 1 }),
+    );
+    const status = await service.sync();
+    expect(status).toMatchObject({
+      lastError: null,
+      tierPrices: "read",
+      tierConfirmed: 2,
+      tierConfirmedNew: 1,
+      tierUnconfirmed: 1,
+    });
+    const [, snapshot] = store.importApiMember.mock.calls[0] as [string, { events: PatreonPledgeEvent[] }];
+    expect(snapshot.events).toEqual([
+      expect.objectContaining({ currency: "CAD", tierId: "111", tierAmountCents: 500 }),
+    ]);
+    // Nothing else changed, and the counted payment alone is logged.
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "2 other-currency payments counted by tier price (1 new), 1 not confirmed, tier prices read.",
+      ),
+    );
+    // The same result on the next sync is not logged again.
+    cadSync();
+    store.importApiMember.mockResolvedValueOnce(
+      imported({ created: false, payments: 0, tierConfirmed: 2, tierConfirmedNew: 0, tierUnconfirmed: 1 }),
+    );
+    jest.spyOn(Date, "now").mockReturnValue(Date.now() + 60_000);
+    expect(await service.sync()).toMatchObject({ tierConfirmed: 2, tierConfirmedNew: 0, tierUnconfirmed: 1 });
+    expect(log).toHaveBeenCalledTimes(1);
+    expectNoToken();
+  });
+  it("imports every member and logs why when tier prices could not be read", async () => {
+    const { service, store } = tracked();
+    fetchMock
+      .mockResolvedValueOnce(json(page([member("member-1", [cad("pledge_start:1")])], [event(cad("pledge_start:1"))])))
+      .mockResolvedValueOnce(json({ errors: [{ detail: `tiers failed for ${token}` }] }, { status: 500 }));
+    store.importApiMember.mockResolvedValueOnce(imported({ created: false, payments: 0, tierUnconfirmed: 1 }));
+    const status = await service.sync();
+    expect(status).toMatchObject({
+      lastError: null,
+      tokenRejected: false,
+      members: 1,
+      tierPrices: "unavailable",
+      tierConfirmed: 0,
+      tierUnconfirmed: 1,
+    });
+    expect(status.lastSuccessAt).not.toBeNull();
+    expect(store.importApiMember).toHaveBeenCalledTimes(1);
+    const [, snapshot] = store.importApiMember.mock.calls[0] as [string, { events: PatreonPledgeEvent[] }];
+    expect(snapshot.events[0].tierAmountCents).toBeUndefined();
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "0 other-currency payments counted by tier price (0 new), 1 not confirmed, tier prices unavailable.",
+      ),
+    );
+    expect(warn).not.toHaveBeenCalled();
+    expectNoToken();
+  });
+  it("imports with the original request when Patreon refuses the tier field", async () => {
+    const { service, store } = tracked();
+    fetchMock
+      .mockResolvedValueOnce(json({ errors: [{ status: "400" }] }, { status: 400 }))
+      .mockResolvedValueOnce(onePage());
+    const status = await service.sync();
+    expect(status).toMatchObject({ lastError: null, members: 1, newMembers: 1, payments: 1, tierPrices: "refused" });
+    expect(store.importApiMember).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+  it("finishes the import and waits for Patreon when only the tier request is rate limited", async () => {
+    const { service, store } = tracked({ PATREON_SYNC_INTERVAL_MINUTES: 10 });
+    fetchMock
+      .mockResolvedValueOnce(json(page([member("member-1", [cad("pledge_start:1")])], [event(cad("pledge_start:1"))])))
+      .mockResolvedValueOnce(new Response("", { status: 429, headers: { "Retry-After": "3600" } }));
+    const status = await service.sync();
+    expect(status).toMatchObject({ lastError: null, members: 1, tierPrices: "unavailable" });
+    expect(store.importApiMember).toHaveBeenCalledTimes(1);
+    expect(Date.parse(status.nextAttemptAt!) - Date.now()).toBeGreaterThan(3_590_000);
+    await service.sync();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+  it("runs automatic supporter matching after the import, without changing the status", async () => {
+    const { service, store, match } = tracked();
+    fetchMock.mockResolvedValueOnce(onePage());
+    match.sweep.mockImplementationOnce(async () => {
+      throw new Error("never rejects in production");
+    });
+    const failing = await service.sync();
+    // A sweep failure is reported by the match service, never as a failed sync.
+    expect(failing).toMatchObject({ lastError: expect.any(String) });
+    fetchMock.mockResolvedValueOnce(onePage());
+    match.sweep.mockResolvedValueOnce(undefined);
+    jest.spyOn(Date, "now").mockReturnValue(Date.now() + 60_000);
+    const status = await service.sync();
+    expect(status).toMatchObject({ lastError: null, members: 1 });
+    expect(match.sweep).toHaveBeenLastCalledWith("sync");
+    const order = (mock: jest.Mock) => mock.mock.invocationCallOrder.at(-1)!;
+    expect(order(store.importApiMember)).toBeLessThan(order(match.sweep));
+  });
+  it("skips automatic matching after a failed import or a shutdown mid-sync", async () => {
+    const failed = tracked();
+    fetchMock.mockResolvedValueOnce(json({}, { status: 503 }));
+    await failed.service.sync();
+    expect(failed.match.sweep).not.toHaveBeenCalled();
+    const stopped = tracked();
+    fetchMock.mockResolvedValueOnce(onePage());
+    stopped.store.importApiMember.mockImplementationOnce(async () => {
+      stopped.service.onModuleDestroy();
+      return imported();
+    });
+    await stopped.service.sync();
+    expect(stopped.match.sweep).not.toHaveBeenCalled();
+  });
+  it("asks the role service to check linked Discord accounts whose supporter record changed", async () => {
+    const { service, store, roles } = tracked();
+    store.importApiMember.mockResolvedValueOnce(imported({ discordLinked: true, discordId }));
+    fetchMock.mockResolvedValueOnce(onePage());
+    await service.sync();
+    expect(roles.supporterChanged).toHaveBeenCalledTimes(1);
+    expect(roles.supporterChanged).toHaveBeenCalledWith(discordId);
+    // A changed status on a record staff already linked can start or end support for the Supporter role.
+    const linked = "223456789012345678";
+    store.importApiMember.mockResolvedValueOnce(
+      imported({ created: false, updated: true, payments: 0, discordId: linked, conflict: "discord-differs" }),
+    );
+    fetchMock.mockResolvedValueOnce(onePage());
+    await service.sync();
+    expect(roles.supporterChanged).toHaveBeenCalledTimes(2);
+    expect(roles.supporterChanged).toHaveBeenLastCalledWith(linked);
+    // An unchanged record, or a changed one without a linked Discord account, queues nothing.
+    store.importApiMember.mockResolvedValueOnce(imported({ created: false, payments: 0, discordId: linked }));
+    fetchMock.mockResolvedValueOnce(onePage());
+    await service.sync();
+    store.importApiMember.mockResolvedValueOnce(imported({ discordLinked: false, conflict: "discord-in-use" }));
+    fetchMock.mockResolvedValueOnce(onePage());
+    await service.sync();
+    expect(roles.supporterChanged).toHaveBeenCalledTimes(2);
+  });
+  it("checks the roles of every Discord account the import moved, relabelled or took off a record", async () => {
+    const { service, store, roles } = tracked();
+    const previous = "223456789012345678";
+    // The record's Patreon link followed the account Patreon now reports, so both accounts are checked.
+    store.importApiMember.mockResolvedValueOnce(
+      imported({ created: false, payments: 0, discordLinked: true, discordId, releasedDiscordIds: [previous] }),
+    );
+    fetchMock.mockResolvedValueOnce(onePage());
+    await service.sync();
+    expect(jest.mocked(roles.supporterChanged).mock.calls).toEqual([[discordId], [previous]]);
+    // Patreon confirmed a staff link: the account is checked although nothing else changed.
+    store.importApiMember.mockResolvedValueOnce(
+      imported({ created: false, payments: 0, discordConfirmed: true, discordId }),
+    );
+    fetchMock.mockResolvedValueOnce(onePage());
+    jest.spyOn(Date, "now").mockReturnValue(Date.now() + 60_000);
+    await service.sync();
+    expect(roles.supporterChanged).toHaveBeenCalledTimes(3);
+    expect(roles.supporterChanged).toHaveBeenLastCalledWith(discordId);
+  });
+  it("keeps importing when the role service throws", async () => {
+    const roles = {
+      supporterChanged: jest.fn(() => {
+        throw new Error("role queue unavailable");
+      }),
+    };
+    const { service, store } = tracked({}, roles);
+    store.importApiMember.mockResolvedValueOnce(imported({ discordLinked: true, discordId }));
+    fetchMock.mockResolvedValueOnce(onePage());
+    expect(await service.sync()).toMatchObject({ lastError: null, discordLinks: 1 });
+    expect(roles.supporterChanged).toHaveBeenCalledWith(discordId);
+  });
+  it("gives the Founder role to a Patreon API founder whose Discord ID the sync linked", async () => {
+    const guild = "100000000000000001";
+    const founderRole = "200000000000000002";
+    // The supporter was awarded on an imported payment before Patreon reported their Discord account, so the
+    // role service only learns who they are from the sync's link.
+    const roleStore = {
+      desired: jest.fn(async (users?: string[]) => ({
+        member: new Map<string, string>(),
+        founder: new Map(users?.includes(discordId) ? [[discordId, "patreon-api-founder"]] : []),
+      })),
+      revokedBasis: jest.fn(async () => new Map<string, string>()),
+      lastEffective: jest.fn(async () => null),
+      begin: jest.fn(async () => "role-action-1"),
+      finish: jest.fn(async () => undefined),
+    };
+    const view = (id: string | null, assignable: boolean): RoleCheckView => ({
+      id,
+      name: assignable ? "Founder" : null,
+      exists: assignable,
+      position: 1,
+      managed: false,
+      privileged: false,
+      staffRole: false,
+      assignable,
+      problem: assignable ? null : "Not configured.",
+    });
+    const discordMember = {
+      id: discordId,
+      joinedAt: new Date(Date.now() - 86_400_000),
+      has: () => false,
+      add: jest.fn(async () => undefined),
+      remove: jest.fn(async () => undefined),
+    } satisfies RoleMember;
+    const discord = {
+      ready: () => true,
+      check: jest.fn(async () => ({
+        manageRoles: true,
+        highestRolePosition: 9,
+        roles: { member: view(null, false), founder: view(founderRole, true) },
+      })),
+      member: jest.fn(async (_guild: string, userId: string) => (userId === discordId ? discordMember : null)),
+    };
+    const settings: Record<string, unknown> = {
+      DISCORD_ROLES_ENABLED: true,
+      ADMIN_GUILD_ID: guild,
+      DISCORD_FOUNDER_ROLE_ID: founderRole,
+    };
+    const roles = new DiscordRolesService(
+      roleStore as unknown as DiscordRolesStore,
+      discord as unknown as DiscordRolesDiscord,
+      { get: (key: string) => settings[key] } as unknown as EnvService,
+    );
+    try {
+      const { service, store } = tracked({}, roles);
+      store.importApiMember.mockResolvedValueOnce(
+        imported({ created: false, payments: 0, discordLinked: true, discordId }),
+      );
+      fetchMock.mockResolvedValueOnce(onePage());
+      await service.sync();
+      await roles.tick();
+      expect(roleStore.desired).toHaveBeenCalledWith([discordId]);
+      expect(discordMember.add).toHaveBeenCalledWith(founderRole, "Gramps: founding supporter");
+      expect(roleStore.begin).toHaveBeenCalledWith(
+        expect.objectContaining({
+          discordUserId: discordId,
+          roleKind: "founder",
+          roleId: founderRole,
+          operation: "add",
+          basisType: "founder",
+          basisId: "patreon-api-founder",
+        }),
+      );
+      expect(roleStore.finish).toHaveBeenCalledWith("role-action-1", "applied", true, "Role added.");
+    } finally {
+      roles.onModuleDestroy();
+    }
   });
   it("reports Discord conflicts and incomplete histories without failing the sync", async () => {
     const { service, store } = tracked();
     store.importApiMember.mockResolvedValueOnce(
       imported({ created: false, updated: true, payments: 0, conflict: "discord-in-use" }),
     );
+    // The history names an event Patreon did not return, so it may be incomplete.
     fetchMock.mockResolvedValueOnce(
       json(
         page(
-          [member("member-1", [{ ...start("pledge_start:1"), type: "subscription" }])],
-          [event({ ...start("pledge_start:1"), type: "subscription" })],
+          [member("member-1", [start("pledge_start:1"), start("subscription:2")])],
+          [event(start("pledge_start:1"))],
         ),
       ),
     );
@@ -437,7 +1187,9 @@ describe("Patreon sync worker", () => {
     const offline = await service.sync();
     expect(offline).toMatchObject({ members: 1, tokenRejected: false });
     expect(offline.lastError).toMatch(/could not be reached.*kept/);
-    fetchMock.mockResolvedValueOnce(json({ data: [{ id: "x", type: "campaign" }] }));
+    // The request with the tier field and the original request it falls back to get the same unusable answer.
+    for (let attempt = 0; attempt < 2; attempt++)
+      fetchMock.mockResolvedValueOnce(json({ data: [{ id: "x", type: "campaign" }] }));
     expect((await service.sync()).lastError).toMatch(/unexpected/);
     expect(store.importApiMember).not.toHaveBeenCalled();
     expectNoToken();
@@ -458,6 +1210,7 @@ describe("Patreon sync worker", () => {
     [{ ADMIN_SESSION_SECRET: token }, /matches another configured secret/],
     [{ PATREON_WEBHOOK_SECRET: token }, /matches another configured secret/],
     [{ WARDOGS_SERVERS: [{ password: token }] }, /matches another configured secret/],
+    [{ PATREON_CLIENT_SECRET: token }, /matches another configured secret/],
     [{ PATREON_CREATOR_ACCESS_TOKEN: "short" }, /does not look like/],
     [{ PATREON_CREATOR_ACCESS_TOKEN: "has whitespace inside the token" }, /does not look like/],
     [{ PATREON_CREATOR_ACCESS_TOKEN: "x".repeat(2049) }, /does not look like/],

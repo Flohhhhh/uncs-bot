@@ -5,8 +5,9 @@ import { ExpressAdapter } from "@nestjs/platform-express";
 import { Test } from "@nestjs/testing";
 import { Client } from "discord.js";
 import { AdminSettings } from "../admin/admin.settings";
-import { AdminStore } from "../admin/admin.store";
+import { AdminStore, type ModerationCount } from "../admin/admin.store";
 import { legacyServerSettings } from "../admin/game-server-fixture";
+import { needsReview } from "../common/staff-alerts";
 import { EnvService } from "../env/env.service";
 import { TelemetryStore } from "../telemetry/telemetry.store";
 import { FEED_CONTEXT, TelemetryFeedContext } from "./feed-context";
@@ -597,6 +598,163 @@ describe("staff alert player names", () => {
   });
 });
 
+describe("repeat offender joins", () => {
+  const [clean, kicked, listed] = ids;
+  const DAY_MS = 24 * 60 * 60_000;
+  const values = { STAFF_ALERTS_WATCHLIST_ENABLED: true };
+  const kicks = (count: number, recent = count): ModerationCount => ({
+    count,
+    recent,
+    lastAt: new Date("2026-10-01T18:00:00Z"),
+    lastBy: "Mod",
+    lastReason: "Team killing",
+  });
+  const historyFor = (records: Record<string, ModerationCount>) => ({
+    moderationSummaries: jest.fn(
+      async (_serverId: string, steamIds: readonly string[], _since?: Date) =>
+        new Map(steamIds.filter((id) => records[id]).map((id) => [id, { name: null, kicks: records[id], bans: null }])),
+    ),
+  });
+  const roster = (...players: string[]) =>
+    snapshot(players.map((steamId) => ({ steamId, name: steamId === kicked ? "Griefer" : "Player" })));
+  const fields = (send: jest.Mock, index = 0) =>
+    (send.mock.calls[index][0].embeds[0].fields as { name: string; value: string }[]).map((field) => field.name);
+
+  it("raises a review alert for a join with enough recent kicks, reading each pass's joins in one query", async () => {
+    const history = historyFor({ [kicked]: kicks(4, 3) });
+    const { pass, alerts, game, discord } = workerFixture(values, { history });
+    await pass(roster(clean), 0);
+    await pass(roster(clean, kicked));
+    await pass(roster(clean, kicked));
+    expect(history.moderationSummaries.mock.calls).toEqual([
+      ["primary", [clean], new Date(start - 30 * DAY_MS)],
+      ["primary", [kicked], new Date(start + 10_000 - 30 * DAY_MS)],
+    ]);
+    const [alert, ...others] = alerts.list("primary");
+    expect(others).toEqual([]);
+    expect(alert).toMatchObject({
+      kind: "repeat-offender-join",
+      category: "watchlist",
+      severity: "warning",
+      title: "Repeat offender joined",
+      player: { steamId: kicked, name: "Griefer" },
+      facts: { kicks: 3, days: 30, priorKicks: 4, lastKickAt: "2026-10-01T18:00:00.000Z" },
+      delivery: { state: "posted" },
+      pinged: false,
+    });
+    expect(alert.lines).toEqual([
+      "Griefer joined.",
+      "Kicked 3 times in the last 30 days (4 in all).",
+      "Last kick 2026-10-01 by Mod: Team killing.",
+      "From dashboard kicks on this server. Monitoring only. Gramps took no action.",
+    ]);
+    expect(needsReview(alert)).toBe(true);
+    expect(fields(discord.channel.send)).toEqual(["Player", "SteamID", "Kicks", "Prior kicks"]);
+    expect(game.execute).not.toHaveBeenCalled();
+  });
+
+  it("adds prior kicks to a watch-list alert instead of raising a second one, and skips players below the threshold", async () => {
+    const entry: NetworkBanEntry = {
+      steamId: listed,
+      communities: 2,
+      reasons: ["Aimbot"],
+      evidenceUrls: [],
+      recordedAt: null,
+      source: "staff",
+    };
+    const source = {
+      name: "Test list",
+      lookup: jest.fn(async (steamIds: string[]) => new Map(steamIds.includes(listed) ? [[listed, entry]] : [])),
+    };
+    const history = historyFor({ [listed]: kicks(5), [kicked]: kicks(6, 2) });
+    const { pass, alerts, discord } = workerFixture(values, { history, sources: [source] });
+    await pass(roster(clean), 0);
+    await pass(roster(clean, kicked, listed));
+    expect(history.moderationSummaries).toHaveBeenCalledTimes(2);
+    expect(history.moderationSummaries).toHaveBeenLastCalledWith("primary", [kicked, listed], expect.any(Date));
+    const [alert, ...others] = alerts.list("primary");
+    expect(others).toEqual([]);
+    expect(alert).toMatchObject({
+      kind: "watchlist-join",
+      player: { steamId: listed },
+      facts: { source: "Test list", communities: 2, priorKicks: 5, lastKickAt: "2026-10-01T18:00:00.000Z" },
+    });
+    expect(fields(discord.channel.send)).toEqual(["Player", "SteamID", "Communities", "Prior kicks"]);
+    expect(discord.channel.send.mock.calls[0][0].embeds[0].fields[3].value).toMatch(/^5 \(last 2026.10.01\)$/);
+  });
+
+  it("asks the watch list while the kick lookup is still running", async () => {
+    const order: string[] = [];
+    const history = {
+      moderationSummaries: jest.fn(async (_serverId: string, steamIds: readonly string[]) => {
+        order.push("kicks asked");
+        await Promise.resolve();
+        await Promise.resolve();
+        order.push("kicks read");
+        return new Map(
+          steamIds.filter((id) => id === kicked).map((id) => [id, { name: null, kicks: kicks(5), bans: null }]),
+        );
+      }),
+    };
+    const source = {
+      name: "Test list",
+      lookup: jest.fn(async () => {
+        order.push("list asked");
+        return new Map<string, NetworkBanEntry>();
+      }),
+    };
+    const { pass, alerts } = workerFixture(values, { history, sources: [source] });
+    await pass(roster(clean), 0);
+    order.length = 0;
+    await pass(roster(clean, kicked));
+    expect(order).toEqual(["kicks asked", "list asked", "kicks read"]);
+    expect(alerts.list("primary")).toMatchObject([{ kind: "repeat-offender-join", player: { steamId: kicked } }]);
+  });
+
+  it("records players online when Gramps starts without posting, and stays off at 0 kicks", async () => {
+    const { pass, alerts, discord } = workerFixture(values, { history: historyFor({ [kicked]: kicks(3) }) });
+    await pass(roster(kicked), 0);
+    expect(alerts.list("primary")).toMatchObject([
+      {
+        title: "Repeat offender online",
+        lines: expect.arrayContaining(["Griefer was online when Gramps started."]),
+        delivery: { state: "suppressed", reason: "online when Gramps started, recorded only" },
+      },
+    ]);
+    expect(discord.channel.send).not.toHaveBeenCalled();
+
+    const off = workerFixture(
+      { ...values, STAFF_ALERTS_REPEAT_OFFENDER_KICKS: 0 },
+      { history: historyFor({ [kicked]: kicks(9) }) },
+    );
+    await off.pass(roster(clean), 0);
+    await off.pass(roster(clean, kicked));
+    expect(off.alerts.list("primary")).toEqual([]);
+  });
+
+  it("reads no kicks while the watch list is off", async () => {
+    const history = historyFor({ [kicked]: kicks(9) });
+    const { pass, alerts } = workerFixture({ STAFF_ALERTS_HEALTH_ENABLED: true }, { history });
+    await pass(roster(clean), 0);
+    await pass(roster(clean, kicked));
+    expect(history.moderationSummaries).not.toHaveBeenCalled();
+    expect(alerts.list("primary")).toEqual([]);
+  });
+
+  it("reports a failed kick lookup in the status without SteamIDs and raises nothing from it", async () => {
+    const history = { moderationSummaries: jest.fn().mockRejectedValue(new Error(`detail ${kicked}`)) };
+    const { pass, alerts, worker } = workerFixture(values, { history });
+    await pass(roster(clean), 0);
+    await pass(roster(clean, kicked));
+    expect(alerts.list("primary")).toEqual([]);
+    expect(worker.view().sources).toEqual([
+      { name: "Kick history", error: "The lookup failed or took longer than 3 seconds.", at: expect.any(String) },
+    ]);
+    const logged = (Logger.prototype.warn as jest.Mock).mock.calls.map((call: unknown[]) => String(call[0]));
+    expect(logged).toEqual(Array(2).fill("Kick history could not be read for primary."));
+  });
+});
+
 describe("staff alerts module wiring", () => {
   it("resolves the monitor, the watch-list source and the feed context without AdminService", async () => {
     const env = { get: () => undefined } as unknown as EnvService;
@@ -623,6 +781,8 @@ describe("staff alerts module wiring", () => {
       .useValue({})
       .compile();
     expect(module.get(StaffAlertsMonitor)).toBeInstanceOf(StaffAlertsMonitor);
+    // Joining players' kick counts come from the dashboard's action records.
+    expect((module.get(StaffAlertsMonitor) as unknown as { history: unknown }).history).toBe(module.get(AdminStore));
     expect(module.get(NETWORK_BAN_SOURCES)).toEqual([expect.any(EnvWatchlistSource)]);
     expect(module.get(FEED_CONTEXT)).toBeInstanceOf(TelemetryFeedContext);
     expect(module.get(StaffAlertsController)).toBeInstanceOf(StaffAlertsController);

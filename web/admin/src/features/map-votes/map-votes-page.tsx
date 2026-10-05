@@ -1,7 +1,7 @@
 import { selectionLabel } from "../../../../../src/common/map-labels";
 import { voteChoiceKey } from "../../../../../src/common/voting-policy";
 import { VotingControlsPanel } from "./voting-controls";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { MapSelection, SettingsSnapshot } from "../../../../../src/common/server-settings";
 import type { MapVoteSetup } from "../../../../../src/common/map-vote-automation";
 import { VoteResults, voteStateLabels as stateLabels, type Vote, type VoteList } from "./vote-status";
@@ -9,7 +9,6 @@ import { useGameApi } from "../../api/server-client";
 import { useResource } from "../../api/use-resource";
 import type { Catalog } from "../../api/types";
 import { useGameAdmin as useAdmin } from "../../app/context";
-import { ServerLink as Link } from "../../app/server-link";
 import { Badge, Card, Empty, Modal, date } from "../../components/ui";
 import { CopyValue, DataTable } from "../../components/data-table";
 import { MapPicker } from "../actions/map-picker";
@@ -41,6 +40,7 @@ function VoteReview({
   const [id] = useState(() => crypto.randomUUID());
   const submitted = useRef(false);
   const [result, setResult] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
   const settings = useResource<SettingsSnapshot>(draft ? "settings" : null);
   const blocked = !!draft && statusUnavailable;
   const rotationReady =
@@ -63,6 +63,7 @@ function VoteReview({
       });
       setResult(response.message);
     } catch (error) {
+      setFailed(true);
       setResult(
         `${errorMessage(error)} Refresh the ballot history and check Discord before starting another vote. This request will not be sent again.`,
       );
@@ -72,7 +73,13 @@ function VoteReview({
     }
   }
   return (
-    <Modal serverScoped title={vote ? "Close this ballot" : "Review Discord ballot"} onClose={close} busy={busy}>
+    <Modal
+      serverScoped
+      title={vote ? "Close this ballot" : "Review Discord ballot"}
+      onClose={close}
+      busy={busy}
+      eyebrow={result ? null : undefined}
+    >
       {draft && (
         <>
           <ol className="change-summary">
@@ -86,7 +93,7 @@ function VoteReview({
           </p>
           <p className="muted">
             The winner queues for the next round only if the rotation position, settings and your administrator access
-            still match. The current match continues.
+            still match and no staff member queued the next map while it was open. The current match continues.
           </p>
         </>
       )}
@@ -98,7 +105,7 @@ function VoteReview({
       )}
       {result ? (
         <>
-          <p className="notice" role="status">
+          <p className={`notice${failed ? " warning" : ""}`} role="status">
             {result}
           </p>
           <p>
@@ -194,11 +201,22 @@ function VotingSetupCheck() {
   );
 }
 
-export function MapVotesPage() {
+function VotingSettings({ onDirty }: { onDirty: (value: boolean) => void }) {
+  return (
+    <Card title="Voting settings">
+      <div className="card-body">
+        <VotingControlsPanel onDirty={onDirty} />
+      </div>
+    </Card>
+  );
+}
+
+/** Ballots, results and voting settings. `onUnsavedChange` reports this page's drafts when it shares a page. */
+export function MapVotesPage({ onUnsavedChange }: { onUnsavedChange?: (value: boolean) => void } = {}) {
   const admin = useAdmin();
   const [policyDirty, setPolicyDirty] = useState(false);
   const [ballotDirty, setBallotDirty] = useState(false);
-  const { setUnsavedChanges } = admin;
+  const setUnsavedChanges = onUnsavedChange ?? admin.setUnsavedChanges;
   useEffect(() => {
     setUnsavedChanges(policyDirty || ballotDirty);
     return () => setUnsavedChanges(false);
@@ -224,49 +242,33 @@ export function MapVotesPage() {
       {!resource.data ? (
         !resource.error && <Empty title="Loading map votes…" />
       ) : !resource.data.enabled ? (
-        <>
+        <div className="stack">
           <Card
             title={resource.error ? "Voting status unavailable" : "Discord map voting is off"}
-            subtitle="You can still choose maps manually."
+            subtitle="You can still queue the next round yourself."
             badge={<Badge kind={resource.error ? "warn" : "neutral"}>{resource.error ? "Unavailable" : "OFF"}</Badge>}
           >
             <div className="card-body">
               <p>
-                <Link className="button primary" to="/match">
-                  Open match &amp; maps
-                </Link>
+                To enable voting, choose a Discord voting channel in Gramps and check its permissions. Prepare the
+                settings below, then enable live voting only after a controlled test.
               </p>
-              <details>
-                <summary>How to enable voting</summary>
-                <p>
-                  Choose a Discord voting channel in Gramps and check its permissions. Prepare the switches below, then
-                  enable live voting only after a controlled test.
-                </p>
-                <VotingSetupCheck />
-              </details>
+              <VotingSetupCheck />
             </div>
           </Card>
-          <Card title="Voting settings">
-            <div className="card-body">
-              <VotingControlsPanel onDirty={setPolicyDirty} />
-            </div>
-          </Card>
-        </>
+          <VotingSettings onDirty={setPolicyDirty} />
+        </div>
       ) : (
-        <>
-          <EnabledMapVotes
-            data={resource.data}
-            error={resource.error}
-            loading={resource.loading}
-            refreshing={resource.refreshing}
-            refresh={resource.refresh}
-            onDirty={setBallotDirty}
-          />
-          <details>
-            <summary>Voting settings</summary>
-            <VotingControlsPanel onDirty={setPolicyDirty} />
-          </details>
-        </>
+        <EnabledMapVotes
+          data={resource.data}
+          error={resource.error}
+          loading={resource.loading}
+          refreshing={resource.refreshing}
+          refresh={resource.refresh}
+          onDirty={setBallotDirty}
+        >
+          <VotingSettings onDirty={setPolicyDirty} />
+        </EnabledMapVotes>
       )}
     </>
   );
@@ -279,6 +281,7 @@ function EnabledMapVotes({
   refreshing,
   refresh,
   onDirty,
+  children,
 }: {
   data: VoteList;
   error: string;
@@ -286,6 +289,8 @@ function EnabledMapVotes({
   refreshing: boolean;
   refresh: () => void;
   onDirty: (value: boolean) => void;
+  /** Shown between the ballot and its history. */
+  children: ReactNode;
 }) {
   const admin = useAdmin();
   const active = data.votes.some((vote) => ["publishing", "open", "closing", "needs_review"].includes(vote.state));
@@ -316,127 +321,122 @@ function EnabledMapVotes({
     setMinutes(5);
   }
   return (
-    <>
-      <p>
-        <Link className="text-button" to="/match">
-          ← Match &amp; maps
-        </Link>
-      </p>
+    <div className="stack">
       <VoteResults data={data} error={error} />
-      <details open={!data.automatic?.enabled}>
-        <summary>{data.automatic?.enabled ? "Staff override" : "Manual ballot"}</summary>
-        <Card title="Ballot controls" subtitle="Publish a ballot in the community’s configured Discord channel.">
-          <div className="card-body">
-            {active && (
+      <Card
+        title={data.automatic?.enabled ? "Staff override ballot" : "Manual ballot"}
+        subtitle="Publish a ballot in the community’s configured Discord channel."
+      >
+        <div className="card-body">
+          {active && (
+            <p className="notice warning">
+              An active ballot or unresolved result needs attention below before another vote can start.
+            </p>
+          )}
+          {!active &&
+            (changed || settings.error || catalog.error || (!settings.loading && rotation && !rotationReady)) && (
               <p className="notice warning">
-                An active ballot or unresolved result needs attention below before another vote can start.
+                {settings.error ||
+                  catalog.error ||
+                  (changed
+                    ? "Server settings changed. Discard this draft and refresh."
+                    : "Voting needs an editable, enabled, ordered rotation and a known current map.")}
               </p>
             )}
-            {!active &&
-              (changed || settings.error || catalog.error || (!settings.loading && rotation && !rotationReady)) && (
-                <p className="notice warning">
-                  {settings.error ||
-                    catalog.error ||
-                    (changed
-                      ? "Server settings changed. Discard this draft and refresh."
-                      : "Voting needs an editable, enabled, ordered rotation and a known current map.")}
-                </p>
-              )}
-            {!active && catalog.data && (
-              <>
-                <MapPicker
-                  value={selection}
-                  change={setSelection}
-                  onReadyChange={setSelectionReady}
-                  disabled={!canEdit}
-                  catalog={catalog.data}
-                />
-                <div className="dialog-actions">
-                  <button
-                    type="button"
-                    className="button secondary"
-                    disabled={
-                      !canEdit ||
-                      !selectionReady ||
-                      choices.length >= 5 ||
-                      choices.some((choice) => voteChoiceKey(choice) === voteChoiceKey(selection))
-                    }
-                    onClick={() => {
-                      setRevision(revision ?? settings.data!.revision);
-                      setChoices([...choices, selection]);
-                      setSelection({ map: "", experiences: [] });
-                    }}
-                  >
-                    Add map option
-                  </button>
-                </div>
-                <ol className="rotation-editor" aria-label="Ballot choices">
-                  {choices.map((choice) => (
-                    <li key={voteChoiceKey(choice)}>
-                      <span>{selectionLabel(choice)}</span>
-                      <button
-                        className="button secondary small"
-                        disabled={admin.busy}
-                        aria-label={`Remove ${selectionLabel(choice)}`}
-                        onClick={() => {
-                          const next = choices.filter((entry) => voteChoiceKey(entry) !== voteChoiceKey(choice));
-                          setChoices(next);
-                          // An emptied ballot is a fresh start; the next choice pins the then-current revision.
-                          if (!next.length) setRevision(null);
-                        }}
-                      >
-                        Remove
-                      </button>
-                    </li>
-                  ))}
-                </ol>
-                <div className="settings-grid">
-                  <label>
-                    Voting duration (minutes)
-                    <input
-                      type="number"
-                      min={2}
-                      max={30}
-                      step={1}
-                      value={minutes}
-                      disabled={!canEdit}
-                      onChange={(event) => setMinutes(Number(event.target.value))}
-                    />
-                  </label>
-                </div>
-                <p className="muted">
-                  Choose 2–5 map, mode or layout combinations. The same map can appear with different modes.
-                </p>
-                <div className="dialog-actions">
-                  {dirty && (
-                    <button className="button secondary" disabled={admin.busy} onClick={clear}>
-                      Discard draft
+          {!active && catalog.data && (
+            <>
+              <MapPicker
+                value={selection}
+                change={setSelection}
+                onReadyChange={setSelectionReady}
+                disabled={!canEdit}
+                catalog={catalog.data}
+              >
+                <button
+                  type="button"
+                  className="button secondary"
+                  disabled={
+                    !canEdit ||
+                    !selectionReady ||
+                    choices.length >= 5 ||
+                    choices.some((choice) => voteChoiceKey(choice) === voteChoiceKey(selection))
+                  }
+                  onClick={() => {
+                    setRevision(revision ?? settings.data!.revision);
+                    setChoices([...choices, selection]);
+                    setSelection({ map: "", experiences: [] });
+                  }}
+                >
+                  Add map option
+                </button>
+              </MapPicker>
+              <ol className="rotation-editor" aria-label="Ballot choices">
+                {choices.map((choice) => (
+                  <li key={voteChoiceKey(choice)}>
+                    <span>{selectionLabel(choice)}</span>
+                    <button
+                      className="button secondary small"
+                      disabled={admin.busy}
+                      aria-label={`Remove ${selectionLabel(choice)}`}
+                      onClick={() => {
+                        const next = choices.filter((entry) => voteChoiceKey(entry) !== voteChoiceKey(choice));
+                        setChoices(next);
+                        // An emptied ballot is a fresh start; the next choice pins the then-current revision.
+                        if (!next.length) setRevision(null);
+                      }}
+                    >
+                      Remove
                     </button>
-                  )}
-                  <button
-                    className="button primary"
-                    disabled={
-                      !canStart || choices.length < 2 || !Number.isInteger(minutes) || minutes < 2 || minutes > 30
-                    }
-                    onClick={() =>
-                      setReview({
-                        draft: {
-                          serverId: data.serverId,
-                          revision: revision!,
-                          choices: structuredClone(choices),
-                          minutes,
-                        },
-                      })
-                    }
-                  >
-                    Review ballot
+                  </li>
+                ))}
+              </ol>
+              <div className="settings-grid ballot-fields">
+                <label>
+                  Voting duration (minutes)
+                  <input
+                    type="number"
+                    min={2}
+                    max={30}
+                    step={1}
+                    value={minutes}
+                    disabled={!canEdit}
+                    onChange={(event) => setMinutes(Number(event.target.value))}
+                  />
+                </label>
+              </div>
+              <p className="muted">
+                Choose 2–5 map, mode or layout combinations. The same map can appear with different modes.
+              </p>
+              <div className="dialog-actions">
+                {dirty && (
+                  <button className="button secondary" disabled={admin.busy} onClick={clear}>
+                    Discard draft
                   </button>
-                </div>
-              </>
-            )}
-          </div>
-        </Card>
-      </details>
+                )}
+                <button
+                  className="button primary"
+                  disabled={
+                    !canStart || choices.length < 2 || !Number.isInteger(minutes) || minutes < 2 || minutes > 30
+                  }
+                  onClick={() =>
+                    setReview({
+                      draft: {
+                        serverId: data.serverId,
+                        revision: revision!,
+                        choices: structuredClone(choices),
+                        minutes,
+                      },
+                    })
+                  }
+                >
+                  Review ballot
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </Card>
+      {children}
       <Card title="Ballot history" subtitle="Latest 20 ballots. Open a row for choices and its receipt.">
         {!data.votes.length ? (
           <Empty title="No ballots yet" />
@@ -521,6 +521,6 @@ function EnabledMapVotes({
           }}
         />
       )}
-    </>
+    </div>
   );
 }

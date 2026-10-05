@@ -3,6 +3,17 @@ import { useBlocker } from "react-router-dom";
 import { useAdmin } from "./context";
 import { Modal } from "../components/ui";
 
+/** True when two search strings differ only in `view`. */
+function sameExceptView(left: string, right: string) {
+  const rest = (search: string) => {
+    const params = new URLSearchParams(search);
+    params.delete("view");
+    params.sort();
+    return params.toString();
+  };
+  return rest(left) === rest(right);
+}
+
 export function NavigationGuard({
   unsaved,
   logoutRequested,
@@ -21,7 +32,17 @@ export function NavigationGuard({
     if (currentLocation.pathname === nextLocation.pathname && currentLocation.search === nextLocation.search)
       return false;
     if (reason.current === "draft") return true;
-    reason.current = busy || dialogOpen ? "review" : unsaved ? "draft" : null;
+    if (busy || dialogOpen) {
+      reason.current = "review";
+      return true;
+    }
+    // A page's own `?view=` tabs keep their hidden views mounted, so switching them keeps every draft.
+    if (
+      currentLocation.pathname === nextLocation.pathname &&
+      sameExceptView(currentLocation.search, nextLocation.search)
+    )
+      return false;
+    reason.current = unsaved ? "draft" : null;
     return reason.current !== null;
   });
   useEffect(() => {

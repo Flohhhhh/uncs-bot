@@ -1,0 +1,285 @@
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { api } from "../../api/client";
+import { useAdmin } from "../../app/context";
+import { errorMessage } from "../actions/policy";
+import type { PatreonSyncResponse, PatreonSyncStatus } from "./types";
+
+const valid = (value: string | null): value is string => value !== null && Number.isFinite(Date.parse(value));
+
+/** A rounded length of time: "under a minute", "5 min", "2 h 5 min" or "3 days". */
+export function duration(ms: number) {
+  const minutes = Math.round(Math.abs(ms) / 60_000);
+  if (minutes < 1) return "under a minute";
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  if (hours >= 48) return `${Math.round(hours / 24)} days`;
+  return minutes % 60 ? `${hours} h ${minutes % 60} min` : `${hours} h`;
+}
+/** "just now" or "5 min ago". */
+export function ago(at: string, now = Date.now()) {
+  const elapsed = now - Date.parse(at);
+  return elapsed < 30_000 ? "just now" : `${duration(elapsed)} ago`;
+}
+/** "in 25 min", or "due now" once the time has passed. */
+export function ahead(at: string, now = Date.now()) {
+  const remaining = Date.parse(at) - now;
+  return remaining <= 0 ? "due now" : `in ${duration(remaining)}`;
+}
+/** The latest attempt did not succeed: the token was refused, nothing has succeeded yet, or it came after the last success. */
+function lastAttemptFailed(sync: PatreonSyncStatus) {
+  if (sync.tokenRejected) return true;
+  if (!valid(sync.lastAttemptAt)) return false;
+  return !valid(sync.lastSuccessAt) || Date.parse(sync.lastAttemptAt) > Date.parse(sync.lastSuccessAt);
+}
+/** A relative time with the exact time in its tooltip. */
+function Moment({ at, children }: { at: string; children: ReactNode }) {
+  return (
+    <time dateTime={at} title={new Date(at).toLocaleString()}>
+      {children}
+    </time>
+  );
+}
+
+/** Counts from the last successful import. Each record says what is left for it in its own steps. */
+function LastImport({ sync }: { sync: PatreonSyncStatus }) {
+  const counts: [string, number][] = [
+    ["Members listed", sync.members],
+    ["New members", sync.newMembers],
+    ["Updated members", sync.updated],
+    ["New payments", sync.payments],
+    ["Payments no longer marked paid", sync.revokedPayments],
+    ["Discord accounts from Patreon", sync.discordReported],
+    ["Discord accounts linked", sync.discordLinks],
+    ["Discord conflicts", sync.conflicts],
+    ["Incomplete payment histories", sync.truncated],
+  ];
+  // Payments in another currency count by their tier's price. Shown only when the campaign has any.
+  if (sync.tierConfirmed + sync.tierUnconfirmed > 0)
+    counts.push(
+      ["Other-currency payments counted", sync.tierConfirmed],
+      ["Other-currency payments not confirmed", sync.tierUnconfirmed],
+    );
+  return (
+    <>
+      <dl className="sync-counts">
+        {counts.map(([label, value]) => (
+          <div key={label}>
+            <dt>{label}</dt>
+            <dd>{value.toLocaleString()}</dd>
+          </div>
+        ))}
+      </dl>
+      <p className="muted">
+        {sync.memberListComplete
+          ? "Counts are from the last successful import."
+          : "Counts are from the last successful import, which read only part of the member list."}
+      </p>
+    </>
+  );
+}
+
+/**
+ * "Patreon: synced 5 min ago · next in 25 min · Automatic: on", an administrator's "Sync now", and a closed Details
+ * panel. The notices above it name a fault. What a record needs is on the record, never on this line. The status
+ * never includes the token.
+ */
+export function PatreonImport({
+  sync,
+  unavailable,
+  disabled,
+  onSynced,
+  status,
+  details,
+}: {
+  sync: PatreonSyncStatus;
+  /** The latest read failed, so the last status is not shown as current. */
+  unavailable: boolean;
+  disabled: boolean;
+  onSynced: () => void;
+  /** More of the status line, after the schedule: the automatic matching span. */
+  status?: ReactNode;
+  /** More of the Details panel, after the last import. */
+  details?: ReactNode;
+}) {
+  const { me } = useAdmin();
+  const [syncing, setSyncing] = useState(false);
+  // A result describes one attempt. A later attempt's status replaces it.
+  const [result, setResult] = useState<{ ok: boolean; message: string; attemptAt: string | null } | null>(null);
+  const inFlight = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  // Only administrators can start a sync; the server checks the role again.
+  const canSync = me.role === "admin" && sync.configured;
+  const running = syncing || sync.running;
+
+  async function syncNow() {
+    if (inFlight.current || disabled || unavailable || !canSync || sync.running) return;
+    const before = sync.lastAttemptAt;
+    inFlight.current = true;
+    setSyncing(true);
+    setResult(null);
+    try {
+      const response = await api<PatreonSyncResponse>("supporters/sync", { method: "POST", body: "{}" });
+      if (!mounted.current) return;
+      const status = response.sync;
+      const attemptAt = status?.lastAttemptAt ?? null;
+      const failed = status ? lastAttemptFailed(status) : false;
+      // The server reuses any attempt from the last 30 seconds, whether or not it worked.
+      if (response.recent)
+        setResult(
+          failed
+            ? { ok: false, message: "The last import failed under 30 seconds ago. Try again in a moment.", attemptAt }
+            : {
+                ok: !status?.lastError,
+                message: "An import finished under 30 seconds ago, so it was not repeated.",
+                attemptAt,
+              },
+        );
+      // No new attempt was recorded: the server holds imports while Patreon's rate limit lasts.
+      else if (status && !response.joined && attemptAt === before)
+        setResult({
+          ok: false,
+          message: "No import ran because Patreon asked the sync to slow down. It will retry automatically.",
+          attemptAt,
+        });
+      // A failed import is explained by the refreshed status below.
+      else if (!failed && !status?.lastError)
+        setResult({
+          ok: true,
+          message: response.joined ? "Joined the import already running. It has finished." : "Patreon import finished.",
+          attemptAt,
+        });
+    } catch (error) {
+      if (!mounted.current) return;
+      const status = typeof error === "object" && error !== null && "status" in error ? error.status : undefined;
+      setResult({
+        ok: false,
+        message:
+          status === 0
+            ? "The sync request ended before Patreon finished. The import may still be running, and the status line updates on the next refresh."
+            : errorMessage(error),
+        attemptAt: before,
+      });
+    } finally {
+      inFlight.current = false;
+      if (mounted.current) {
+        setSyncing(false);
+        onSynced();
+      }
+    }
+  }
+
+  const shown = result && result.attemptAt === sync.lastAttemptAt ? result : null;
+  const success = valid(sync.lastSuccessAt) ? sync.lastSuccessAt : null;
+  const attempt = valid(sync.lastAttemptAt) ? sync.lastAttemptAt : null;
+  const next = valid(sync.nextAttemptAt) ? sync.nextAttemptAt : null;
+  const now = Date.now();
+  const show = !unavailable && sync.configured;
+  // An attempt after the last success that is no longer running did not succeed.
+  const failedAt =
+    show && !running && attempt && (!success || Date.parse(attempt) > Date.parse(success)) ? attempt : null;
+  // Patreon shares a patron's Discord account only once the creator sets up its Discord benefit.
+  const discordNotShared = Boolean(show && success) && sync.paidMembers > 0 && sync.discordReported === 0;
+  const tone =
+    unavailable || sync.tokenRejected || sync.lastError ? "attention" : sync.configured && success ? "good" : "quiet";
+  // The schedule's own cadence. A rejected token or Patreon's rate limit can push the next run later, and a failed
+  // run's end is not recorded, so allow two minutes past its start.
+  const intervalMs = sync.intervalMinutes * 60_000;
+  const lastRun = failedAt ?? success;
+  const regular =
+    !sync.tokenRejected &&
+    next !== null &&
+    (lastRun === null || Date.parse(next) - Date.parse(lastRun) <= intervalMs + 2 * 60_000);
+  const state = unavailable ? (
+    "Status unavailable"
+  ) : !sync.configured ? (
+    "Not configured"
+  ) : running ? (
+    "Syncing now…"
+  ) : success ? (
+    <>
+      synced <Moment at={success}>{ago(success, now)}</Moment>
+    </>
+  ) : (
+    "Not synced yet"
+  );
+  return (
+    <>
+      {/* Notices come first, each only while its fault lasts. */}
+      {!unavailable &&
+        (sync.tokenRejected ? (
+          <p className="notice warning">
+            <strong>Patreon rejected the access token.</strong> Renew the Creator's Access Token on the Patreon client
+            page, update PATREON_CREATOR_ACCESS_TOKEN in Railway, and check that PATREON_CAMPAIGN_ID belongs to that
+            creator.
+          </p>
+        ) : sync.lastError ? (
+          <p className="notice warning">
+            <strong>Patreon import needs attention.</strong> {sync.lastError}
+          </p>
+        ) : null)}
+      {discordNotShared && (
+        <p className="notice info">
+          <strong>Patreon is not sharing Discord accounts.</strong> Connect Discord on Patreon and add it as a benefit
+          on each paid tier.
+        </p>
+      )}
+      <div className="status-row supporter-sync">
+        {/* The page is a polite live region; the relative times change every minute and are not announced. */}
+        <p className={`status-line ${tone}`} aria-live="off">
+          <span>
+            Patreon: <strong>{state}</strong>
+          </span>
+          {show && running && success && (
+            <span>
+              synced <Moment at={success}>{ago(success, now)}</Moment>
+            </span>
+          )}
+          {failedAt && (
+            <span>
+              last tried <Moment at={failedAt}>{ago(failedAt, now)}</Moment>
+            </span>
+          )}
+          {show && !running && next && (
+            <span title={regular ? `Runs every ${duration(intervalMs)}` : undefined}>
+              next <Moment at={next}>{ahead(next, now)}</Moment>
+            </span>
+          )}
+          {status}
+        </p>
+        {canSync && (
+          <button
+            type="button"
+            className="button secondary small"
+            disabled={disabled || unavailable || running}
+            onClick={() => void syncNow()}
+          >
+            {running ? "Syncing…" : "Sync now"}
+          </button>
+        )}
+        <details className="status-about supporter-details">
+          <summary>Details</summary>
+          <div className="status-about-panel">
+            {show && success && <LastImport sync={sync} />}
+            {details}
+          </div>
+        </details>
+        {!unavailable && !sync.configured && (
+          <p className="muted">
+            Set PATREON_ENABLED, PATREON_CAMPAIGN_ID and PATREON_CREATOR_ACCESS_TOKEN in Railway to import members.
+          </p>
+        )}
+      </div>
+      {shown && (
+        <p className={`notice ${shown.ok ? "success" : "warning"}`} role="status">
+          {shown.message}
+        </p>
+      )}
+    </>
+  );
+}

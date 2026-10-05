@@ -106,6 +106,18 @@ it("allows a ballot at a confirmed position without demanding an unreported game
   expect(screen.getByRole("button", { name: "Review ballot" })).toBeEnabled();
   expect(screen.queryByText(/Round timing is unavailable/)).not.toBeInTheDocument();
   expect(within(screen.getByRole("list", { name: "Ballot choices" })).getAllByRole("listitem")).toHaveLength(2);
+  expect(screen.queryByRole("link", { name: /Match & maps/ })).not.toBeInTheDocument();
+  expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+});
+it("says in review that a staff queue while the ballot is open keeps its winner from queuing", async () => {
+  show();
+  await choose("Europe");
+  await choose("Islands");
+  fireEvent.click(screen.getByRole("button", { name: "Review ballot" }));
+  // The close checks for a person's queue since the ballot opened, even of the entry already next.
+  expect(within(screen.getByRole("dialog")).getByText(/only if/)).toHaveTextContent(
+    "only if the rotation position, settings and your administrator access still match and no staff member queued the next map while it was open.",
+  );
   expect(request.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
 });
 it("shows automatic progress and keeps manual publication under staff override", async () => {
@@ -129,9 +141,9 @@ it("shows automatic progress and keeps manual publication under staff override",
   );
   show();
   expect(await screen.findByText("Automatic voting · Waiting for the next position.")).toBeInTheDocument();
-  expect(await screen.findByRole("button", { name: "Review ballot" })).not.toBeVisible();
-  fireEvent.click(screen.getByText("Staff override"));
-  expect(screen.getByRole("button", { name: "Review ballot" })).toBeVisible();
+  expect(screen.getByRole("heading", { name: "Staff override ballot" })).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "Review ballot" })).toBeVisible();
+  expect(document.querySelector("details")).toBeNull();
   expect(request.mock.calls.some(([, options]) => options?.method === "POST")).toBe(false);
 });
 it("checks rotation again in review and blocks pending, failed and changed-position responses", async () => {
@@ -245,7 +257,7 @@ it("does not query settings or catalog when disabled", async () => {
   enabled = false;
   show();
   await screen.findByRole("heading", { name: "Discord map voting is off" });
-  expect(screen.getByRole("link", { name: "Open match & maps" })).toHaveAttribute("href", "/match?server=primary");
+  expect(screen.queryByRole("link")).not.toBeInTheDocument();
   await waitFor(() => expect(request.mock.calls.map(([path]) => path)).toEqual(["map-votes", "map-votes/controls"]));
   await screen.findByText("Voting is off.");
   expect(request.mock.calls.map(([path]) => path)).toEqual(["map-votes", "map-votes/controls"]);
@@ -313,8 +325,8 @@ it("checks voting setup only on request, clears stale results on retry, and neve
   );
   show();
   await screen.findByRole("heading", { name: "Discord map voting is off" });
-  fireEvent.click(screen.getByText("How to enable voting"));
-  expect(request.mock.calls.map(([path]) => path)).toEqual(["map-votes", "map-votes/controls"]);
+  expect(document.querySelector("details")).toBeNull();
+  await waitFor(() => expect(request.mock.calls.map(([path]) => path)).toEqual(["map-votes", "map-votes/controls"]));
   fireEvent.click(screen.getByRole("button", { name: "Check voting setup" }));
   expect(screen.getByRole("button", { name: "Checking setup…" })).toBeDisabled();
   resolveSetup({
@@ -410,6 +422,21 @@ it("keeps uncertain requests reviewable without offering an automatic retry", as
   expect(screen.getByRole("button", { name: /Copy ballot receipt/ })).toBeInTheDocument();
   expect(request.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
 });
+it("reports drafts to a page that shares them instead of clearing the page's warning", async () => {
+  const report = vi.fn();
+  const state = context();
+  render(
+    <AdminContext.Provider value={state}>
+      <MapVotesPage onUnsavedChange={report} />
+    </AdminContext.Provider>,
+    { wrapper: ({ children }) => <MemoryRouter>{children}</MemoryRouter> },
+  );
+  fireEvent.change(await screen.findByRole("combobox", { name: "Map" }), { target: { value: "Europe" } });
+  await waitFor(() => expect(report).toHaveBeenLastCalledWith(true));
+  fireEvent.click(screen.getByRole("button", { name: "Discard draft" }));
+  await waitFor(() => expect(report).toHaveBeenLastCalledWith(false));
+  expect(state.setUnsavedChanges).not.toHaveBeenCalled();
+});
 it("protects an unfinished selection and discards it explicitly", async () => {
   const { state } = show();
   fireEvent.change(await screen.findByRole("combobox", { name: "Map" }), { target: { value: "Europe" } });
@@ -493,7 +520,7 @@ it("shows saved results and closes an active ballot with a separate recorded req
   votes = [ballot];
   show();
   await screen.findByText(/An active ballot/);
-  expect(request.mock.calls.map(([path]) => path)).toEqual(["map-votes", "map-votes/controls"]);
+  await waitFor(() => expect(request.mock.calls.map(([path]) => path)).toEqual(["map-votes", "map-votes/controls"]));
   expect(screen.queryByRole("button", { name: "Review ballot" })).not.toBeInTheDocument();
   expect(screen.getByRole("link", { name: /View in Discord/ })).toHaveAttribute("href", ballot.messageUrl);
   fireEvent.click(screen.getByRole("button", { name: "Close ballot" }));
@@ -511,4 +538,13 @@ it("does not invent a zero-vote total when staff close an uncounted ballot", asy
   const table = await screen.findByRole("table", { name: "Map votes" });
   expect(within(table).queryByText(/0 votes/)).not.toBeInTheDocument();
   expect(within(table).getByText("Closed before counting.")).toBeInTheDocument();
+});
+it("shows the ballot, voting settings and history as sections", async () => {
+  votes = [{ ...ballot, state: "queued", message: "Ozeti won." }];
+  show();
+  await screen.findByRole("button", { name: "Add map option" });
+  const headings = screen.getAllByRole("heading", { level: 3 }).map((heading) => heading.textContent);
+  expect(headings).toEqual(["Last map vote", "Manual ballot", "Voting settings", "Ballot history"]);
+  expect(await screen.findByRole("checkbox", { name: "Automatic community voting" })).toBeVisible();
+  expect(request.mock.calls.some(([, options]) => options?.method === "POST")).toBe(false);
 });

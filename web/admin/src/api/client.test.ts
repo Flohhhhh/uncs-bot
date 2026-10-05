@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, configureSession, isReadPending, MUTATION_TIMEOUT_MS, READ_TIMEOUT_MS } from "./client";
+import { api, ApiError, configureSession, isReadPending, MUTATION_TIMEOUT_MS, READ_TIMEOUT_MS } from "./client";
 import { rejectionState } from "../features/actions/policy";
 afterEach(() => {
   configureSession("");
@@ -44,6 +44,47 @@ describe("staff API boundary", () => {
     vi.stubGlobal("fetch", fetcher);
     await expect(api("actions", { method: "POST", body: "{}" })).rejects.toThrow("before confirmation");
     expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+  it.each<[string, string | null, number | undefined]>([
+    ["a number of seconds", "60", 60],
+    ["a date", "Sun, 04 Oct 2026 12:00:30 GMT", 30],
+    ["a date already past", "Sun, 04 Oct 2026 11:59:00 GMT", 0],
+    ["nothing", null, undefined],
+    ["text it cannot read", "soon", undefined],
+  ])(
+    "reports how long a 429 asked to wait, given %s, and never repeats the request itself",
+    async (_name, header, wait) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-10-04T12:00:00Z"));
+      const fetcher = vi.fn(
+        async () =>
+          new Response(JSON.stringify({ message: "Too many dashboard requests. Try again in a minute." }), {
+            status: 429,
+            headers: header === null ? undefined : { "Retry-After": header },
+          }),
+      );
+      vi.stubGlobal("fetch", fetcher);
+      const error: unknown = await api("applications/one/approve", { method: "POST", body: "{}" }).catch(
+        (failure: unknown) => failure,
+      );
+      expect(error).toBeInstanceOf(ApiError);
+      expect(error).toMatchObject({ status: 429, message: "Too many dashboard requests. Try again in a minute." });
+      expect((error as ApiError).retryAfter).toBe(wait);
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("keeps the server's words and the rule a refusal names", async () => {
+    const refusal = {
+      message: "This payment was not made inside the founder window.",
+      blockedReason: "outside_window",
+    };
+    const fetcher = vi.fn(async () => new Response(JSON.stringify(refusal), { status: 409 }));
+    vi.stubGlobal("fetch", fetcher);
+    const post = () => api("supporters/paypal", { method: "POST", body: "{}" });
+    await expect(post()).rejects.toMatchObject({ ...refusal, status: 409 });
+    fetcher.mockImplementation(async () => new Response(JSON.stringify({ message: "Conflict" }), { status: 409 }));
+    await expect(post()).rejects.toMatchObject({ message: "Conflict", status: 409, blockedReason: undefined });
   });
   it("rejects a foreign URL before any network request", async () => {
     const fetcher = vi.fn();

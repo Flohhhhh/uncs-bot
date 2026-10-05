@@ -1,5 +1,21 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { and, desc, eq, gt, inArray, lt, not, sql } from "drizzle-orm";
+import {
+  and,
+  count,
+  desc,
+  eq,
+  gt,
+  gte,
+  inArray,
+  isNotNull,
+  like,
+  lt,
+  ne,
+  not,
+  sql,
+  type SQL,
+  type SQLWrapper,
+} from "drizzle-orm";
 import { DATABASE, type Database } from "../database/database.types";
 import { adminActions, adminSessions } from "../database/schema";
 import type { ActionResult, AdminAction, Staff } from "./admin.types";
@@ -17,6 +33,47 @@ const routineDelivery = and(
   inArray(adminActions.action, ["message", "broadcast"]),
   inArray(adminActions.state, ["accepted", "applied"]),
 )!;
+
+const moderation = inArray(adminActions.action, ["kick", "ban"]);
+/**
+ * Kicks and bans that count toward a player's record: those the game applied or accepted. A started,
+ * pending or unknown record may never have reached the game, such as one left by a crash.
+ */
+const counted = and(moderation, inArray(adminActions.state, ["applied", "accepted"]))!;
+/** A player's recent kicks and bans: every one the game did not refuse, shown with its outcome. */
+const attempted = and(moderation, ne(adminActions.state, "failed"))!;
+/** The value from the group's newest row, among the rows that match `filter` when one is given. */
+const newest = <T>(value: SQLWrapper, filter?: SQL) =>
+  sql<T>`(array_agg(${value} order by ${adminActions.createdAt} desc)${filter ? sql` filter (where ${filter})` : sql``})[1]`;
+const lastAt = sql<Date>`max(${adminActions.createdAt})`.mapWith(adminActions.createdAt);
+// Kicks and bans keep the player's name from the roster at the time; older records have none.
+const playerName = sql`${adminActions.details}->>'playerName'`;
+const recordFields = (since: Date) => ({
+  steamId: adminActions.target,
+  action: adminActions.action,
+  count: count(),
+  recent: sql<number>`count(*) filter (where ${gte(adminActions.createdAt, since)})`.mapWith(Number),
+  lastAt,
+  lastBy: newest<string>(adminActions.actorName),
+  lastReason: newest<string | null>(sql`${adminActions.details}->>'reason'`),
+  name: newest<string | null>(playerName, isNotNull(playerName)),
+});
+/** One kind of action against one player: how many, how many since the asked date, and the newest one. */
+export type ModerationCount = {
+  count: number;
+  recent: number;
+  lastAt: Date;
+  lastBy: string;
+  lastReason: string | null;
+};
+export type ModerationSummary = { name: string | null; kicks: ModerationCount | null; bans: ModerationCount | null };
+const moderationCount = (row: ModerationCount): ModerationCount => ({
+  count: row.count,
+  recent: row.recent,
+  lastAt: row.lastAt,
+  lastBy: row.lastBy,
+  lastReason: row.lastReason,
+});
 
 const auditFields = {
   id: adminActions.id,
@@ -50,7 +107,8 @@ export class AdminStore {
     await this.db.delete(adminSessions).where(eq(adminSessions.tokenHash, tokenHash));
   }
 
-  async begin(staff: Staff, action: AdminAction, requestHash: string) {
+  /** `playerName` is the target's name from the roster, kept with a kick or ban for its record. */
+  async begin(staff: Staff, action: AdminAction, requestHash: string, playerName?: string) {
     const inserted = await this.db
       .insert(adminActions)
       .values({
@@ -60,7 +118,7 @@ export class AdminStore {
         action: action.action,
         target: "steamId" in action ? action.steamId : "server",
         requestHash,
-        details: action,
+        details: playerName ? { ...action, playerName } : action,
       })
       .onConflictDoNothing()
       .returning();
@@ -87,6 +145,27 @@ export class AdminStore {
       .limit(100);
   }
 
+  /**
+   * Whether a person (not a `system:*` actor) sent a map-next for this server at or after `since` that the
+   * game did not refuse. Started and unconfirmed queues count: they may still change the next map.
+   */
+  async staffQueuedSince(serverId: string, since: Date) {
+    const [found] = await this.db
+      .select({ id: adminActions.id })
+      .from(adminActions)
+      .where(
+        and(
+          eq(adminActions.action, "map-next"),
+          eq(actionServer, serverId),
+          gte(adminActions.createdAt, since),
+          not(like(adminActions.actorId, "system:%")),
+          ne(adminActions.state, "failed"),
+        ),
+      )
+      .limit(1);
+    return !!found;
+  }
+
   async receipt(id: string, serverId = LEGACY_SERVER_ID) {
     const [record] = await this.db
       .select(auditFields)
@@ -94,5 +173,53 @@ export class AdminStore {
       .where(and(eq(adminActions.id, id), eq(actionServer, serverId)))
       .limit(1);
     return record ?? null;
+  }
+
+  /**
+   * Kicks and bans the game applied or accepted for these players on the server, in one query. `recent`
+   * counts those at or after `since`. Players with neither are left out.
+   */
+  async moderationSummaries(serverId: string, steamIds: readonly string[], since = new Date(0)) {
+    const summaries = new Map<string, ModerationSummary>();
+    if (!steamIds.length) return summaries;
+    const rows = await this.db
+      .select(recordFields(since))
+      .from(adminActions)
+      .where(and(eq(actionServer, serverId), inArray(adminActions.target, [...steamIds]), counted))
+      .groupBy(adminActions.target, adminActions.action)
+      .orderBy(desc(lastAt));
+    for (const row of rows) {
+      const summary = summaries.get(row.steamId) ?? { name: null, kicks: null, bans: null };
+      summary.name ??= row.name;
+      if (row.action === "kick") summary.kicks = moderationCount(row);
+      else summary.bans = moderationCount(row);
+      summaries.set(row.steamId, summary);
+    }
+    return summaries;
+  }
+
+  /** One player's newest kicks and bans on the server, unconfirmed ones included and failed ones left out. */
+  async moderationEntries(serverId: string, steamId: string, limit = 10) {
+    return this.db
+      .select(auditFields)
+      .from(adminActions)
+      .where(and(eq(actionServer, serverId), eq(adminActions.target, steamId), attempted))
+      .orderBy(desc(adminActions.createdAt))
+      .limit(limit);
+  }
+
+  /** Players kicked at least `minimum` times on the server since `since`, most kicks first (at most 50). */
+  async repeatOffenders(serverId: string, since: Date, minimum = 2) {
+    const rows = await this.db
+      .select(recordFields(since))
+      .from(adminActions)
+      .where(
+        and(eq(actionServer, serverId), eq(adminActions.action, "kick"), counted, gte(adminActions.createdAt, since)),
+      )
+      .groupBy(adminActions.target, adminActions.action)
+      .having(sql`count(*) >= ${minimum}`)
+      .orderBy(desc(count()), desc(lastAt))
+      .limit(50);
+    return rows.map((row) => ({ steamId: row.steamId, name: row.name, kicks: moderationCount(row) }));
   }
 }

@@ -14,6 +14,8 @@ const context: AdminContextValue = {
   me: { id: "12345678901234567", name: "Staff", role: "viewer", csrf: "fixture" },
   overview: null,
   stale: false,
+  checking: false,
+  watchRoster: vi.fn(),
   busy: false,
   dialogOpen: false,
   refreshVersion: 0,
@@ -97,8 +99,12 @@ function page(value: AdminContextValue = context) {
     </AdminContext.Provider>
   );
 }
+/** One entry in the stat strip, such as "Recorded kills 100". */
+function stat(label: string) {
+  return screen.getByText(label, { selector: ".combat-stats dt" }).closest("div");
+}
 function recordedKills() {
-  return screen.getByText("RECORDED KILLS", { selector: ".metric-label" }).closest(".metric");
+  return stat("Recorded kills");
 }
 
 beforeEach(() => {
@@ -123,7 +129,7 @@ describe("CombatPage", () => {
     );
     render(page());
     await screen.findByText(enabled ? "Waiting for the first combat events" : "Combat tracking is off");
-    expect(screen.queryByText("RECORDED KILLS", { selector: ".metric-label" })).not.toBeInTheDocument();
+    expect(document.querySelector(".combat-stats")).not.toBeInTheDocument();
     expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
   });
@@ -136,17 +142,25 @@ describe("CombatPage", () => {
     await act(async () => response.resolve(server()));
     expect(await screen.findByRole("table", { name: "Server leaderboard" })).toBeTruthy();
     expect(recordedKills()?.textContent).toContain("100");
+    expect(stat("Headshot kills")?.textContent).toContain("50% of kills");
     expect(
       screen.getByText("Filters apply to these recent events. Stats cover the full recorded period."),
     ).toBeTruthy();
-    expect(screen.getByText("Recorded statistics are for human review, not a cheating verdict.")).toBeTruthy();
+    expect(screen.getByText("Combat feed:").parentElement).toHaveTextContent("Combat feed: Receiving");
+    // The coverage notes sit behind one disclosure instead of a permanent panel.
+    const about = screen.getByText("About these numbers").closest("details")!;
+    expect(about).not.toHaveAttribute("open");
+    fireEvent.click(screen.getByText("About these numbers"));
+    expect(about).toHaveAttribute("open");
+    expect(within(about).getByText("Recorded statistics are for human review, not a cheating verdict.")).toBeVisible();
+    expect(within(about).getByText(server().coverageNote)).toBeVisible();
   });
 
   it("keeps recorded history visible after tracking is turned off", async () => {
     request.mockResolvedValue(server({ enabled: false, connected: false, feedStatus: "waiting" }));
     render(page());
     expect(await screen.findByRole("table", { name: "Server leaderboard" })).toBeInTheDocument();
-    expect(screen.getByText("TRACKING OFF")).toBeInTheDocument();
+    expect(screen.getByText("Tracking off")).toBeInTheDocument();
     expect(recordedKills()?.textContent).toContain("100");
     expect(screen.queryByText("No statistics are available yet.")).not.toBeInTheDocument();
   });
@@ -191,10 +205,10 @@ describe("CombatPage", () => {
     );
     render(page());
     await screen.findByRole("table", { name: "Server leaderboard" });
-    fireEvent.click(screen.getByRole("button", { name: "Last 24 hours" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Last 24 hours" }));
     expect(screen.getByText("Loading combat history…")).toBeTruthy();
     expect(screen.queryByRole("table", { name: "Server leaderboard" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Last 30 days" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Last 30 days" }));
     await act(async () =>
       day.resolve(server({ period: "day", leaderboard: [{ ...server().leaderboard[0], name: "Day-only player" }] })),
     );
@@ -207,7 +221,7 @@ describe("CombatPage", () => {
     );
     expect(await screen.findByRole("button", { name: "Month-only player" })).toBeTruthy();
     expect(screen.queryByText("Day-only player")).toBeNull();
-    expect(screen.getByRole("button", { name: "Last 30 days" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Last 30 days" })).toHaveAttribute("aria-selected", "true");
   });
 
   it("opens a player's history with no old roster and returns to the server leaderboard", async () => {
@@ -223,7 +237,7 @@ describe("CombatPage", () => {
     await act(async () => response.resolve(playerData));
     expect(await screen.findByRole("heading", { name: "Alice" })).toBeTruthy();
     expect(screen.getByText("No recorded deaths in this period")).toBeTruthy();
-    expect(screen.getByText("K / D", { selector: ".metric-label" }).closest(".metric")?.textContent).toContain("—");
+    expect(stat("K / D")?.textContent).toContain("—");
     expect(request).toHaveBeenCalledWith(
       `combat/players/${aliceId}?period=week`,
       expect.objectContaining({ signal: expect.anything() }),
@@ -252,21 +266,21 @@ describe("CombatPage", () => {
   it("keeps failed-refresh history stale through a pending retry until recovery is confirmed", async () => {
     request.mockResolvedValueOnce(server()).mockRejectedValueOnce(new Error("Unavailable"));
     const view = render(page());
-    await screen.findByText("FEED RECEIVING");
+    await screen.findByText("Receiving");
     view.rerender(page({ ...context, refreshVersion: 1 }));
     expect(await screen.findByRole("alert")).toBeTruthy();
-    expect(screen.getByText("FEED STATUS UNAVAILABLE")).toBeTruthy();
-    expect(screen.queryByText("FEED RECEIVING")).toBeNull();
+    expect(screen.getByText("Status unavailable")).toBeTruthy();
+    expect(screen.queryByText("Receiving")).toBeNull();
     expect(screen.getByRole("table", { name: "Server leaderboard" })).toBeTruthy();
     const retry = deferred<CombatResponse>();
     request.mockImplementationOnce(() => retry.promise as never);
     view.rerender(page({ ...context, refreshVersion: 2 }));
     await waitFor(() => expect(request).toHaveBeenCalledTimes(3));
     expect(screen.getByRole("alert")).toHaveTextContent("Showing the last received snapshot");
-    expect(screen.queryByText("FEED RECEIVING")).toBeNull();
+    expect(screen.queryByText("Receiving")).toBeNull();
     expect(screen.getByRole("button", { name: "Retry combat history" })).toBeDisabled();
     await act(async () => retry.resolve(server({ feedStatus: "quiet" })));
-    expect(await screen.findByText("NO RECENT BATCH")).toBeInTheDocument();
+    expect(await screen.findByText("No recent batch")).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(request.mock.calls.every(([, options]) => !options?.method)).toBe(true);
   });
@@ -277,7 +291,7 @@ describe("CombatPage", () => {
       server({ feedStatus: "quiet", events: [], leaderboard: [{ ...server().leaderboard[0], name }] }),
     );
     render(page());
-    expect(await screen.findByText("NO RECENT BATCH")).toBeTruthy();
+    expect(await screen.findByText("No recent batch")).toBeTruthy();
     expect(screen.getByText(/A quiet feed does not mean the server is offline/)).toBeTruthy();
     expect(screen.getByRole("button", { name })).toBeTruthy();
     expect(document.querySelector("img")).toBeNull();
@@ -365,14 +379,141 @@ describe("CombatPage", () => {
     expect(screen.queryByText("Latest game feed delivery refused.")).toBeNull();
   });
 
+  it("lists the game events received by type with an escaped latest sample", async () => {
+    const markup = "<img src=x onerror=alert(1)>";
+    const response = server({
+      otherEvents: [
+        { type: "killed", count: 9500, firstReceivedAt: observedAt, lastReceivedAt: observedAt, sample: null },
+        {
+          type: "playerJoined",
+          count: 12,
+          firstReceivedAt: "2026-09-29T18:00:00.000Z",
+          lastReceivedAt: observedAt,
+          sample: { type: "playerJoined", steamId: aliceId, name: markup },
+        },
+        {
+          type: "bulk",
+          count: 1,
+          firstReceivedAt: observedAt,
+          lastReceivedAt: observedAt,
+          sample: { tooLarge: true, bytes: 5120 },
+        },
+      ],
+    });
+    const { leaderboard, otherEvents: _otherEvents, ...base } = response;
+    request.mockImplementation(async (path) =>
+      path.startsWith("combat/players/") ? { ...base, steamId: aliceId, player: leaderboard[0] } : response,
+    );
+    render(page());
+    const list = await screen.findByRole("list", { name: "Game events received" });
+    const rows = within(list).getAllByRole("listitem");
+    expect(rows.map((row) => row.querySelector("p")?.textContent?.replace(/ last seen .*/, ""))).toEqual([
+      `killed · ${(9500).toLocaleString()} ·`,
+      "playerJoined · 12 ·",
+      "bulk · 1 ·",
+    ]);
+    expect(
+      within(rows[0])
+        .getByText(/last seen/)
+        .querySelector("time"),
+    ).toHaveAttribute("dateTime", observedAt);
+    // Killed events are stored in full, so they carry no sample.
+    expect(within(rows[0]).queryByText("Latest sample")).toBeNull();
+    const sample = within(rows[1]).getByText("Latest sample").closest("details")!;
+    expect(sample).not.toHaveAttribute("open");
+    fireEvent.click(within(sample).getByText("Latest sample"));
+    expect(sample).toHaveAttribute("open");
+    const pre = sample.querySelector("pre")!;
+    expect(JSON.parse(pre.textContent!)).toEqual({ type: "playerJoined", steamId: aliceId, name: markup });
+    expect(pre.children).toHaveLength(0);
+    expect(document.querySelector("img")).toBeNull();
+    expect(JSON.parse(rows[2].querySelector("pre")!.textContent!)).toEqual({ tooLarge: true, bytes: 5120 });
+    // Server view only: a player's history does not show feed event types.
+    fireEvent.click(
+      within(screen.getByRole("table", { name: "Server leaderboard" })).getByRole("button", { name: "Alice" }),
+    );
+    expect(await screen.findByRole("heading", { name: "Alice" })).toBeTruthy();
+    expect(screen.queryByText("Game events received")).toBeNull();
+  });
+
+  it("says when no game events were counted and omits the section for an older Gramps", async () => {
+    request.mockResolvedValueOnce(server({ otherEvents: [] }));
+    const { unmount } = render(page());
+    expect(await screen.findByText("No game events counted in this period")).toBeInTheDocument();
+    expect(screen.getByText("Game events received")).toBeInTheDocument();
+    unmount();
+    request.mockResolvedValueOnce(server());
+    render(page());
+    await screen.findByRole("table", { name: "Server leaderboard" });
+    expect(screen.queryByText("Game events received")).toBeNull();
+  });
+
+  it("warns when the last batch had new event types over the daily limit", async () => {
+    const batch = { at: observedAt, accepted: 3, skipped: 7, invalid: 0, firstInvalid: null, types: 9 };
+    request.mockResolvedValueOnce(server({ lastBatch: { ...batch, typesOverLimit: 2 } }));
+    const { unmount } = render(page());
+    await screen.findByRole("table", { name: "Server leaderboard" });
+    const notice = screen.getByText("Daily event type limit reached.").closest(".notice");
+    expect(notice).toHaveClass("warning");
+    expect(notice).toHaveTextContent("2 new event types not counted.");
+    unmount();
+    request.mockResolvedValueOnce(server({ lastBatch: { ...batch, typesOverLimit: 0 } }));
+    render(page());
+    await screen.findByRole("table", { name: "Server leaderboard" });
+    expect(screen.queryByText("Daily event type limit reached.")).toBeNull();
+  });
+
   it("blocks navigation while another staff action is in progress", async () => {
     request.mockResolvedValue(server());
     render(page({ ...context, busy: true }));
     await screen.findByRole("table", { name: "Server leaderboard" });
-    const period = screen.getByRole("button", { name: "Last 24 hours" }) as HTMLButtonElement;
+    const period = screen.getByRole("tab", { name: "Last 24 hours" }) as HTMLButtonElement;
     expect(period.disabled).toBe(true);
     fireEvent.click(period);
     await waitFor(() => expect(request).toHaveBeenCalledTimes(1));
     expect((screen.getAllByRole("button", { name: "Alice" })[0] as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("shows weapons by their readable name and still filters by the reported cause", async () => {
+    request.mockResolvedValue(server({ events: [event({ cause: "Id.Item.AK74M" }), event({ eventId: "two" })] }));
+    render(page());
+    const events = await screen.findByRole("table", { name: "Combat events" });
+    expect(within(events).getByText("AK-74M")).toHaveAttribute("title", "Id.Item.AK74M");
+    const cause = screen.getByLabelText("Weapon / cause");
+    expect(within(cause).getByRole("option", { name: "AK-74M" })).toHaveValue("AK-74M");
+    fireEvent.change(cause, { target: { value: "AK-74M" } });
+    expect(within(screen.getByRole("table", { name: "Combat events" })).getAllByRole("row")).toHaveLength(2);
+  });
+
+  it("offers one option per readable weapon, keeps unnamed causes apart and searches the shown name", async () => {
+    request.mockResolvedValue(
+      server({
+        events: [
+          event({ eventId: "one", cause: "Id.Item.AK74M" }),
+          event({ eventId: "two", cause: "ID.Item.AK74M" }),
+          event({ eventId: "three", cause: "Weapon.Rifle" }),
+          event({ eventId: "four", cause: "Some.Other" }),
+        ],
+      }),
+    );
+    render(page());
+    const rows = () => within(screen.getByRole("table", { name: "Combat events" })).getAllByRole("row");
+    await screen.findByRole("table", { name: "Combat events" });
+    const cause = screen.getByLabelText("Weapon / cause");
+    // Both casings read "AK-74M", so they are one option that matches both events.
+    expect(within(cause).getAllByRole("option", { name: "AK-74M" })).toHaveLength(1);
+    expect(within(cause).getByRole("option", { name: "Unknown weapon (Weapon.Rifle)" })).toHaveValue("Weapon.Rifle");
+    expect(within(cause).getByRole("option", { name: "Unknown weapon (Some.Other)" })).toHaveValue("Some.Other");
+    fireEvent.change(cause, { target: { value: "AK-74M" } });
+    expect(rows()).toHaveLength(3);
+    fireEvent.change(cause, { target: { value: "Weapon.Rifle" } });
+    expect(rows()).toHaveLength(2);
+    fireEvent.change(cause, { target: { value: "" } });
+    // The table shows "AK-74M", so searching for it finds both casings; the raw id still matches too.
+    const search = screen.getByLabelText("Search player, SteamID, or weapon");
+    fireEvent.change(search, { target: { value: "ak-74m" } });
+    expect(rows()).toHaveLength(3);
+    fireEvent.change(search, { target: { value: "ID.Item.AK74M" } });
+    expect(rows()).toHaveLength(3);
   });
 });

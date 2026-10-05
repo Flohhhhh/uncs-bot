@@ -8,6 +8,7 @@ import {
   type OnModuleDestroy,
 } from "@nestjs/common";
 import { ZodError } from "zod";
+import { AdminStore, type ModerationCount } from "../admin/admin.store";
 import { GameServers } from "../admin/game-servers";
 import { RconError, type RconErrorKind } from "../admin/rcon-protocol";
 import type { Overview, WardogsClient } from "../admin/wardogs.client";
@@ -18,7 +19,7 @@ import { EnvService } from "../env/env.service";
 import { LEAVE_GRACE_MS, MAX_ROSTER, ROUND_HOLD_MS } from "../server-community/community-state";
 import { FEED_CONTEXT, type FeedContextSource } from "./feed-context";
 import { initialHealthState, observeHealth, type HealthAlert } from "./health-state";
-import { formatLocal } from "./local-time";
+import { formatLocal, localParts } from "./local-time";
 import { NETWORK_BAN_SOURCES, withTimeout, type NetworkBanEntry, type NetworkBanSource } from "./network-bans";
 import {
   initialPerformanceState,
@@ -45,6 +46,9 @@ const ONLINE_AT_START = "online when Gramps started, recorded only";
 const SOURCE_TIMEOUT_MS = 3_000;
 const FEED_TIMEOUT_MS = 2_000;
 const NO_ACTION = "Gramps took no action.";
+const DAY_MS = 24 * 60 * 60_000;
+/** Shown with the network-ban sources in the worker status. */
+const KICK_HISTORY = "Kick history";
 /** Alert posts that may wait on Discord at once per server; past this, alerts are recorded only. */
 const POSTS_MAX = 10;
 
@@ -119,6 +123,34 @@ export function watchlistText(entry: NetworkBanEntry, name: string, presentAtSta
   };
 }
 
+/** "3 (last 2026-10-02)": all of a player's recorded kicks and the local date of the newest. */
+export function priorKicksText(kicks: ModerationCount, timeZone: string) {
+  return `${kicks.count} (last ${localParts(kicks.lastAt.getTime(), timeZone).date})`;
+}
+
+/** Monitoring only: the record is dashboard kicks on this server, never a reason Gramps acts. */
+export function repeatOffenderText(
+  kicks: ModerationCount,
+  name: string,
+  days: number,
+  presentAtStart: boolean,
+  timeZone: string,
+) {
+  const times = (count: number) => (count === 1 ? "once" : `${count} times`);
+  const reason = kicks.lastReason ? `: ${cleanText(kicks.lastReason, 200)}` : "";
+  return {
+    title: presentAtStart ? "Repeat offender online" : "Repeat offender joined",
+    lines: [
+      `${playerLabel(name)} ${presentAtStart ? "was online when Gramps started" : "joined"}.`,
+      `Kicked ${times(kicks.recent)} in the last ${days} days${kicks.count > kicks.recent ? ` (${kicks.count} in all)` : ""}.`,
+      `Last kick ${localParts(kicks.lastAt.getTime(), timeZone).date} by ${cleanText(kicks.lastBy, 64)}${reason}.`,
+      `From dashboard kicks on this server. Monitoring only. ${NO_ACTION}`,
+    ],
+  };
+}
+
+/** Kick and ban counts for joining players, read in one query per pass. */
+export type KickHistory = Pick<AdminStore, "moderationSummaries">;
 type FeedReader = FeedContextSource | null | undefined;
 
 /** One server: shared overview reads, pure reducers, then StaffAlerts.raise. Never changes the game. */
@@ -154,6 +186,7 @@ export class StaffAlertsWorker {
     private readonly env: EnvService,
     private readonly sources: NetworkBanSource[] = [],
     private readonly feed: FeedReader = null,
+    private readonly history: KickHistory | null = null,
   ) {}
 
   start() {
@@ -436,27 +469,22 @@ export class StaffAlertsWorker {
     if (!presentAtStart || (first && overview.players.length)) this.bootChecked = true;
     if (!ids.length) return;
     const knownGood = options.performance.knownGood;
-    for (const source of this.sources) {
-      let found: Map<string, NetworkBanEntry>;
-      try {
-        found = await withTimeout((signal) => source.lookup(ids, signal), SOURCE_TIMEOUT_MS);
-        this.sourceErrors.set(source.name, null);
-      } catch {
-        // Never log SteamIDs or source details; the next join tries again.
-        this.logger.warn(`Network ban source "${source.name}" failed for ${this.server.id}.`);
-        this.sourceErrors.set(source.name, {
-          error: "The lookup failed or took longer than 3 seconds.",
-          at: new Date(now).toISOString(),
-        });
-        continue;
-      }
+    const [kicks, lookups] = await Promise.all([this.priorKicks(ids, options, now), this.networkBans(ids, now)]);
+    // A watch-list alert already carries the player's kicks, so the same join raises no second alert.
+    const watched = new Set<string>();
+    for (const { source, found } of lookups) {
       for (const steamId of ids) {
         const entry = found.get(steamId);
         if (!entry || entry.revoked) continue;
+        watched.add(steamId);
+        const prior = kicks.get(steamId);
         const name = overview.players.find((player) => player.steamId === steamId)?.name ?? "Unknown";
         const isKnownGood = knownGood.has(steamId) || this.alerts.sessionNever().has(steamId);
         const text = watchlistText(entry, name, presentAtStart, isKnownGood);
         const highlighted = entry.communities !== null && entry.communities >= options.watchlist.highlightCommunities;
+        const fields: [string, string][] = [];
+        if (entry.communities !== null) fields.push(["Communities", String(entry.communities)]);
+        if (prior) fields.push(["Prior kicks", priorKicksText(prior, options.timeZone)]);
         this.raise({
           serverId: this.server.id,
           serverName: this.server.name,
@@ -471,8 +499,9 @@ export class StaffAlertsWorker {
             source: source.name,
             ...(entry.communities !== null ? { communities: entry.communities } : {}),
             ...(entry.recordedAt ? { recordedAt: entry.recordedAt } : {}),
+            ...(prior ? { priorKicks: prior.count, lastKickAt: prior.lastAt.toISOString() } : {}),
           },
-          fields: entry.communities !== null ? [["Communities", String(entry.communities)]] : [],
+          fields,
           links: entry.evidenceUrls,
           deliver: !presentAtStart,
           ...(presentAtStart ? { suppressed: ONLINE_AT_START } : {}),
@@ -490,6 +519,84 @@ export class StaffAlertsWorker {
         });
       }
     }
+    const { repeatKicks, repeatDays } = options.watchlist;
+    if (repeatKicks > 0)
+      for (const steamId of ids) {
+        const prior = kicks.get(steamId);
+        if (!prior || prior.recent < repeatKicks || watched.has(steamId)) continue;
+        const name = overview.players.find((player) => player.steamId === steamId)?.name ?? "Unknown";
+        const text = repeatOffenderText(prior, name, repeatDays, presentAtStart, options.timeZone);
+        this.raise({
+          serverId: this.server.id,
+          serverName: this.server.name,
+          kind: "repeat-offender-join",
+          severity: "warning",
+          key: `${presentAtStart ? "repeat-start" : "repeat"}:${steamId}`,
+          repeatMs: options.watchlist.cooldownMinutes * 60_000,
+          title: text.title,
+          lines: text.lines,
+          player: { steamId, name },
+          facts: {
+            kicks: prior.recent,
+            days: repeatDays,
+            priorKicks: prior.count,
+            lastKickAt: prior.lastAt.toISOString(),
+          },
+          fields: [
+            ["Kicks", `${prior.recent} in ${repeatDays} days`],
+            ["Prior kicks", priorKicksText(prior, options.timeZone)],
+          ],
+          deliver: !presentAtStart,
+          ...(presentAtStart ? { suppressed: ONLINE_AT_START } : {}),
+        });
+      }
+  }
+
+  /** Each network-ban source's matches, asked in turn. A failed source is reported and skipped; the next join tries again. */
+  private async networkBans(ids: string[], now: number) {
+    const lookups: { source: NetworkBanSource; found: Map<string, NetworkBanEntry> }[] = [];
+    for (const source of this.sources) {
+      try {
+        const found = await withTimeout((signal) => source.lookup(ids, signal), SOURCE_TIMEOUT_MS);
+        this.sourceErrors.set(source.name, null);
+        lookups.push({ source, found });
+      } catch {
+        // Never log SteamIDs or source details.
+        this.logger.warn(`Network ban source "${source.name}" failed for ${this.server.id}.`);
+        this.sourceErrors.set(source.name, {
+          error: "The lookup failed or took longer than 3 seconds.",
+          at: new Date(now).toISOString(),
+        });
+      }
+    }
+    return lookups;
+  }
+
+  /**
+   * Recorded kicks for the joining players, from one query with a 3-second limit. A failed read is
+   * shown in the status and leaves the alerts without kick counts; the next join reads again.
+   */
+  private async priorKicks(ids: string[], options: StaffAlertsOptions, now: number) {
+    const found = new Map<string, ModerationCount>();
+    const history = this.history;
+    if (!history) return found;
+    const since = new Date(now - options.watchlist.repeatDays * DAY_MS);
+    try {
+      const summaries = await withTimeout(
+        () => history.moderationSummaries(this.server.id, ids, since),
+        SOURCE_TIMEOUT_MS,
+      );
+      this.sourceErrors.set(KICK_HISTORY, null);
+      for (const [steamId, summary] of summaries) if (summary.kicks) found.set(steamId, summary.kicks);
+    } catch {
+      // Never log SteamIDs or database details.
+      this.logger.warn(`Kick history could not be read for ${this.server.id}.`);
+      this.sourceErrors.set(KICK_HISTORY, {
+        error: "The lookup failed or took longer than 3 seconds.",
+        at: new Date(now).toISOString(),
+      });
+    }
+    return found;
   }
 
   view(): StaffAlertsWorkerView {
@@ -514,10 +621,10 @@ export class StaffAlertsWorker {
       counters: this.performance.counters,
       trackedPlayers: this.performance.players.size,
       unlinkedPlayers: this.unlinked,
-      sources: this.sources.map((source) => ({
-        name: source.name,
-        error: this.sourceErrors.get(source.name)?.error ?? null,
-        at: this.sourceErrors.get(source.name)?.at ?? null,
+      sources: [...this.sources.map((source) => source.name), ...(this.history ? [KICK_HISTORY] : [])].map((name) => ({
+        name,
+        error: this.sourceErrors.get(name)?.error ?? null,
+        at: this.sourceErrors.get(name)?.at ?? null,
       })),
     };
   }
@@ -553,9 +660,9 @@ const idleWorker = (state: StaffAlertsWorkerView["state"]): StaffAlertsWorkerVie
 /**
  * Alert-only staff monitoring: one worker per configured server, started only when
  * STAFF_ALERTS_ENABLED and at least one feature are on. It reads the shared, cached overview
- * (and the live reserved slots only when a performance alert is about to fire). It never sends a game
- * action, writes no admin_actions rows and has no WarDogs Server Commands connection. State is
- * in memory; run one replica.
+ * (and the live reserved slots only when a performance alert is about to fire, and joining players'
+ * kick counts from admin_actions while the watch list is on). It never sends a game action, writes no
+ * admin_actions rows and has no WarDogs Server Commands connection. State is in memory; run one replica.
  */
 @Injectable()
 export class StaffAlertsMonitor implements OnApplicationBootstrap, OnApplicationShutdown, OnModuleDestroy {
@@ -568,6 +675,7 @@ export class StaffAlertsMonitor implements OnApplicationBootstrap, OnApplication
     private readonly env: EnvService,
     @Inject(NETWORK_BAN_SOURCES) private readonly sources: NetworkBanSource[],
     @Optional() @Inject(FEED_CONTEXT) private readonly feed?: FeedContextSource | null,
+    @Optional() @Inject(AdminStore) private readonly history?: AdminStore | null,
   ) {}
 
   onApplicationBootstrap() {
@@ -581,6 +689,7 @@ export class StaffAlertsMonitor implements OnApplicationBootstrap, OnApplication
           this.env,
           this.sources,
           this.feed,
+          this.history ?? null,
         );
         this.workers.set(server.id, worker);
         worker.start();

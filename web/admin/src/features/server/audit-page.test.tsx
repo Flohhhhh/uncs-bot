@@ -1,10 +1,11 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../../api/client";
 import type { Audit } from "../../api/types";
 import { AdminContext } from "../../app/context";
-import { context } from "../players/test-fixtures";
-import { AuditPage } from "./pages";
+import { alice, context } from "../players/test-fixtures";
+import { DashboardHistory } from "./pages";
 
 vi.mock("../../api/client", () => ({ api: vi.fn() }));
 const request = vi.mocked(api);
@@ -26,11 +27,13 @@ const recent: Audit[] = Array.from({ length: 100 }, (_value, index) => ({
   actorName: "Recent staff",
   details: { reason: "Recent action" },
 }));
-function mount() {
+function mount(admin = context()) {
   return render(
-    <AdminContext.Provider value={context()}>
-      <AuditPage />
-    </AdminContext.Provider>,
+    <MemoryRouter initialEntries={["/activity?server=primary&view=actions"]}>
+      <AdminContext.Provider value={admin}>
+        <DashboardHistory />
+      </AdminContext.Provider>
+    </MemoryRouter>,
   );
 }
 function search(value: string) {
@@ -51,6 +54,9 @@ describe("stored action receipt recovery", () => {
     expect(await screen.findByText("Earlier staff")).toBeInTheDocument();
     expect(screen.getByText("EXACT ID")).toBeInTheDocument();
     expect(screen.getByText("Unconfirmed")).toBeInTheDocument();
+    // The looked-up receipt opens with its action ID showing.
+    expect(screen.getByRole("button", { name: "Details" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText(id)).toBeVisible();
     expect(request).toHaveBeenCalledWith(`audit/${id}`, expect.objectContaining({ signal: expect.any(AbortSignal) }));
     expect(screen.getByText(/does not resend the action or recheck the game/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Back to recent actions" }));
@@ -112,5 +118,69 @@ describe("stored action receipt recovery", () => {
     search(id);
     expect(await screen.findByText("Earlier staff")).toBeInTheDocument();
     expect(screen.queryByText("Recent history unavailable")).not.toBeInTheDocument();
+  });
+  it("uses one outcome wording, names roster players beside their SteamID, and keeps the action ID in a details row", async () => {
+    const entries: Audit[] = [
+      { ...older, id: otherId, actorName: "Mod", state: "accepted", target: alice.steamId },
+      {
+        ...older,
+        actorName: "Admin",
+        action: "broadcast",
+        target: "server",
+        state: "applied",
+        message: "Sent",
+        details: { reason: "Staff action: Send announcement.", message: "GG all" } as Audit["details"],
+      },
+    ];
+    request.mockResolvedValue(entries);
+    mount();
+    const accepted = (await screen.findByText("Mod")).closest("tr")!;
+    expect(within(accepted).getByText("Accepted · not verified")).toBeInTheDocument();
+    expect(within(accepted).getByRole("button", { name: alice.name })).toBeInTheDocument();
+    expect(within(accepted).getByText(alice.steamId)).toBeInTheDocument();
+    expect(within(accepted).queryByText(otherId)).not.toBeInTheDocument();
+    const toggle = within(accepted).getByRole("button", { name: "Details" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    const details = document.getElementById(toggle.getAttribute("aria-controls")!)!;
+    expect(details).not.toBeVisible();
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(details).toBeVisible();
+    expect(within(details).getByText(otherId)).toBeInTheDocument();
+    const broadcast = screen.getByText("Admin").closest("tr")!;
+    expect(within(broadcast).getByText("Applied")).toBeInTheDocument();
+    fireEvent.click(within(broadcast).getByRole("button", { name: "Details" }));
+    expect(screen.getByText("GG all")).toBeVisible();
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "unc alice" } });
+    expect(screen.queryByText("Admin")).not.toBeInTheDocument();
+    expect(screen.getByText("Mod")).toBeInTheDocument();
+  });
+  it("opens the player panel from a target name, reading only that player's kick and ban record", async () => {
+    request.mockResolvedValue([{ ...older, target: alice.steamId }]);
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: alice.name }));
+    const panel = screen.getByRole("dialog");
+    expect(within(panel).getByRole("link", { name: "Combat history →" })).toHaveAttribute(
+      "href",
+      `/activity?server=primary&view=combat&player=${alice.steamId}`,
+    );
+    await waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+    expect(request.mock.calls.map(([path, options]) => [path, options?.method])).toEqual([
+      ["audit", undefined],
+      [`moderation/players/${alice.steamId}`, undefined],
+    ]);
+  });
+  it("names a kicked player from the receipt once they have left the roster", async () => {
+    const gone = "76561198000000009";
+    request.mockResolvedValue([
+      { ...older, target: gone, details: { reason: "Team killing", playerName: "Griefer" } },
+      { ...older, id: otherId, actorName: "Other staff", target: "76561198000000008" },
+    ]);
+    mount();
+    const row = (await screen.findByRole("button", { name: "Griefer" })).closest("tr")!;
+    expect(within(row).getByText(gone)).toBeInTheDocument();
+    search("griefer");
+    expect(screen.getByRole("button", { name: "Griefer" })).toBeInTheDocument();
+    expect(screen.queryByText("Other staff")).not.toBeInTheDocument();
   });
 });

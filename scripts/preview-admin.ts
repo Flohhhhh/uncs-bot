@@ -3,11 +3,32 @@ import "reflect-metadata";
 import { Test } from "@nestjs/testing";
 import { HttpAdapterHost } from "@nestjs/core";
 import { ExpressAdapter } from "@nestjs/platform-express";
-import { ConflictException, ForbiddenException, Global, Module, UnauthorizedException } from "@nestjs/common";
+import {
+  BadRequestException,
+  Body,
+  ConflictException,
+  Controller,
+  ForbiddenException,
+  Get,
+  Global,
+  HttpException,
+  Logger,
+  Module,
+  Post,
+  Req,
+  Res,
+  ServiceUnavailableException,
+  UnauthorizedException,
+  UseFilters,
+  UseGuards,
+} from "@nestjs/common";
+import { join } from "node:path";
+import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import type { Request, Response } from "express";
 import { AdminModule } from "../src/admin/admin.module";
-import { AdminAuth } from "../src/admin/admin.auth";
+import { AdminAuth, AdminGuard, type StaffRequest } from "../src/admin/admin.auth";
+import { AdminExceptionFilter } from "../src/admin/admin.controller";
 import { AdminSettings } from "../src/admin/admin.settings";
 import { AdminStore } from "../src/admin/admin.store";
 import { WardogsClient } from "../src/admin/wardogs.client";
@@ -17,6 +38,7 @@ import { settingFields, SESSION, ROTATION } from "../src/common/server-settings"
 import { scalarValue } from "../src/admin/config-document";
 import { parseRotation, auditAction } from "../src/admin/server-configuration";
 import { mapLabel } from "../src/common/map-labels";
+import { describeCause } from "../src/common/cause-labels";
 import type { ActionResult, AdminAction, Staff } from "../src/admin/admin.types";
 import { ApplicationsModule } from "../src/applications/applications.module";
 import { ApplicationsStore } from "../src/applications/applications.store";
@@ -26,13 +48,26 @@ import { EnvService } from "../src/env/env.service";
 import type { whitelistApplications } from "../src/database/schema";
 import { TelemModule } from "../src/telemetry/telemetry.module";
 import { TelemetryStore } from "../src/telemetry/telemetry.store";
-import type { CombatStats } from "../src/telemetry/telemetry.types";
+import {
+  LEADER_TAGS,
+  PUBLIC_MAX_DISTANCE_CENTIMETERS,
+  type CombatStats,
+  type LeaderTag,
+  type RowExtrasAggregate,
+  type ServerStatsAggregate,
+} from "../src/telemetry/telemetry.types";
 import { SupportersModule } from "../src/supporters/supporters.module";
 import { SupportersStore } from "../src/supporters/supporters.store";
+import { SupporterMatchService } from "../src/supporters/supporter-match.service";
+import { SupporterMatchStore } from "../src/supporters/supporter-match.store";
+import { DiscordRolesDiscord } from "../src/discord-roles/discord-roles.discord";
+import { DiscordRolesStore } from "../src/discord-roles/discord-roles.store";
+import { PatreonSyncService, type PatreonSyncStatus } from "../src/supporters/patreon-sync.service";
 import { MapVotesModule } from "../src/map-votes/map-votes.module";
 import { MapVotesStore } from "../src/map-votes/map-votes.store";
 import { MapVotesDiscord } from "../src/map-votes/map-votes.discord";
-import type { MapVoteRecord } from "../src/map-votes/map-votes.types";
+import { ballotWinner, type MapVoteRecord } from "../src/map-votes/map-votes.types";
+import { automationSettings, closeReached } from "../src/common/voting-policy";
 import { ServerEventsModule } from "../src/server-events/server-events.module";
 import { ServerCommunityController } from "../src/server-community/server-community.controller";
 import { ServerCommunityService } from "../src/server-community/server-community.service";
@@ -45,17 +80,26 @@ import { StaffAlerts } from "../src/staff-alerts/staff-alerts.service";
 import { StaffAlertsMonitor } from "../src/staff-alerts/staff-alerts.monitor";
 import { settingsView, staffAlertsOptions } from "../src/staff-alerts/staff-alerts.config";
 import type { StaffAlertsStatus } from "../src/common/staff-alerts";
-import type {
-  FounderPolicy,
-  ManualMemberInput,
-  PaymentView,
-  SupporterMutation,
-  SupporterView,
+import { automaticBlockedMessages } from "../src/supporters/supporter-match.rules";
+import {
+  founderBlockedMessages,
+  type FounderPolicy,
+  type ManualMemberInput,
+  type PaymentView,
+  type SupporterMutation,
+  type SupporterView,
 } from "../src/supporters/supporters.types";
 
 const previewPort = Number(process.env.PREVIEW_PORT || 4317);
+// PREVIEW_GAME_MODE=pre-round reproduces the 2 October waiting sample (1/100 players, scores 0);
+// full-server shows 100/100 players (a 34/33/33 roster, so 50v50 readiness can pass) and a 100-point
+// match in progress. PREVIEW_CLOCK=false hides the match clock on every server, as the live build did
+// on 2 October.
+const previewMode = process.env.PREVIEW_GAME_MODE ?? "live";
+const previewClock = process.env.PREVIEW_CLOCK !== "false";
 function createPreviewGame(name: string, reportsClock: boolean) {
   let previewRoundStart = Date.now() - 600_000;
+  const clock = reportsClock && previewClock && previewMode !== "pre-round";
 
   const players = [
     { name: "UncDap", steamId: "76561198066952872", faction: "RED", kills: 18, deaths: 7, cash: 14300, pingMs: 32 },
@@ -105,6 +149,19 @@ function createPreviewGame(name: string, reportsClock: boolean) {
       pingMs: 44,
     },
   ];
+  if (previewMode === "full-server")
+    // A full server: 34/33/33 across the three teams, every identity linked and unique.
+    players.push(
+      ...Array.from({ length: 100 - players.length }, (_, index) => ({
+        name: `Preview player ${index + 1}`,
+        steamId: String(76561198100000000n + BigInt(index)),
+        faction: ["RED", "BLU", "GRN"][(index + players.length) % 3],
+        kills: 0,
+        deaths: 0,
+        cash: 1000,
+        pingMs: 40,
+      })),
+    );
   const factions = [
     { code: "RED", name: "Valkyra", colorHex: "#D86060", score: 18420 },
     { code: "BLU", name: "Lonestar", colorHex: "#5B95D8", score: 14800 },
@@ -192,14 +249,26 @@ function createPreviewGame(name: string, reportsClock: boolean) {
         return {
           serverName: scalarValue(text, SESSION, "ServerName") || "Local preview",
           map: mapLabel(currentMap),
-          ...(reportsClock ? { matchSeconds: (Date.now() - previewRoundStart) / 1000 } : {}),
+          ...(clock ? { matchSeconds: (Date.now() - previewRoundStart) / 1000 } : {}),
           lighting,
           alternator: currentMap === "Kavkazi" ? "ZoneAlternator.Bakurani.Farmland.Circle" : "None",
           experiences: ["KOTH"],
           scoreTick: { current: 24, min: 18, max: 30 },
           ...(reportsClock ? { rotation: { nowIndex: 0, nextIndex: 1 } } : {}),
-          players: { current: players.length, max: 100 },
-          factionScores: factions.map(({ name, colorHex, score }) => ({ name, colorHex, score })),
+          players: {
+            current: previewMode === "pre-round" ? 1 : previewMode === "full-server" ? 100 : players.length,
+            max: 100,
+          },
+          factionScores: factions.map(({ name, colorHex, score }, index) => ({
+            name,
+            colorHex,
+            score:
+              previewMode === "pre-round"
+                ? 0
+                : previewMode === "full-server"
+                  ? Math.min(99, Math.floor(((Date.now() - previewRoundStart) / 18_000) * (1 - index * 0.2)))
+                  : score,
+          })),
         };
       if (path === "/v1/players") return { players };
       if (path === "/v1/server-id") return { serverId: `preview-${name}` };
@@ -391,6 +460,16 @@ const store = {
       .reverse()
       .slice(0, 100);
   },
+  async staffQueuedSince(serverId: string, since: Date) {
+    return [...records.values()].some(
+      (record) =>
+        record.action === "map-next" &&
+        (record.details.serverId ?? "primary") === serverId &&
+        record.createdAt >= since &&
+        !record.actorId.startsWith("system:") &&
+        record.state !== "failed",
+    );
+  },
   async receipt(id: string, serverId: string) {
     const record = records.get(id);
     if (!record || (record.details.serverId ?? "primary") !== serverId) return null;
@@ -471,6 +550,9 @@ const applicationStore = {
       reviewKind: null,
       lastActionState: null,
       lastActionMessage: null,
+      accessIntent: "grant",
+      whitelistGrant: null,
+      revokedAt: null,
       ...input,
     } as WhitelistApplication;
     applications.set(entry.id, entry);
@@ -495,8 +577,10 @@ const applicationStore = {
       entry.reviewId !== previous.reviewId
     )
       throw new ConflictException("Preview application changed during the check");
+    const revoke = entry.accessIntent === "revoke";
     Object.assign(entry, {
-      status: result.state === "applied" ? "approved" : "needs_review",
+      status: result.state === "applied" ? (revoke ? "revoked" : "approved") : "needs_review",
+      ...(revoke && result.state === "applied" ? { revokedAt: new Date() } : {}),
       reviewedAt: new Date(),
       reviewedBy: staff.id,
       reviewReason: review.reason,
@@ -526,17 +610,75 @@ const applicationStore = {
     });
     return { claimed: true, application: entry };
   },
-  async finishApproval(id: string, actionId: string, result: ActionResult) {
+  async finishApproval(
+    id: string,
+    actionId: string,
+    result: ActionResult,
+    grant: "granted" | "existing" | null = null,
+  ) {
     const entry = applications.get(id);
     if (!entry || entry.status !== "processing" || entry.reviewId !== actionId)
       throw new Error("Preview application changed");
     Object.assign(entry, {
       status: result.state === "applied" ? "approved" : "needs_review",
+      ...(result.state === "applied" && grant ? { whitelistGrant: grant } : {}),
       lastActionState: result.state,
       lastActionMessage: result.message,
       updatedAt: new Date(),
     });
     return entry;
+  },
+  async claimRevoke(id: string, review: ApplicationReview, staff: Staff) {
+    const entry = applications.get(id);
+    if (!entry || entry.serverId !== staff.serverId) return { claimed: false, application: undefined };
+    if (!(entry.status === "approved" || (entry.status === "needs_review" && entry.accessIntent === "revoke")))
+      return { claimed: false, application: entry };
+    Object.assign(entry, {
+      status: "revoking",
+      accessIntent: "revoke",
+      reviewedAt: new Date(),
+      reviewedBy: staff.id,
+      reviewReason: review.reason,
+      reviewId: review.id,
+      reviewKind: "revoke",
+      lastActionState: "started",
+      lastActionMessage: "Revocation started.",
+      updatedAt: new Date(),
+    });
+    return { claimed: true, application: entry };
+  },
+  async finishRevoke(id: string, actionId: string, result: ActionResult) {
+    const entry = applications.get(id);
+    if (!entry || entry.status !== "revoking" || entry.reviewId !== actionId)
+      throw new Error("Preview application changed");
+    const removed = result.state === "applied" || result.state === "pending";
+    Object.assign(entry, {
+      status: removed ? "revoked" : result.state === "failed" ? "approved" : "needs_review",
+      ...(removed ? { revokedAt: new Date() } : {}),
+      ...(result.state === "failed" ? { accessIntent: "grant" } : {}),
+      lastActionState: result.state,
+      lastActionMessage: result.message,
+      updatedAt: new Date(),
+    });
+    return entry;
+  },
+  async recordExternalRevoke(removal: { serverId: string; steamId: string; actorId: string; state: string }) {
+    const revoked = [...applications.values()].filter(
+      (entry) =>
+        entry.serverId === removal.serverId && entry.steamId === removal.steamId && entry.status === "approved",
+    );
+    for (const entry of revoked)
+      Object.assign(entry, {
+        status: "revoked",
+        accessIntent: "revoke",
+        revokedAt: new Date(),
+        reviewedBy: removal.actorId,
+        reviewKind: "revoke",
+        lastActionState: removal.state,
+        lastActionMessage: "Removed on the Whitelist page.",
+        updatedAt: new Date(),
+      });
+    return revoked;
   },
 };
 const applicantAuth = {
@@ -569,29 +711,78 @@ const applicantAuth = {
   },
 };
 const demoInstance = randomUUID();
+// Simulated kill causes and tags in the game's own spellings, so labels can be checked by eye.
+const demoCauses = [
+  "Id.Item.AK74M",
+  "ID.Item.AK74M",
+  "Id.Item.SR_04",
+  "Id.Item.WEPN_029",
+  "ID.Item.ATMine",
+  "Vehicle.Variant.Land.Wheeled.Humvee.Default",
+  "Id.Vehicle.WeaponExtension.WHL_05.RingTurret",
+];
+const demoTag = (name: string) => `Meta.Progression.Context.Player.KillContext.${name}`;
+// A fictional player with a very long name, for the website's phone-width checks. Not on the live roster.
+const demoLongName = {
+  name: "Sir Reginald Fluffington-Bottomsworth III of the Back Porch",
+  steamId: "76561198123456799",
+};
 const demoEvents = Array.from({ length: 48 }, (_, index) => {
-  const killer = index % 11 === 0 ? null : players[index % 7 < 4 ? 0 : index % players.length];
+  const killer =
+    index % 11 === 0 ? null : index % 13 === 5 ? demoLongName : players[index % 7 < 4 ? 0 : index % players.length];
   const victim = players[1 + (index % (players.length - 1))];
   const ageDays = index < 24 ? 0 : index < 38 ? 3 : 12;
   const suicide = !!killer && killer.steamId === victim.steamId;
+  const cause = killer ? demoCauses[index % demoCauses.length] : null;
+  // Centimetres, as the feed sends them. One reading over the public 2 km cap stays out of public stats.
+  const distanceCentimeters = !killer
+    ? null
+    : index === 47
+      ? 250_000
+      : Math.round((cause === "Id.Item.SR_04" ? 300 + index * 6 : 18 + index * 2.75) * 100);
   return {
     serverId: index % 3 === 0 ? "event" : "primary",
     eventId: randomUUID(),
     serverInstanceId: demoInstance,
-    receivedAt: new Date(Date.now() - ageDays * 86_400_000 - index * 65_000 - 20_000),
+    // Spread across the day so the hour chart has a shape; the newest stays 20 seconds old.
+    receivedAt: new Date(Date.now() - ageDays * 86_400_000 - (index % 24) * 47 * 60_000 - 20_000),
     eventTime: 3400 - index * 35,
     matchId: demoInstance,
-    mapName: "Kavkazi",
+    mapName: ["Kavkazi", "Europe", "NorthAmerica"][Math.floor(index / 3) % 3],
     killerSteamId: killer?.steamId ?? null,
     killerName: killer?.name ?? null,
     victimSteamId: victim.steamId,
     victimName: victim.name,
-    cause: killer ? "Id.Item.AK74M" : null,
-    distanceMeters: killer ? 18 + index * 2.75 : null,
+    cause,
+    distanceCentimeters,
+    distanceMeters: distanceCentimeters === null ? null : distanceCentimeters / 100,
+    contextTags: [
+      ...(!!killer && !suicide && index % 4 === 0 ? [demoTag("Headshot")] : []),
+      ...(killer && index % 5 === 0 ? [demoTag("Penetration")] : []),
+      ...(killer && index % 9 === 4 ? [demoTag("WeaponMelee")] : []),
+      ...(killer ? [] : [demoTag("Falling")]),
+    ],
     headshot: !!killer && !suicide && index % 4 === 0,
     suicide,
   };
 });
+type DemoEvent = (typeof demoEvents)[number];
+const demoHasTag = (event: DemoEvent, tag: string) =>
+  event.contextTags.some((entry) => entry === tag || entry.endsWith(`.${tag}`));
+const demoCapped = (centimeters: number | null) =>
+  centimeters !== null && centimeters > 0 && centimeters <= PUBLIC_MAX_DISTANCE_CENTIMETERS ? centimeters : null;
+const demoLongest = (events: DemoEvent[]) =>
+  events.reduce<number | null>((best, event) => {
+    const centimeters = demoCapped(event.distanceCentimeters);
+    return centimeters !== null && (best === null || centimeters > best) ? centimeters : best;
+  }, null);
+/** Long shots count firearms only, as in the store; every simulated cause has a label. */
+const demoLongShot = (event: DemoEvent) => describeCause(event.cause).kind === "firearm";
+function demoGroupBy<K>(events: DemoEvent[], key: (event: DemoEvent) => K) {
+  const groups = new Map<K, DemoEvent[]>();
+  for (const event of events) groups.set(key(event), [...(groups.get(key(event)) ?? []), event]);
+  return groups;
+}
 const filteredDemoEvents = (since: Date, until: Date, playerId?: string, serverId = "primary") =>
   demoEvents.filter(
     (entry) =>
@@ -647,11 +838,153 @@ const telemetryStore = {
   async events(since: Date, until: Date, playerId?: string, serverId = "primary") {
     return filteredDemoEvents(since, until, playerId, serverId)
       .sort((a, b) => b.receivedAt.getTime() - a.receivedAt.getTime())
-      .slice(0, 100);
+      .slice(0, 100)
+      .map(({ contextTags: _tags, distanceCentimeters: _centimeters, ...event }) => event);
+  },
+  /** The real store's aggregate shape, computed in memory from the simulated events. */
+  async serverStats(since: Date, until: Date, serverId = "primary"): Promise<ServerStatsAggregate> {
+    const events = filteredDemoEvents(since, until, undefined, serverId);
+    const kills = events.filter((event) => event.killerSteamId && !event.suicide);
+    const tagged = (rows: DemoEvent[], tag: string) => rows.filter((event) => demoHasTag(event, tag)).length;
+    const group = (set: number, rows: DemoEvent[], fields: Partial<ServerStatsAggregate["groups"][number]> = {}) => ({
+      set,
+      causeKey: null,
+      cause: null,
+      mapName: null,
+      hour: null,
+      kills: rows.length,
+      headshotKills: rows.filter((event) => event.headshot).length,
+      longestCentimeters: demoLongest(rows),
+      melee: tagged(rows, LEADER_TAGS.melee),
+      roadkill: tagged(rows, LEADER_TAGS.roadkill),
+      vehicleExplosion: tagged(rows, LEADER_TAGS.vehicleExplosion),
+      penetration: tagged(rows, LEADER_TAGS.penetration),
+      ricochet: tagged(rows, LEADER_TAGS.ricochet),
+      ...fields,
+    });
+    const groups = [
+      ...[...demoGroupBy(kills, (event) => event.cause?.toLowerCase() ?? null)].map(([causeKey, rows]) =>
+        group(3, rows, { causeKey, cause: rows[0].cause }),
+      ),
+      ...[...demoGroupBy(kills, (event) => event.mapName)].map(([mapName, rows]) => group(5, rows, { mapName })),
+      ...[...demoGroupBy(kills, (event) => event.receivedAt.getUTCHours())].map(([hour, rows]) =>
+        group(6, rows, { hour }),
+      ),
+      group(7, kills),
+    ];
+    const longest = [...demoGroupBy(kills, (event) => event.killerSteamId!)]
+      .map(([steamId, rows]) => {
+        const best = rows
+          .filter((event) => demoCapped(event.distanceCentimeters) !== null && demoLongShot(event))
+          .sort((a, b) => b.distanceCentimeters! - a.distanceCentimeters!)[0];
+        return best
+          ? {
+              steamId,
+              name: best.killerName,
+              cause: best.cause,
+              mapName: best.mapName,
+              distanceCentimeters: best.distanceCentimeters!,
+            }
+          : null;
+      })
+      .filter((row) => row !== null)
+      .sort((a, b) => b.distanceCentimeters - a.distanceCentimeters)
+      .slice(0, 10);
+    const leaders = (Object.keys(LEADER_TAGS) as LeaderTag[]).flatMap((tag) => {
+      const falling = tag === "falling";
+      const hits = (falling ? events : kills).filter((event) => demoHasTag(event, LEADER_TAGS[tag]));
+      return [...demoGroupBy(hits, (event) => (falling ? event.victimSteamId : event.killerSteamId!))]
+        .map(([steamId, rows]) => ({
+          tag,
+          steamId,
+          name: falling ? rows[0].victimName : rows[0].killerName,
+          count: rows.length,
+        }))
+        .sort((a, b) => b.count - a.count || a.steamId.localeCompare(b.steamId))
+        .slice(0, 5);
+    });
+    return {
+      groups,
+      totals: {
+        events: events.length,
+        deaths: events.length,
+        suicides: events.filter((event) => event.suicide).length,
+        falling: events.filter((event) => demoHasTag(event, LEADER_TAGS.falling)).length,
+        players: new Set(events.flatMap((event) => [event.killerSteamId, event.victimSteamId]).filter(Boolean)).size,
+      },
+      longest,
+      leaders,
+    };
+  },
+  // Simulated killed counts only: the preview invents no other game event types or samples.
+  async eventTypes(since: Date, until: Date, serverId = "primary") {
+    const times = filteredDemoEvents(since, until, undefined, serverId).map((event) => event.receivedAt.getTime());
+    if (!times.length) return [];
+    return [
+      {
+        type: "killed",
+        count: times.length,
+        firstReceivedAt: new Date(Math.min(...times)),
+        lastReceivedAt: new Date(Math.max(...times)),
+        sample: null,
+      },
+    ];
+  },
+  /** Per-cause kills, longest firearm kill and best streak for the listed players, from the simulated events. */
+  async rowExtras(since: Date, until: Date, steamIds: string[], serverId = "primary"): Promise<RowExtrasAggregate> {
+    const events = filteredDemoEvents(since, until, undefined, serverId);
+    const weapons: RowExtrasAggregate["weapons"] = [];
+    const streaks: RowExtrasAggregate["streaks"] = [];
+    for (const steamId of new Set(steamIds)) {
+      const kills = events.filter((event) => event.killerSteamId === steamId && !event.suicide);
+      for (const rows of demoGroupBy(kills, (event) => event.cause?.toLowerCase() ?? null).values())
+        weapons.push({
+          steamId,
+          cause: rows[0].cause,
+          kills: rows.length,
+          longestCentimeters: demoLongShot(rows[0]) ? demoLongest(rows) : null,
+        });
+      let run = 0,
+        best = 0;
+      const own = events
+        .filter((event) => event.victimSteamId === steamId || (event.killerSteamId === steamId && !event.suicide))
+        .sort((a, b) => a.receivedAt.getTime() - b.receivedAt.getTime() || a.eventTime - b.eventTime);
+      for (const event of own) {
+        run = event.victimSteamId === steamId ? 0 : run + 1;
+        best = Math.max(best, run);
+      }
+      streaks.push({ steamId, bestStreak: best });
+    }
+    return { weapons, streaks };
   },
 };
 // Fictional supporter evidence stays in memory. No Patreon credentials or calls.
 const demoSupporters = new Map<string, SupporterView>();
+/** No whitelist applications exist in the preview, so automatic matching never has anything to copy. */
+function previewMatch(record: Pick<SupporterView, "discordId" | "discordSource" | "steamId">, founder: boolean) {
+  const automaticBlockedReason = founder
+    ? null
+    : !record.discordId
+      ? ("no_discord" as const)
+      : record.discordSource !== "patreon"
+        ? ("discord_not_from_patreon" as const)
+        : ("no_patreon_payment" as const);
+  return {
+    match: {
+      steam: record.discordId
+        ? { reason: "no_application" as const, steamId: null, applicationId: null, serverId: null }
+        : null,
+      sourceApplication: null,
+      sourceApplicationRevoked: false,
+      patreonDiscordElsewhere: false,
+      discordReportedForOtherPatron: false,
+      linkedSteamShared: false,
+    },
+    automaticPayment: null,
+    automaticBlockedReason,
+    automaticBlockedMessage: automaticBlockedReason ? automaticBlockedMessages[automaticBlockedReason] : null,
+  };
+}
 const demoSupporterActions = new Map<string, string>();
 const demoPaymentReferences = new Set<string>();
 for (const [index, displayName] of ["Demo · Steady Supporter", "Demo · Founding Crew", "Demo · New Backer"].entries()) {
@@ -666,11 +999,15 @@ for (const [index, displayName] of ["Demo · Steady Supporter", "Demo · Foundin
     reference: `DEMO-RECEIPT-${index + 1}`,
     verificationState: index === 2 ? "unverified" : "verified",
     firstSuccessfulPaymentVerified: index !== 2,
+    minimumConfirmed: false,
+    recordedBy: index === 2 ? null : "999999999999999991",
   };
   demoPaymentReferences.add(payment.reference.toLowerCase());
   demoSupporters.set(id, {
     id,
+    provider: "patreon",
     patreonMemberId: `preview-member-${index + 1}`,
+    confirmKey: `preview-member-${index + 1}`,
     displayName,
     patronStatus: index === 1 ? "former_patron" : "active_patron",
     lastChargeStatus: "Paid",
@@ -678,12 +1015,42 @@ for (const [index, displayName] of ["Demo · Steady Supporter", "Demo · Foundin
     observedAt: new Date().toISOString(),
     reviewState: index === 1 ? "verified" : "pending",
     discordId: index === 2 ? null : `88888888888888888${index + 1}`,
+    discordSource: index === 2 ? null : "staff",
+    patreonDiscordId: null,
+    patronLinkConflict: null,
     steamId: index === 2 ? null : `7656119800000000${index + 1}`,
+    steamSource: index === 2 ? null : "staff",
+    steamApplicationId: null,
     identityState: index === 2 ? "unlinked" : "staff_linked",
     version: 1,
     latestPayment: payment,
+    payments: [payment],
     founderEligiblePayment: null,
-    founder: index === 1 ? { awardedAt: paidAt, paymentId: payment.id } : null,
+    // The demo founder's charge was refunded after the promise, so the record shows that note. It stays a founder.
+    founder:
+      index === 1
+        ? {
+            awardedAt: paidAt,
+            paymentId: payment.id,
+            source: payment.source,
+            automatic: false,
+            paymentVerified: false,
+            paymentFirst: true,
+          }
+        : null,
+    founderBlockedReason: null,
+    founderFirstPaymentWaiting: false,
+    founderTierBelowMinimum: false,
+    founderBlockedMessage: null,
+    needsDiscordLink: false,
+    ...previewMatch(
+      {
+        discordId: index === 2 ? null : `88888888888888888${index + 1}`,
+        discordSource: index === 2 ? null : "staff",
+        steamId: index === 2 ? null : `7656119800000000${index + 1}`,
+      },
+      index === 1,
+    ),
   });
 }
 const supporterStore = {
@@ -701,7 +1068,9 @@ const supporterStore = {
     if (existing) throw new ConflictException("This preview membership is already recorded. Search its membership ID.");
     const record: SupporterView = {
       id: randomUUID(),
+      provider: "patreon",
       patreonMemberId: input.patreonMemberId,
+      confirmKey: input.patreonMemberId,
       displayName: input.displayName,
       patronStatus: null,
       lastChargeStatus: null,
@@ -709,19 +1078,34 @@ const supporterStore = {
       observedAt: new Date().toISOString(),
       reviewState: "unverified",
       discordId: null,
+      discordSource: null,
+      patreonDiscordId: null,
+      patronLinkConflict: null,
       steamId: null,
+      steamSource: null,
+      steamApplicationId: null,
       identityState: "unlinked",
       version: 1,
       latestPayment: null,
+      payments: [],
       founderEligiblePayment: null,
       founder: null,
+      founderBlockedReason: "no_payment",
+      founderFirstPaymentWaiting: false,
+      founderTierBelowMinimum: false,
+      founderBlockedMessage: founderBlockedMessages.no_payment,
+      needsDiscordLink: false,
+      ...previewMatch({ discordId: null, discordSource: null, steamId: null }, false),
     };
     demoSupporters.set(record.id, record);
     demoSupporterActions.set(input.id, fingerprint);
     const [supporter] = await this.list(campaignId, policy, record.id);
     return { ok: true, replayed: false, supporter };
   },
-  async list(_campaignId: string, _policy: FounderPolicy, memberId?: string, search = "") {
+  async recordPaypal() {
+    throw new ConflictException("Recording PayPal supporters is unavailable in the simulated preview.");
+  },
+  async list(_campaignId: string | null, _policy: FounderPolicy, memberId?: string, search = "") {
     const needle = search.toLocaleLowerCase();
     return structuredClone(
       [...demoSupporters.values()]
@@ -751,7 +1135,13 @@ const supporterStore = {
         }),
     );
   },
-  async mutate(memberId: string, input: SupporterMutation, staff: Staff, campaignId: string, policy: FounderPolicy) {
+  async mutate(
+    memberId: string,
+    input: SupporterMutation,
+    staff: Staff,
+    campaignId: string | null,
+    policy: FounderPolicy,
+  ) {
     const record = demoSupporters.get(memberId);
     if (!record) throw new ConflictException("Preview supporter not found.");
     const fingerprint = JSON.stringify({ memberId, input, staff: staff.id });
@@ -760,7 +1150,7 @@ const supporterStore = {
       if (previous !== fingerprint) throw new ConflictException("Preview review ID was already used.");
       return { ok: true, replayed: true, supporter: structuredClone(record) };
     }
-    if (record.version !== input.version || record.patreonMemberId !== input.confirm)
+    if (record.version !== input.version || record.confirmKey !== input.confirm)
       throw new ConflictException("Preview record changed. Refresh before reviewing.");
     if (input.kind === "founder") {
       const [view] = await this.list(campaignId, policy, memberId);
@@ -774,7 +1164,15 @@ const supporterStore = {
         throw new ConflictException(
           "This preview record needs a matched identity and qualifying checked first payment.",
         );
-      record.founder = { awardedAt: new Date().toISOString(), paymentId: input.paymentId };
+      record.founder = {
+        awardedAt: new Date().toISOString(),
+        paymentId: input.paymentId,
+        source: view.founderEligiblePayment.source,
+        automatic: false,
+        paymentVerified: true,
+        paymentFirst: true,
+      };
+      Object.assign(record, previewMatch(record, true));
     }
     if (input.kind === "link") {
       if (
@@ -783,9 +1181,19 @@ const supporterStore = {
         )
       )
         throw new ConflictException("This preview account is already linked.");
-      record.discordId = input.discordId;
-      record.steamId = input.steamId;
-      record.identityState = "staff_linked";
+      if (input.discordId !== undefined && input.discordId !== record.discordId)
+        Object.assign(record, { discordId: input.discordId, discordSource: "staff" });
+      if (input.steamId !== undefined && input.steamId !== record.steamId)
+        Object.assign(record, { steamId: input.steamId, steamSource: "staff", steamApplicationId: null });
+      record.identityState =
+        record.discordId && record.steamId
+          ? record.discordSource === "patreon"
+            ? "patreon_linked"
+            : "staff_linked"
+          : record.discordId || record.steamId
+            ? "partial"
+            : "unlinked";
+      Object.assign(record, previewMatch(record, Boolean(record.founder)));
     }
     if (input.kind === "payment") {
       const reference = input.reference.toLowerCase();
@@ -801,7 +1209,10 @@ const supporterStore = {
         source: "manual_receipt",
         verificationState: "verified",
         firstSuccessfulPaymentVerified: input.firstSuccessfulPaymentVerified,
+        minimumConfirmed: false,
+        recordedBy: staff.id,
       };
+      record.payments = [record.latestPayment, ...record.payments];
     }
     if (input.kind === "review") record.reviewState = "verified";
     record.version++;
@@ -809,8 +1220,61 @@ const supporterStore = {
     return { ok: true, replayed: false, supporter: structuredClone(record) };
   },
 };
+// A simulated Patreon import: no token and no Patreon calls. "Sync now" runs for two seconds.
+// It reports one Discord conflict, which shows as a count in Details.
+const [, , previewBacker] = [...demoSupporters.values()];
+let previewSyncRun: Promise<PatreonSyncStatus> | null = null;
+let previewSyncedAt = Date.now() - 12 * 60_000;
+const previewSyncStatus = (): PatreonSyncStatus => ({
+  configured: true,
+  running: previewSyncRun !== null,
+  lastAttemptAt: new Date(previewSyncedAt - 4_000).toISOString(),
+  lastSuccessAt: new Date(previewSyncedAt).toISOString(),
+  lastError: null,
+  tokenRejected: false,
+  members: demoSupporters.size,
+  newMembers: 0,
+  updated: 1,
+  payments: 2,
+  discordLinks: 1,
+  conflicts: 1,
+  truncated: 0,
+  revokedPayments: 1,
+  paidMembers: 2,
+  discordReported: 1,
+  tierConfirmed: 0,
+  tierConfirmedNew: 0,
+  tierUnconfirmed: 0,
+  tierPrices: "not_requested",
+  memberListComplete: true,
+  intervalMinutes: 30,
+  nextAttemptAt: new Date(previewSyncedAt + 30 * 60_000).toISOString(),
+  conflictDetails: [
+    // The demo supporters are Patreon records, so the member ID equals the confirm key.
+    { supporterId: previewBacker.id, patreonMemberId: previewBacker.confirmKey, reason: "discord-in-use" },
+  ],
+});
+const patreonSync = {
+  configured: () => true,
+  status: previewSyncStatus,
+  async staffSync() {
+    if (previewSyncRun) return { joined: true, sync: await previewSyncRun };
+    previewSyncRun = new Promise<PatreonSyncStatus>((done) =>
+      setTimeout(() => {
+        previewSyncedAt = Date.now();
+        previewSyncRun = null;
+        done(previewSyncStatus());
+      }, 2_000),
+    );
+    return { joined: false, sync: await previewSyncRun };
+  },
+  onApplicationBootstrap() {},
+  onModuleDestroy() {},
+};
 const previewEnvironment: Record<string, unknown> = {
   MAP_VOTES_ENABLED: process.env.PREVIEW_MAP_VOTES_ENABLED !== "false",
+  // Voted 50v50 stays held for the owner's review unless a rehearsal asks for it.
+  MAP_VOTES_FIFTY_ENABLED: process.env.PREVIEW_MAP_VOTES_FIFTY_ENABLED === "true",
   SERVER_EVENTS_ENABLED: true,
   WARDOGS_RCON_URL: "https://game.example.test",
   ADMIN_GUILD_ID: "111111111111111111",
@@ -967,6 +1431,11 @@ async function seedPreviewStaffAlerts() {
     },
     deliver: true,
   });
+  await previewStaffAlerts.send(
+    "primary",
+    "preview:map-vote-review",
+    "The automatic map vote on UNCs Primary needs staff review: The queue result is unconfirmed. Automatic voting on this server is paused until staff close it.",
+  );
   if (offline) await previewStaffAlerts.review("primary", offline.id, "legit", { name: "Preview moderator" });
   previewStaffAlerts.snooze("event", "seeding", 240, "Preview moderator");
 }
@@ -1097,7 +1566,8 @@ const eventStore = {
       event.state === "complete" ||
       demoEventOperations.has(op.id) ||
       (event.operation && !manual) ||
-      (event.stop && op.kind !== "restore_lock")
+      (event.state === "needs_review" && op.kind !== "restore_lock") ||
+      (event.stop && op.kind !== "restore_lock" && op.kind !== "ended")
     )
       return null;
     demoEventOperations.set(op.id, {
@@ -1114,7 +1584,7 @@ const eventStore = {
       progress,
       version: version + 1,
       updatedAt: new Date(),
-      state: op.kind === "restore_lock" ? "stopping" : event.state,
+      state: op.kind === "restore_lock" || event.stop ? "stopping" : event.state,
     });
     return structuredClone(event);
   },
@@ -1156,13 +1626,40 @@ const eventStore = {
   async recover() {
     /* Preview effects run in this one in-memory process only. */
   },
+  async halt(id: string, reason: string, opId?: string) {
+    const event = demoServerEvents.get(id);
+    if (!event || ["complete", "needs_review"].includes(event.state)) return null;
+    if (opId ? event.operation?.id !== opId : event.operation) return null;
+    if (opId) Object.assign(demoEventOperations.get(opId) ?? {}, { state: "unknown", message: "Interrupted." });
+    Object.assign(event, {
+      stop: event.stop ?? {
+        id: randomUUID(),
+        actorId: "system:event-halt",
+        actorName: "Gramps 50v50 safety stop",
+        reason,
+        at: new Date().toISOString(),
+      },
+      state: "stopping",
+      operation: null,
+      message: `${reason} The team lock is being restored.`,
+      version: event.version + 1,
+      updatedAt: new Date(),
+    });
+    return structuredClone(event);
+  },
+  async completeRestored(id: string, version: number, message: string) {
+    const event = demoServerEvents.get(id)!;
+    if (event.version === version && !event.operation && event.stop && event.state === "stopping")
+      Object.assign(event, { state: "complete", message, version: version + 1, updatedAt: new Date() });
+    return structuredClone(event);
+  },
 };
 const demoVotePolicies = new Map<
   string,
   {
     serverId: string;
     version: number;
-    policy: import("../src/common/voting-policy").VotingPolicy;
+    policy: import("../src/common/voting-policy").StoredVotingPolicy;
     actorId: string;
     actorName: string;
     connectionHash: string;
@@ -1178,12 +1675,18 @@ const voteStore = {
   async savePolicy(
     serverId: string,
     version: number,
-    policy: import("../src/common/voting-policy").VotingPolicy,
+    next:
+      | import("../src/common/voting-policy").StoredVotingPolicy
+      | ((
+          previous: import("../src/common/voting-policy").StoredVotingPolicy | null,
+        ) => import("../src/common/voting-policy").StoredVotingPolicy),
     staff: Staff,
     connectionHash: string,
   ) {
-    if ((demoVotePolicies.get(serverId)?.version ?? 0) !== version)
+    const previous = demoVotePolicies.get(serverId);
+    if ((previous?.version ?? 0) !== version)
       throw new ConflictException("Voting controls changed. Reload saved controls.");
+    const policy = typeof next === "function" ? next(structuredClone(previous?.policy ?? null)) : next;
     const saved = { serverId, version: version + 1, policy, actorId: staff.id, actorName: staff.name, connectionHash };
     demoVotePolicies.set(serverId, structuredClone(saved));
     const closed: MapVoteRecord[] = [];
@@ -1199,11 +1702,42 @@ const voteStore = {
   async automaticOpen() {
     return structuredClone([...demoVotes.values()].filter((vote) => vote.state === "open" && vote.automation));
   },
-  async observeScore(id: string, score: number) {
+  async observeScore(id: string, score: number, step: number | null = null) {
     const vote = demoVotes.get(id);
     if (!vote?.automation || vote.state !== "open" || score < vote.automation.highestScore) return false;
+    if (score > vote.automation.highestScore && vote.automation.settings) {
+      vote.automation.maxStep = Math.max(vote.automation.maxStep ?? 0, step ?? 0);
+      vote.automation.lastScoreAt = new Date().toISOString();
+    }
     vote.automation.highestScore = score;
     return true;
+  },
+  async patchAutomation(
+    id: string,
+    patch: Partial<import("../src/common/voting-policy").VoteAutomation>,
+    states: MapVoteRecord["state"][] = ["open", "closing"],
+  ) {
+    const vote = demoVotes.get(id);
+    if (!vote?.automation || !states.includes(vote.state)) return null;
+    Object.assign(vote.automation, structuredClone(patch));
+    return structuredClone(vote);
+  },
+  async resolveReview(
+    id: string,
+    to: "queued" | "cancelled",
+    message: string,
+    patch: Partial<import("../src/common/voting-policy").VoteAutomation>,
+    messageId?: string,
+  ) {
+    const vote = demoVotes.get(id);
+    if (!vote?.automation || vote.state !== "needs_review") return null;
+    Object.assign(vote, { state: to, message, updatedAt: new Date() });
+    Object.assign(vote.automation, structuredClone(patch));
+    if (messageId && !vote.messageId) vote.messageId = messageId;
+    return structuredClone(vote);
+  },
+  async needsReview() {
+    return structuredClone([...demoVotes.values()].filter((vote) => vote.state === "needs_review" && vote.automation));
   },
   async claimReminder(id: string, stage: import("../src/common/voting-policy").VoteReminder, receiptId: string) {
     const vote = demoVotes.get(id);
@@ -1279,15 +1813,28 @@ const voteStore = {
   async due(now: Date) {
     return structuredClone([...demoVotes.values()].filter((vote) => vote.state === "open" && vote.closesAt <= now));
   },
-  async claimClose(id: string) {
+  async claimClose(id: string, scoreReached = false) {
     const vote = demoVotes.get(id);
     if (!vote || vote.state !== "open") return null;
+    if (!scoreReached && vote.closesAt.getTime() > Date.now()) return null;
+    if (scoreReached && (!vote.automation || !closeReached(vote.automation, vote.automation.highestScore))) return null;
     vote.state = "closing";
+    vote.winner = ballotWinner(
+      vote.counts,
+      vote.automation ? automationSettings(vote.automation).tieRule : "keep_rotation",
+      vote.choices.findIndex((choice) => choice.event === "50v50"),
+    );
     return structuredClone(vote);
   },
-  async finish(id: string, state: MapVoteRecord["state"], message: string) {
+  async finish(
+    id: string,
+    state: MapVoteRecord["state"],
+    message: string,
+    patch?: Partial<import("../src/common/voting-policy").VoteAutomation>,
+  ) {
     const vote = demoVotes.get(id)!;
     Object.assign(vote, { state, message });
+    if (patch && vote.automation) Object.assign(vote.automation, structuredClone(patch));
     return structuredClone(vote);
   },
   async cancel(id: string, requestId: string, staff: Staff, reason: string) {
@@ -1309,6 +1856,342 @@ const voteStore = {
   },
 };
 
+// ----- Discord roles: a simulated GET /admin/api/discord-roles and reconcile from draft #117 -----
+// Nothing here reaches Discord. By default the feature is off (DISCORD_ROLES_ENABLED=false) with the UNC and Founder
+// roles ready and the optional Supporter role not set up, so the page reads "Ready to switch on". Set
+// PREVIEW_DISCORD_ROLES_ENABLED=true to rehearse a real run against the same sample members.
+const previewRolesEnabled = process.env.PREVIEW_DISCORD_ROLES_ENABLED === "true";
+type PreviewRoleKind = "member" | "founder" | "supporter";
+const previewRoleIds: Record<PreviewRoleKind, string> = {
+  member: "600000000000000001",
+  founder: "600000000000000002",
+  supporter: "600000000000000003",
+};
+const previewRoleMembers = {
+  newUnc: "310000000000000001",
+  regular: "310000000000000002",
+  rejoined: "310000000000000003",
+  founder: "310000000000000004",
+  retry: "310000000000000005",
+  revoked: "310000000000000006",
+  alreadyTagged: "310000000000000007",
+  away: "310000000000000008",
+  handRemoved: "310000000000000009",
+  handGiven: "310000000000000010",
+  refused: "310000000000000012",
+};
+const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+const previewRoleCheck = (kind: PreviewRoleKind, name: string, position: number) => ({
+  id: previewRoleIds[kind],
+  name,
+  exists: true,
+  position,
+  managed: false,
+  privileged: false,
+  staffRole: false,
+  assignable: true,
+  problem: null,
+});
+type PreviewPlanEntry = { discordUserId: string; roleKind: PreviewRoleKind | null; op: string; why: string };
+// Changes Gramps would make until a simulated real run applies them: adds and one removal for review.
+const previewRoleChanges: PreviewPlanEntry[] = [
+  { discordUserId: previewRoleMembers.newUnc, roleKind: "member", op: "add", why: "desired" },
+  { discordUserId: previewRoleMembers.regular, roleKind: "member", op: "add", why: "desired" },
+  { discordUserId: previewRoleMembers.rejoined, roleKind: "member", op: "add", why: "desired" },
+  { discordUserId: previewRoleMembers.founder, roleKind: "founder", op: "add", why: "desired" },
+  { discordUserId: previewRoleMembers.retry, roleKind: "member", op: "add", why: "retry-unknown-add" },
+  { discordUserId: previewRoleMembers.revoked, roleKind: "member", op: "remove", why: "application-revoked" },
+];
+// Entries that only note a role or leave it alone.
+const previewRoleNotes: PreviewPlanEntry[] = [
+  { discordUserId: previewRoleMembers.alreadyTagged, roleKind: "member", op: "note", why: "already-present" },
+  { discordUserId: previewRoleMembers.away, roleKind: null, op: "none", why: "not-in-server" },
+  { discordUserId: previewRoleMembers.handRemoved, roleKind: "member", op: "none", why: "removed-in-discord" },
+  { discordUserId: previewRoleMembers.handGiven, roleKind: "member", op: "none", why: "not-ours" },
+];
+let previewRolesApplied = false;
+let previewRolesRunning = false;
+// Like draft #117, real runs and previews are spaced separately: 30 seconds between runs, 5 between previews.
+let previewRolesLastRequestAt = 0;
+let previewRolesLastPreviewAt = 0;
+const previewRoleResults = new Map<string, { fingerprint: string; summary: Record<string, unknown> }>();
+const previewLedgerRow = (
+  discordUserId: string,
+  roleKind: PreviewRoleKind,
+  operation: string,
+  state: "applied" | "failed" | "unknown",
+  message: string,
+  createdAt: string,
+  trigger = "schedule",
+  requestedBy: string | null = null,
+) => ({
+  id: randomUUID(),
+  actorId: "system:discord-roles",
+  actorName: "Gramps Discord roles",
+  requestedBy,
+  trigger,
+  guildId: "111111111111111111",
+  discordUserId,
+  roleKind,
+  roleId: previewRoleIds[roleKind],
+  operation,
+  basisType: roleKind === "member" ? "application" : roleKind,
+  basisId: randomUUID(),
+  changed: state === "applied" && operation !== "note",
+  state,
+  message,
+  createdAt,
+  completedAt: state === "unknown" ? null : createdAt,
+});
+const previewRoleLedger = [
+  previewLedgerRow(
+    previewRoleMembers.alreadyTagged,
+    "member",
+    "note",
+    "applied",
+    "The role was already present. Gramps did not add it and will not remove it.",
+    minutesAgo(95),
+  ),
+  previewLedgerRow(
+    previewRoleMembers.handRemoved,
+    "member",
+    "note",
+    "applied",
+    "The role Gramps added was removed in Discord. Gramps will not add it back during this membership, and will not remove it if staff give it back.",
+    minutesAgo(180),
+  ),
+  previewLedgerRow(
+    previewRoleMembers.retry,
+    "member",
+    "add",
+    "unknown",
+    "Discord did not confirm the change. Gramps will check this member again later.",
+    minutesAgo(240),
+  ),
+  previewLedgerRow("310000000000000011", "founder", "add", "applied", "Role added.", minutesAgo(60 * 26), "event"),
+  previewLedgerRow(
+    previewRoleMembers.refused,
+    "member",
+    "add",
+    "failed",
+    "Discord refused: the bot cannot manage this role. Check Manage Roles and the role order.",
+    minutesAgo(60 * 27),
+  ),
+  previewLedgerRow("310000000000000013", "member", "remove", "applied", "Role removed.", minutesAgo(60 * 50), "event"),
+];
+const previewRolePass = (
+  trigger: string,
+  requestedBy: string | null,
+  dryRun: boolean,
+  startedAt: string,
+  counts: Record<string, number> = {},
+) => ({
+  trigger,
+  requestedBy,
+  dryRun,
+  startedAt,
+  finishedAt: new Date(Date.parse(startedAt) + 9_000).toISOString(),
+  users: 10,
+  added: 0,
+  removed: 0,
+  noted: 0,
+  confirmed: 0,
+  failed: 0,
+  blocked: 0,
+  deferred: 0,
+  ...counts,
+  error: null,
+  attention: [],
+});
+// While the feature is off no check runs, so there is no pass since startup. Switched on, the sample shows the
+// startup check and a later event check.
+let previewRolesLastPass: Record<string, unknown> | null = previewRolesEnabled
+  ? previewRolePass("event", null, false, minutesAgo(12), { users: 1, added: 1 })
+  : null;
+let previewRolesLastFullPass: Record<string, unknown> | null = previewRolesEnabled
+  ? previewRolePass("startup", null, false, minutesAgo(180), { added: 2, noted: 1, failed: 1 })
+  : null;
+const previewRolesStatus = () => ({
+  enabled: previewRolesEnabled,
+  configured: { guild: true, memberRole: true, founderRole: true, supporterRole: false },
+  discordReady: true,
+  bot: { manageRoles: true, highestRolePosition: 14 },
+  roles: {
+    member: previewRoleCheck("member", "UNC", 9),
+    founder: previewRoleCheck("founder", "Founder", 10),
+    supporter: {
+      id: null,
+      name: null,
+      exists: false,
+      position: null,
+      managed: false,
+      privileged: false,
+      staffRole: false,
+      assignable: false,
+      problem:
+        "Set DISCORD_SUPPORTER_ROLE_ID to the Supporter role ID (Server Settings, Roles, right-click the role, Copy Role ID).",
+      candidates: [{ id: previewRoleIds.supporter, name: "Supporter" }],
+    },
+  },
+  ready: true,
+  running: previewRolesRunning,
+  lastPass: previewRolesLastPass,
+  lastFullPass: previewRolesLastFullPass,
+  queued: 0,
+  fullPassQueued: false,
+  nextRetryAt: previewRolesEnabled && !previewRolesApplied ? new Date(Date.now() + 25 * 60_000).toISOString() : null,
+  summary: { memberEligible: 42, founders: 6, foundersWithoutDiscord: 2, supporterEligible: null },
+  // Every kind of item, so each can be reviewed. Founders come from supporter records, the rest from earlier checks.
+  attention: [
+    {
+      kind: "founder_without_discord",
+      supporterId: randomUUID(),
+      displayName: "Grandpa Joe",
+      provider: "paypal",
+      at: minutesAgo(60 * 30),
+    },
+    {
+      kind: "founder_without_discord",
+      supporterId: randomUUID(),
+      displayName: null,
+      provider: "patreon",
+      at: minutesAgo(60 * 20),
+    },
+    { kind: "not_in_server", discordUserId: previewRoleMembers.away, at: minutesAgo(180) },
+    {
+      kind: "removed_in_discord",
+      discordUserId: previewRoleMembers.handRemoved,
+      roleKind: "member",
+      basisId: randomUUID(),
+      at: minutesAgo(180),
+    },
+    {
+      kind: "failed",
+      discordUserId: previewRoleMembers.refused,
+      roleKind: "member",
+      basisId: randomUUID(),
+      at: minutesAgo(60 * 27),
+    },
+  ],
+  recent: previewRoleLedger.slice(0, 25),
+  note: "Gramps adds the UNC role for approved UNC member applications and the Founder role for founders with a linked Discord account, and removes only roles it added itself. Local preview: sample data only.",
+});
+const previewReconcileSchema = z
+  .object({
+    id: z.uuid(),
+    reason: z.string().trim().min(3).max(200),
+    discordUserId: z
+      .string()
+      .regex(/^\d{17,20}$/)
+      .optional(),
+    dryRun: z.boolean().optional(),
+  })
+  .strict();
+
+/** Simulated roles API with draft #117's switch, run and preview spacing, running and repeated-ID rules. */
+@Controller("admin/api/discord-roles")
+@UseFilters(AdminExceptionFilter)
+@UseGuards(AdminGuard)
+class PreviewDiscordRolesController {
+  // Like draft #117, the guard admits every staff member and the roles API itself requires an administrator.
+  private requireAdmin(req: StaffRequest) {
+    if (req.staff.role !== "admin") throw new ForbiddenException("Only administrators can manage Discord roles.");
+  }
+  @Get()
+  status(@Req() req: StaffRequest) {
+    this.requireAdmin(req);
+    return previewRolesStatus();
+  }
+  @Post("reconcile")
+  async reconcile(@Req() req: StaffRequest, @Body() body: unknown) {
+    this.requireAdmin(req);
+    const parsed = previewReconcileSchema.safeParse(body);
+    if (!parsed.success) throw new BadRequestException("Send an action ID, a reason and an optional Discord user ID.");
+    const input = parsed.data;
+    const fingerprint = JSON.stringify(input);
+    const previous = previewRoleResults.get(input.id);
+    if (previous) {
+      if (previous.fingerprint !== fingerprint)
+        throw new ConflictException("This action ID was already used for another role check.");
+      return { ok: true, replayed: true, summary: previous.summary };
+    }
+    if (!input.dryRun && !previewRolesEnabled)
+      throw new ServiceUnavailableException("Discord roles are switched off (DISCORD_ROLES_ENABLED=false).");
+    if (previewRolesRunning)
+      throw new ConflictException("A role check is already running. Try again when it finishes.");
+    if (input.dryRun) {
+      if (Date.now() - previewRolesLastPreviewAt < 5_000)
+        throw new HttpException("Wait 5 seconds between previews.", 429);
+      previewRolesLastPreviewAt = Date.now();
+    } else {
+      if (Date.now() - previewRolesLastRequestAt < 30_000)
+        throw new HttpException("Wait 30 seconds between role checks.", 429);
+      previewRolesLastRequestAt = Date.now();
+    }
+    const startedAt = new Date().toISOString();
+    const only = (entries: PreviewPlanEntry[]) =>
+      input.discordUserId ? entries.filter((entry) => entry.discordUserId === input.discordUserId) : entries;
+    const changes = previewRolesApplied ? [] : only(previewRoleChanges);
+    let summary: Record<string, unknown>;
+    if (input.dryRun) {
+      const plan = [...changes, ...only(previewRoleNotes)];
+      summary = {
+        ...previewRolePass("admin", req.staff.id, true, startedAt, { users: plan.length }),
+        reason: input.reason,
+        plan,
+      };
+    } else {
+      // A simulated real run: a short wait, then the planned changes are recorded as applied. Discord is never called.
+      previewRolesRunning = true;
+      await new Promise((done) => setTimeout(done, 1_500));
+      previewRolesRunning = false;
+      const at = new Date().toISOString();
+      for (const change of changes)
+        previewRoleLedger.unshift(
+          previewLedgerRow(
+            change.discordUserId,
+            change.roleKind!,
+            change.op,
+            "applied",
+            change.op === "add" ? "Role added." : "Role removed.",
+            at,
+            "admin",
+            req.staff.id,
+          ),
+        );
+      previewRolesApplied = true;
+      summary = {
+        ...previewRolePass("admin", req.staff.id, false, startedAt, {
+          added: changes.filter((change) => change.op === "add").length,
+          removed: changes.filter((change) => change.op === "remove").length,
+        }),
+        reason: input.reason,
+      };
+      previewRolesLastPass = summary;
+      if (!input.discordUserId) previewRolesLastFullPass = summary;
+    }
+    previewRoleResults.set(input.id, { fingerprint, summary });
+    return { ok: true, replayed: false, summary };
+  }
+}
+
+/**
+ * Serves the dashboard shell when /admin/discord-roles is reloaded in this preview. Production needs the same path
+ * in AdminPageController's list.
+ */
+@Controller("admin")
+class PreviewDiscordRolesPage {
+  private readonly logger = new Logger(PreviewDiscordRolesPage.name);
+  @Get("discord-roles")
+  page(@Res() res: Response) {
+    res.sendFile(join(process.cwd(), "dist", "src", "admin", "public", "index.html"), (error?: Error) => {
+      if (!error || res.headersSent) return;
+      this.logger.error("The preview dashboard page could not be sent.");
+      res.status(503).json({ message: "The dashboard is unavailable." });
+    });
+  }
+}
+
 async function main() {
   // ServeStaticModule selects its loader during dependency creation, so the test
   // application must provide its adapter before compiling the isolated preview.
@@ -1317,7 +2200,12 @@ async function main() {
   adapterHost.httpAdapter = adapter;
   await seedPreviewStaffAlerts();
   const module = await Test.createTestingModule({
-    controllers: [ServerCommunityController, StaffAlertsController],
+    controllers: [
+      ServerCommunityController,
+      StaffAlertsController,
+      PreviewDiscordRolesController,
+      PreviewDiscordRolesPage,
+    ],
     providers: [
       { provide: StaffAlerts, useValue: previewStaffAlerts },
       { provide: StaffAlertsMonitor, useValue: previewStaffMonitor },
@@ -1336,12 +2224,38 @@ async function main() {
                 "Welcome to The UNCs! Website: theuncsgaming.com",
                 "Get whitelisted: theuncsgaming.com/whitelist. Sign in with Discord and apply on the website.",
               ],
+              variants: [
+                [
+                  "Welcome to The UNCs! Website: theuncsgaming.com",
+                  "Get whitelisted: theuncsgaming.com/whitelist. Sign in with Discord and apply on the website.",
+                ],
+                [
+                  "Pull up a chair, the coffee's fresh. Welcome to The UNCs.",
+                  "The whitelist is free: theuncsgaming.com/whitelist.",
+                ],
+                ["Welcome in! Be kind to the new guys, we were all new once."],
+              ],
+              whitelistedVariants: [
+                ["Welcome back! Good to see a regular."],
+                ["The usual table is ready. Welcome back to The UNCs."],
+              ],
+              whitelist: {
+                source: "running-whitelist",
+                cacheSeconds: 300,
+                lastLoadedAt: id === "primary" ? new Date(Date.now() - 3 * 60_000).toISOString() : null,
+                lastFailedAt: null,
+              },
               delaySeconds: 10,
               spacingSeconds: 20,
             },
             round: {
               enabled: false,
               message: "GG! Get whitelisted at theuncsgaming.com/whitelist. Thanks for playing on The UNCs.",
+              messages: [
+                "GG! Get whitelisted at theuncsgaming.com/whitelist. Thanks for playing on The UNCs.",
+                "Round's done. Stretch those knees and grab a refill.",
+                "GG! Same time next round?",
+              ],
             },
             discordStatus: { enabled: false, configured: false, problem: null },
           }),
@@ -1376,17 +2290,56 @@ async function main() {
     .useValue(telemetryStore)
     .overrideProvider(SupportersStore)
     .useValue(supporterStore)
+    // No database: automatic supporter matching stays off and reports nothing.
+    .overrideProvider(SupporterMatchStore)
+    .useValue({})
+    .overrideProvider(SupporterMatchService)
+    .useValue({
+      status: () => ({
+        steamFill: false,
+        founderAuto: false,
+        holdHours: 72,
+        configured: false,
+        running: false,
+        lastRunAt: null,
+        lastTrigger: null,
+        lastError: null,
+        checked: 0,
+        steamFilled: 0,
+        foundersRecorded: 0,
+        blocked: {},
+        capped: false,
+      }),
+      sweep: async () => undefined,
+      member: async () => null,
+      applicationChanged: async () => undefined,
+    })
+    .overrideProvider(PatreonSyncService)
+    .useValue(patreonSync)
     .overrideProvider(MapVotesStore)
     .useValue(voteStore)
     .overrideProvider(ServerEventsStore)
     .useValue(eventStore)
+    // No Discord client or database: the roles page reports Discord as not connected.
+    .overrideProvider(DiscordRolesDiscord)
+    .useValue({ ready: () => false })
+    .overrideProvider(DiscordRolesStore)
+    .useValue({
+      summary: async () => ({ memberEligible: 0, founders: 1, foundersWithoutDiscord: 0 }),
+      foundersWithoutDiscord: async () => [],
+      recent: async () => [],
+    })
     .overrideProvider(MapVotesDiscord)
     .useValue({
       check: async () => ({ name: "simulated-voting" }),
       publish: async () => "333333333333333333",
+      findBallotMessage: async () => null,
       update: async () => undefined,
       remind: async () => undefined,
     })
+    // Map-vote and 50v50 automation alerts land in the same simulated staff channel and Staff alerts status.
+    .overrideProvider(StaffAlerts)
+    .useValue(previewStaffAlerts)
     .compile();
   const app = module.createNestApplication(adapter, { rawBody: true });
   await app.listen(previewPort, "127.0.0.1");

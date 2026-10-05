@@ -1,6 +1,6 @@
 # Gramps staff alerts
 
-Gramps can tell staff, in a private Discord channel, when the game server looks unhealthy, sits empty, has a player whose kill counters stand out, or has a player on the staff watch list join. It replaces the parts of the third-party "WarDogs Server Commands" bot (wardogsbot.com) that The UNCs used. That bot's game-server connection is being removed and must not be connected to the game server again. It may stay in Discord only to post its cross-community network-ban alerts in a private staff channel.
+Gramps can tell staff, in a private Discord channel, when the game server looks unhealthy, sits empty, has a player whose kill counters stand out, or has a player on the staff watch list join. The same channel also carries map-vote and 50v50 automation that needs a person ([automation alerts](#automation-alerts)). It replaces the parts of the third-party "WarDogs Server Commands" bot (wardogsbot.com) that The UNCs used. That bot's game-server connection is being removed and must not be connected to the game server again. It may stay in Discord only to post its cross-community network-ban alerts in a private staff channel.
 
 Everything here is off by default and **alert-only**.
 
@@ -9,8 +9,9 @@ Everything here is off by default and **alert-only**.
 Staff alerts **do**:
 
 - Read the same cached RCON overview the dashboard uses (at most every 10 seconds while players are on and performance tracking is on, otherwise every 15 seconds, and 30 seconds after a failed read).
-- Post an embed to one private staff channel, record every alert in memory for the staff API, and log `Staff alert <id> <kind> <server> <delivery>`.
+- Post an embed to one private staff channel, record every alert in memory for the staff API, and log `Staff alert <id> <kind> <server> <delivery>`. Automation alerts also log their text (`Staff alert for <server>: <text>`), which carries no player names or SteamIDs.
 - Read the live whitelist (the running reserved slots, never the server configuration file) only when a performance alert is about to fire and `STAFF_ALERTS_PERFORMANCE_SKIP_WHITELISTED=true`.
+- Read joining players' kick counts from the dashboard's own action records (`admin_actions`) while the watch list is on: one query per read that sees joins, never one per player (section 5).
 
 Staff alerts **never**:
 
@@ -45,9 +46,11 @@ STAFF_ALERTS_SEEDING_ENABLED=true
 # STAFF_ALERTS_PING_ROLE_ID=<staff role ID>
 ```
 
+Automation alerts need only `STAFF_ALERTS_CHANNEL_ID`: they come from map votes and 50v50 events whenever those features are on, whatever `STAFF_ALERTS_ENABLED` says.
+
 Then, a week later, `STAFF_ALERTS_PERFORMANCE_ENABLED=observe`, and after another week of calibration `true` (section 4). The full list with defaults is in `.env.example`; every setting is validated at boot, and JSON settings are never echoed in error messages.
 
-To use the watch list (section 5), also set `STAFF_ALERTS_WATCHLIST_ENABLED=true` next to `STAFF_ALERTS_ENABLED=true`. It defaults to `false`, and without both flags Gramps ignores every `STAFF_ALERTS_WATCHLIST` entry: a listed player joins with no alert, no record and no log line.
+To use the watch list and repeat-offender alerts (section 5), also set `STAFF_ALERTS_WATCHLIST_ENABLED=true` next to `STAFF_ALERTS_ENABLED=true`. It defaults to `false`, and without both flags Gramps ignores every `STAFF_ALERTS_WATCHLIST` entry: a listed player joins with no alert, no record and no log line.
 
 After deploying, open `GET /admin/api/servers/<server>/staff-alerts` (or the dashboard's Staff alerts tab once it lands) and check that `channel.state` is `ok` and `ping` is `ok` or `off`. `not-mentionable` means a ping would notify nobody (step 5); `invalid` means the role is the `@everyone` role or is not in the staff server. If you set up the watch list, also check that `features.watchlist` is `true`.
 
@@ -65,12 +68,20 @@ After deploying, open `GET /admin/api/servers/<server>/staff-alerts` (or the das
 | `performance-window`    | `WINDOW_KILLS` (30) or more kills within `WINDOW_MINUTES` (5).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | warning (never pings)                                    | **Review: unusual kill rate** · Ace had 31 kills in 5 min (6.2/min).                               |
 | `performance-match`     | `MATCH_KILLS` (40) or more round kills at K/D `MATCH_KD` (20) or more.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | warning (never pings)                                    | **Review: unusual round K/D** · Ace has 44 kills and 2 deaths this round on Bakurani (K/D 22).     |
 | `watchlist-join`        | A watch-list player appears who was not online in recent reads, including right after a failed read, an outage or a map load. One per player per `WATCHLIST_COOLDOWN_MINUTES` (360). Players already online when Gramps starts are recorded only (section 5).                                                                                                                                                                                                                                                                                                                           | high at `WATCHLIST_HIGHLIGHT_COMMUNITIES`+, else warning | **Watch list: player joined** · Banned in 4 communities (as recorded 2026-10-02). Monitoring only. |
+| `repeat-offender-join`  | A player appears, as for `watchlist-join`, with `REPEAT_OFFENDER_KICKS` (3) or more dashboard kicks the game applied or accepted on this server within `REPEAT_OFFENDER_DAYS` (30). Checked with the watch list; a watch-list player gets the kick count on that alert instead. Shares its cooldown, players-online-at-start rule and snooze.                                                                                                                                                                                                                                           | warning (never pings)                                    | **Repeat offender joined** · Kicked 3 times in the last 30 days. Monitoring only.                  |
+| `automation`            | Map-vote and 50v50 automation that needs a person (`StaffAlerts.send`): a ballot needing review, automatic voting paused after refused results, a 50v50 needing review or stopping itself, or the team lock possibly left off. One per issue and server every 30 minutes; the caller repeats it at most once.                                                                                                                                                                                                                                                                           | warning (never pings)                                    | **Automation needs a person** · The automatic map vote on UNCs Primary needs staff review: …       |
 
 Every seeding alert adds: "Gramps reads the player count over RCON. It cannot see whether the server is listed in the browser. Check the in-game browser and consider a seed call."
 
-**Quiet by design.** One alert per episode, a recovery message only if an alert was sent, no reminders. Per server and rolling hour: health and seeding together 6, watch list 6, performance `PERFORMANCE_MAX_PER_HOUR` (3). At most one role ping every 30 minutes. Alerts held back by a limit, a cooldown or a snooze are still recorded, with the reason, for the dashboard. Reads never wait for Discord to accept a post; while 10 posts for a server are still waiting on Discord, further alerts are recorded only, with that reason. A scheduled restart below the player threshold and a watch-list player already online when Gramps starts are recorded only; neither posts, pings or uses up a limit (hourly or the 30-minute restart limit).
+**Quiet by design.** One alert per episode, a recovery message only if an alert was sent, no reminders. Per server and rolling hour: health and seeding together 6, watch list and repeat offenders together 6, performance `PERFORMANCE_MAX_PER_HOUR` (3), automation 10. At most one role ping every 30 minutes. Alerts held back by a limit, a cooldown or a snooze are still recorded, with the reason, for the dashboard. Reads never wait for Discord to accept a post; while 10 posts for a server are still waiting on Discord, further alerts are recorded only, with that reason. A scheduled restart below the player threshold and a watch-list player already online when Gramps starts are recorded only; neither posts, pings or uses up a limit (hourly or the 30-minute restart limit).
 
 **Embeds.** Grey for info, amber for warning, red for high. The footer reads `Gramps · <server> · alert <id>`. Player names are game-controlled: control characters are removed, Markdown is escaped, mentions are neutralized and names are capped at 64 characters. SteamIDs are shown as code. There is no "Open in dashboard" button yet: it arrives with the dashboard's Staff alerts tab. Until then, use the alert ID in the footer with the staff API (section 7).
+
+### Automation alerts
+
+Map votes and 50v50 events call `StaffAlerts.send(server, key, message)` when automation needs a person. Gramps logs the text, records an `automation` alert for the staff API and posts it as an amber embed titled **Automation needs a person**, through the same channel checks and refusals as every other alert (section 2). It never mentions anyone, so it never pings or uses up the 30-minute ping, and a snooze, even `all`, never holds it back. It returns true only when the alert was posted; a refused channel or a Discord error is recorded as `failed` and never throws into the voting or event worker. Staff can acknowledge it like any alert. The footer names the server as configured (`WARDOGS_SERVERS`), like the monitor's alerts. The text is cleaned and capped at 600 characters in the embed; the log keeps up to 1,800.
+
+A channel that took map-vote alerts before these checks existed is refused now, and its alerts are only logged and recorded as `failed`, if `@everyone` can view it, Gramps lacks **Embed Links** or **Read Message History** there, or it is the weekly leaderboard channel. After deploying, check `channel.state` is `ok` in the staff status (section 2).
 
 ### The October 2 incident, replayed
 
@@ -114,6 +125,15 @@ STAFF_ALERTS_WATCHLIST='[{"steamId":"76561198000000003","reason":"Aimbot","evide
 - Everyone online when Gramps starts is checked once and recorded for the staff API as "online when Gramps started", without posting or pinging. Gramps keeps no state across restarts, so posting them would repeat alerts staff already had on every redeploy and every watch-list edit. If Gramps starts during a map load (an empty roster), the roster refills over several reads, so every player listed within the first 3 minutes counts as online at the start. On a server that really was empty, a watch-list join in those 3 minutes is recorded the same way. If such a player leaves and joins again, that join alerts as usual.
 - A known-good player on the watch list still alerts, with a note.
 
+### Repeat offenders
+
+While the watch list is on, Gramps also looks up each joining player's kicks in the dashboard's action records, with the same join rules as the watch list (including players online when Gramps starts, which are recorded only). One query covers every player who joined since the last read.
+
+- A watch-list alert adds the player's kicks on this server, if any, as **Prior kicks: 3 (last 2026-10-02)** (facts `priorKicks` and `lastKickAt`).
+- A `repeat-offender-join` alert is raised for a player with `STAFF_ALERTS_REPEAT_OFFENDER_KICKS` (default 3) or more kicks within `STAFF_ALERTS_REPEAT_OFFENDER_DAYS` (default 30). `0` kicks turns it off and keeps the watch list. A player on the watch list gets the kick count on that alert instead of a second alert. It uses the watch-list cooldown and snooze, never pings, and waits for a person to acknowledge it.
+- Kicks count when they were sent from the dashboard on this server and the game applied or accepted them. Refused kicks do not count, and neither do started, pending or unknown ones, which may never have reached the game. Kicks made in the in-game console are only in the game's command log (`/v1/audit`), without a reason or staff name, and are not counted.
+- Monitoring only: Gramps never kicks or bans a repeat offender. If the lookup fails or takes longer than 3 seconds, the alerts go without kick counts and the worker status lists the error under `Kick history`.
+
 ## 6. Limits of inference
 
 Gramps cannot see uptime, a boot ID, CPU or memory, tick rate, server load, or whether the server is listed in the in-game browser. Restarts, updates and seeding problems are inferred from RCON reads and say so. "Server under load" alerts from WarDogs have no Gramps equivalent. A restart while the server is empty may not be detected. The match clock or map changing across a read gap or a longer outage is treated as a restart signal. A single failed read is often just the game hitching during map travel, so across one failed read (within a minute of the reads on either side, however long that read took to time out) a new map, clock or round is not a restart signal, and an empty roster has to stay empty for 3 minutes first.
@@ -124,7 +144,7 @@ The default `SEEDING_AFTER_RESTART_HOURS=12` also fires after a quiet overnight 
 
 - **Staff API.** `GET admin/api/staff-alerts` (single server) or `GET admin/api/servers/<id>/staff-alerts` returns the status: features, channel and ping state, thresholds and list counts, worker observations (connection, players, round, build, last restart, seeding episode, counters, tracked and unlinked players, source errors), active snoozes, the newest 100 alerts and per-round peaks. Any staff role with access to the server can read it.
 - **Review.** `POST .../staff-alerts/<alertId>/review` with `{"decision":"ack"|"legit"|"never"}`. Moderators and administrators only. `legit` and `never` apply to performance alerts. `never` suppresses that SteamID until Gramps restarts and returns `knownGoodEntry`. The reviewer and time are kept in memory, and the Discord footer is updated when possible ("Marked legit by Mod One").
-- **Snooze.** `POST .../staff-alerts/snooze` with `{"category":"health"|"seeding"|"performance"|"watchlist"|"all","minutes":15-1440}`; `0` clears it. Snoozed alerts, including recovery messages, are still recorded. Snoozes do not survive a restart.
+- **Snooze.** `POST .../staff-alerts/snooze` with `{"category":"health"|"seeding"|"performance"|"watchlist"|"all","minutes":15-1440}`; `0` clears it. `watchlist` also covers repeat-offender alerts. Snoozed alerts, including recovery messages, are still recorded. Automation alerts are never snoozed. Snoozes do not survive a restart.
 - **Kick or ban.** Use the existing dashboard actions on the player, which go through `AdminService.act` with your identity, a reason and (for a ban) the typed SteamID confirmation. Current game builds reject bans for offline players with `player_not_found`, so a ban works only while the player is connected. Gramps never queues a ban to apply later.
 
 The dashboard's Staff alerts tab (Activity → Staff alerts) is planned to land after the dashboard refresh. Until then, use Discord and the staff API.
@@ -152,7 +172,7 @@ These are steps in WarDogs Server Commands and Warcon, not Gramps code. They kee
 - In WarDogs Server Commands, remove every server under ST-00.
 - In Warcon, revoke the WarDogs key. If the WarDogs agent was used, stop and remove it.
 - Change the RCON password, because WarDogs was linked by direct RCON with our password. Set the new password in the server configuration on the host (xREALM) first, then update `WARDOGS_RCON_PASSWORD` (or the server's `password` in `WARDOGS_SERVERS`) on Railway.
-- Then rotate the `[WDServerFeed]` token, since a bot with RCON or config access could have read it. Set a new token in the server configuration on the host (xREALM) first, then update `WARDOGS_FEED_TOKEN` (or the server's `feedToken` in `WARDOGS_SERVERS`) on Railway.
+- Then rotate the `[WDServerFeed]` token, since a bot with RCON or config access could have read it. Set a new token in the server configuration on the host (xREALM) first, then update `WARDOGS_FEED_TOKEN` (or the server's `feedToken` in `WARDOGS_SERVERS`) on Railway. Both steps are in [Rotating passwords and tokens](SECRET_ROTATION.md).
 - Check the Warcon organisation ban list and the whitelist for entries WarDogs added, and decide on each one.
 - Never re-add the server: held bans and whitelist grants can run automatically on reconnect.
 

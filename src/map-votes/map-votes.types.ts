@@ -2,19 +2,10 @@ import { z } from "zod";
 import { gameServerId } from "../common/game-server";
 import { mapSelectionSchema } from "../admin/admin.types";
 import { voteChoiceKey, type VoteAutomation } from "../common/voting-policy";
+export { ballotWinner } from "./voting-settings";
 
-export const votingPolicySchema = z
-  .object({
-    enabled: z.boolean(),
-    mapChoices: z.boolean(),
-    modeChoices: z.boolean(),
-    midpointReminder: z.boolean(),
-    finalReminder: z.boolean(),
-  })
-  .strict()
-  .refine((policy) => !policy.enabled || policy.mapChoices || policy.modeChoices, {
-    message: "Choose maps, modes, or both before enabling voting.",
-  });
+/** A ballot option. The 50v50 marker is accepted only for automatic ballots. */
+export const ballotChoiceSchema = mapSelectionSchema.extend({ event: z.literal("50v50").optional() }).strict();
 
 export const startMapVoteSchema = z
   .object({
@@ -25,7 +16,7 @@ export const startMapVoteSchema = z
       .min(1)
       .max(200)
       .regex(/^[^\r\n"]+$/),
-    choices: z.array(mapSelectionSchema).min(2).max(5),
+    choices: z.array(ballotChoiceSchema).min(2).max(5),
     minutes: z.number().int().min(2).max(30),
     reason: z
       .string()
@@ -54,7 +45,7 @@ export const cancelMapVoteSchema = z
   })
   .strict();
 export type StartMapVote = z.infer<typeof startMapVoteSchema>;
-export type MapVoteChoice = z.infer<typeof mapSelectionSchema>;
+export type MapVoteChoice = z.infer<typeof ballotChoiceSchema>;
 export type MapVoteState =
   | "publishing"
   | "open"
@@ -101,11 +92,6 @@ export type MapVoteRecord = {
   automation?: VoteAutomation | null;
 };
 
-/** A tie or no votes keeps the saved rotation. */
-export function ballotWinner(counts: number[]) {
-  const maximum = Math.max(0, ...counts);
-  return maximum > 0 && counts.filter((count) => count === maximum).length === 1 ? counts.indexOf(maximum) : null;
-}
 export function hasVoteCounts(vote: MapVoteRecord) {
   return vote.winner !== null || ["closing", "queued", "no_votes", "tied"].includes(vote.state);
 }

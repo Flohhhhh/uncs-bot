@@ -1,0 +1,2 @@
+ALTER TABLE "supporter_members" DROP CONSTRAINT "supporter_members_discord_source_check";--> statement-breakpoint
+ALTER TABLE "supporter_members" ADD CONSTRAINT "supporter_members_discord_source_check" CHECK ("supporter_members"."discord_source" is null or ("supporter_members"."discord_id" is not null and ("supporter_members"."discord_source" = 'staff' or ("supporter_members"."discord_source" in ('patreon', 'patron_signin') and "supporter_members"."provider" = 'patreon'))));

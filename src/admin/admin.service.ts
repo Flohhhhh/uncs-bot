@@ -7,21 +7,50 @@ import {
   ServiceUnavailableException,
 } from "@nestjs/common";
 import { createHash } from "node:crypto";
+import { Subject } from "rxjs";
 import { z } from "zod";
 import { AdminStore } from "./admin.store";
-import { actionSchema, canAct, type ActionResult, type Staff } from "./admin.types";
+import { actionSchema, canAct, steamId, type ActionResult, type Staff } from "./admin.types";
 import { RconError } from "./wardogs.client";
 import { GameServers } from "./game-servers";
 import { auditAction } from "./server-configuration";
+
+/** A whitelist removal the game applied or saved, from any staff tool. */
+export type WhitelistRemoval = {
+  serverId: string;
+  steamId: string;
+  actionId: string;
+  actorId: string;
+  actorName: string;
+  state: "applied" | "pending";
+};
+
+/** The Repeat offenders list on Action history: players kicked this many times within this many days. */
+export const REPEAT_OFFENDER_LIST = { minimum: 2, days: 30 };
+const DAY_MS = 24 * 60 * 60_000;
+
+/** Returns a sentence to add to the staff member's result, or null. */
+export type UnchangedQueueListener = (staff: Staff, serverId: string) => Promise<string | null>;
 
 @Injectable()
 export class AdminService {
   private readonly reads = new Map<string, { until: number; promise: Promise<unknown> }>();
   private readonly lastActions = new Map<string, number>();
+  /** Emitted after the audit receipt of a successful whitelist removal is saved. */
+  readonly whitelistRemovals = new Subject<WhitelistRemoval>();
+  private readonly unchangedQueue: UnchangedQueueListener[] = [];
   constructor(
     private readonly servers: GameServers,
     private readonly store: AdminStore,
   ) {}
+
+  /**
+   * Runs after a person's map-next finds its entry already next, which leaves the rotation unchanged.
+   * Map votes register here to close an open ballot: they depend on this service, so it cannot depend on them.
+   */
+  onUnchangedQueue(listener: UnchangedQueueListener) {
+    this.unchangedQueue.push(listener);
+  }
 
   async read(resource: string, serverId?: string) {
     const id = this.servers.resolve(serverId),
@@ -108,9 +137,13 @@ export class AdminService {
     if (this.lastActions.size > 1000) this.lastActions.clear();
     this.lastActions.set(actorKey, Date.now());
     const requestHash = createHash("sha256").update(JSON.stringify(action)).digest("hex");
+    const playerName =
+      action.action === "kick" || action.action === "ban" ? this.rosterName(serverId, action.steamId) : undefined;
     let started: Awaited<ReturnType<AdminStore["begin"]>>;
     try {
-      started = await this.store.begin(staff, auditAction(action), requestHash);
+      started = await (playerName
+        ? this.store.begin(staff, auditAction(action), requestHash, playerName)
+        : this.store.begin(staff, auditAction(action), requestHash));
     } catch {
       throw new ServiceUnavailableException("The action could not be recorded, so nothing was sent to the game.");
     }
@@ -152,7 +185,79 @@ export class AdminService {
           "The game request finished, but its final audit record could not be saved. Check the game and this action ID before repeating it.",
       };
     }
+    if (action.action === "whitelist-remove" && (result.state === "applied" || result.state === "pending"))
+      this.whitelistRemovals.next({
+        serverId,
+        steamId: action.steamId,
+        actionId: action.id,
+        actorId: staff.id,
+        actorName: staff.name,
+        state: result.state,
+      });
+    // Gramps' own queue changes (system:* actors) never close a ballot this way.
+    if (
+      action.action === "map-next" &&
+      !staff.id.startsWith("system:") &&
+      result.state === "applied" &&
+      result.changed === false
+    )
+      for (const listener of this.unchangedQueue) {
+        let note: string | null = null;
+        try {
+          note = await listener(staff, serverId);
+        } catch {
+          /* The game result stands; the listener reports its own failures. */
+        }
+        if (note) result = { ...result, message: `${result.message} ${note}` };
+      }
     return { id: action.id, ...result };
+  }
+
+  /** The player's name from the last roster read, for a kick or ban record. Never a game request or a reason to stop. */
+  private rosterName(serverId: string, player: string) {
+    try {
+      const name = this.servers.get(serverId).rosterName(player)?.trim();
+      return name ? [...name].slice(0, 64).join("") : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** One player's kicks and bans on this server for the player panel: counts, the newest of each and the last 10. */
+  async moderation(player: string, serverId?: string) {
+    const parsed = steamId.safeParse(player);
+    if (!parsed.success) throw new BadRequestException("Enter a 17-digit SteamID64 for a personal Steam account.");
+    const id = this.servers.resolve(serverId);
+    try {
+      const [summaries, entries] = await Promise.all([
+        this.store.moderationSummaries(id, [parsed.data]),
+        this.store.moderationEntries(id, parsed.data),
+      ]);
+      const summary = summaries.get(parsed.data);
+      return { kicks: summary?.kicks ?? null, bans: summary?.bans ?? null, entries };
+    } catch {
+      throw new ServiceUnavailableException("Kick and ban history could not be loaded. Try again shortly.");
+    }
+  }
+
+  /** Players kicked at least twice on this server in the last 30 days, most kicks first. */
+  async repeatOffenders(serverId?: string) {
+    const id = this.servers.resolve(serverId);
+    const { minimum, days } = REPEAT_OFFENDER_LIST;
+    try {
+      const players = await this.store.repeatOffenders(id, new Date(Date.now() - days * DAY_MS), minimum);
+      return { minimum, days, players };
+    } catch {
+      throw new ServiceUnavailableException("Repeat offenders could not be loaded. Try again shortly.");
+    }
+  }
+
+  /**
+   * Whether a person queued a map on this server since `since`, including the entry already next, which
+   * leaves the rotation unchanged. Every ballot, automatic or manual, checks this before it sends its winner.
+   */
+  staffQueuedSince(serverId: string, since: Date) {
+    return this.store.staffQueuedSince(serverId, since);
   }
 
   async receipt(id: string, serverId?: string) {
