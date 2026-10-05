@@ -43,6 +43,9 @@ export type WatchlistOptions = {
   entries: WatchlistEntry[];
   highlightCommunities: number;
   cooldownMinutes: number;
+  /** Kicks within `repeatDays` that make a join a repeat-offender alert; 0 turns that alert off. */
+  repeatKicks: number;
+  repeatDays: number;
 };
 export type StaffAlertsOptions = {
   enabled: boolean;
@@ -106,6 +109,8 @@ export function staffAlertsOptions(env: EnvService): StaffAlertsOptions {
       entries: env.get("STAFF_ALERTS_WATCHLIST") ?? [],
       highlightCommunities: env.get("STAFF_ALERTS_WATCHLIST_HIGHLIGHT_COMMUNITIES") ?? 3,
       cooldownMinutes: env.get("STAFF_ALERTS_WATCHLIST_COOLDOWN_MINUTES") ?? 360,
+      repeatKicks: env.get("STAFF_ALERTS_REPEAT_OFFENDER_KICKS") ?? 3,
+      repeatDays: env.get("STAFF_ALERTS_REPEAT_OFFENDER_DAYS") ?? 30,
     },
   };
   return {
@@ -138,5 +143,7 @@ export function settingsView(options: StaffAlertsOptions, sessionNeverCount: num
     watchlistCount: options.watchlist.entries.length,
     watchlistHighlightCommunities: options.watchlist.highlightCommunities,
     watchlistCooldownMinutes: options.watchlist.cooldownMinutes,
+    repeatOffenderKicks: options.watchlist.repeatKicks,
+    repeatOffenderDays: options.watchlist.repeatDays,
   };
 }

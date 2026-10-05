@@ -107,6 +107,10 @@ export class ServerActivity {
     for (const player of previous.players)
       if (!afterPlayers.has(player.steamId)) this.append("players", `${player.name} left`, at, player.steamId);
   }
+  /** A player's name in the last good roster read, or undefined. Reads nothing from the game. */
+  playerName(steamId: string) {
+    return this.previous?.players.find((player) => player.steamId === steamId)?.name;
+  }
   view(): ServerActivityView {
     return {
       startedAt: this.startedAt,
