@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import { useGameApi } from "../../api/server-client";
 import type { Overview } from "../../api/types";
 import { useGameAdmin as useAdmin } from "../../app/context";
@@ -147,6 +147,8 @@ export function BulkApproveDialog({
   const opened = useRef(0);
   const stopButton = useRef<HTMLButtonElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
+  const reviewList = useRef<HTMLUListElement>(null);
+  const [listScrolls, setListScrolls] = useState(false);
   const [phase, setPhase] = useState<"review" | "running" | "done">("review");
   const [stopping, setStopping] = useState(false);
   const [validation, setValidation] = useState("");
@@ -173,6 +175,17 @@ export function BulkApproveDialog({
       if (inFlight.current) setBusy(false);
     };
   }, [setBusy]);
+  useLayoutEffect(() => {
+    // A list taller than its box scrolls inside the dialog, so the keyboard has to be able to reach it. Long
+    // names wrap on a phone, so this measures the list instead of counting names. The dialog is open by now.
+    const measure = () => {
+      const list = reviewList.current;
+      if (list) setListScrolls(list.scrollHeight > list.clientHeight);
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, []);
   useEffect(() => {
     // The button that started the batch is gone by now, so focus moves to the one that replaced it.
     if (phase === "running") stopButton.current?.focus();
@@ -242,11 +255,14 @@ export function BulkApproveDialog({
             item.message = errorMessage(error);
             return;
           }
-          const seconds = Math.ceil(wait / 1000);
-          item.state = "paused";
-          item.message = `Server busy. Trying again in ${seconds} second${seconds === 1 ? "" : "s"}.`;
-          publish();
-          await pause(wait);
+          // Stop, or a closed dialog, while this request was out found no wait to end. So none starts now.
+          if (!halted()) {
+            const seconds = Math.ceil(wait / 1000);
+            item.state = "paused";
+            item.message = `Server busy. Trying again in ${seconds} second${seconds === 1 ? "" : "s"}.`;
+            publish();
+            await pause(wait);
+          }
           if (halted()) {
             item.state = "queued";
             item.message = "";
@@ -311,10 +327,10 @@ export function BulkApproveDialog({
         {phase === "review" && (
           <>
             <ul
+              ref={reviewList}
               className="team-review-players bulk-approve-list"
               aria-label="Applications to approve"
-              // A long list scrolls inside the dialog, so the keyboard has to be able to reach it.
-              tabIndex={total > 5 ? 0 : undefined}
+              tabIndex={listScrolls ? 0 : undefined}
             >
               {items.map((item) => (
                 <li key={item.id}>

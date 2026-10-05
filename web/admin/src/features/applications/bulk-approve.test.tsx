@@ -157,6 +157,21 @@ describe("approving several applications", () => {
     expect(request).not.toHaveBeenCalled();
   });
 
+  it("makes the list of names a keyboard stop only while it scrolls", () => {
+    const list = () => screen.getByRole("list", { name: "Applications to approve" });
+    // Five names are taller than the list's box, and names that wrap on a phone get there with fewer.
+    const height = vi.spyOn(Element.prototype, "scrollHeight", "get").mockReturnValue(335);
+    vi.spyOn(Element.prototype, "clientHeight", "get").mockReturnValue(299);
+    open(context(), [one, two]);
+    expect(list()).toHaveAttribute("tabindex", "0");
+    height.mockReturnValue(299);
+    fireEvent(window, new Event("resize"));
+    expect(list()).not.toHaveAttribute("tabindex");
+    height.mockReturnValue(300);
+    fireEvent(window, new Event("resize"));
+    expect(list()).toHaveAttribute("tabindex", "0");
+  });
+
   it("approves one at a time in the listed order, each with its own review ID and the shared reason", async () => {
     const answers: (() => void)[] = [];
     request.mockImplementation(
@@ -372,6 +387,31 @@ describe("approving several applications", () => {
     expect(progress()).toHaveTextContent("0 approved. 3 not sent.");
     expect(screen.queryByRole("list", { name: "Applications to check" })).not.toBeInTheDocument();
     expect(states(finished)).toEqual(["queued", "queued", "queued"]);
+    await flush(600_000);
+    expect(sent()).toHaveLength(1);
+  });
+
+  it("stops at once when a request that was out when Stop was pressed comes back as a 429", async () => {
+    let refuse!: () => void;
+    request.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          refuse = () => reject(busy());
+        }),
+    );
+    const { admin, finished } = open();
+    await start();
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    expect(screen.getByRole("button", { name: "Stopping…" })).toBeDisabled();
+    // Stop had no wait to end when it was pressed, so the 429 must not start one.
+    await settle(refuse);
+    expect(screen.getByRole("heading", { name: "Approval stopped" })).toBeInTheDocument();
+    expect(progress()).toHaveTextContent("0 approved. 3 not sent.");
+    expect(progress()).not.toHaveTextContent("Server busy");
+    expect(screen.queryByRole("list", { name: "Applications to check" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close" })).toBeEnabled();
+    expect(states(finished)).toEqual(["queued", "queued", "queued"]);
+    expect(admin.setBusy).toHaveBeenLastCalledWith(false);
     await flush(600_000);
     expect(sent()).toHaveLength(1);
   });

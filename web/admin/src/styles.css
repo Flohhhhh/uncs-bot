@@ -1666,6 +1666,17 @@ dialog .supporter-check input {
   font-size: var(--text-sm);
   line-height: 1.5;
 }
+.bulk-approve-list:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* This header has a long subtitle beside its tools, so the tools drop under the title when both do not fit. */
+.application-requests .card-header {
+  flex-wrap: wrap;
+}
+.application-requests .selection-label {
+  white-space: nowrap;
+}
 .bulk-approve-results {
   margin-bottom: var(--space-4);
   padding: var(--space-3) var(--space-4);

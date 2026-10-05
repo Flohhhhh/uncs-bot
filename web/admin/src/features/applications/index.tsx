@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useGameApi } from "../../api/server-client";
 import { useResource } from "../../api/use-resource";
 import { useGameAdmin as useAdmin } from "../../app/context";
-import { Badge, Card, Empty, Modal, ReasonField, Search, date } from "../../components/ui";
+import { Badge, Card, Empty, Modal, ReasonField, Search, date, focusPageHeading } from "../../components/ui";
 import { CopyValue, DataTable } from "../../components/data-table";
 import { BulkApproveDialog, BulkProblems, bulkProblems, bulkSummary, type BulkApproveResult } from "./bulk-approve";
 import { approveReason, reasonProblem } from "./review";
@@ -448,7 +448,16 @@ function AdminApplications() {
             >
               Approve {selection.length}
             </button>
-            <button type="button" className="text-button" disabled={busy} onClick={() => setTicked(new Set())}>
+            <button
+              type="button"
+              className="text-button"
+              disabled={busy}
+              onClick={() => {
+                setTicked(new Set());
+                // This button goes with the selection, so focus moves on before it is removed.
+                focusPageHeading();
+              }}
+            >
               Clear
             </button>
           </div>
@@ -460,7 +469,14 @@ function AdminApplications() {
             <strong>Last bulk approval:</strong> {bulkSummary(lastBulk.items)}
           </p>
           <BulkProblems items={bulkProblems(lastBulk.items)} />
-          <button type="button" className="text-button" onClick={() => setLastBulk(null)}>
+          <button
+            type="button"
+            className="text-button"
+            onClick={() => {
+              setLastBulk(null);
+              focusPageHeading();
+            }}
+          >
             Dismiss
           </button>
         </section>

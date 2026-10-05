@@ -575,3 +575,41 @@ it("keeps a running batch in its order through a refresh, then keeps what was ne
   expect(screen.queryByRole("region", { name: "Last bulk approval" })).not.toBeInTheDocument();
   expect(postCalls()).toHaveLength(2);
 });
+
+it("moves keyboard focus to the page heading when Clear or Dismiss removes itself", async () => {
+  vi.useFakeTimers();
+  const [first, second] = [named(1, "First"), named(2, "Second")];
+  request.mockImplementation(async (_path, options) => {
+    if (options?.method !== "POST") return { enabled: true, applications: [first, second] };
+    throw Object.assign(new Error("This SteamID is already on the running whitelist."), { status: 409 });
+  });
+  render(
+    <main id="main-content" tabIndex={-1}>
+      <h1 tabIndex={-1}>Applications</h1>
+      <Live />
+    </main>,
+  );
+  await flush();
+  const heading = screen.getByRole("heading", { name: "Applications" });
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select all pending" }));
+  const clear = screen.getByRole("button", { name: "Clear" });
+  clear.focus();
+  fireEvent.click(clear);
+  expect(clear).not.toBeInTheDocument();
+  expect(heading).toHaveFocus();
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select First" }));
+  fireEvent.click(screen.getByRole("button", { name: "Approve 1" }));
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Approve 1" }));
+  await flush(FIRST_APPROVAL_GAP_MS);
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Close" }));
+  await flush();
+  const dismiss = within(screen.getByRole("region", { name: "Last bulk approval" })).getByRole("button", {
+    name: "Dismiss",
+  });
+  dismiss.focus();
+  expect(dismiss).toHaveFocus();
+  fireEvent.click(dismiss);
+  expect(dismiss).not.toBeInTheDocument();
+  expect(heading).toHaveFocus();
+  expect(postCalls()).toHaveLength(1);
+});
