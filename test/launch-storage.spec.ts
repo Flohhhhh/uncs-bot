@@ -3132,6 +3132,12 @@ describe("launch storage on isolated PostgreSQL", () => {
     it("drops a refusal from the page by itself once it no longer holds", async () => {
       // membership_linked: the import moves the record's Patreon account to the patron Patreon now reports it for.
       const moved = await importPatron("moved-from", patron);
+      // Patreon linked the account an hour before the patron signed in with another, so the link is not a later
+      // action that settles the refusal.
+      await client.query(
+        "UPDATE supporter_actions SET created_at = created_at - interval '1 hour' WHERE member_id = $1",
+        [moved.id],
+      );
       expect(await patronLink.link(signIn("moved-from", otherAccount, new Date(Date.now() - 60_000)))).toMatchObject({
         outcome: "conflict",
         conflict: "membership_linked",
