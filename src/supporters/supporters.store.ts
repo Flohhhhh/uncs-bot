@@ -15,8 +15,10 @@ import { firstPaidEventId, type PatreonMemberSnapshot, type PatreonPledgeEvent }
 import {
   earlierPayment,
   type Executor,
+  founderAppliedWithSteam,
   founderCheck,
   type FounderIdentity,
+  founderTieReason,
   identityKeys,
   lockKeys,
   matchFactsSql,
@@ -99,6 +101,7 @@ type StoredSupporter = Omit<
 > & {
   founderCandidate: { payment: PaymentView; earlier: boolean; copyUnverified: boolean } | null;
   otherFounder: boolean;
+  founderAppliedWithSteam: boolean;
   matchFacts: MatchFacts;
 };
 type ObservedFields = Pick<PatreonObservation, "displayName" | "patronStatus" | "lastChargeStatus" | "lastChargeAt">;
@@ -621,6 +624,7 @@ export class SupportersStore {
           JOIN supporter_members other_member ON other_member.id = other_founder.member_id
           WHERE other_member.id <> m.id AND ((m.discord_id IS NOT NULL AND other_member.discord_id = m.discord_id)
             OR (m.steam_id IS NOT NULL AND other_member.steam_id = m.steam_id))),
+        'founderAppliedWithSteam', ${founderAppliedWithSteam(sql.raw("m.id"), sql.raw("m.steam_id"))},
         'matchFacts', ${matchFactsSql(campaignId)},
         'founder', (SELECT json_build_object('awardedAt', f.awarded_at, 'paymentId', f.payment_id, 'source', founder_payment.source,
             'automatic', f.awarded_by LIKE 'system:%')
@@ -649,7 +653,7 @@ export class SupportersStore {
   }
 
   private view(stored: StoredSupporter, policy: FounderPolicy, now: number): SupporterView {
-    const { founderCandidate, otherFounder, matchFacts, ...supporter } = stored;
+    const { founderCandidate, otherFounder, founderAppliedWithSteam, matchFacts, ...supporter } = stored;
     const facts: MatchFacts = {
       applications: matchFacts?.applications ?? [],
       automatic: matchFacts?.automatic ?? null,
@@ -670,6 +674,7 @@ export class SupportersStore {
               importedCopyUnverified: eligible ? false : Boolean(founderCandidate?.copyUnverified),
               hasIdentity: founderIdentity(supporter),
               otherFounder,
+              founderAppliedWithSteam,
             });
     }
     // The same verdict automatic matching reaches: its own rules, then the staff founder rule on its payment.
@@ -683,6 +688,7 @@ export class SupportersStore {
           earlierPayment: facts.automatic!.earlier,
           hasIdentity: founderIdentity(supporter),
           otherFounder,
+          founderAppliedWithSteam,
         }));
     const source = supporter.steamApplicationId
       ? facts.applications.find((application) => application.id === supporter.steamApplicationId)
@@ -781,7 +787,8 @@ export class SupportersStore {
           };
           if (founder) {
             await lockKeys(tx, identityKeys("founder", added));
-            if (await otherFounder(tx, added)) throw founderConflict("already_founder");
+            const tie = await otherFounder(tx, added);
+            if (tie) throw founderConflict(founderTieReason[tie]);
           }
         }
         details.previousDiscordId = member.discordId;

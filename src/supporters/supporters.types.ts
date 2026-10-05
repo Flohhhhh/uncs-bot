@@ -213,7 +213,8 @@ export type FounderBlockedReason =
   | "outside_window"
   | "below_minimum"
   | "no_identity"
-  | "already_founder";
+  | "already_founder"
+  | "steam_applied_by_founder";
 export const founderBlockedMessages: Record<FounderBlockedReason | "no_payment", string> = {
   window_not_configured: "The founder window is not configured.",
   source_not_qualifying:
@@ -226,6 +227,8 @@ export const founderBlockedMessages: Record<FounderBlockedReason | "no_payment",
   below_minimum: "The payment is below US$5, or a non-USD payment has not been confirmed to be worth at least US$5.",
   no_identity: "Link a Discord account or a valid SteamID64 first. A SteamID that is entered must be valid.",
   already_founder: "This person already has a founder record. Each person can be a founder once.",
+  steam_applied_by_founder:
+    "A founder with no SteamID linked applied for the whitelist with this SteamID. Link that founder's SteamID first.",
   no_payment: "No payment is recorded for this supporter.",
 };
 export type FounderPaymentFacts = {
@@ -262,12 +265,20 @@ export function meetsFounderMinimum(
  * The first reason this payment cannot make its member a founder, or null when it qualifies. One rule for every
  * provider: a verified first successful payment from a qualifying source, inside the end-exclusive window, worth at
  * least US$5. `earlierPayment` ignores the imported copy of a staff receipt's own charge, and
- * `importedCopyUnverified` means Patreon no longer reports that copy as paid.
+ * `importedCopyUnverified` means Patreon no longer reports that copy as paid. `otherFounder` is another founder record
+ * with the same Discord account or SteamID. `founderAppliedWithSteam` is a founder record with no SteamID linked whose
+ * Discord account applied for the whitelist with this record's SteamID.
  */
 export function founderBlocker(
   payment: FounderPaymentFacts,
   policy: FounderPolicy,
-  context: { earlierPayment: boolean; importedCopyUnverified?: boolean; hasIdentity: boolean; otherFounder: boolean },
+  context: {
+    earlierPayment: boolean;
+    importedCopyUnverified?: boolean;
+    hasIdentity: boolean;
+    otherFounder: boolean;
+    founderAppliedWithSteam?: boolean;
+  },
 ): FounderBlockedReason | null {
   const starts = policy.startsAt ? Date.parse(policy.startsAt) : NaN,
     ends = policy.endsAt ? Date.parse(policy.endsAt) : NaN;
@@ -281,6 +292,7 @@ export function founderBlocker(
   if (!meetsFounderMinimum(payment, policy)) return "below_minimum";
   if (!context.hasIdentity) return "no_identity";
   if (context.otherFounder) return "already_founder";
+  if (context.founderAppliedWithSteam) return "steam_applied_by_founder";
   return null;
 }
 /** A declined Patreon patron keeps the Supporter role this long after the declined charge while Patreon retries. */

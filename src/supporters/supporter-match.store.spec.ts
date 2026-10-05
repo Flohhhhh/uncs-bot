@@ -59,8 +59,10 @@ function fixture() {
     earlier: false,
     // A staff link of the same SteamID committed first, so the conditional fill matches no row.
     lost: false,
-    // Another supporter record committed the SteamID after the facts were read.
-    holder: false,
+    // Another supporter record committed a SteamID after the facts were read: any SteamID, or only this one.
+    holder: false as boolean | string,
+    // A founder with no SteamID linked whose Discord account applied with the SteamID being checked.
+    appliedFounder: false,
     facts: {
       applications: [applicationFixture()],
       automatic: { payment: paymentFixture(), earlier: false, earlierOtherRecord: false },
@@ -80,7 +82,10 @@ function fixture() {
       return { rows: state.founder ? [[memberId]] : [] };
     if (text.includes('from "supporter_founders" inner join'))
       return { rows: state.otherFounder ? [[randomUUID()]] : [] };
-    if (text.startsWith('select "id" from "supporter_members"')) return { rows: state.holder ? [[randomUUID()]] : [] };
+    if (text.startsWith("SELECT EXISTS (SELECT 1 FROM supporter_founders applied_founder"))
+      return { rows: [{ applied: state.appliedFounder }] };
+    if (text.startsWith('select "id" from "supporter_members"'))
+      return { rows: state.holder === true || state.holder === params[1] ? [[randomUUID()]] : [] };
     if (text.startsWith('select "id" from "supporter_payments"'))
       return { rows: state.earlier ? [[randomUUID()]] : [] };
     if (text.startsWith('update "supporter_members" set "steam_id"')) {
@@ -104,7 +109,10 @@ function fixture() {
     });
   return { store, query, member, state, texts, calls, run };
 }
+const otherSteam = "76561198000000002";
 const writes = (texts: string[]) => texts.filter((text) => /^(insert|update)/.test(text));
+const lockKeysOf = (query: ReturnType<typeof fixture>["query"]) =>
+  query.mock.calls.filter(([config]) => config.text.includes("pg_advisory_xact_lock")).map(([, params]) => params[0]);
 const audit = (calls: [{ text: string }, unknown[]][]) =>
   calls.map(([, params]) => JSON.parse(params.find((value) => String(value).startsWith("{")) as string));
 
@@ -280,7 +288,7 @@ describe("automatic founder promise", () => {
     });
     expect(calls('update "supporter_members" set "version"')).toHaveLength(1);
   });
-  it("records it with only a Discord account, locking and checking that account alone", async () => {
+  it("records it with only a Discord account, after locking the SteamID it applied with and checking its holders", async () => {
     const { run, texts, calls, query } = fixture();
     expect(await run({ recordFounder: true, fillSteam: false })).toMatchObject({
       steamFilled: false,
@@ -288,17 +296,25 @@ describe("automatic founder promise", () => {
       blocked: [],
       discordId,
     });
-    const locks = query.mock.calls.filter(([config]) => config.text.includes("pg_advisory_xact_lock"));
-    expect(locks.map(([, params]) => params[0])).toEqual([`founder:discord:${discordId}`]);
+    // The SteamID lock comes before the founder lock, the order staff links and PayPal records use.
+    expect(lockKeysOf(query)).toEqual([`supporter:steam:${steamId}`, `founder:discord:${discordId}`]);
     const all = texts();
+    const steamLock = query.mock.calls.findIndex(([, params]) => params?.[0] === `supporter:steam:${steamId}`);
+    const founderLock = query.mock.calls.findIndex(([, params]) => params?.[0] === `founder:discord:${discordId}`);
+    const holders = all.findIndex((text) => text.startsWith('select "id" from "supporter_members"'));
+    expect([steamLock < holders, holders < founderLock]).toEqual([true, true]);
+    expect(query.mock.calls[holders][1]).toEqual(
+      expect.arrayContaining([memberId, steamId, "paypal", "patreon", campaign]),
+    );
     // The cross-record founder check names the Discord account only: there is no SteamID to compare.
     const other = all.findIndex((text) => text.includes('from "supporter_founders" inner join'));
     const insert = all.findIndex((text) => text.startsWith('insert into "supporter_founders"'));
-    expect(other).toBeGreaterThan(all.findIndex((text) => text.includes("pg_advisory_xact_lock")));
+    expect(other).toBeGreaterThan(founderLock);
     expect(other).toBeLessThan(insert);
     expect(all[other]).toContain('"supporter_members"."discord_id" = $');
     expect(all[other]).not.toContain('"steam_id"');
     expect(query.mock.calls[other][1]).toEqual(expect.arrayContaining([memberId, discordId]));
+    expect(all.some((text) => text.includes("applied_founder"))).toBe(false);
     const [[, founderValues]] = calls('insert into "supporter_founders"');
     expect(founderValues).toEqual(
       expect.arrayContaining([memberId, paymentFixture().id, "system:supporter-match", policy.startsAt, policy.endsAt]),
@@ -390,6 +406,125 @@ describe("automatic founder promise", () => {
       expect(f.texts().some((text) => text.includes("pg_advisory_xact_lock"))).toBe(false);
     },
   );
+  it("records no Discord-only promise when another record took the applied SteamID while the facts were read", async () => {
+    const f = fixture();
+    // The facts say no record holds it. Under the SteamID lock, one does.
+    f.state.holder = true;
+    expect(await f.run({ recordFounder: true, fillSteam: false })).toMatchObject({
+      steamFilled: false,
+      founderRecorded: false,
+      blocked: ["steam_on_another_record"],
+    });
+    expect(writes(f.texts())).toEqual([]);
+    // The founder locks are never reached.
+    expect(lockKeysOf(f.query)).toEqual([`supporter:steam:${steamId}`]);
+  });
+  it("takes no SteamID lock for a Discord account with no application, or only declined and revoked ones", async () => {
+    for (const applications of [
+      [],
+      [
+        applicationFixture({ status: "declined" }),
+        applicationFixture({ id: "b2", serverId: "event", status: "revoked" }),
+      ],
+    ]) {
+      const f = fixture();
+      f.state.facts.applications = applications;
+      f.state.holder = true;
+      expect(await f.run({ recordFounder: true, fillSteam: false })).toMatchObject({ founderRecorded: true });
+      expect(lockKeysOf(f.query)).toEqual([`founder:discord:${discordId}`]);
+    }
+  });
+  describe("when the Discord account applied with a second SteamID", () => {
+    // The approved application is clean. A pending application on another server names another SteamID.
+    const second = (change: Parameters<typeof applicationFixture>[0] = {}) => [
+      applicationFixture(),
+      applicationFixture({ id: "b2", serverId: "event", steamId: otherSteam, status: "pending", ...change }),
+    ];
+    it.each([
+      ["with the SteamID fill on", true],
+      ["with the SteamID fill off", false],
+    ])("records no promise while another record holds that SteamID, %s", async (_name, fillSteam) => {
+      const f = fixture();
+      f.state.facts.applications = second({ otherSupporter: true });
+      // The fill still copies the approved SteamID. It does not make the founder automatic.
+      expect(await f.run({ recordFounder: true, fillSteam })).toMatchObject({
+        steamFilled: fillSteam,
+        founderRecorded: false,
+        blocked: ["steam_on_another_record"],
+      });
+      expect(f.calls('insert into "supporter_founders"')).toHaveLength(0);
+      expect(lockKeysOf(f.query).filter((key) => String(key).startsWith("founder:"))).toEqual([]);
+    });
+    it("locks both SteamIDs in order before the fill, and checks the second one's holders before the founder locks", async () => {
+      const f = fixture();
+      f.state.facts.applications = second();
+      expect(await f.run({ recordFounder: true })).toMatchObject({ steamFilled: true, founderRecorded: true });
+      expect(lockKeysOf(f.query)).toEqual([
+        `supporter:steam:${steamId}`,
+        `supporter:steam:${otherSteam}`,
+        // Taken again for the founder step, which is harmless inside one transaction.
+        `supporter:steam:${otherSteam}`,
+        `founder:discord:${discordId}`,
+        `founder:steam:${steamId}`,
+      ]);
+      const holders = f.calls('select "id" from "supporter_members"').map(([, params]) => params[1]);
+      expect(holders).toEqual([steamId, otherSteam]);
+      const all = f.texts();
+      expect(all.findIndex((text) => text.startsWith('update "supporter_members" set "steam_id"'))).toBeGreaterThan(
+        f.query.mock.calls.findIndex(([, params]) => params?.[0] === `supporter:steam:${otherSteam}`),
+      );
+    });
+    it("only locks the SteamID being copied when no founder step follows", async () => {
+      const f = fixture();
+      f.state.facts.applications = second();
+      expect(await f.run()).toMatchObject({ steamFilled: true, founderRecorded: false });
+      expect(lockKeysOf(f.query)).toEqual([`supporter:steam:${steamId}`]);
+    });
+    it("records no promise when another record took that SteamID while the facts were read", async () => {
+      for (const fillSteam of [true, false]) {
+        const f = fixture();
+        f.state.facts.applications = second();
+        f.state.holder = otherSteam;
+        expect(await f.run({ recordFounder: true, fillSteam })).toMatchObject({
+          steamFilled: fillSteam,
+          founderRecorded: false,
+          blocked: ["steam_on_another_record"],
+        });
+        expect(f.calls('insert into "supporter_founders"')).toHaveLength(0);
+      }
+      // The same for a SteamID staff linked: the other applied SteamID is locked and checked, the linked one is not.
+      const linked = ready();
+      linked.state.facts.applications = second();
+      linked.state.holder = otherSteam;
+      expect(await linked.run({ recordFounder: true })).toMatchObject({
+        founderRecorded: false,
+        blocked: ["steam_on_another_record"],
+      });
+      expect(lockKeysOf(linked.query)).toEqual([`supporter:steam:${otherSteam}`]);
+      expect(writes(linked.texts())).toEqual([]);
+    });
+  });
+  it("refuses a promise for a SteamID that a founder with no SteamID linked applied with", async () => {
+    const f = ready();
+    f.state.appliedFounder = true;
+    expect(await f.run({ recordFounder: true, fillSteam: false })).toMatchObject({
+      founderRecorded: false,
+      blocked: ["steam_applied_by_founder"],
+    });
+    expect(writes(f.texts())).toEqual([]);
+    const [[statement, params]] = f.query.mock.calls.filter(([config]) => config.text.includes("applied_founder"));
+    expect(statement.text).toContain(
+      "WHERE applied_member.id <> $1 AND applied_member.steam_id IS NULL AND applied.steam_id = $2",
+    );
+    expect(statement.text).toContain("applied.status NOT IN ('declined', 'revoked')");
+    expect(params).toEqual([memberId, steamId]);
+    // It runs under the founder locks, after the plain comparison found no founder.
+    const all = f.texts();
+    expect(all.findIndex((text) => text.includes("applied_founder"))).toBeGreaterThan(
+      all.findIndex((text) => text.includes('from "supporter_founders" inner join')),
+    );
+    expect(lockKeysOf(f.query)).toEqual([`founder:discord:${discordId}`, `founder:steam:${steamId}`]);
+  });
   it("records a Discord-only promise on a payment in another currency counted by its tier's price", async () => {
     const f = fixture();
     f.state.facts.automatic!.payment = paymentFixture({ currency: "CAD", amountCents: 750, minimumConfirmed: true });

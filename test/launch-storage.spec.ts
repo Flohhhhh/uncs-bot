@@ -2374,6 +2374,152 @@ describe("launch storage on isolated PostgreSQL", () => {
       expect((await kinds(record.id)).map((row) => row.kind)).toEqual(["patreon-discord-link"]);
     });
 
+    it("refuses a founder by SteamID for a person already recorded on the Discord account that applied with it", async () => {
+      // Patreon first: the patron connected Discord and applied, and no SteamID is linked to the record.
+      const record = await importPatron();
+      await approve((await application()).id, "primary");
+      expect(await match.autoMatch(record.id, options({ fillSteam: false }))).toMatchObject({
+        steamFilled: false,
+        founderRecorded: true,
+        blocked: [],
+      });
+      // Staff then record the same person's PayPal payment by SteamID alone and ask for a founder promise.
+      const award = paypalInput({ discordId: undefined, steamId: patronSteam, awardFounder: true });
+      await expect(supporters.recordPaypal(award, staff, null, policy)).rejects.toMatchObject({
+        status: 409,
+        response: { blockedReason: "steam_applied_by_founder" },
+      });
+      expect(await supporterCounts()).toMatchObject({ members: 1, payments: 1, founders: 1 });
+      // The payment alone is recorded, and its record says why no founder promise can be recorded on it.
+      const paypal = await supporters.recordPaypal(
+        { ...award, id: randomUUID(), awardFounder: false },
+        staff,
+        null,
+        policy,
+      );
+      expect(paypal).toMatchObject({
+        founder: { awarded: false, eligible: false, blockedReason: "steam_applied_by_founder" },
+        supporter: { discordId: null, steamId: patronSteam, founderBlockedReason: "steam_applied_by_founder" },
+      });
+      await expect(
+        supporters.mutate(
+          paypal.supporter.id,
+          { ...review(paypal.supporter), kind: "founder", paymentId: paypal.payment.id },
+          staff,
+          null,
+          policy,
+        ),
+      ).rejects.toMatchObject({ status: 409, response: { blockedReason: "steam_applied_by_founder" } });
+      // Staff link the SteamID on the founder's record. Both records then hold it, and the plain rule applies.
+      const founder = (await supporters.get(record.id, campaign, automaticPolicy))!;
+      expect(founder).toMatchObject({
+        steamId: null,
+        founder: { automatic: true },
+        match: { steam: { reason: "steam_on_another_record", steamId: patronSteam } },
+      });
+      expect(
+        (
+          await supporters.mutate(
+            record.id,
+            { ...review(founder), kind: "link", steamId: patronSteam },
+            staff,
+            campaign,
+            policy,
+          )
+        ).supporter,
+      ).toMatchObject({ steamId: patronSteam, steamSource: "staff", founder: { automatic: true } });
+      expect((await supporters.get(paypal.supporter.id, null, policy))?.founderBlockedReason).toBe("already_founder");
+      expect((await client.query<{ member_id: string }>("SELECT member_id FROM supporter_founders")).rows).toEqual([
+        { member_id: record.id },
+      ]);
+    });
+
+    it("records one founder when a match on a Discord account and a PayPal founder award for its SteamID overlap", async () => {
+      const record = await importPatron();
+      await approve((await application()).id, "primary");
+      const results = await overlap<unknown>(
+        "supporter_members",
+        // No SteamID is linked, so the match records the founder on the Discord account alone.
+        ({ match }) => match.autoMatch(record.id, options({ fillSteam: false })),
+        ({ supporters }) =>
+          supporters.recordPaypal(
+            paypalInput({ discordId: undefined, steamId: patronSteam, awardFounder: true }),
+            staff,
+            null,
+            policy,
+          ),
+      );
+      expect((await client.query("SELECT count(*)::int AS count FROM supporter_founders")).rows).toEqual([
+        { count: 1 },
+      ]);
+      const automatic = results[0] as PromiseSettledResult<AutoMatchResult>;
+      const paypal = results[1];
+      if (automatic.status === "fulfilled" && automatic.value.founderRecorded)
+        // The award waited for the SteamID lock, then found the founder through the whitelist application.
+        expect(paypal).toMatchObject({
+          status: "rejected",
+          reason: { response: { blockedReason: "steam_applied_by_founder" } },
+        });
+      else {
+        // The match waited for the SteamID lock, then found the PayPal record that holds the SteamID.
+        expect(paypal.status).toBe("fulfilled");
+        expect(automatic).toMatchObject({
+          status: "fulfilled",
+          value: { steamFilled: false, founderRecorded: false, blocked: ["steam_on_another_record"] },
+        });
+      }
+    });
+
+    it("leaves the founder to staff, with the SteamID fill on or off, while another record holds a second SteamID the account applied with", async () => {
+      // The patron's approved application is clean. On another server they applied with a second SteamID, and a
+      // PayPal founder record holds that one.
+      const secondSteam = "76561198000000024";
+      const paypal = await supporters.recordPaypal(
+        paypalInput({ discordId: undefined, steamId: secondSteam, awardFounder: true }),
+        staff,
+        null,
+        policy,
+      );
+      const record = await importPatron();
+      await approve((await application()).id, "primary");
+      await application(patron, secondSteam, "east");
+      const blocked = { automaticBlockedReason: "steam_on_another_record", founder: null, founderBlockedReason: null };
+      // Before the fill: the approved SteamID can be copied, and the page already says the founder is not automatic.
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        ...blocked,
+        steamId: null,
+        match: { steam: { reason: null, steamId: patronSteam } },
+      });
+      expect(await match.autoMatch(record.id, options({ fillSteam: false }))).toMatchObject({
+        steamFilled: false,
+        founderRecorded: false,
+        blocked: ["steam_on_another_record"],
+      });
+      // The fill copies the approved SteamID and changes nothing about the founder, in that run or the next.
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        steamFilled: true,
+        founderRecorded: false,
+        blocked: ["steam_on_another_record"],
+      });
+      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+        ...blocked,
+        steamId: patronSteam,
+        steamSource: "application",
+      });
+      expect(await match.autoMatch(record.id, options())).toMatchObject({
+        steamFilled: false,
+        founderRecorded: false,
+        blocked: ["steam_on_another_record"],
+      });
+      expect((await client.query<{ member_id: string }>("SELECT member_id FROM supporter_founders")).rows).toEqual([
+        { member_id: paypal.supporter.id },
+      ]);
+      expect((await kinds(record.id)).map((row) => row.kind).sort()).toEqual([
+        "application-steam-link",
+        "patreon-discord-link",
+      ]);
+    });
+
     it("records no automatic founder on a first payment in another currency", async () => {
       const record = await importPatron("euro-patron", patron, {
         ...charge("pledge_start:euro-patron", "2026-10-01T12:00:00.000Z"),

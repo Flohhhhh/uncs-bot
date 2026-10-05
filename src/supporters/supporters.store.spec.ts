@@ -80,6 +80,8 @@ function fixture() {
     manualDuplicate: boolean;
     earlier: boolean;
     otherFounder: boolean;
+    /** A founder with no SteamID linked whose Discord account applied with the SteamID being checked. */
+    appliedFounder: boolean;
     founder: boolean;
     action: Record<string, unknown> | null;
     /** The record's current Discord account applied with the SteamID being linked. */
@@ -89,6 +91,7 @@ function fixture() {
     manualDuplicate: false,
     earlier: false,
     otherFounder: false,
+    appliedFounder: false,
     founder: false,
     action: null,
     previousApplication: false,
@@ -104,6 +107,8 @@ function fixture() {
       return { rows: state.action ? [row(supporterActions, state.action)] : [] };
     if (config.text.includes('from "supporter_founders" inner join'))
       return { rows: state.otherFounder ? [[randomUUID()]] : [] };
+    if (config.text.startsWith("SELECT EXISTS (SELECT 1 FROM supporter_founders applied_founder"))
+      return { rows: [{ applied: state.appliedFounder }] };
     if (config.text.startsWith('select "member_id" from "supporter_founders" where'))
       return { rows: state.founder ? [[id]] : [] };
     if (config.text.startsWith('select "id" from "supporter_payments"'))
@@ -284,6 +289,8 @@ describe("supporter persistence and founder eligibility", () => {
     ["invalid-steam", "no_identity"],
     ["earlier", "earlier_payment"],
     ["other-founder", "already_founder"],
+    ["applied-founder", "steam_applied_by_founder"],
+    ["other-and-applied-founder", "already_founder"],
   ])("rejects founder award for %s evidence (%s)", async (caseName, blockedReason) => {
     const { store, query, payment, member, state } = fixture();
     if (caseName === "low") payment.amountCents = 499;
@@ -297,7 +304,8 @@ describe("supporter persistence and founder eligibility", () => {
     if (caseName === "unlinked") Object.assign(member, { discordId: null, steamId: null });
     if (caseName === "invalid-steam") member.steamId = "76561190000000001";
     if (caseName === "earlier") state.earlier = true;
-    if (caseName === "other-founder") state.otherFounder = true;
+    if (caseName.startsWith("other-")) state.otherFounder = true;
+    if (caseName.endsWith("applied-founder")) state.appliedFounder = true;
     await expect(
       store.mutate(
         id,
@@ -351,6 +359,44 @@ describe("supporter persistence and founder eligibility", () => {
     );
     expect(lock).toBeGreaterThan(-1);
     expect(lock).toBeLessThan(check);
+  });
+  it("looks for a founder who applied with the SteamID only for a record that has one, after the plain comparison", async () => {
+    const award = (paymentId: string): SupporterMutation => ({
+      kind: "founder",
+      id: randomUUID(),
+      version: 3,
+      confirm: "member-123",
+      reason: "Reviewed receipt",
+      paymentId,
+    });
+    // The list read that follows a save selects the same expression, so only the check's own statement counts.
+    const applied = (query: jest.Mock) =>
+      query.mock.calls.filter(([config]) => (config as { text: string }).text.startsWith("SELECT EXISTS (SELECT 1"));
+    const withSteam = fixture();
+    await withSteam.store.mutate(id, award(withSteam.payment.id), staff, "123", policy);
+    const [[statement, params]] = applied(withSteam.query);
+    expect(statement.text).toContain("JOIN whitelist_applications applied ON applied.discord_user_id");
+    expect(statement.text).toContain(
+      "WHERE applied_member.id <> $1 AND applied_member.steam_id IS NULL AND applied.steam_id = $2",
+    );
+    expect(statement.text).toContain("applied.status NOT IN ('declined', 'revoked')");
+    expect(params).toEqual([id, "76561198000000001"]);
+    const texts = withSteam.query.mock.calls.map(([config]) => config.text);
+    const plain = texts.findIndex((text) => text.includes('from "supporter_founders" inner join'));
+    const lock = texts.findIndex((text) => text.includes("pg_advisory_xact_lock"));
+    const check = texts.findIndex((text) => text.startsWith("SELECT EXISTS (SELECT 1"));
+    expect([lock < plain, plain < check]).toEqual([true, true]);
+    // A record with only a Discord account has no SteamID to look for, and a founder found already ends the check.
+    const discordOnly = fixture();
+    Object.assign(discordOnly.member, { steamId: null, steamSource: null });
+    await discordOnly.store.mutate(id, award(discordOnly.payment.id), staff, "123", policy);
+    expect(applied(discordOnly.query)).toHaveLength(0);
+    const found = fixture();
+    found.state.otherFounder = true;
+    await expect(found.store.mutate(id, award(found.payment.id), staff, "123", policy)).rejects.toMatchObject({
+      status: 409,
+    });
+    expect(applied(found.query)).toHaveLength(0);
   });
   it("keeps Patreon records closed while Patreon is not configured and rejects receipts on PayPal records", async () => {
     const { store, member } = fixture();
@@ -497,6 +543,24 @@ describe("supporter persistence and founder eligibility", () => {
     ]);
     expect(locks[1].index).toBeLessThan(check);
     expect(query.mock.calls.at(-1)![0].text).toBe("rollback");
+    // The same for a SteamID that a founder with no SteamID linked applied with, named as its own reason.
+    const applied = fixture();
+    applied.state.founder = true;
+    applied.state.appliedFounder = true;
+    await expect(
+      applied.store.mutate(id, link({ steamId: "76561198000000002" }), staff, "123", policy),
+    ).rejects.toMatchObject({
+      status: 409,
+      response: {
+        blockedReason: "steam_applied_by_founder",
+        message:
+          "A founder with no SteamID linked applied for the whitelist with this SteamID. Link that founder's SteamID first.",
+      },
+    });
+    expect(applied.query.mock.calls.find(([config]) => config.text.includes("applied_founder"))![1]).toEqual([
+      id,
+      "76561198000000002",
+    ]);
     // A record that is not a founder takes no founder lock, only the SteamID lock.
     const plain = fixture();
     plain.state.otherFounder = true;
@@ -551,6 +615,18 @@ describe("supporter persistence and founder eligibility", () => {
     expect(statement.text).toContain("WHEN m.discord_id IS NULL OR m.steam_id IS NULL THEN 'partial'");
     expect(statement.text).toContain("WHEN m.discord_source = 'patreon' THEN 'patreon_linked' ELSE 'staff_linked'");
     expect(statement.text).toContain("'automatic', f.awarded_by LIKE 'system:%'");
+  });
+  it("reads whether a founder with no SteamID linked applied with the record's SteamID, by the shared expression", async () => {
+    const { store, query } = fixture();
+    await store.list("123", policy);
+    const [statement] = query.mock.calls[0];
+    expect(statement.text).toContain(
+      "'founderAppliedWithSteam', EXISTS (SELECT 1 FROM supporter_founders applied_founder",
+    );
+    expect(statement.text).toContain(
+      "WHERE applied_member.id <> m.id AND applied_member.steam_id IS NULL AND applied.steam_id = m.steam_id",
+    );
+    expect(statement.text).toContain("AND applied.status NOT IN ('declined', 'revoked'))");
   });
   it("reads every application of the Discord account for matching, never contact details", async () => {
     const { store, query } = fixture();
@@ -647,11 +723,23 @@ describe("supporter persistence and founder eligibility", () => {
     });
     expect(view).not.toHaveProperty("matchFacts");
     expect(view).not.toHaveProperty("otherFounder");
+    expect(view).not.toHaveProperty("founderAppliedWithSteam");
     // The staff rule runs on the automatic payment after the automatic rules.
     expect(await read(stored({}, { automatic: { payment, earlier: true, earlierOtherRecord: false } }))).toMatchObject({
       automaticBlockedReason: "earlier_payment",
     });
     expect(await read(stored({ otherFounder: true }))).toMatchObject({ automaticBlockedReason: "already_founder" });
+    // A founder with no SteamID linked applied with this record's SteamID: no award, by staff or by automation.
+    const appliedByFounder = await read(stored({ founderAppliedWithSteam: true }));
+    expect(appliedByFounder).toMatchObject({
+      founderBlockedReason: "steam_applied_by_founder",
+      founderBlockedMessage: expect.stringContaining("Link that founder's SteamID first."),
+      automaticBlockedReason: "steam_applied_by_founder",
+    });
+    expect(appliedByFounder).not.toHaveProperty("founderAppliedWithSteam");
+    expect(await read(stored({ otherFounder: true, founderAppliedWithSteam: true }))).toMatchObject({
+      founderBlockedReason: "already_founder",
+    });
     expect(await read(stored({}, { linkedSteamShared: true }))).toMatchObject({
       automaticBlockedReason: "steam_shared",
       match: { linkedSteamShared: true },
@@ -680,9 +768,19 @@ describe("supporter persistence and founder eligibility", () => {
       await read(stored({ steamId: null, steamSource: null, steamApplicationId: null }, { applications: [held] })),
     ).toMatchObject({
       automaticBlockedReason: "steam_on_another_record",
-      automaticBlockedMessage: "Another supporter record already holds this SteamID.",
+      automaticBlockedMessage: "Another supporter record holds a SteamID this Discord account applied with.",
       match: { steam: { reason: "steam_on_another_record" } },
     });
+    // The same verdict once the SteamID fill copied the approved SteamID, when the SteamID held elsewhere is another
+    // one this Discord account applied with.
+    const second = { ...held, id: randomUUID(), serverId: "event", steamId: "76561198000000002", status: "pending" };
+    for (const linked of [{}, { steamId: null, steamSource: null, steamApplicationId: null }])
+      expect(await read(stored(linked, { applications: [stored().matchFacts.applications[0], second] }))).toMatchObject(
+        {
+          automaticBlockedReason: "steam_on_another_record",
+          match: { steam: { reason: null, steamId: "76561198000000001" } },
+        },
+      );
     // A founder needs no automatic verdict, and a record without a Discord account has no SteamID match.
     expect(
       await read(
@@ -825,11 +923,14 @@ describe("PayPal supporter ledger", () => {
       recorded: false,
       founderAwarded: false,
       earlier: false,
+      appliedFounder: false,
       action: null as Record<string, unknown> | null,
     };
     const query = jest.fn(async (config: { text: string }, _params: unknown[]) => {
       const text = config.text;
       if (text.includes("pg_advisory_xact_lock")) return { rows: [] };
+      if (text.startsWith("SELECT EXISTS (SELECT 1 FROM supporter_founders applied_founder"))
+        return { rows: [{ applied: state.appliedFounder }] };
       if (text.includes("json_build_object"))
         return {
           rows: [
@@ -1010,6 +1111,33 @@ describe("PayPal supporter ledger", () => {
     const result = await store.recordPaypal({ ...input, awardFounder: true }, staff, null, policy);
     expect(result.founder).toEqual({ awarded: true, eligible: true, blockedReason: null });
     expect(texts(query).some((text) => text.startsWith('insert into "supporter_founders"'))).toBe(true);
+  });
+  it("refuses a founder by SteamID when a founder with no SteamID linked applied with it, recording nothing", async () => {
+    const { store, query, state, input, member } = paypalFixture();
+    state.appliedFounder = true;
+    Object.assign(member, { discordId: null, steamId: "76561198000000009" });
+    const award = { ...input, discordId: undefined, steamId: "76561198000000009", awardFounder: true };
+    await expect(store.recordPaypal(award, staff, null, policy)).rejects.toMatchObject({
+      status: 409,
+      response: {
+        blockedReason: "steam_applied_by_founder",
+        message: expect.stringMatching(/Link that founder's SteamID first\. Nothing was recorded\.$/),
+      },
+    });
+    expect(texts(query).at(-1)).toBe("rollback");
+    expect(texts(query).some((text) => text.startsWith('insert into "supporter_founders"'))).toBe(false);
+    const check = query.mock.calls.find(([config]) => config.text.includes("applied_founder"))!;
+    expect(check[1]).toEqual([member.id, "76561198000000009"]);
+    // The SteamID lock, then the founder lock, both before the check.
+    const keys = query.mock.calls.flatMap(([config, params], index) =>
+      config.text.includes("pg_advisory_xact_lock") ? [{ index, key: String(params[0]) }] : [],
+    );
+    const steamLock = keys.find(({ key }) => key === "supporter:steam:76561198000000009")!;
+    const founderLock = keys.find(({ key }) => key === "founder:steam:76561198000000009")!;
+    expect([steamLock.index < founderLock.index, founderLock.index < query.mock.calls.indexOf(check)]).toEqual([
+      true,
+      true,
+    ]);
   });
   it.each([
     ["an earlier payment", { earlier: true }, {}, "earlier_payment"],

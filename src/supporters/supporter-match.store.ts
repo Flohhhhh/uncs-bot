@@ -6,6 +6,7 @@ import { supporterActions, supporterFounders, supporterMembers } from "../databa
 import {
   type Executor,
   founderCheck,
+  founderTieReason,
   identityKeys,
   lockKeys,
   matchFactsSql,
@@ -14,6 +15,7 @@ import {
 } from "./founder-rules";
 import {
   applicationSteamMatch,
+  appliedSteamIds,
   AUTO_FOUNDER_HOLD_HOURS_DEFAULT,
   AUTO_FOUNDER_REASON,
   automaticFounderBlocker,
@@ -49,8 +51,9 @@ const sha256 = (value: unknown) => createHash("sha256").update(JSON.stringify(va
 /**
  * Automatic supporter matching's database work. Every write is conditional on the state it changes, made under the
  * member's row lock, and audited in the same transaction, so a repeated run writes nothing. Lock order: the member
- * row, then that Discord account's applications (FOR SHARE), then the SteamID being copied, then the sorted founder
- * advisory locks, the same order staff links and founder awards use.
+ * row, then that Discord account's applications (FOR SHARE), then the SteamIDs whose holders decide the run (the one
+ * being copied, and before a founder promise every other one the Discord account applied with), then the sorted
+ * founder advisory locks, the same order staff links and founder awards use.
  */
 @Injectable()
 export class SupporterMatchStore {
@@ -122,9 +125,11 @@ export class SupporterMatchStore {
         const application = facts.applications.find((item) => item.id === steam.applicationId);
         let refused: AutomaticFounderBlockedReason | null = steam.reason;
         // The facts were read before any lock on the SteamID. A staff Link or PayPal record of it takes the same lock,
-        // so once it is held, every committed holder is visible here.
+        // so once it is held, every committed holder is visible here. A founder step that follows locks the other
+        // SteamIDs this account applied with, so they are taken here too, all in one sorted pass.
         if (!refused) {
-          await lockKeys(tx, supporterSteamKeys(steam.steamId));
+          const locked = [steam.steamId!, ...(options.recordFounder && !founder ? appliedSteamIds(facts) : [])];
+          await lockKeys(tx, locked.flatMap(supporterSteamKeys));
           if (await this.otherHolder(tx, memberId, steam.steamId!, options.campaignId)) {
             refused = "steam_on_another_record";
             heldElsewhere = true;
@@ -134,7 +139,8 @@ export class SupporterMatchStore {
         if (!refused && founder) {
           const added = { id: memberId, discordId: null, steamId: steam.steamId };
           await lockKeys(tx, identityKeys("founder", added));
-          if (await otherFounder(tx, added)) refused = "already_founder";
+          const tie = await otherFounder(tx, added);
+          if (tie) refused = founderTieReason[tie];
         }
         if (refused) result.blocked.push(refused);
         else {
@@ -176,13 +182,26 @@ export class SupporterMatchStore {
         }
       }
       if (options.recordFounder && !founder) {
-        // The rule refuses a record with no SteamID when another record holds the SteamID its Discord account applied
-        // with. A holder found under the lock is newer than the facts the rule reads, and is refused the same way.
-        const reason: AutomaticFounderBlockedReason | null =
+        // The rule refuses a record when another record holds a SteamID its Discord account applied with. A holder
+        // found under the lock is newer than the facts the rule reads, and is refused the same way.
+        let reason: AutomaticFounderBlockedReason | null =
           automaticFounderBlocker(current, facts, {
             now: options.now,
             holdHours: options.policy.automaticHoldHours ?? AUTO_FOUNDER_HOLD_HOURS_DEFAULT,
           }) ?? (heldElsewhere ? "steam_on_another_record" : null);
+        // The rule read those holders before any lock. Every write of a SteamID to a supporter record takes that
+        // SteamID's lock first, so once the locks are held, a record that took one meanwhile is visible here. A
+        // founder award that follows on one of them finds a founder with no SteamID linked through its application
+        // (founderAppliedWithSteam). The linked SteamID itself is compared by founderCheck.
+        if (!reason) {
+          const applied = appliedSteamIds(facts, current.steamId);
+          await lockKeys(tx, applied.flatMap(supporterSteamKeys));
+          for (const steamId of applied)
+            if (await this.otherHolder(tx, memberId, steamId, options.campaignId)) {
+              reason = "steam_on_another_record";
+              break;
+            }
+        }
         // The SteamID fill may already have listed this reason for the same record.
         if (reason) {
           if (!result.blocked.includes(reason)) result.blocked.push(reason);
