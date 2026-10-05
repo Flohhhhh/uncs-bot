@@ -345,9 +345,10 @@ export function ReasonField({ defaultValue = "" }: { defaultValue?: string }) {
 /**
  * Where focus goes when the control that opened a dialog cannot take it back. A review opened from the
  * player panel returns to the panel, which stays open behind it and keeps the page inert; otherwise the
- * page heading takes focus rather than leave keyboard users at the end of the page.
+ * page heading takes focus rather than leave keyboard users at the end of the page. A page control that
+ * removes itself, such as Dismiss, uses it too.
  */
-function focusPageHeading() {
+export function focusPageHeading() {
   const open = document.querySelectorAll<HTMLDialogElement>("dialog[open]");
   const panel = open[open.length - 1];
   if (panel) {

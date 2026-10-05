@@ -1652,6 +1652,77 @@ dialog .supporter-check input {
     gap: 14px;
   }
 }
+/* Bulk approval: the list of applicants in the dialog, and the result kept on the page. */
+.bulk-approve-list li > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.bulk-approve-list li > span {
+  flex-shrink: 0;
+}
+.bulk-approve-list p {
+  margin: 6px 0 0;
+  color: var(--cream);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+.bulk-approve-list:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* This header has a long subtitle beside its tools, so the tools drop under the title when both do not fit. */
+.application-requests .card-header {
+  flex-wrap: wrap;
+}
+.application-requests .selection-label {
+  white-space: nowrap;
+}
+.bulk-approve-results {
+  margin-bottom: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--warn-line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  font-size: var(--text-sm);
+}
+.bulk-approve-results > p {
+  margin: 0;
+  line-height: 1.6;
+}
+.bulk-approve-results .bulk-approve-list {
+  max-height: none;
+  margin-top: var(--space-3);
+}
+.bulk-approve-results .text-button {
+  margin-top: var(--space-2);
+  padding-left: 0;
+}
+/* On phones the tick box sits in the corner of the request's card, with a full-size touch target. */
+@media (max-width: 700px) {
+  .application-requests [data-mobile="cards"] tbody tr {
+    position: relative;
+  }
+  .application-requests .application-applicant {
+    grid-column: 1 / -1;
+    padding-right: 44px;
+  }
+  .application-requests [data-mobile="cards"] td.application-applicant::before {
+    content: none;
+  }
+  .application-requests .select-cell {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 44px;
+    height: 44px;
+    display: grid;
+    place-items: center;
+  }
+  .application-requests .select-cell input {
+    width: 22px;
+    height: 22px;
+  }
+}
 .text-button {
   border: 0;
   background: transparent;
