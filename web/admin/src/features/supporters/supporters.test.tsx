@@ -328,8 +328,9 @@ it("adds a Patreon member from Details only after the campaign membership is tic
   );
   await screen.findByRole("heading", { name: "Saved" });
   expect(screen.getByRole("status")).toHaveTextContent(/^Nothing else changed\.$/);
-  // The form and its Save button are gone, so focus moves to the result.
-  expect(screen.getByRole("status")).toHaveFocus();
+  // The form and its Save button are gone, so focus moves to the result. That happens in an effect, which can run
+  // after the save's last render.
+  await waitFor(() => expect(screen.getByRole("status")).toHaveFocus());
   expect(postCalls()).toHaveLength(1);
 });
 
@@ -366,7 +367,7 @@ it("keeps an uncertain manual entry out of the success state and never resubmits
   await screen.findByRole("heading", { name: "Not sure it saved" });
   expect(screen.getByText("Close and reload before trying again.")).toBeInTheDocument();
   expect(screen.getByRole("status")).toHaveTextContent(/^The save could not be confirmed\. Review ID: [0-9a-f-]{36}$/);
-  expect(screen.getByRole("status")).toHaveFocus();
+  await waitFor(() => expect(screen.getByRole("status")).toHaveFocus());
   expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
   expect(postCalls()).toHaveLength(1);
 });
@@ -971,8 +972,8 @@ it("makes a founder from the qualifying payment rather than the latest renewal, 
   expect(within(dialog).getByText("Gramps updates their Discord roles next.")).toBeInTheDocument();
   const status = within(dialog).getByRole("status");
   expect(status).toHaveTextContent(/^Saved\.$/);
-  // The Save button is gone, so focus moves to the result.
-  expect(status).toHaveFocus();
+  // The Save button is gone, so focus moves to the result, in an effect that can run after the last render.
+  await waitFor(() => expect(status).toHaveFocus());
   // The record as saved.
   expect(fact(dialog, "Founder")).toHaveTextContent(/^Since .+Added by staff$/);
   expect(within(dialog).queryByRole("button", { name: /Make founder|Save/ })).not.toBeInTheDocument();
