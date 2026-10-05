@@ -50,6 +50,13 @@
       "when": 1791174127188,
       "tag": "0006_link_patreon",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1791183792169,
+      "tag": "0007_game_feed_event_types",
+      "breakpoints": true
     }
   ]
 }
