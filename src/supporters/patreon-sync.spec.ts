@@ -114,8 +114,11 @@ const imported = (overrides: Partial<ApiImportResult> = {}): ApiImportResult => 
   tierConfirmedNew: 0,
   tierUnconfirmed: 0,
   discordLinked: false,
+  discordConfirmed: false,
+  discordMoved: false,
   conflict: null,
   discordId: null,
+  releasedDiscordIds: [],
   patreonDiscordChanged: false,
   ...overrides,
 });
@@ -131,10 +134,7 @@ function fixture(
     ADMIN_SESSION_SECRET: "s".repeat(40),
     ...overrides,
   };
-  const store = {
-    importApiMember: jest.fn().mockResolvedValue(imported()),
-    founderReviews: jest.fn().mockResolvedValue([]),
-  };
+  const store = { importApiMember: jest.fn().mockResolvedValue(imported()) };
   const match = { sweep: jest.fn(async (_trigger: string) => undefined) };
   const service = new PatreonSyncService(
     new PatreonClient(),
@@ -356,34 +356,55 @@ describe("Patreon API client", () => {
     fetchMock.mockImplementation(async () => new Response("oops", { status: 502 }));
     await expect(new PatreonClient().members(campaign, token)).rejects.toMatchObject({ kind: "unavailable" });
   });
-  it("marks histories incomplete when events are missing, capped or do not start with the pledge", async () => {
-    const many = Array.from({ length: PATREON_HISTORY_CAP }, (_, index) => ({
-      id: `subscription:${index}`,
-      date: new Date(Date.UTC(2026, 8, 1, 0, index)).toISOString(),
-      status: "Paid",
-      type: index ? "subscription" : "pledge_start",
-    }));
-    const midChain: EventInput = { id: "subscription:9", date: "2026-10-01T00:00:00Z", status: "Paid" };
+  it("marks a history incomplete when an event is missing, in the future or at Patreon's cut-off", async () => {
+    const history = (count: number) =>
+      Array.from({ length: count }, (_, index) => ({
+        id: `subscription:${count}-${index}`,
+        date: new Date(Date.UTC(2026, 8, 1, 0, index)).toISOString(),
+        status: "Paid",
+        type: index ? "subscription" : "pledge_start",
+      }));
+    const capped = history(PATREON_HISTORY_CAP);
+    const long = history(PATREON_HISTORY_CAP - 1);
+    const future: EventInput = { id: "subscription:7", date: "2099-01-01T00:00:00Z", status: "Paid" };
+    // Patreon trims only long histories, so one that starts with a renewal is still the whole history.
+    const renewal: EventInput = { id: "subscription:9", date: "2026-10-01T00:00:00Z", status: "Paid" };
     fetchMock.mockResolvedValueOnce(
       json(
         page(
           [
             member("missing", [start("pledge_start:1"), start("pledge_start:2")]),
-            member("capped", many),
-            member("mid-chain", [midChain]),
+            member("future", [start("pledge_start:4"), future]),
+            member("capped", capped),
+            member("long", long),
+            member("renewal-first", [renewal]),
             member("complete", [start("pledge_start:3")]),
+            member("empty"),
           ],
-          [event(start("pledge_start:1")), ...many.map(event), event(midChain), event(start("pledge_start:3"))],
+          [
+            event(start("pledge_start:1")),
+            event(start("pledge_start:4")),
+            event(future),
+            ...capped.map(event),
+            ...long.map(event),
+            event(renewal),
+            event(start("pledge_start:3")),
+          ],
         ),
       ),
     );
     const { members } = await new PatreonClient().members(campaign, token);
     expect(members.map((item) => [item.patreonMemberId, item.historyComplete])).toEqual([
       ["missing", false],
+      ["future", false],
       ["capped", false],
-      ["mid-chain", false],
+      ["long", true],
+      ["renewal-first", true],
       ["complete", true],
+      ["empty", true],
     ]);
+    // A future event is never imported.
+    expect(members[1].events.map((item) => item.id)).toEqual(["pledge_start:4"]);
   });
 });
 
@@ -611,25 +632,51 @@ describe("first successful payment derivation", () => {
     ];
     expect(firstPaidEventId(events, true)).toBe("pledge_start:1");
     expect(firstPaidEventId(events, false)).toBeNull();
+    expect(firstPaidEventId([], true)).toBeNull();
   });
-  it("skips declined attempts but refuses to guess after an earlier refund, fraud or tie", () => {
+  it("decides a history that starts with a renewal rather than the pledge start", () => {
+    const events = [
+      at("subscription:3", "2026-11-01T00:00:00Z", "Paid"),
+      at("subscription:2", "2026-10-01T00:00:00Z", "Paid"),
+    ];
+    expect(firstPaidEventId(events, true)).toBe("subscription:2");
+  });
+  it("orders events at the same time by the pledge start, then by event ID", () => {
+    const time = "2026-10-01T12:00:00Z";
+    expect(
+      firstPaidEventId([at("subscription:2", time, "Paid"), at("pledge_start:9", time, "Paid", "pledge_start")], true),
+    ).toBe("pledge_start:9");
+    expect(firstPaidEventId([at("subscription:b", time, "Paid"), at("subscription:a", time, "Paid")], true)).toBe(
+      "subscription:a",
+    );
+    // A reversed charge first at the same time decides the same way.
+    expect(
+      firstPaidEventId([at("subscription:a", time, "Refunded"), at("subscription:b", time, "Paid")], true),
+    ).toBeNull();
+  });
+  it("lets the first charge taken decide: a reversed one means no later payment is the first", () => {
     const paid = at("subscription:2", "2026-10-02T00:00:00Z", "Paid");
-    expect(firstPaidEventId([at("pledge_start:1", "2026-10-01T00:00:00Z", "Declined"), paid], true)).toBe(
+    for (const status of ["Refunded", "Partially Refunded", "Fraud", "Refunded by Patreon", "Refund Pending", "Other"])
+      expect(firstPaidEventId([at("pledge_start:1", "2026-10-01T00:00:00Z", status), paid], true)).toBeNull();
+  });
+  it("counts a charge whose refund Patreon declined as paid, so it can be the first payment", () => {
+    const declinedRefund = at("pledge_start:1", "2026-10-01T00:00:00Z", "Refund Declined", "pledge_start");
+    expect(firstPaidEventId([declinedRefund, at("subscription:2", "2026-11-01T00:00:00Z", "Paid")], true)).toBe(
+      "pledge_start:1",
+    );
+  });
+  it("ignores events that are not charges, and waits while an earlier charge is pending", () => {
+    const paid = at("subscription:2", "2026-10-02T00:00:00Z", "Paid");
+    for (const status of ["Declined", "Free Trial", "Deleted", null])
+      expect(firstPaidEventId([at("pledge_start:1", "2026-10-01T00:00:00Z", status!), paid], true)).toBe(
+        "subscription:2",
+      );
+    // Patreon may still take the pending charge, so which payment is the first is not known yet.
+    expect(firstPaidEventId([at("pledge_start:1", "2026-10-01T00:00:00Z", "Pending"), paid], true)).toBeNull();
+    // A charge pending after the first payment changes nothing.
+    expect(firstPaidEventId([paid, at("subscription:3", "2026-11-01T00:00:00Z", "Pending")], true)).toBe(
       "subscription:2",
     );
-    // A declined refund still means an earlier charge was taken.
-    for (const status of [
-      "Refunded",
-      "Partially Refunded",
-      "Fraud",
-      "Refunded by Patreon",
-      "Refund Pending",
-      "Refund Declined",
-      "Other",
-    ])
-      expect(firstPaidEventId([at("pledge_start:1", "2026-10-01T00:00:00Z", status), paid], true)).toBeNull();
-    expect(firstPaidEventId([paid, at("subscription:3", "2026-10-02T00:00:00Z", "Paid")], true)).toBeNull();
-    expect(firstPaidEventId([], true)).toBeNull();
   });
 });
 
@@ -666,7 +713,8 @@ describe("Patreon sync worker", () => {
       memberListComplete: true,
     });
     expect(status.lastSuccessAt).not.toBeNull();
-    expect(store.founderReviews).toHaveBeenCalledWith(campaign);
+    // Founder payments are a note on each record, never a list to work through.
+    expect(status).not.toHaveProperty("founderReviews");
     expectNoToken();
   });
   it("counts who Patreon reported a Discord account for and who has a completed payment", async () => {
@@ -795,7 +843,7 @@ describe("Patreon sync worker", () => {
     await service.sync();
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
-  it("runs automatic supporter matching after the import and before the founder reviews, without changing the status", async () => {
+  it("runs automatic supporter matching after the import, without changing the status", async () => {
     const { service, store, match } = tracked();
     fetchMock.mockResolvedValueOnce(onePage());
     match.sweep.mockImplementationOnce(async () => {
@@ -812,7 +860,6 @@ describe("Patreon sync worker", () => {
     expect(match.sweep).toHaveBeenLastCalledWith("sync");
     const order = (mock: jest.Mock) => mock.mock.invocationCallOrder.at(-1)!;
     expect(order(store.importApiMember)).toBeLessThan(order(match.sweep));
-    expect(order(match.sweep)).toBeLessThan(order(store.founderReviews));
   });
   it("skips automatic matching after a failed import or a shutdown mid-sync", async () => {
     const failed = tracked();
@@ -827,7 +874,6 @@ describe("Patreon sync worker", () => {
     });
     await stopped.service.sync();
     expect(stopped.match.sweep).not.toHaveBeenCalled();
-    expect(stopped.store.founderReviews).not.toHaveBeenCalled();
   });
   it("asks the role service to check linked Discord accounts whose supporter record changed", async () => {
     const { service, store, roles } = tracked();
@@ -853,6 +899,26 @@ describe("Patreon sync worker", () => {
     fetchMock.mockResolvedValueOnce(onePage());
     await service.sync();
     expect(roles.supporterChanged).toHaveBeenCalledTimes(2);
+  });
+  it("checks the roles of every Discord account the import moved, relabelled or took off a record", async () => {
+    const { service, store, roles } = tracked();
+    const previous = "223456789012345678";
+    // The record's Patreon link followed the account Patreon now reports, so both accounts are checked.
+    store.importApiMember.mockResolvedValueOnce(
+      imported({ created: false, payments: 0, discordLinked: true, discordId, releasedDiscordIds: [previous] }),
+    );
+    fetchMock.mockResolvedValueOnce(onePage());
+    await service.sync();
+    expect(jest.mocked(roles.supporterChanged).mock.calls).toEqual([[discordId], [previous]]);
+    // Patreon confirmed a staff link: the account is checked although nothing else changed.
+    store.importApiMember.mockResolvedValueOnce(
+      imported({ created: false, payments: 0, discordConfirmed: true, discordId }),
+    );
+    fetchMock.mockResolvedValueOnce(onePage());
+    jest.spyOn(Date, "now").mockReturnValue(Date.now() + 60_000);
+    await service.sync();
+    expect(roles.supporterChanged).toHaveBeenCalledTimes(3);
+    expect(roles.supporterChanged).toHaveBeenLastCalledWith(discordId);
   });
   it("keeps importing when the role service throws", async () => {
     const roles = {
@@ -948,11 +1014,12 @@ describe("Patreon sync worker", () => {
     store.importApiMember.mockResolvedValueOnce(
       imported({ created: false, updated: true, payments: 0, conflict: "discord-in-use" }),
     );
+    // The history names an event Patreon did not return, so it may be incomplete.
     fetchMock.mockResolvedValueOnce(
       json(
         page(
-          [member("member-1", [{ ...start("pledge_start:1"), type: "subscription" }])],
-          [event({ ...start("pledge_start:1"), type: "subscription" })],
+          [member("member-1", [start("pledge_start:1"), start("subscription:2")])],
+          [event(start("pledge_start:1"))],
         ),
       ),
     );

@@ -90,7 +90,7 @@ const founder: Supporter = {
     },
   ],
 };
-const outsideWindow = "This payment was not made inside the founder window.";
+const outsideWindow = "Paid outside the founder window.";
 /** The same donor saved without a founder, with the server's reason as a note. */
 const notFounder: Supporter = {
   ...founder,
@@ -488,7 +488,7 @@ describe("Add PayPal supporter", () => {
   });
 
   it("saves a payment that is not the first in one step, without asking for a founder", async () => {
-    const notFirst = "Staff have not confirmed this was the supporter's first successful payment.";
+    const notFirst = "Not confirmed as their first payment.";
     request.mockResolvedValue(
       saved({
         supporter: {
@@ -714,7 +714,6 @@ describe("the Supporters page", () => {
       intervalMinutes: 30,
       nextAttemptAt: null,
       conflictDetails: [],
-      founderReviews: [],
     },
   };
   const page = () =>
@@ -737,24 +736,30 @@ describe("the Supporters page", () => {
     });
     page();
     fireEvent.click(await screen.findByRole("button", { name: "Add PayPal supporter" }));
-    expect(screen.getByRole("button", { name: "Record existing Patreon member" })).toBeDisabled();
+    // Patreon is off, so a Patreon member cannot be added. The PayPal form does not need Patreon.
+    expect(screen.getByText("Add Patreon member").closest("button")).toBeDisabled();
     fill({ "Paid on": localMinute(new Date(Date.now() - 3_600_000)) });
     save();
     expect(await screen.findByText("Saved as a founder.")).toBeInTheDocument();
     expect(posted()).toHaveLength(1);
     // The list behind the dialog is read again and shows the new record.
-    expect(await screen.findByRole("button", { name: "Review supporter" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Open Dana Donor" })).toBeInTheDocument();
     expect(request.mock.calls.filter(([path]) => path === "supporters")).toHaveLength(2);
     fireEvent.click(screen.getByRole("button", { name: "Open record" }));
-    const review = await screen.findByRole("dialog", { name: "Supporter record" });
-    expect(within(review).getByText("PAYPAL SUPPORTER RECORD")).toBeInTheDocument();
-    expect(within(review).getByText("Dana Donor")).toBeInTheDocument();
+    const review = await screen.findByRole("dialog", { name: "Dana Donor" });
+    expect(within(review).getByText("PayPal", { selector: ".eyebrow" })).toBeInTheDocument();
+    const since = new Date(founder.founder!.awardedAt).toLocaleDateString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
+    expect(within(review).getByText(`Since ${since}`)).toBeInTheDocument();
     expect(screen.getAllByRole("dialog")).toHaveLength(1);
   });
 
   it("saves again from the open dialog while the list behind it cannot be read", async () => {
     const down = "Supporter records are temporarily unavailable.";
-    const refreshFailed = "Supporter records could not be refreshed. Refresh before recording another review.";
+    const refreshFailed = "Could not refresh, so reload before saving.";
     const reads = () => request.mock.calls.filter(([path]) => path === "supporters").length;
     request.mockImplementation(async (path, options) => {
       if (options?.method === "POST") {

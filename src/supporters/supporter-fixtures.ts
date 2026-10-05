@@ -64,6 +64,8 @@ export function supporterFixture(overrides: Partial<SupporterView> = {}): Suppor
     founderEligiblePayment: null,
     founder: null,
     founderBlockedReason: "no_payment",
+    founderFirstPaymentWaiting: false,
+    founderTierBelowMinimum: false,
     founderBlockedMessage: null,
     needsDiscordLink: false,
     match: {

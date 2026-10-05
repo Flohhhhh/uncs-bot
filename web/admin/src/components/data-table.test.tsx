@@ -97,6 +97,40 @@ describe("on a phone", () => {
     fireEvent.change(select, { target: { value: "" } });
     expect(order()).toEqual(["missing", "ten", "two"]);
   });
+  it("names a page's own order and plain sort words, leaving out an order that repeats the default", () => {
+    render(
+      <DataTable
+        label="Results"
+        rows={rows}
+        defaultOrder="Best first"
+        columns={[
+          { label: "Player", value: (row) => row.id, sortLabels: { ascending: "Name A to Z" } },
+          { label: "Score", value: (row) => row.score, sortLabels: { ascending: null, descending: "Highest first" } },
+        ]}
+        renderRow={(row) => (
+          <tr key={row.id}>
+            <td>{row.id}</td>
+            <td>{row.score ?? "—"}</td>
+          </tr>
+        )}
+      />,
+    );
+    const select = screen.getByRole("combobox", { name: "Sort by" });
+    expect([...select.querySelectorAll("option")].map((option) => option.textContent)).toEqual([
+      "Best first",
+      "Name A to Z",
+      "Player (descending)",
+      "Highest first",
+    ]);
+    fireEvent.change(select, { target: { value: "1:descending" } });
+    expect(order()).toEqual(["ten", "two", "missing"]);
+    // A heading sort the list leaves out shows as the default order it repeats.
+    fireEvent.change(select, { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Sort by Score" }));
+    expect(order()).toEqual(["two", "ten", "missing"]);
+    expect(select).toHaveValue("");
+    expect(select).toHaveDisplayValue("Best first");
+  });
 });
 it("keeps column headings and no extra select on a wide screen", () => {
   render(table());

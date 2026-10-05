@@ -231,6 +231,31 @@ describe("supporter reviews", () => {
     expect(result.sync).toEqual({ configured: true, running: false, members: 2 });
     expect(result.automation).toEqual(match.status());
   });
+  it("refuses a payment with a review, and a Discord confirmation with a link, before reading any record", async () => {
+    const { service, store } = fixture();
+    const input = { id: randomUUID(), version: 1, confirm: "member-123", reason: "Checked in Patreon" };
+    // Gramps settles founder payments and Discord accounts from Patreon, so staff never confirm either.
+    for (const [kind, body] of [
+      ["review", { ...input, paymentId: randomUUID() }],
+      ["link", { ...input, discordId: admin.id, discordConfirmed: true }],
+    ] as const)
+      await expect(service.mutate(admin, randomUUID(), kind, body)).rejects.toMatchObject({ status: 400 });
+    expect(store.mutate).not.toHaveBeenCalled();
+    // The review itself, and a link that changes an account, are still accepted.
+    await service.mutate(admin, randomUUID(), "review", input);
+    expect(store.mutate).toHaveBeenLastCalledWith(
+      expect.any(String),
+      { ...input, kind: "review" },
+      admin,
+      campaign,
+      expect.any(Object),
+    );
+  });
+  it("lists the Patreon sync status exactly as the import reports it", async () => {
+    const { service, sync } = fixture();
+    sync.status.mockReturnValue({ configured: true, members: 2, conflicts: 1 });
+    expect((await service.list(admin)).sync).toEqual({ configured: true, members: 2, conflicts: 1 });
+  });
   it("lets only administrators start a configured Patreon sync", async () => {
     const { service, sync } = fixture();
     await expect(service.syncNow(admin)).resolves.toEqual({
@@ -300,7 +325,7 @@ describe("supporter reviews", () => {
       store.list.mockResolvedValue([record("primary")]);
       const [shown] = (await service.list(admin)).supporters;
       expect(shown.match.steam).toMatchObject({ steamId: "76561198000000009", serverId: "primary" });
-      expect(shown.nextSteps[0].message).toContain("SteamID 76561198000000009");
+      expect(shown.nextSteps[0].message).toContain("SteamID (76561198000000009)");
     });
     it("leave out the source application and keep the SteamID alert without its SteamID", async () => {
       const { service, store } = fixture();
