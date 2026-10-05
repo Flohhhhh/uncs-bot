@@ -1,5 +1,6 @@
 import { type MiddlewareConsumer, Module, type NestModule, type RawBodyRequest } from "@nestjs/common";
 import type { NextFunction, Request, Response } from "express";
+import { AdminAuth } from "../admin/admin.auth";
 import { AdminModule } from "../admin/admin.module";
 import { DiscordRolesModule } from "../discord-roles/discord-roles.module";
 import {
@@ -20,14 +21,19 @@ import { SupporterMatchModule } from "./supporter-match.module";
   exports: [SupportersService, SupportersStore, PatreonSyncService, PatreonClient],
 })
 export class SupportersModule implements NestModule {
-  constructor(private readonly service: SupportersService) {}
+  constructor(
+    private readonly service: SupportersService,
+    private readonly auth: AdminAuth,
+  ) {}
 
   configure(consumer: MiddlewareConsumer) {
     // Webhooks carrying a valid Patreon signature count in their own bucket, so unsigned traffic
     // behind one proxy can neither use up Patreon's allowance nor fill the address map and lock
-    // the webhooks out.
+    // the webhooks out. Likewise a staff session AdminAuth has verified counts in its own bucket, keyed by its
+    // token hash, so anonymous traffic cannot lock staff out of the supporter pages; see the /admin limiter.
     const traffic = new Map<string, { until: number; count: number }>();
     const signed = new Map<string, { until: number; count: number }>();
+    const staffSessions = new Map<string, { until: number; count: number }>();
     consumer
       .apply((req: RawBodyRequest<Request>, res: Response, next: NextFunction) => {
         res.set({
@@ -43,10 +49,13 @@ export class SupportersModule implements NestModule {
         });
         const webhook = /^\/supporters\/webhooks(?:\/|$)/i.test(req.originalUrl);
         const patreon = webhook && this.service.signedWebhook(req.rawBody, req.headers["x-patreon-signature"]);
-        const counters = patreon ? signed : traffic;
+        const session = webhook ? undefined : this.auth.verifiedSession(req);
+        const counters = patreon ? signed : session ? staffSessions : traffic;
         const now = Date.now();
         for (const [key, value] of counters) if (value.until <= now) counters.delete(key);
-        const key = patreon ? "patreon" : `${webhook ? "webhook" : "staff"}:${req.socket.remoteAddress ?? "unknown"}`;
+        const key = patreon
+          ? "patreon"
+          : (session ?? `${webhook ? "webhook" : "staff"}:${req.socket.remoteAddress ?? "unknown"}`);
         let counter = counters.get(key);
         // The signed bucket holds one entry, so it needs no size cap.
         if (!counter && (patreon || counters.size < 5000)) {

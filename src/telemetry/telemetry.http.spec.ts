@@ -396,6 +396,36 @@ describe("telemetry HTTP boundaries", () => {
     // Read refusals are never filed as feed refusals.
     expect(rejected).not.toHaveBeenCalled();
   });
+  it("keeps a verified staff session's combat reads apart from anonymous traffic at the same address", async () => {
+    const staffCookie = `__Host-uncs_admin_session=${sessionToken}`;
+    // Verify the session through the real guard, then drive a fresh copy of the limiter directly.
+    await request(app.getHttpServer()).get("/admin/api/combat").set("Cookie", staffCookie).expect(200);
+    let limit!: (req: Request, res: Response, next: NextFunction) => void;
+    app.get(TelemModule).configure({
+      apply: (middleware: typeof limit) => {
+        limit = middleware;
+        return { forRoutes: () => undefined };
+      },
+    } as unknown as MiddlewareConsumer);
+    const read = (originalUrl: string, cookie?: string) => {
+      let status: number | "passed" = 0;
+      const res = {} as Response;
+      Object.assign(res, { set: () => res, json: () => res, status: (code: number) => ((status = code), res) });
+      const req = { originalUrl, socket: { remoteAddress: "10.0.0.1" }, headers: { cookie } };
+      limit(req as unknown as Request, res, () => (status = "passed"));
+      return status;
+    };
+    for (let count = 0; count < 300; count++) expect(read("/admin/api/combat")).toBe("passed");
+    expect(read("/admin/api/combat")).toBe(429);
+    // A well-formed cookie that was never verified gets no fresh bucket.
+    expect(read("/admin/api/combat", `__Host-uncs_admin_session=${"d".repeat(64)}`)).toBe(429);
+    // Public reads keep their address limit even when they carry a verified staff cookie.
+    for (let count = 0; count < 300; count++) expect(read("/community/api/leaderboard")).toBe("passed");
+    expect(read("/community/api/leaderboard", staffCookie)).toBe(429);
+    for (let count = 0; count < 300; count++)
+      expect(read("/admin/api/servers/primary/combat", staffCookie)).toBe("passed");
+    expect(read("/admin/api/combat", staffCookie)).toBe(429);
+  });
   it("shows staff the game event types received with their latest sample, never the public", async () => {
     const at = new Date("2026-10-04T18:00:00.000Z");
     const steamId = "76561198000000001";

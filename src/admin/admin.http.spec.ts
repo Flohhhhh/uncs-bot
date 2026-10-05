@@ -1,7 +1,8 @@
 import { Test } from "@nestjs/testing";
 import { HttpAdapterHost } from "@nestjs/core";
 import { ExpressAdapter } from "@nestjs/platform-express";
-import type { INestApplication } from "@nestjs/common";
+import type { INestApplication, MiddlewareConsumer } from "@nestjs/common";
+import type { NextFunction, Request as ExpressRequest, Response as ExpressResponse } from "express";
 import request from "supertest";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -549,6 +550,91 @@ describe("admin HTTP boundaries", () => {
       .expect(429);
     expect(denied.headers["retry-after"]).toBe("60");
     expect(denied.headers["cache-control"]).toBe("no-store");
+  });
+  describe("verified staff sessions", () => {
+    const staffCookie = `__Host-uncs_admin_session=${token}`;
+    // Sessions are verified over HTTP through the real guard. The floods then go straight to a fresh copy of the
+    // /admin limiter from the same module and AdminAuth, so thousands of requests need no sockets.
+    let limit!: (req: ExpressRequest, res: ExpressResponse, next: NextFunction) => void;
+    beforeEach(() => {
+      app.get(AdminModule).configure({
+        apply: (middleware: typeof limit) => {
+          limit = middleware;
+          return { forRoutes: () => undefined };
+        },
+      } as unknown as MiddlewareConsumer);
+    });
+    const send = (path: string, cookie?: string) => {
+      let status: number | "passed" = 0;
+      const res = {} as ExpressResponse;
+      Object.assign(res, { set: () => res, json: () => res, status: (code: number) => ((status = code), res) });
+      const req = { originalUrl: path, socket: { remoteAddress: "10.0.0.1" }, headers: cookie ? { cookie } : {} };
+      limit(req as unknown as ExpressRequest, res, () => (status = "passed"));
+      return status;
+    };
+    const verify = () => request(app.getHttpServer()).get("/admin/api/me").set("Cookie", staffCookie).expect(200);
+
+    it("count in their own bucket, so anonymous traffic from the same address cannot lock staff out", async () => {
+      expect(send("/admin/api/me", staffCookie)).toBe("passed");
+      await verify();
+      // The unverified request above counted against the address, like every anonymous one.
+      for (let count = 1; count < 600; count++) expect(send("/admin/api/me")).toBe("passed");
+      expect(send("/admin/api/me")).toBe(429);
+      // A well-formed cookie that was never verified gets no fresh bucket.
+      expect(send("/admin/api/me", `__Host-uncs_admin_session=${"d".repeat(64)}`)).toBe(429);
+      expect(send("/admin/api/overview", staffCookie)).toBe("passed");
+      // The session's own bucket has the same per-minute limit.
+      for (let count = 1; count < 600; count++) expect(send("/admin/api/overview", staffCookie)).toBe("passed");
+      expect(send("/admin/api/overview", staffCookie)).toBe(429);
+      expect(send("/admin/api/me")).toBe(429);
+    });
+
+    it("count against the address again once signed out", async () => {
+      await verify();
+      await request(app.getHttpServer())
+        .post("/admin/api/logout")
+        .set("Cookie", staffCookie)
+        .set("Origin", config.origin)
+        .set("X-CSRF-Token", session.csrf)
+        .expect(201);
+      for (let count = 0; count < 600; count++) expect(send("/admin/api/me")).toBe("passed");
+      // The test store still returns this session, so only the limiter's trust decides this.
+      expect(send("/admin/api/me", staffCookie)).toBe(429);
+    });
+
+    it("count a new sign-in in its own bucket from its first request, even while anonymous traffic fills the address", async () => {
+      for (let count = 0; count < 600; count++) expect(send("/admin/api/me")).toBe("passed");
+      const login = await request(app.getHttpServer()).get("/admin/auth/login").expect(302);
+      const state = new URL(login.headers.location).searchParams.get("state");
+      jest
+        .mocked(fetch)
+        .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "discord-access-secret" })))
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ id: session.userId, username: "UNC admin", mfa_enabled: true })),
+        )
+        .mockResolvedValueOnce(new Response(JSON.stringify({ roles: ["staff"] })));
+      const callback = await request(app.getHttpServer())
+        .get("/admin/auth/callback")
+        .query({ code: "one-time-code", state })
+        .set("Cookie", login.headers["set-cookie"][0].split(";")[0])
+        .expect(302);
+      const signedIn = ([] as string[])
+        .concat(callback.headers["set-cookie"])
+        .map((cookie) => cookie.split(";")[0])
+        .find((cookie) => /^__Host-uncs_admin_session=[a-f0-9]{64}$/.test(cookie));
+      expect(signedIn).toBeDefined();
+      // Counted by address, this first request would be refused, so the session could never be verified.
+      expect(send("/admin/api/me", signedIn)).toBe("passed");
+      expect(send("/admin/api/me")).toBe(429);
+    });
+
+    it("keep sign-in and its callback on the address limit", async () => {
+      await verify();
+      for (let count = 0; count < 60; count++) expect(send("/admin/auth/login")).toBe("passed");
+      expect(send("/admin/auth/login", staffCookie)).toBe(429);
+      expect(send("/Admin/Auth/Callback?code=code&state=state", staffCookie)).toBe(429);
+      expect(send("/admin/api/me", staffCookie)).toBe("passed");
+    });
   });
   it("does not send invalid SteamIDs or unknown payload fields to RCON", async () => {
     await request(app.getHttpServer())

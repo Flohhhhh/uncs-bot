@@ -275,7 +275,10 @@ describe("staff application review traffic limit", () => {
   })
   class ReviewAndApply implements NestModule {
     configure(consumer: MiddlewareConsumer) {
-      new AdminModule(new HttpAdapterHost()).configure(consumer);
+      // The stubbed AdminGuard verifies no session, so every request here counts against the address.
+      new AdminModule(new HttpAdapterHost(), { verifiedSession: () => undefined } as unknown as AdminAuth).configure(
+        consumer,
+      );
       new ApplicationsModule().configure(consumer);
     }
   }
