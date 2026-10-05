@@ -59,8 +59,8 @@ function receivedWindow(serverId: string, since: Date, until: Date) {
  * text after `Id.Item.` (any casing) or a whole bare code with no dot, slash or backslash; it is a firearm
  * when its norm() key is a labelled firearm (FIREARM_ITEM_KEYS, bound as one text[] parameter) or it is a
  * `WEPN_` code. Every other cause, including vehicles and their weapons (`Vehicle.Variant.`, `Id.Vehicle.`),
- * has no item code. Plain text tests on rows the range scan already reads. Use it after receivedWindow() in
- * text order.
+ * has no item code. parseFeed() already trims stored causes and caps them at 200 characters, as describeCause()
+ * does. Plain text tests on rows the range scan already reads. Use it after receivedWindow() in text order.
  */
 function longShot(column: "cause" | "c.cause" | "kills.cause") {
   const cause = `lower(btrim(${column}))`;
@@ -451,9 +451,10 @@ export class TelemetryStore {
 
   /**
    * Leaderboard row extras for up to 100 listed players over the same bounds as snapshot(): kills per
-   * cause with its longest capped kill when the cause is a long shot (longShot()), and each player's most kills without dying within one server session
-   * (ordered by receipt, then game clock; a suicide counts as a death). Reads only these players' own
-   * events through the killer and victim indexes. Rows keep SteamIDs and never leave the service.
+   * cause, with its longest capped kill when the cause is a long shot (longShot()), and each player's
+   * most kills without dying within one server session (ordered by receipt, then game clock; a suicide
+   * counts as a death). Reads only these players' own events through the killer and victim indexes.
+   * Rows keep SteamIDs and never leave the service.
    */
   async rowExtras(since: Date, until: Date, steamIds: string[], serverId = "primary"): Promise<RowExtrasAggregate> {
     const ids = [...new Set(steamIds.filter(isPublicIndividualSteamId))].slice(0, 100);
