@@ -24,6 +24,7 @@ import {
 } from "./policy";
 import { ManualMember } from "./manual-member";
 import { PatreonImport } from "./patreon-sync";
+import { AddPaypalSupporter } from "./paypal-form";
 import type {
   AutomationStatus,
   Supporter,
@@ -743,6 +744,12 @@ function AdminSupporters() {
         >
           Record existing Patreon member
         </button>
+        <AddPaypalSupporter
+          unavailable={pageUnavailable}
+          policy={policy}
+          onRecorded={resource.refresh}
+          onOpen={setSelected}
+        />
       </div>
       <p className="filter-note">
         {search

@@ -45,6 +45,18 @@ describe("staff API boundary", () => {
     await expect(api("actions", { method: "POST", body: "{}" })).rejects.toThrow("before confirmation");
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
+  it("keeps the server's words and the rule a refusal names", async () => {
+    const refusal = {
+      message: "This payment was not made inside the founder window.",
+      blockedReason: "outside_window",
+    };
+    const fetcher = vi.fn(async () => new Response(JSON.stringify(refusal), { status: 409 }));
+    vi.stubGlobal("fetch", fetcher);
+    const post = () => api("supporters/paypal", { method: "POST", body: "{}" });
+    await expect(post()).rejects.toMatchObject({ ...refusal, status: 409 });
+    fetcher.mockImplementation(async () => new Response(JSON.stringify({ message: "Conflict" }), { status: 409 }));
+    await expect(post()).rejects.toMatchObject({ message: "Conflict", status: 409, blockedReason: undefined });
+  });
   it("rejects a foreign URL before any network request", async () => {
     const fetcher = vi.fn();
     vi.stubGlobal("fetch", fetcher);

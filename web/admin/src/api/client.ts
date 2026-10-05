@@ -2,6 +2,8 @@ export class ApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    /** The rule a refusal names, such as `outside_window` for a founder, when the server sends one. */
+    readonly blockedReason?: string,
   ) {
     super(message);
   }
@@ -117,7 +119,11 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
         data && typeof data === "object" && "message" in data && typeof data.message === "string"
           ? data.message
           : "The request could not be completed.";
-      throw new ApiError(message, response.status);
+      const blockedReason =
+        data && typeof data === "object" && "blockedReason" in data && typeof data.blockedReason === "string"
+          ? data.blockedReason
+          : undefined;
+      throw new ApiError(message, response.status, blockedReason);
     }
     if (data === null)
       throw new ApiError("The response could not be read. Refresh before repeating any action.", response.status);
