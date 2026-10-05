@@ -13,8 +13,11 @@ import {
 } from "drizzle-orm/pg-core";
 
 export type SupporterProvider = "patreon" | "paypal";
-/** Who linked a supporter's Discord account: staff, or the Patreon import from the patron's own connection. */
-export type SupporterDiscordSource = "staff" | "patreon";
+/**
+ * Who linked a supporter's Discord account: staff, the Patreon import from the patron's own connection, or the patron
+ * by signing in to Discord and Patreon ("Link Patreon"). Builds from before `patron_signin` treat it as staff.
+ */
+export type SupporterDiscordSource = "staff" | "patreon" | "patron_signin";
 /** Who linked a supporter's SteamID: staff, or automatic matching from an approved whitelist application. */
 export type SupporterSteamSource = "staff" | "application";
 // Plain text column: a new source is a TypeScript-only addition unless a check constrains it.
@@ -71,7 +74,7 @@ export const supporterMembers = pgTable(
     // Every new column is null on existing rows, so each check below holds for them.
     check(
       "supporter_members_discord_source_check",
-      sql`${table.discordSource} is null or (${table.discordId} is not null and (${table.discordSource} = 'staff' or (${table.discordSource} = 'patreon' and ${table.provider} = 'patreon')))`,
+      sql`${table.discordSource} is null or (${table.discordId} is not null and (${table.discordSource} = 'staff' or (${table.discordSource} in ('patreon', 'patron_signin') and ${table.provider} = 'patreon')))`,
     ),
     check(
       "supporter_members_steam_source_check",

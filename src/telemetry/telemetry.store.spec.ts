@@ -3,9 +3,9 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { getTableConfig } from "drizzle-orm/pg-core";
 import type { Client } from "pg";
 import type { Database } from "../database/database.types";
-import { combatEvents } from "../database/telemetry.schema";
-import { TelemetryStore } from "./telemetry.store";
-import { parseFeed } from "./telemetry.types";
+import { combatEvents, gameFeedEventTypes } from "../database/telemetry.schema";
+import { MAX_FEED_TYPES_PER_DAY, TelemetryStore } from "./telemetry.store";
+import { MAX_SAMPLE_BYTES, parseFeed } from "./telemetry.types";
 
 // These tests inspect the actual Drizzle driver queries; they do not emulate
 // PostgreSQL constraints or claim that a migration has been applied.
@@ -14,7 +14,26 @@ function fixture() {
   const db = drizzle({ query } as unknown as Client) as Database;
   return { store: new TelemetryStore(db), query };
 }
+const isTypeUpsert = (text: string) => text.includes("INSERT INTO game_feed_event_types");
+const serverInstance = randomUUID();
+const killed = () => ({ eventId: randomUUID(), type: "killed", eventTime: 3 });
+const feed = (events: unknown[]) => parseFeed({ serverId: serverInstance, serverName: "The UNCs", events });
 describe("telemetry persistence contract", () => {
+  it("keeps one bounded row per server, event type and UTC day with a purge index", () => {
+    const schema = getTableConfig(gameFeedEventTypes);
+    expect(schema.name).toBe("game_feed_event_types");
+    expect(schema.primaryKeys[0].columns.map((column) => column.name)).toEqual(["server_id", "type", "day"]);
+    expect(schema.indexes.map((index) => index.config.name)).toEqual(["game_feed_event_types_day_idx"]);
+    expect(schema.columns.map((column) => [column.name, column.getSQLType(), column.notNull])).toEqual([
+      ["server_id", "text", true],
+      ["type", "varchar(64)", true],
+      ["day", "date", true],
+      ["count", "bigint", true],
+      ["first_received_at", "timestamp with time zone", true],
+      ["last_received_at", "timestamp with time zone", true],
+      ["sample", "jsonb", false],
+    ]);
+  });
   it("has durable instance+event identity and receipt/player lookup indexes", () => {
     const schema = getTableConfig(combatEvents);
     expect(schema.primaryKeys[0].columns.map((column) => column.name)).toEqual([
@@ -43,10 +62,14 @@ describe("telemetry persistence contract", () => {
       ],
     });
     query.mockImplementation(async (config) => ({
-      rows: config.text.startsWith('insert into "combat_events"') ? [[eventId]] : [],
+      rows: config.text.startsWith('insert into "combat_events"')
+        ? [[eventId]]
+        : isTypeUpsert(config.text)
+          ? [{ type: "killed" }]
+          : [],
     }));
     const result = await store.ingest(batch, new Date("2026-09-30T12:00:00Z"));
-    expect(result).toEqual({ inserted: 1, duplicates: 1, skipped: 0 });
+    expect(result).toEqual({ inserted: 1, duplicates: 1, skipped: 0, typesOverLimit: 0 });
     const [config, values] = query.mock.calls.find(([config]) =>
       config.text.startsWith('insert into "combat_events"'),
     )!;
@@ -71,6 +94,131 @@ describe("telemetry persistence contract", () => {
     const [remove, removeParams] = query.mock.calls.find(([config]) => config.text.startsWith("delete"))!;
     expect(remove.text).toContain('"combat_events"."received_at" <');
     expect(removeParams).toContain(new Date(now.getTime() - 90 * 86_400_000).toISOString());
+    // The same daily claim purges event type counts for whole UTC days before the 90-day cutoff.
+    const [purge, purgeParams] = query.mock.calls.find(([config]) =>
+      config.text.startsWith('delete from "game_feed_event_types"'),
+    )!;
+    expect(purge.text).toContain('"game_feed_event_types"."server_id" = $1');
+    expect(purge.text).toContain('"game_feed_event_types"."day" < $2');
+    expect(purgeParams).toEqual(["primary", "2026-07-02"]);
+  });
+  it("purges nothing when the daily cleanup was already claimed", async () => {
+    const { store, query } = fixture();
+    await store.ingest(feed([killed(), { type: "spawn" }]), new Date("2026-09-30T12:00:00Z"));
+    expect(query.mock.calls.some(([config]) => config.text.startsWith("delete"))).toBe(false);
+  });
+  it("adds every type in a batch with one upsert after the tracking row lock, never one query per event", async () => {
+    const { store, query } = fixture();
+    const now = new Date("2026-09-30T23:59:59.999Z");
+    const events = [
+      ...Array.from({ length: 150 }, killed),
+      ...Array.from({ length: 40 }, (_, index) => ({ type: "spawn", index })),
+      ...Array.from({ length: 10 }, (_, index) => ({ type: "Round.Result", index })),
+    ];
+    query.mockImplementation(async (config) => ({
+      rows: isTypeUpsert(config.text) ? [{ type: "killed" }, { type: "spawn" }, { type: "Round.Result" }] : [],
+    }));
+    await expect(store.ingest(feed(events), now, "east")).resolves.toMatchObject({ typesOverLimit: 0 });
+    const texts = query.mock.calls.map(([config]) => config.text);
+    expect(texts.filter(isTypeUpsert)).toHaveLength(1);
+    // Six statements in all for 200 events: begin, events, tracking, types, cleanup claim, commit.
+    expect(texts).toHaveLength(6);
+    const tracking = texts.findIndex((text) => text.startsWith('insert into "combat_tracking"'));
+    const upsert = texts.findIndex(isTypeUpsert);
+    expect(tracking).toBeGreaterThan(0);
+    expect(upsert).toBeGreaterThan(tracking);
+    expect(texts.at(-1)).toBe("commit");
+    const [config, params] = query.mock.calls[upsert];
+    expect(config.text).toContain("ON CONFLICT (server_id, type, day) DO UPDATE SET");
+    expect(config.text).toContain("count = stored.count + excluded.count");
+    expect(config.text).toContain("last_received_at = greatest(stored.last_received_at, excluded.last_received_at)");
+    // One VALUES row per type: name, count, sample (null for killed) and batch order.
+    expect(params.slice(0, 12)).toEqual([
+      "killed",
+      150,
+      null,
+      0,
+      "spawn",
+      40,
+      JSON.stringify({ type: "spawn", index: 39 }),
+      1,
+      "Round.Result",
+      10,
+      JSON.stringify({ type: "Round.Result", index: 9 }),
+      2,
+    ]);
+    // Counted on the server's configured key and the UTC receipt day, never the payload's instance ID.
+    expect(params).toEqual(expect.arrayContaining(["east", "2026-09-30", now]));
+    expect(params).not.toContain(serverInstance);
+  });
+  it("keeps a stored sample over a size marker and keeps killed samples empty", async () => {
+    const { store, query } = fixture();
+    const big = { type: "bulk", padding: "x".repeat(MAX_SAMPLE_BYTES) };
+    await store.ingest(feed([big, killed()]), new Date("2026-09-30T12:00:00Z"));
+    const [config, params] = query.mock.calls.find(([config]) => isTypeUpsert(config.text))!;
+    const bytes = Buffer.byteLength(JSON.stringify(big));
+    expect(params.slice(0, 8)).toEqual(["bulk", 1, JSON.stringify({ tooLarge: true, bytes }), 0, "killed", 1, null, 1]);
+    expect(JSON.stringify(params)).not.toContain("xxxx");
+    // A newer real sample replaces the stored one; a marker (no "type" key) or null keeps it.
+    expect(config.text).toContain("WHEN excluded.sample IS NULL THEN stored.sample");
+    expect(config.text).toContain("WHEN excluded.sample ? 'type' THEN excluded.sample");
+    expect(config.text).toContain("ELSE coalesce(stored.sample, excluded.sample)");
+  });
+  it("caps new types per server and UTC day, killed aside, and reports the types left out", async () => {
+    const { store, query } = fixture();
+    const events = [killed(), ...["a", "b", "c", "d"].map((type) => ({ type }))];
+    // The database recorded killed and two of the four new types; two were over the limit.
+    query.mockImplementation(async (config) => ({
+      rows: isTypeUpsert(config.text) ? [{ type: "killed" }, { type: "a" }, { type: "b" }] : [],
+    }));
+    const result = await store.ingest(feed(events), new Date("2026-09-30T12:00:00Z"));
+    expect(result).toEqual({ inserted: 0, duplicates: 1, skipped: 4, typesOverLimit: 2 });
+    const [config, params] = query.mock.calls.find(([config]) => isTypeUpsert(config.text))!;
+    expect(MAX_FEED_TYPES_PER_DAY).toBe(200);
+    expect(config.text).toContain("WHERE type <> 'killed' AND type NOT IN (SELECT type FROM today)");
+    expect(config.text).toMatch(/WHERE rank <= \$\d+ - \(SELECT count\(\*\) FROM today WHERE type <> 'killed'\)/);
+    expect(config.text).toContain("row_number() OVER (ORDER BY ord)");
+    expect(params).toContain(MAX_FEED_TYPES_PER_DAY);
+  });
+  it("skips the type upsert for a batch with no valid entries", async () => {
+    const { store, query } = fixture();
+    await store.ingest(feed([]), new Date());
+    expect(query.mock.calls.some(([config]) => isTypeUpsert(config.text))).toBe(false);
+  });
+  it("rolls back the killed events and tracking when the type counts fail", async () => {
+    const { store, query } = fixture();
+    query.mockImplementation(async (config) => {
+      if (isTypeUpsert(config.text)) throw new Error("database error");
+      return { rows: [] };
+    });
+    await expect(store.ingest(feed([killed(), { type: "spawn" }]), new Date())).rejects.toThrow();
+    const texts = query.mock.calls.map(([config]) => config.text);
+    expect(texts.some((text) => text.startsWith('insert into "combat_events"'))).toBe(true);
+    expect(texts.at(-1)).toBe("rollback");
+    expect(texts).not.toContain("commit");
+  });
+  it("reads staff event type totals over whole UTC days with one read-only statement", async () => {
+    const { store, query } = fixture();
+    const first = new Date("2026-09-29T01:00:00Z"),
+      last = new Date("2026-09-30T11:00:00Z");
+    query.mockResolvedValueOnce({
+      rows: [
+        { type: "spawn", count: "12", firstReceivedAt: first, lastReceivedAt: last, sample: { type: "spawn" } },
+        { type: "killed", count: 3, firstReceivedAt: first.toISOString(), lastReceivedAt: last, sample: null },
+      ],
+    });
+    const since = new Date("2026-09-29T12:00:00Z"),
+      until = new Date("2026-09-30T12:00:00Z");
+    await expect(store.eventTypes(since, until, "east")).resolves.toEqual([
+      { type: "spawn", count: 12, firstReceivedAt: first, lastReceivedAt: last, sample: { type: "spawn" } },
+      { type: "killed", count: 3, firstReceivedAt: first, lastReceivedAt: last, sample: null },
+    ]);
+    expect(query).toHaveBeenCalledTimes(1);
+    const [config, params] = query.mock.calls[0];
+    expect(config.text).toContain("server_id = $1 AND day >= $2::date AND day <= $3::date");
+    expect(params).toEqual(["east", "2026-09-29", "2026-09-30", MAX_FEED_TYPES_PER_DAY + 1]);
+    expect(config.text).toContain("DISTINCT ON (type) type, sample FROM scoped WHERE sample IS NOT NULL");
+    expect(config.text).not.toMatch(/\b(insert|update|delete)\b/i);
   });
   it("rolls back event and tracking writes if persistence fails", async () => {
     const { store, query } = fixture();

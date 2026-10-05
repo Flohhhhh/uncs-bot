@@ -986,3 +986,165 @@ describe("next steps on the Supporters page", () => {
     expect(message("no_payment")).toBe("No payment yet.");
   });
 });
+
+describe("a Discord account the patron linked by signing in", () => {
+  const otherDiscord = "234567890123456789";
+  const patron: MatchMember = { ...patreonDiscord, discordSource: "patron_signin", patreonDiscordId: null };
+  it.each([
+    ["reports no account", null],
+    ["reports the same account", discordId],
+  ])("counts like a link from Patreon when Patreon %s", (_name, patreonDiscordId) => {
+    expect(automaticFounderBlocker({ ...patron, patreonDiscordId }, facts(), later)).toBeNull();
+  });
+  it("is refused when Patreon reports a different account", () => {
+    expect(automaticFounderBlocker({ ...patron, patreonDiscordId: otherDiscord }, facts(), later)).toBe(
+      "discord_differs",
+    );
+  });
+  it("leaves staff links and import links as they were", () => {
+    for (const discordSource of ["staff", null] as const)
+      expect(automaticFounderBlocker({ ...patron, discordSource }, facts(), later)).toBe("discord_not_from_patreon");
+    // An import link Patreon no longer reports any account for still counts.
+    expect(automaticFounderBlocker({ ...patreonDiscord, patreonDiscordId: null }, facts(), later)).toBeNull();
+    expect(automaticFounderBlocker({ ...patreonDiscord, patreonDiscordId: otherDiscord }, facts(), later)).toBe(
+      "discord_differs",
+    );
+  });
+  it("waits only for the first payment's refund window, however new the link is", () => {
+    // The payment is from October 1, 12:00 UTC. No link time is read: a link made just now counts at once.
+    const paidAt = Date.parse(paymentFixture().paidAt);
+    for (const member of [patron, patreonDiscord]) {
+      expect(automaticFounderBlocker(member, facts(), { now: paidAt + 72 * 3_600_000, holdHours: 72 })).toBeNull();
+      expect(automaticFounderBlocker(member, facts(), { now: paidAt + 72 * 3_600_000 - 1, holdHours: 72 })).toBe(
+        "payment_too_recent",
+      );
+      expect(automaticFounderBlocker(member, facts(), { now: paidAt, holdHours: 0 })).toBeNull();
+      expect(automaticFounderBlocker({ ...member, lastChargeStatus: "Refunded" }, facts(), later)).toBe(
+        "charge_reversed",
+      );
+    }
+  });
+});
+
+describe("next steps for patrons who link their own Discord account", () => {
+  const otherDiscord = "234567890123456789";
+  const patronOn = { ...on, patronLink: true };
+  it("waits for the patron to tap Link Patreon while linking is on, with nothing for staff to do", () => {
+    expect(supporterNextSteps(supporterFixture(), patronOn)[0]).toEqual({
+      code: "connect_discord_in_patreon",
+      area: "discord",
+      message: "Waiting for them to tap Link Patreon in Discord.",
+    });
+    // Off or omitted, the step keeps its usual text, whatever the page's wording is.
+    const usual = supporterNextSteps(supporterFixture(), { ...patronOn, patronLink: false })[0];
+    expect(usual).toMatchObject({ code: "connect_discord_in_patreon", area: "discord" });
+    expect(usual.message).not.toContain("Link Patreon");
+    expect(supporterNextSteps(supporterFixture(), on)[0]).toEqual(usual);
+    // An account Patreon already reports is linked by the next sync either way.
+    const reported = supporterFixture({ patreonDiscordId: discordId });
+    expect(supporterNextSteps(reported, patronOn)[0]).toEqual(supporterNextSteps(reported, on)[0]);
+    expect(supporterNextSteps(reported, patronOn)[0].message).not.toContain("Link Patreon");
+  });
+  it("words a founder's wait for a missing account the same way, so the page shows one line", () => {
+    const waiting = "Waiting for them to tap Link Patreon in Discord.";
+    const message = (record: SupporterView, code: string) =>
+      supporterNextSteps(record, patronOn).find((step) => step.code === code)?.message;
+    const missing = ready({
+      discordId: null,
+      discordSource: null,
+      patreonDiscordId: null,
+      automaticBlockedReason: "no_discord",
+    });
+    expect(message(missing, "connect_discord_in_patreon")).toBe(waiting);
+    expect(message(missing, "founder_waiting_discord")).toBe(waiting);
+    expect(
+      message(
+        ready({
+          discordId: null,
+          patreonDiscordId: null,
+          founder: founderOf("patreon_api", true),
+          needsDiscordLink: true,
+        }),
+        "founder_needs_discord",
+      ),
+    ).toBe(waiting);
+    // Link Patreon never replaces a staff link, so that one still waits for Patreon to report the account.
+    expect(
+      message(
+        ready({ discordSource: "staff", automaticBlockedReason: "discord_not_from_patreon" }),
+        "founder_waiting_discord",
+      ),
+    ).toBe("Waiting for them to connect Discord on Patreon.");
+  });
+  it.each([
+    [
+      "membership_linked",
+      { discordId, conflict: "membership_linked", linkedDiscordId: otherDiscord },
+      `Discord account ${discordId} signed in as this patron, but this record links ${otherDiscord}.`,
+    ],
+    [
+      "discord_linked",
+      { discordId, conflict: "discord_linked", linkedDiscordId: null },
+      `Discord account ${discordId} signed in as this patron, but another record already links it.`,
+    ],
+    [
+      "founder_tie",
+      { discordId, conflict: "founder_tie", linkedDiscordId: null },
+      `Discord account ${discordId} signed in as this patron, but another founder record holds it.`,
+    ],
+  ] as const)("puts a refused sign-in (%s) first", (_name, patronLinkConflict, message) => {
+    for (const record of [
+      supporterFixture({ patronLinkConflict }),
+      ready({ discordId: otherDiscord, patreonDiscordId: otherDiscord, patronLinkConflict }),
+    ]) {
+      const steps = supporterNextSteps(record, patronOn);
+      expect(steps[0]).toEqual({ code: "patron_link_conflict", area: "discord", message });
+      expect(steps.filter((step) => step.code === "patron_link_conflict")).toHaveLength(1);
+      expect(message).not.toContain(";");
+    }
+  });
+  it("keeps the no-longer-reported alert for import links only, and flags a different reported account", () => {
+    const patron = ready({ discordSource: "patron_signin", patreonDiscordId: null });
+    expect(codes(patron, patronOn)).not.toContain("discord_not_reported");
+    expect(codes({ ...patron, patreonDiscordId: otherDiscord }, patronOn)).toContain("discord_differs");
+  });
+  describe("on the patron's own link", () => {
+    // The payment is from October 1, 12:00 UTC.
+    const own = (overrides: Partial<SupporterView> = {}) =>
+      ready({
+        discordSource: "patron_signin",
+        patreonDiscordId: null,
+        automaticPayment: paymentFixture(),
+        ...overrides,
+      });
+    it("waits only for the refund window, exactly as on a link from Patreon, with nothing for staff to check", () => {
+      expect(supporterNextSteps(own({ automaticBlockedReason: "payment_too_recent" }), patronOn)).toEqual([
+        {
+          code: "founder_automatic_waiting",
+          area: "founder",
+          message: "Gramps makes them a founder after the refund wait (2026-10-04 12:00 UTC).",
+        },
+      ]);
+      expect(codes(own(), patronOn)).toEqual(["founder_ready_automatic"]);
+      for (const automaticBlockedReason of ["payment_too_recent", null] as const) {
+        const steps = supporterNextSteps(own({ automaticBlockedReason }), patronOn);
+        expect(steps).toEqual(supporterNextSteps(own({ automaticBlockedReason, discordSource: "patreon" }), patronOn));
+        expect(steps.map((step) => step.message).join(" ")).not.toMatch(/check/i);
+      }
+    });
+    it("leaves only a different account Patreon reports for staff", () => {
+      expect(
+        supporterNextSteps(
+          own({ patreonDiscordId: otherDiscord, automaticBlockedReason: "discord_differs" }),
+          patronOn,
+        ),
+      ).toEqual([
+        {
+          code: "discord_differs",
+          area: "discord",
+          message: `Patreon now shows a different Discord account, ${otherDiscord}.`,
+        },
+      ]);
+    });
+  });
+});

@@ -44,9 +44,9 @@ Kills sent between steps 1 and 2 are refused and may be lost for good, so do thi
 
 ## Dashboard sign-in (Discord OAuth client secret)
 
-1. In the Developer Portal, open **OAuth2** → **Reset Secret**. Staff and applicant sign-in fails until step 2 is live; existing sessions keep working.
+1. In the Developer Portal, open **OAuth2** → **Reset Secret**. Staff and applicant sign-in fails until step 2 is live; existing sessions keep working. While Link Patreon is on, patrons who are partway through end at "Link expired" too.
 2. In Railway, set `ADMIN_DISCORD_CLIENT_SECRET` and deploy.
-3. Check: sign in to the dashboard in a private window.
+3. Check: sign in to the dashboard in a private window. While Link Patreon is on, `/patreon panel` in a test channel should post the panel or name the setting to fix.
 
 ## Dashboard session secret
 
@@ -56,6 +56,10 @@ Kills sent between steps 1 and 2 are refused and may be lost for good, so do thi
 
 - **Creator's Access Token:** renew it on the [Patreon client page](https://www.patreon.com/portal/registration/register-clients), set `PATREON_CREATOR_ACCESS_TOKEN` in Railway and deploy. On the Supporters page, the sync status should show a fresh successful sync and no rejected token.
 - **Webhook secret** (only if the optional webhook is set up): change it in the Patreon webhook settings and set `PATREON_WEBHOOK_SECRET` in Railway at the same time. Deliveries in between are refused; the scheduled import still brings in the same members and payments on its next run.
+- **Client secret** (only if [Link Patreon](PATREON_SUPPORTERS.md#link-patreon-patrons-link-their-own-discord) is set up):
+  1. On the [Patreon client page](https://www.patreon.com/portal/registration/register-clients), open the client behind the creator token and get a new client secret. If Patreon offers no way to change it, create a new client instead and redo the [Link Patreon setup](PATREON_SUPPORTERS.md#owner-setup). A new client also brings a new Client ID and Creator's Access Token, and needs the redirect URI added again. Patrons partway through cannot finish until step 2 is live.
+  2. In Railway, set `PATREON_CLIENT_SECRET` (and `PATREON_CLIENT_ID` and `PATREON_CREATOR_ACCESS_TOKEN` if they changed) and deploy. The new secret must differ from every other secret.
+  3. Check: `/patreon panel` in a test channel posts the panel or names the setting to fix, and the Supporters page shows a fresh successful sync, because changing the client can replace the creator token.
 
 See [Patreon supporters](PATREON_SUPPORTERS.md) for what the sync status means.
 

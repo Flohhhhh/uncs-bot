@@ -215,11 +215,25 @@ describe("refused feed delivery record", () => {
   });
   it("keeps each server's latest stored batch counts and warns about invalid entries at most once a minute", () => {
     const deliveries = multiServer();
-    deliveries.accepted("east", { accepted: 3, skipped: 1, invalid: 0, firstInvalid: null });
+    const types = { types: 1, typesOverLimit: 0 };
+    deliveries.accepted("east", { accepted: 3, skipped: 1, invalid: 0, firstInvalid: null, ...types });
     expect(warn).not.toHaveBeenCalled();
     jest.advanceTimersByTime(2_000);
-    deliveries.accepted("east", { accepted: 1, skipped: 2, invalid: 2, firstInvalid: "events.0.eventId (bad format)" });
-    deliveries.accepted("east", { accepted: 1, skipped: 1, invalid: 1, firstInvalid: "events.0 (not an object)" });
+    deliveries.accepted("east", {
+      accepted: 1,
+      skipped: 2,
+      invalid: 2,
+      firstInvalid: "events.0.eventId (bad format)",
+      ...types,
+    });
+    deliveries.accepted("east", {
+      accepted: 1,
+      skipped: 1,
+      invalid: 1,
+      firstInvalid: "events.0 (not an object)",
+      types: 2,
+      typesOverLimit: 0,
+    });
     deliveries.rejected("east", 503, "storage unavailable", true);
     expect(deliveries.status("east")).toEqual({
       ...clean,
@@ -229,6 +243,8 @@ describe("refused feed delivery record", () => {
         skipped: 1,
         invalid: 1,
         firstInvalid: "events.0 (not an object)",
+        types: 2,
+        typesOverLimit: 0,
       },
       lastRejected: { at: new Date(now.getTime() + 2_000).toISOString(), status: 503, reason: "storage unavailable" },
       rejectedCount: 1,
@@ -238,6 +254,19 @@ describe("refused feed delivery record", () => {
     expect(warn.mock.calls.map(([message]) => message)).toEqual([
       "Accepted a game feed batch for server east but skipped 2 invalid entries; first: events.0.eventId (bad format).",
       "Rejected a game feed delivery for server east: 503 storage unavailable.",
+    ]);
+  });
+  it("keeps the batch's type counts and warns about types over the daily limit at most once a minute", () => {
+    const deliveries = multiServer();
+    const batch = { accepted: 0, skipped: 5, invalid: 0, firstInvalid: null, types: 5 };
+    deliveries.accepted("east", { ...batch, typesOverLimit: 3 });
+    deliveries.accepted("east", { ...batch, typesOverLimit: 1 });
+    expect(deliveries.status("east").lastBatch).toMatchObject({ types: 5, typesOverLimit: 1 });
+    jest.advanceTimersByTime(60_000);
+    deliveries.accepted("east", { ...batch, typesOverLimit: 2 });
+    expect(warn.mock.calls.map(([message]) => message)).toEqual([
+      "Accepted a game feed batch for server east but did not count 3 new event types: the daily limit of event types was reached.",
+      "Accepted a game feed batch for server east but did not count 2 new event types: the daily limit of event types was reached. (1 similar warning suppressed.)",
     ]);
   });
 });

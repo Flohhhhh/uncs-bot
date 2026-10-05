@@ -1,9 +1,10 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { and, desc, eq, gte, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { DATABASE, type Database } from "../database/database.types";
-import { combatEvents, combatTracking } from "../database/telemetry.schema";
+import { combatEvents, combatTracking, gameFeedEventTypes } from "../database/telemetry.schema";
 import {
   type CombatAggregate,
+  type FeedEventTypeSummary,
   type ParsedFeed,
   type TrackingRecord,
   type WeeklyHighlights,
@@ -11,9 +12,61 @@ import {
   emptyTotals,
 } from "./telemetry.types";
 
+/** New event types recorded per server and UTC day, killed aside, so a bad feed cannot add unbounded rows. */
+export const MAX_FEED_TYPES_PER_DAY = 200;
+const RETENTION_MS = 90 * 86_400_000;
+const utcDay = (at: Date) => at.toISOString().slice(0, 10);
+
+type Transaction = Parameters<Parameters<Database["transaction"]>[0]>[0];
+
 @Injectable()
 export class TelemetryStore {
   constructor(@Inject(DATABASE) private readonly db: Database) {}
+
+  /**
+   * Adds this batch's per-type counts to today's rows in one statement. Existing rows always count;
+   * types new today are added in batch order while the server has fewer than MAX_FEED_TYPES_PER_DAY
+   * of them. Returns how many of the batch's types were over that limit and not recorded.
+   */
+  private async tallyTypes(tx: Transaction, batch: ParsedFeed, receivedAt: Date, serverId: string) {
+    if (!batch.types.length) return 0;
+    const day = utcDay(receivedAt);
+    const rows = sql.join(
+      batch.types.map(
+        (entry, order) =>
+          sql`(${entry.type}::varchar, ${entry.count}::bigint, ${entry.sample === null ? null : JSON.stringify(entry.sample)}::jsonb, ${order}::int)`,
+      ),
+      sql`, `,
+    );
+    // A stored sample is replaced by a newer one, and by a size marker (which has no "type" key) only
+    // when there is none yet. killed never carries a sample.
+    const result = await tx.execute<{ type: string }>(sql`
+      WITH batch(type, count, sample, ord) AS (VALUES ${rows}),
+      today AS (SELECT type FROM game_feed_event_types WHERE server_id = ${serverId} AND day = ${day}::date),
+      fresh AS (
+        SELECT batch.*, row_number() OVER (ORDER BY ord) AS rank FROM batch
+        WHERE type <> 'killed' AND type NOT IN (SELECT type FROM today)
+      ), allowed AS (
+        SELECT type, count, sample FROM batch WHERE type = 'killed' OR type IN (SELECT type FROM today)
+        UNION ALL
+        SELECT type, count, sample FROM fresh
+        WHERE rank <= ${MAX_FEED_TYPES_PER_DAY} - (SELECT count(*) FROM today WHERE type <> 'killed')
+      )
+      INSERT INTO game_feed_event_types AS stored (server_id, type, day, count, first_received_at, last_received_at, sample)
+      SELECT ${serverId}, type, ${day}::date, count, ${receivedAt}, ${receivedAt}, sample FROM allowed
+      ON CONFLICT (server_id, type, day) DO UPDATE SET
+        count = stored.count + excluded.count,
+        first_received_at = least(stored.first_received_at, excluded.first_received_at),
+        last_received_at = greatest(stored.last_received_at, excluded.last_received_at),
+        sample = CASE
+          WHEN excluded.sample IS NULL THEN stored.sample
+          WHEN excluded.sample ? 'type' THEN excluded.sample
+          ELSE coalesce(stored.sample, excluded.sample)
+        END
+      RETURNING type
+    `);
+    return batch.types.length - result.rows.length;
+  }
 
   async ingest(batch: ParsedFeed, receivedAt: Date, serverId = "primary") {
     return this.db.transaction(async (tx) => {
@@ -44,6 +97,9 @@ export class TelemetryStore {
             lastReceivedAt: sql`greatest(${combatTracking.lastReceivedAt}, ${receivedAt})`,
           },
         });
+      // After the tracking upsert, which holds this server's tracking row until commit, so concurrent
+      // batches for one server count today's types one at a time and the daily limit holds.
+      const typesOverLimit = await this.tallyTypes(tx, batch, receivedAt, serverId);
       const cleanup = await tx
         .update(combatTracking)
         .set({ lastCleanupAt: receivedAt })
@@ -57,17 +113,49 @@ export class TelemetryStore {
           ),
         )
         .returning({ id: combatTracking.id });
-      if (cleanup.length)
+      if (cleanup.length) {
+        const cutoff = new Date(receivedAt.getTime() - RETENTION_MS);
         await tx
           .delete(combatEvents)
-          .where(
-            and(
-              eq(combatEvents.serverId, serverId),
-              lt(combatEvents.receivedAt, new Date(receivedAt.getTime() - 90 * 86_400_000)),
-            ),
-          );
-      return { inserted, duplicates: batch.events.length - inserted, skipped: batch.skipped };
+          .where(and(eq(combatEvents.serverId, serverId), lt(combatEvents.receivedAt, cutoff)));
+        await tx
+          .delete(gameFeedEventTypes)
+          .where(and(eq(gameFeedEventTypes.serverId, serverId), lt(gameFeedEventTypes.day, utcDay(cutoff))));
+      }
+      return { inserted, duplicates: batch.events.length - inserted, skipped: batch.skipped, typesOverLimit };
     });
+  }
+
+  /**
+   * Staff diagnostic: each feed event type counted on the UTC days that overlap since..until, with
+   * its total, first and last receipt and latest kept sample. Whole days, so totals can include
+   * entries received shortly before since.
+   */
+  async eventTypes(since: Date, until: Date, serverId = "primary"): Promise<FeedEventTypeSummary[]> {
+    const rows = await this.db.execute<FeedEventTypeSummary>(sql`
+      WITH scoped AS (
+        SELECT * FROM game_feed_event_types
+        WHERE server_id = ${serverId} AND day >= ${utcDay(since)}::date AND day <= ${utcDay(until)}::date
+      ), totals AS (
+        SELECT type, sum(count) AS count, min(first_received_at) AS first_received_at,
+          max(last_received_at) AS last_received_at
+        FROM scoped GROUP BY type
+      ), latest AS (
+        SELECT DISTINCT ON (type) type, sample FROM scoped WHERE sample IS NOT NULL
+        ORDER BY type, last_received_at DESC, day DESC
+      )
+      SELECT totals.type, totals.count::float8 AS count, totals.first_received_at AS "firstReceivedAt",
+        totals.last_received_at AS "lastReceivedAt", latest.sample
+      FROM totals LEFT JOIN latest USING (type)
+      ORDER BY totals.count DESC, totals.type LIMIT ${MAX_FEED_TYPES_PER_DAY + 1}
+    `);
+    return rows.rows.map((row) => ({
+      type: row.type,
+      count: Number(row.count),
+      firstReceivedAt: new Date(row.firstReceivedAt),
+      lastReceivedAt: new Date(row.lastReceivedAt),
+      sample: row.sample ?? null,
+    }));
   }
 
   async tracking(serverId = "primary"): Promise<TrackingRecord> {

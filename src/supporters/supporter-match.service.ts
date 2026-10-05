@@ -13,7 +13,8 @@ const MATCH_FAILED =
 const SOURCES_FAILED =
   "Older supporter links could not be classified at startup and stay unclassified until the next restart. Matching still runs, but no founder promise is recorded automatically on a Discord account that is not labelled as coming from Patreon.";
 
-export type SupporterMatchTrigger = "startup" | "sync" | "webhook" | "approval" | "link";
+/** `patron`: a patron linked their own Discord account with "Link Patreon". */
+export type SupporterMatchTrigger = "startup" | "sync" | "webhook" | "approval" | "link" | "patron";
 export type SupporterMatchStatus = {
   /** Copy empty SteamIDs from approved whitelist applications (SUPPORTER_AUTO_STEAM_FILL_ENABLED). */
   steamFill: boolean;
@@ -50,7 +51,9 @@ const uniqueViolation = (error: unknown) => {
 
 /**
  * Runs automatic supporter matching for Patreon records: after each Patreon sync, after a webhook observation, after
- * a whitelist application is approved, and after staff link a Discord account (SteamID only). Both switches are off by
+ * a whitelist application is approved, after a patron links their own Discord account, and after staff link a Discord
+ * account (SteamID only). A patron's own link counts like one from Patreon (see automaticFounderBlocker), so it can
+ * lead straight to a founder promise once the first payment has passed the refund wait. Both switches are off by
  * default, and nothing runs while Patreon is not configured. Never throws to its callers and never posts to Discord;
  * a recorded founder only queues the usual Founder role check.
  */

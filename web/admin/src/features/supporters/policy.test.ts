@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   applicationSteamId,
   discordCell,
+  discordSource,
   founderOffered,
   paymentLine,
   paymentOffered,
@@ -87,6 +88,8 @@ describe("row state", () => {
     ["discord_on_another_record", "discord", "needs", "needs"],
     ["discord_differs", "discord", "needs", "needs"],
     ["discord_reported_for_other_patron", "discord", "needs", "needs"],
+    // A patron's own Link Patreon sign-in that Gramps refused is a real conflict.
+    ["patron_link_conflict", "discord", "needs", "needs"],
     // SteamID: whitelist applications matter later, and no founder needs a SteamID, on either provider
     ["no_whitelist_application", "steam", "later", "later"],
     ["application_pending", "steam", "later", "later"],
@@ -253,16 +256,36 @@ describe("Add payment", () => {
 
 describe("the Discord column", () => {
   const unlinked: Supporter = { ...record, discordId: null, discordSource: null };
-  it.each(["discord_on_another_record", "discord_differs", "discord_reported_for_other_patron"])(
-    "asks staff to check the account for %s, before anything else",
-    (code) => {
-      expect(discordCell(withSteps(step(code, "discord")))).toEqual({ text: "Check", warn: true, rank: 0 });
-    },
-  );
+  it.each([
+    "discord_on_another_record",
+    "discord_differs",
+    "discord_reported_for_other_patron",
+    "patron_link_conflict",
+  ])("asks staff to check the account for %s, before anything else", (code) => {
+    expect(discordCell(withSteps(step(code, "discord")))).toEqual({ text: "Check", warn: true, rank: 0 });
+  });
   it("says where a linked account came from", () => {
     expect(discordCell(record)).toEqual({ text: "Linked", warn: false, detail: "Added by staff", rank: 4 });
     expect(discordCell({ ...record, discordSource: "patreon" }).detail).toBe("From Patreon");
     expect(discordCell({ ...record, discordSource: null }).detail).toBe("Added earlier");
+  });
+  it("says Linked by patron for an account the patron linked with Link Patreon", () => {
+    const own: Supporter = { ...record, discordSource: "patron_signin", identityState: "patreon_linked" };
+    expect(discordSource(own)).toBe("Linked by patron");
+    expect(discordCell(own)).toEqual({ text: "Linked", warn: false, detail: "Linked by patron", rank: 4 });
+    // Patreon reporting no account is the usual case for these links, so it is never a problem.
+    expect(discordCell({ ...own, patreonDiscordId: null })).toMatchObject({ text: "Linked", warn: false });
+    expect(rowState({ ...own, nextSteps: [] }).state).toBe("set");
+  });
+  it("puts a different account Patreon reports against a patron's own link under Needs you", () => {
+    const conflict: Supporter = {
+      ...record,
+      discordSource: "patron_signin",
+      patreonDiscordId: "34567890123456789",
+      nextSteps: [step("discord_differs", "discord")],
+    };
+    expect(discordCell(conflict)).toEqual({ text: "Check", warn: true, rank: 0 });
+    expect(rowState(conflict)).toMatchObject({ state: "needs", needs: ["Step discord_differs."] });
   });
   it("says an account is missing only on a PayPal record, where staff add it", () => {
     expect(discordCell({ ...unlinked, provider: "paypal", patreonMemberId: null })).toEqual({

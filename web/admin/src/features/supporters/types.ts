@@ -63,7 +63,7 @@ export interface Supporter {
   observedAt: string;
   reviewState: "pending" | "verified" | "unverified";
   discordId: string | null;
-  discordSource: "staff" | "patreon" | null;
+  discordSource: "staff" | "patreon" | "patron_signin" | null;
   patreonDiscordId: string | null;
   steamId: string | null;
   steamSource: "staff" | "application" | null;
@@ -177,7 +177,8 @@ export interface SupporterReviewResponse {
   /** Set when the save let Gramps copy the SteamID from an approved application straight away. */
   automatic?: { steamFilled: boolean; founderRecorded: boolean };
 }
-export type SupporterDecision = "link" | "payment" | "founder";
+/** `review` keeps the accounts as they are, which settles a refused Link Patreon sign-in. */
+export type SupporterDecision = "link" | "review" | "payment" | "founder";
 interface ReviewBase {
   id: string;
   version: number;

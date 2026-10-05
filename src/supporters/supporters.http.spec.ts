@@ -44,6 +44,8 @@ describe("private supporters HTTP boundary", () => {
     get: jest.fn(),
   };
   const adminStore = { session: jest.fn() };
+  // The dashboard's Discord sign-in as Link Patreon reads it; a test can make it fail.
+  const patronLinkIdentity = jest.fn((): unknown => config);
   const game = { execute: jest.fn() };
   const sync = { configured: jest.fn(), status: jest.fn(), staffSync: jest.fn() };
   const match = { member: jest.fn(), status: jest.fn(), sweep: jest.fn(), applicationChanged: jest.fn() };
@@ -94,6 +96,7 @@ describe("private supporters HTTP boundary", () => {
           { id: "partner", name: "Partner server", version: "b".repeat(64) },
         ],
         explicitServers: () => true,
+        patronLink: () => patronLinkIdentity(),
         // The partner server has its own staff; this administrator's roles are not among them.
         serverRoles: (id: string) =>
           id === "partner" ? { admin: ["partner-staff"], moderator: [], viewer: [] } : undefined,
@@ -177,6 +180,62 @@ describe("private supporters HTTP boundary", () => {
         { code: "founder_no_payment", area: "payment" },
       ],
     });
+  });
+  /** Every setting Link Patreon needs besides the import and the dashboard's Discord sign-in. */
+  const patronLinkReady = {
+    PATREON_CREATOR_ACCESS_TOKEN: "creator-token-0123456789",
+    PATREON_CLIENT_ID: "patreon-client-id-0123456789",
+    PATREON_CLIENT_SECRET: "patreon-client-secret-0123456789",
+    DISCORD_ROLES_ENABLED: true,
+    DISCORD_SUPPORTER_ROLE_ID: "300000000000000009",
+  };
+  /** The first next step of an unlinked Patreon record, read with these settings. */
+  async function unlinkedStep(settings: Record<string, unknown>) {
+    store.list.mockResolvedValue([supporterFixture()]);
+    Object.assign(values, settings);
+    try {
+      const result = await request(app.getHttpServer())
+        .get("/admin/api/supporters")
+        .set("Cookie", `__Host-uncs_admin_session=${sessionToken}`)
+        .expect(200);
+      const [step] = result.body.supporters[0].nextSteps;
+      expect(step).toMatchObject({ code: "connect_discord_in_patreon", area: "discord" });
+      return step.message as string;
+    } finally {
+      for (const key of Object.keys(settings)) delete values[key];
+    }
+  }
+  it.each([true, false, undefined])(
+    "waits for the patron's Link Patreon only while PATREON_LINK_ENABLED is %p",
+    async (enabled) => {
+      const message = await unlinkedStep({ ...patronLinkReady, PATREON_LINK_ENABLED: enabled });
+      if (enabled) expect(message).toBe("Waiting for them to tap Link Patreon in Discord.");
+      else expect(message).not.toContain("Link Patreon");
+    },
+  );
+  it.each<[string, Record<string, unknown>]>([
+    ["no client secret", { PATREON_CLIENT_SECRET: undefined }],
+    ["the creator token reused as the client secret", { PATREON_CLIENT_SECRET: "creator-token-0123456789" }],
+    ["no client ID", { PATREON_CLIENT_ID: undefined }],
+    ["Discord roles off", { DISCORD_ROLES_ENABLED: false }],
+    ["no Supporter role", { DISCORD_SUPPORTER_ROLE_ID: undefined }],
+  ])(
+    "does not wait for Link Patreon while it is switched on with %s, since patrons cannot use it",
+    async (_name, gap) => {
+      const message = await unlinkedStep({ ...patronLinkReady, PATREON_LINK_ENABLED: true, ...gap });
+      expect(message).toBe("Waiting for them to connect Discord on Patreon.");
+    },
+  );
+  it("does not wait for Link Patreon while the Discord sign-in it uses is not set up", async () => {
+    patronLinkIdentity.mockImplementation(() => {
+      throw new ServiceUnavailableException("Discord sign-in has not been connected yet.");
+    });
+    try {
+      const message = await unlinkedStep({ ...patronLinkReady, PATREON_LINK_ENABLED: true });
+      expect(message).toBe("Waiting for them to connect Discord on Patreon.");
+    } finally {
+      patronLinkIdentity.mockImplementation(() => config);
+    }
   });
   it("returns the record as read again after a staff link fills the SteamID", async () => {
     store.mutate.mockResolvedValueOnce({ ok: true, replayed: false, supporter: supporterFixture({ version: 2 }) });

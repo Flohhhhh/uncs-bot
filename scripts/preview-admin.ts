@@ -783,6 +783,20 @@ const telemetryStore = {
       .sort((a, b) => b.receivedAt.getTime() - a.receivedAt.getTime())
       .slice(0, 100);
   },
+  // Simulated killed counts only: the preview invents no other game event types or samples.
+  async eventTypes(since: Date, until: Date, serverId = "primary") {
+    const times = filteredDemoEvents(since, until, undefined, serverId).map((event) => event.receivedAt.getTime());
+    if (!times.length) return [];
+    return [
+      {
+        type: "killed",
+        count: times.length,
+        firstReceivedAt: new Date(Math.min(...times)),
+        lastReceivedAt: new Date(Math.max(...times)),
+        sample: null,
+      },
+    ];
+  },
 };
 // Fictional supporter evidence stays in memory. No Patreon credentials or calls.
 const demoSupporters = new Map<string, SupporterView>();
@@ -843,6 +857,7 @@ for (const [index, displayName] of ["Demo · Steady Supporter", "Demo · Foundin
     discordId: index === 2 ? null : `88888888888888888${index + 1}`,
     discordSource: index === 2 ? null : "staff",
     patreonDiscordId: null,
+    patronLinkConflict: null,
     steamId: index === 2 ? null : `7656119800000000${index + 1}`,
     steamSource: index === 2 ? null : "staff",
     steamApplicationId: null,
@@ -905,6 +920,7 @@ const supporterStore = {
       discordId: null,
       discordSource: null,
       patreonDiscordId: null,
+      patronLinkConflict: null,
       steamId: null,
       steamSource: null,
       steamApplicationId: null,

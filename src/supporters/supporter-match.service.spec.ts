@@ -88,6 +88,21 @@ describe("automatic supporter matching switches", () => {
     expect(await founderOnly.service.member("member-a", "link", { founder: false })).toBeNull();
     expect(founderOnly.store.autoMatch).not.toHaveBeenCalled();
   });
+  it("matches a record a patron just linked like any other trigger, founder included, logging no IDs", async () => {
+    const { service, store, roles } = fixture();
+    const log = jest.spyOn(Logger.prototype, "log").mockImplementation(() => undefined);
+    store.autoMatch.mockResolvedValueOnce(result({ founderRecorded: true }));
+    expect(await service.member("member-a", "patron")).toMatchObject({ founderRecorded: true });
+    expect(store.autoMatch).toHaveBeenCalledWith(
+      "member-a",
+      expect.objectContaining({ fillSteam: true, recordFounder: true, campaignId: "123" }),
+    );
+    expect(roles.supporterChanged).toHaveBeenCalledWith(discordId);
+    expect(log).toHaveBeenCalledWith(
+      "Automatic supporter match (patron): kept the SteamID and recorded a founder promise.",
+    );
+    expect(JSON.stringify(log.mock.calls)).not.toContain(discordId);
+  });
   it("reports both switches, the hold and the last sweep", async () => {
     const { service, store } = fixture({ SUPPORTER_AUTO_FOUNDER_HOLD_HOURS: 24 });
     store.autoMatch
