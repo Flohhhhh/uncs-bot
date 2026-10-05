@@ -276,6 +276,8 @@ describe("telemetry persistence contract", () => {
       "ORDER BY kills.distance_centimeters DESC, kills.received_at, kills.event_time, kills.event_id LIMIT 1",
     );
     expect(config.text).toContain("LIMIT 50");
+    // "Id.Item.AK74M" and "ID.Item.AK74M" are one weapon, so Old faithful counts them together.
+    expect(config.text).toContain("GROUP BY lower(btrim(cause)) ORDER BY count(*) DESC, lower(btrim(cause)) LIMIT 1");
     expect(config.text).not.toMatch(/\b(insert|update|delete)\b/i);
     expect(config.text).not.toMatch(/email|discord/i);
     await store.weeklyHighlights(since, until, "east", 25);

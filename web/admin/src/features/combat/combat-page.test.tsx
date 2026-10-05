@@ -474,13 +474,13 @@ describe("CombatPage", () => {
     expect((screen.getAllByRole("button", { name: "Alice" })[0] as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("shows weapons without the item prefix and still filters by the reported cause", async () => {
+  it("shows weapons by their readable name and still filters by the reported cause", async () => {
     request.mockResolvedValue(server({ events: [event({ cause: "Id.Item.AK74M" }), event({ eventId: "two" })] }));
     render(page());
     const events = await screen.findByRole("table", { name: "Combat events" });
-    expect(within(events).getByText("AK74M")).toHaveAttribute("title", "Id.Item.AK74M");
+    expect(within(events).getByText("AK-74M")).toHaveAttribute("title", "Id.Item.AK74M");
     const cause = screen.getByLabelText("Weapon / cause");
-    expect(within(cause).getByRole("option", { name: "AK74M" })).toHaveValue("Id.Item.AK74M");
+    expect(within(cause).getByRole("option", { name: "AK-74M" })).toHaveValue("Id.Item.AK74M");
     fireEvent.change(cause, { target: { value: "Id.Item.AK74M" } });
     expect(within(screen.getByRole("table", { name: "Combat events" })).getAllByRole("row")).toHaveLength(2);
   });

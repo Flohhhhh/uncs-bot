@@ -255,8 +255,8 @@ export class TelemetryStore {
         (SELECT count(*)::int FROM kills) AS kills,
         (SELECT count(*)::int FROM kills WHERE cause IS NOT NULL AND cause <> '') AS "killsWithCause",
         (SELECT row_to_json(r) FROM (
-          SELECT cause, count(*)::int AS kills FROM kills WHERE cause IS NOT NULL AND cause <> ''
-          GROUP BY cause ORDER BY count(*) DESC, cause LIMIT 1
+          SELECT min(btrim(cause)) AS cause, count(*)::int AS kills FROM kills WHERE cause IS NOT NULL AND btrim(cause) <> ''
+          GROUP BY lower(btrim(cause)) ORDER BY count(*) DESC, lower(btrim(cause)) LIMIT 1
         ) r) AS "topCause",
         COALESCE((SELECT json_agg(row_to_json(r)) FROM (
           SELECT map_name AS "mapName", count(*)::int AS kills FROM kills WHERE map_name IS NOT NULL AND map_name <> ''
