@@ -324,7 +324,10 @@ it("does not save a cancelled or reversed edit", async () => {
   render(hub("rotation", state));
   fireEvent.click(await screen.findByRole("button", { name: "Edit Bakurani" }));
   expect(screen.getByRole("tab", { name: "Next round" })).toBeDisabled();
-  fireEvent.click(await screen.findByRole("button", { name: "Cancel entry edit" }));
+  // While the catalog loads, the row shows a loading notice with its own Cancel button, which the map picker
+  // replaces. Clicking the notice's button just as it is replaced loses the click, so wait for the picker.
+  await waitFor(() => expect(within(queueRows()[0]).getByRole("combobox", { name: "Map" })).toHaveValue("Kavkazi"));
+  fireEvent.click(screen.getByRole("button", { name: "Cancel entry edit" }));
   // The hub re-enables its tabs once the cancelled edit's unsaved flag clears, which can land a render later.
   await waitFor(() => expect(screen.getByRole("tab", { name: "Next round" })).toBeEnabled());
   expect(screen.queryByRole("button", { name: "Review rotation" })).not.toBeInTheDocument();
