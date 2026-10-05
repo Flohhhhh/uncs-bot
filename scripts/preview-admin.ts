@@ -865,6 +865,7 @@ for (const [index, displayName] of ["Demo · Steady Supporter", "Demo · Foundin
         : null,
     founderBlockedReason: null,
     founderFirstPaymentWaiting: false,
+    founderTierBelowMinimum: false,
     founderBlockedMessage: null,
     needsDiscordLink: false,
     ...previewMatch(
@@ -915,6 +916,7 @@ const supporterStore = {
       founder: null,
       founderBlockedReason: "no_payment",
       founderFirstPaymentWaiting: false,
+      founderTierBelowMinimum: false,
       founderBlockedMessage: founderBlockedMessages.no_payment,
       needsDiscordLink: false,
       ...previewMatch({ discordId: null, discordSource: null, steamId: null }, false),

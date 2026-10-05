@@ -3950,19 +3950,6 @@ tr.audit-more[hidden] {
   font-weight: 650;
   font-variant-numeric: tabular-nums;
 }
-.supporter-sync h3 {
-  margin: var(--space-3) 0 var(--space-1);
-  font-size: var(--text-sm);
-}
-.supporter-sync ul {
-  margin: 0 0 var(--space-3);
-  padding-left: var(--space-4);
-}
-.supporter-sync li small {
-  display: block;
-  color: var(--muted);
-  font-size: var(--text-xs);
-}
 /* The founder window's exact times are long, so they take the panel's full width. */
 .sync-counts > .supporter-window {
   grid-column: 1 / -1;

@@ -172,6 +172,16 @@ describe("Supporters table", () => {
   });
 });
 
+describe("Patreon status line", () => {
+  it("styles only what the status line renders", () => {
+    // Its Details panel holds counts and a button. The founder review lists it once had are gone, with their rules.
+    const selectors = rules
+      .flatMap((rule) => rule.selectors)
+      .filter((selector) => selector.includes(".supporter-sync"));
+    expect(selectors).toEqual([".supporter-sync > .button"]);
+  });
+});
+
 describe("Applications requests header", () => {
   it.each([320, 390, 430, 768, 1280])("drops the select-all under the title when both do not fit at %ipx", (width) => {
     // On one row with the long subtitle, "Select all pending" was squeezed to 70px at 390px and broke into

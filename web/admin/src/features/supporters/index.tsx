@@ -8,7 +8,7 @@ import {
   applicationSteamId,
   discordCell,
   discordSource,
-  founderReady,
+  founderOffered,
   founderWindowLabel,
   newYork,
   paymentLine,
@@ -103,10 +103,10 @@ function Facts({
       ? record.lastChargeStatus
       : null;
   // Why Gramps would not make this ready record a founder itself. Only while automatic founders are on does Gramps
-  // look at it at all. PayPal records are never automatic, and a record waiting out the refund wait already says
-  // when Gramps makes it a founder.
+  // look at it at all. PayPal records are never automatic, a record waiting out the refund wait already says when
+  // Gramps makes it a founder, and a record another one may share a person with already says so in its steps.
   const skipped =
-    founderAuto && founderReady(record) && record.automaticBlockedReason !== "not_patreon" && !refundWait(record)
+    founderAuto && founderOffered(record) && record.automaticBlockedReason !== "not_patreon" && !refundWait(record)
       ? record.automaticBlockedMessage
       : null;
   return (
@@ -322,7 +322,8 @@ function SupporterDialog({
   useEffect(() => {
     if (result) outcome.current?.focus();
   }, [result]);
-  const ready = founderReady(record);
+  // Make founder, unless another record may be the same person.
+  const ready = founderOffered(record);
 
   function choose(decision: Decision) {
     if (busy || unavailable || submitted.current || (decision === "founder" && !ready)) return;

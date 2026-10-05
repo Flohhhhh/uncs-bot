@@ -35,6 +35,20 @@ export function founderReady(record: Supporter) {
   return !record.founder && record.founderBlockedReason === null && Boolean(record.founderEligiblePayment);
 }
 
+/**
+ * Steps that tie the record to another one that may be the same person: it holds a SteamID they applied with, or it
+ * paid earlier. The staff founder rule compares this record alone, so Make founder stays hidden while one shows.
+ */
+const OTHER_RECORD_CODES = new Set([
+  "steam_on_another_record",
+  "founder_steam_on_another_record",
+  "founder_earlier_payment_other_record",
+]);
+/** Whether the record offers Make founder: the server's verdict, unless another record may be the same person. */
+export function founderOffered(record: Supporter) {
+  return founderReady(record) && !record.nextSteps.some((step) => OTHER_RECORD_CODES.has(step.code));
+}
+
 /** Where the Discord account came from. */
 export const discordSource = (record: Supporter) =>
   record.discordSource === "patreon"
@@ -92,10 +106,10 @@ const LATER_CODES = new Set([
   "no_approved_application",
 ]);
 /**
- * A Patreon founder needs no SteamID, so on a Patreon record these SteamID steps matter only for the whitelist promise
- * later. On a PayPal record staff match the SteamID themselves, so they stay tasks there.
+ * A founder needs no SteamID, so these SteamID steps and alerts matter only for the whitelist promise later, on every
+ * record. A SteamID another record holds is a real conflict, so it stays a task.
  */
-const PATREON_LATER_CODES = new Set([
+const STEAM_LATER_CODES = new Set([
   "application_not_confirmed",
   "several_steam_ids",
   "invalid_steam_id",
@@ -140,7 +154,7 @@ export function rowState(record: Supporter): RowState {
       (step.code === "founder_needs_discord" && patreon)
     )
       waiting.add(step.message);
-    else if (LATER_CODES.has(step.code) || (patreon && PATREON_LATER_CODES.has(step.code))) later.add(step.message);
+    else if (LATER_CODES.has(step.code) || STEAM_LATER_CODES.has(step.code)) later.add(step.message);
     else needs.add(step.message);
   }
   return {
@@ -191,11 +205,12 @@ export function paymentOffered(record: Supporter, importConfigured: boolean) {
 }
 
 /**
- * The SteamID an approved application offers staff to check and link when the record has none: only one the SteamID
- * rule accepts, or one approved without a recorded grant. A SteamID that is shared, was rejected before, is held by
- * another record, is invalid, or is under review is never offered. It is never filled in.
+ * The SteamID an approved application offers staff to check and link when the record has none: one the SteamID rule
+ * accepts, one approved without a recorded grant, or one another record holds, which the record's step asks staff to
+ * link here when they are the same person. A SteamID that is shared, was rejected before, is invalid, or is under
+ * review is never offered. It is never filled in.
  */
-const OFFERED_REASONS = new Set<string | null>([null, "application_not_confirmed"]);
+const OFFERED_REASONS = new Set<string | null>([null, "application_not_confirmed", "steam_on_another_record"]);
 export function applicationSteamId(record: Supporter) {
   const steam = record.match.steam;
   return !record.steamId && steam?.steamId && OFFERED_REASONS.has(steam.reason) ? steam.steamId : null;

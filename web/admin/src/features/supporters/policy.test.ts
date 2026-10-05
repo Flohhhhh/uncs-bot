@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { discordCell, paymentLine, paymentOffered, providerLine, reviewInput, rowState } from "./policy";
+import {
+  applicationSteamId,
+  discordCell,
+  founderOffered,
+  paymentLine,
+  paymentOffered,
+  providerLine,
+  reviewInput,
+  rowState,
+} from "./policy";
 import type { NextStep, PaymentEvidence, Supporter } from "./types";
 
 const payment: PaymentEvidence = {
@@ -78,20 +87,20 @@ describe("row state", () => {
     ["discord_on_another_record", "discord", "needs", "needs"],
     ["discord_differs", "discord", "needs", "needs"],
     ["discord_reported_for_other_patron", "discord", "needs", "needs"],
-    // SteamID: whitelist applications matter later, and a Patreon founder needs no SteamID
+    // SteamID: whitelist applications matter later, and no founder needs a SteamID, on either provider
     ["no_whitelist_application", "steam", "later", "later"],
     ["application_pending", "steam", "later", "later"],
     ["application_in_progress", "steam", "later", "later"],
     ["no_approved_application", "steam", "later", "later"],
-    ["application_not_confirmed", "steam", "later", "needs"],
-    ["several_steam_ids", "steam", "later", "needs"],
-    ["invalid_steam_id", "steam", "later", "needs"],
-    ["steam_shared", "steam", "later", "needs"],
-    ["steam_rejected_before", "steam", "later", "needs"],
-    ["steam_available", "steam", "later", "needs"],
-    ["source_application_revoked", "steam", "later", "needs"],
-    ["steam_differs_from_application", "steam", "later", "needs"],
-    ["linked_steam_shared", "steam", "later", "needs"],
+    ["application_not_confirmed", "steam", "later", "later"],
+    ["several_steam_ids", "steam", "later", "later"],
+    ["invalid_steam_id", "steam", "later", "later"],
+    ["steam_shared", "steam", "later", "later"],
+    ["steam_rejected_before", "steam", "later", "later"],
+    ["steam_available", "steam", "later", "later"],
+    ["source_application_revoked", "steam", "later", "later"],
+    ["steam_differs_from_application", "steam", "later", "later"],
+    ["linked_steam_shared", "steam", "later", "later"],
     // One person on two records is for staff on either provider.
     ["steam_on_another_record", "steam", "needs", "needs"],
     ["steam_ready_automatic", "steam", "waiting", "waiting"],
@@ -107,7 +116,8 @@ describe("row state", () => {
     ["founder_needs_discord", "founder", "waiting", "needs"],
     ["founder_ready_staff", "founder", "needs", "needs"],
     ["founder_steam_on_another_record", "founder", "needs", "needs"],
-    ["founder_earlier_payment_other_record", "founder", "needs", "needs"],
+    // A person's first payment on another record is a note: Gramps decided it.
+    ["founder_earlier_payment_other_record", "info", "notes", "notes"],
     ["founder_steam_applied_by_founder", "founder", "needs", "needs"],
     ["founder_window_not_configured", "founder", "notes", "notes"],
     // Notes: why a record is not a founder
@@ -162,6 +172,48 @@ describe("row state", () => {
       ),
     );
     expect(state).toMatchObject({ state: "waiting", waiting: [message] });
+  });
+});
+
+describe("PayPal SteamID alerts", () => {
+  it("leaves a PayPal founder with SteamID alerts that no button clears all set", () => {
+    // A SteamID Gramps found, or one another Discord account applied with, matters only for the whitelist later.
+    const state = rowState(
+      paypal(step("steam_available"), step("linked_steam_shared"), step("steam_differs_from_application")),
+    );
+    expect(state.state).toBe("set");
+    expect(state.later).toHaveLength(3);
+    // Another record holding the SteamID is a real conflict, on PayPal too.
+    expect(rowState(paypal(step("steam_on_another_record"))).state).toBe("needs");
+  });
+});
+
+describe("Use SteamID", () => {
+  it("offers a SteamID another record holds, which its step asks staff to link when they are the same person", () => {
+    const steam = { steamId: "76561198000000009", applicationId: "app-1", serverId: "primary" };
+    const offered = (reason: "steam_on_another_record" | "steam_shared" | null) =>
+      applicationSteamId({ ...record, steamId: null, match: { ...record.match, steam: { ...steam, reason } } });
+    expect(offered("steam_on_another_record")).toBe(steam.steamId);
+    expect(offered(null)).toBe(steam.steamId);
+    expect(offered("steam_shared")).toBeNull();
+  });
+});
+
+describe("Make founder", () => {
+  const ready: Supporter = { ...record, founder: null, founderEligiblePayment: payment };
+  it("follows the server's verdict", () => {
+    expect(founderOffered(ready)).toBe(true);
+    expect(founderOffered({ ...ready, founderBlockedReason: "outside_window" })).toBe(false);
+    expect(founderOffered(record)).toBe(false);
+  });
+  it.each([
+    ["steam_on_another_record", "steam"],
+    ["founder_steam_on_another_record", "founder"],
+    ["founder_earlier_payment_other_record", "info"],
+  ] as const)("stays hidden while %s says another record may be the same person", (code, area) => {
+    // The staff founder rule compares this record alone, so it could make the same person a founder twice.
+    for (const provider of ["patreon", "paypal"] as const)
+      expect(founderOffered({ ...ready, provider, nextSteps: [step(code, area)] })).toBe(false);
   });
 });
 

@@ -43,6 +43,7 @@ import {
   sourceApplicationRevoked,
 } from "./supporter-match.rules";
 import {
+  FIRST_PAYMENT_REFUNDED,
   FOUNDER_MINIMUM,
   founderBlockedMessage,
   founderBlocker,
@@ -55,6 +56,7 @@ import {
   type PaypalInput,
   type SupporterMutation,
   type SupporterView,
+  TIER_BELOW_MINIMUM,
 } from "./supporters.types";
 
 export const PATREON_SYNC_ACTOR = { id: "system:patreon-sync", name: "Patreon sync" } as const;
@@ -105,6 +107,7 @@ type StoredSupporter = Omit<
   SupporterView,
   | "founderBlockedReason"
   | "founderFirstPaymentWaiting"
+  | "founderTierBelowMinimum"
   | "founderBlockedMessage"
   | "needsDiscordLink"
   | "match"
@@ -112,7 +115,13 @@ type StoredSupporter = Omit<
   | "automaticBlockedReason"
   | "automaticBlockedMessage"
 > & {
-  founderCandidate: { payment: PaymentView; earlier: boolean; copyUnverified: boolean } | null;
+  founderCandidate: {
+    payment: PaymentView;
+    earlier: boolean;
+    copyUnverified: boolean;
+    /** A `patreon-payment-below-minimum` audit row says Patreon priced this payment's tier under US$5. */
+    tierBelowMinimum?: boolean;
+  } | null;
   otherFounder: boolean;
   founderAppliedWithSteam: boolean;
   matchFacts: MatchFacts;
@@ -161,6 +170,19 @@ export function apiSnapshotHash(campaignId: string, snapshot: PatreonMemberSnaps
 /** A completed payment in a currency other than the founder minimum's, which only a tier price can confirm. */
 const otherCurrencyPaid = (event: PatreonPledgeEvent) =>
   patreonChargePaid(event.paymentStatus) && event.currency !== null && event.currency !== FOUNDER_MINIMUM.currency;
+/**
+ * A completed payment in another currency whose tier Patreon priced under the founder minimum. Gramps knows it is not
+ * worth US$5 or more unless that price rises, which every sync checks again.
+ */
+export function tierBelowMinimum(event: PatreonPledgeEvent) {
+  return (
+    otherCurrencyPaid(event) &&
+    typeof event.tierAmountCents === "number" &&
+    event.tierAmountCents < FOUNDER_MINIMUM.amountCents
+  );
+}
+/** The audit row that records a tier priced under US$5. The Supporters page reads it, as nothing else stores it. */
+export const TIER_BELOW_MINIMUM_KIND = "patreon-payment-below-minimum";
 /**
  * Whether a completed payment in another currency counts as US$5 or more: Patreon named its tier, and that tier costs
  * at least the founder minimum in US cents. The amount paid is in the patron's currency and is not compared.
@@ -339,7 +361,8 @@ export class SupportersStore {
    * reversed, including a charge first seen already reversed, so the earlier-payment test still sees it. A changed
    * first-payment mark writes a `patreon-first-payment` audit row. A Paid event in another currency is marked
    * `minimumConfirmed` when its tier costs US$5 or more, on a new payment or one imported earlier, with an audit row.
-   * That mark is never removed here.
+   * That mark is never removed here. One whose tier Patreon priced under US$5 gets a `patreon-payment-below-minimum`
+   * audit row once per price, so the Supporters page knows the answer instead of waiting for Patreon.
    *
    * The Discord account follows Patreon: an account Patreon reports for a staff link becomes a Patreon link, and a
    * Patreon link that is not a founder's follows the account Patreon now reports, taking it from another record only
@@ -421,6 +444,7 @@ export class SupportersStore {
           createdAt: receivedAt,
         });
       let paymentsChanged = false;
+      let tierNoted = false;
       const existing = new Map(
         (
           await tx
@@ -447,12 +471,45 @@ export class SupportersStore {
           { paymentId },
         );
       };
+      // The tier prices under US$5 already recorded for this member's payments, read once when one is needed.
+      let belowNoted: Map<string, unknown> | undefined;
+      // The audit row for a payment whose tier Patreon priced under US$5, written again only when that price changes.
+      const noteBelowMinimum = async (paymentId: string, event: PatreonPledgeEvent) => {
+        belowNoted ??= new Map(
+          (
+            await tx
+              .select({ details: supporterActions.details })
+              .from(supporterActions)
+              .where(and(eq(supporterActions.memberId, member.id), eq(supporterActions.kind, TIER_BELOW_MINIMUM_KIND)))
+              .orderBy(supporterActions.createdAt)
+          ).map((row) => [String(row.details.paymentId), row.details.tierAmountCents]),
+        );
+        const tierAmountCents = event.tierAmountCents ?? null;
+        if (belowNoted.get(paymentId) === tierAmountCents) return;
+        belowNoted.set(paymentId, tierAmountCents);
+        tierNoted = true;
+        audit(
+          TIER_BELOW_MINIMUM_KIND,
+          "The tier this payment paid for costs less than US$5.",
+          {
+            paymentId,
+            reference: event.id,
+            amountCents: event.amountCents,
+            currency: event.currency,
+            tierId: event.tierId ?? null,
+            tierAmountCents,
+            minimumConfirmed: 0,
+          },
+          { paymentId, tierAmountCents },
+        );
+      };
       // One pass per event: a history that lists an event twice must not write or count it twice.
       const events = [...new Map(snapshot.events.map((event) => [event.id, event])).values()];
       for (const event of events.sort((a, b) => a.date.getTime() - b.date.getTime())) {
         const row = existing.get(event.id);
         const paid = patreonChargePaid(event.paymentStatus);
         const meets = tierMeetsMinimum(event);
+        const below = tierBelowMinimum(event);
         if (!row) {
           // Only a charge Patreon took is a payment. One first seen already reversed is kept unverified, so a later
           // payment is never taken for the first one.
@@ -480,12 +537,14 @@ export class SupportersStore {
           if (inserted && paid) {
             result.payments++;
             if (meets) confirmByTier(inserted.id, event);
+            if (below) await noteBelowMinimum(inserted.id, event);
             if (otherCurrencyPaid(event)) result[meets ? "tierConfirmed" : "tierUnconfirmed"]++;
           } else if (inserted) paymentsChanged = true;
           continue;
         }
         // Only ever false to true: a payment counted once stays counted, whatever Patreon reports later.
         const confirm = meets && !row.minimumConfirmed;
+        if (below && !row.minimumConfirmed) await noteBelowMinimum(row.id, event);
         if (otherCurrencyPaid(event)) result[row.minimumConfirmed || confirm ? "tierConfirmed" : "tierUnconfirmed"]++;
         // A truncated history cannot prove or disprove the first payment, so it keeps the earlier answer.
         const first = paid && (snapshot.historyComplete ? event.id === firstId : row.firstSuccessfulPaymentVerified);
@@ -545,6 +604,8 @@ export class SupportersStore {
         stale ||
         result.payments ||
         paymentsChanged ||
+        // How the page judges a payment changed, so an open staff dialog refreshes.
+        tierNoted ||
         result.discordLinked ||
         result.discordConfirmed ||
         result.patreonDiscordChanged
@@ -718,7 +779,9 @@ export class SupportersStore {
           AND p.paid_at >= ${policy.startsAt}::timestamptz AND p.paid_at < ${policy.endsAt}::timestamptz
           ORDER BY (p.source = 'manual_receipt') DESC, p.paid_at DESC, p.recorded_at DESC LIMIT 1),
         'founderCandidate', (SELECT json_build_object('payment', ${payment("p")}, 'earlier', ${earlierPayment},
-            'copyUnverified', coalesce(dup.verification_state <> 'verified', false))
+            'copyUnverified', coalesce(dup.verification_state <> 'verified', false),
+            'tierBelowMinimum', EXISTS (SELECT 1 FROM supporter_actions tier_note WHERE tier_note.member_id = p.member_id
+              AND tier_note.kind = ${TIER_BELOW_MINIMUM_KIND} AND tier_note.details->>'paymentId' = p.id::text))
           FROM supporter_payments p LEFT JOIN LATERAL ${receiptCopy("p")} dup ON true WHERE p.member_id = m.id
           ORDER BY (p.source IN ${qualifyingSources}) DESC, p.paid_at ASC, p.recorded_at ASC LIMIT 1),
         'otherFounder', EXISTS (SELECT 1 FROM supporter_founders other_founder
@@ -768,10 +831,19 @@ export class SupportersStore {
     };
     let founderBlockedReason: SupporterView["founderBlockedReason"] = null;
     let founderFirstPaymentWaiting = false;
+    let founderTierBelowMinimum = false;
     let candidate: PaymentView | null = null;
     if (!supporter.founder) {
       const eligible = supporter.founderEligiblePayment;
       candidate = eligible ?? founderCandidate?.payment ?? null;
+      // Patreon priced the tier of this payment in another currency under US$5: an answer, not something to wait for.
+      founderTierBelowMinimum =
+        !eligible &&
+        Boolean(founderCandidate?.tierBelowMinimum) &&
+        candidate !== null &&
+        !candidate.minimumConfirmed &&
+        candidate.currency !== null &&
+        candidate.currency !== policy.currency;
       const context = {
         earlierPayment: eligible ? false : Boolean(founderCandidate?.earlier),
         importedCopyUnverified: eligible ? false : Boolean(founderCandidate?.copyUnverified),
@@ -798,9 +870,18 @@ export class SupportersStore {
         founderFirstPaymentWaiting =
           marked === null ||
           (marked === "no_identity" && !supporter.discordId) ||
-          (marked === "below_minimum" && candidate.currency !== null && candidate.currency !== policy.currency);
+          (marked === "below_minimum" &&
+            candidate.currency !== null &&
+            candidate.currency !== policy.currency &&
+            !founderTierBelowMinimum);
       }
     }
+    // A reversed imported charge is the earliest payment, so no later one is their first. Say so, since the record
+    // shows its latest payment.
+    const firstRefunded =
+      founderBlockedReason === "not_verified" &&
+      candidate?.source === "patreon_api" &&
+      candidate.verificationState !== "verified";
     // The same verdict automatic matching reaches: its own rules, then the staff founder rule on its payment.
     const automaticBlockedReason = supporter.founder
       ? null
@@ -822,7 +903,14 @@ export class SupportersStore {
       payments: supporter.payments ?? [],
       founderBlockedReason,
       founderFirstPaymentWaiting,
-      founderBlockedMessage: founderBlockedReason ? founderBlockedMessage(founderBlockedReason, candidate) : null,
+      founderTierBelowMinimum,
+      founderBlockedMessage: firstRefunded
+        ? FIRST_PAYMENT_REFUNDED
+        : founderBlockedReason === "below_minimum" && founderTierBelowMinimum
+          ? TIER_BELOW_MINIMUM
+          : founderBlockedReason
+            ? founderBlockedMessage(founderBlockedReason, candidate)
+            : null,
       needsDiscordLink: Boolean(supporter.founder) && !supporter.discordId,
       match: {
         steam: supporter.discordId ? applicationSteamMatch(facts.applications) : null,

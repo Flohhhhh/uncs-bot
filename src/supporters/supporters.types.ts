@@ -232,6 +232,13 @@ export const founderBlockedMessages: Record<FounderBlockedReason | "no_payment",
   no_payment: "No payment yet.",
 };
 /**
+ * A record's verdict when its earliest payment is an imported charge Patreon reversed. Under the first-payment rule no
+ * later payment is their first, so it names that charge rather than the payment the record shows.
+ */
+export const FIRST_PAYMENT_REFUNDED = "Their first payment was refunded.";
+/** A record's verdict when Patreon priced the tier of its payment in another currency under the founder minimum. */
+export const TIER_BELOW_MINIMUM = "Their tier costs less than US$5.";
+/**
  * The founder verdict as staff read it. A payment in another currency is below the minimum only until it is confirmed
  * as worth US$5 or more, so its sentence says that rather than what was paid.
  */
@@ -412,6 +419,11 @@ export type SupporterView = {
    * verified imported payment. Gramps waits for the import rather than asking staff.
    */
   founderFirstPaymentWaiting: boolean;
+  /**
+   * The founder payment is in another currency and Patreon priced its tier under US$5, so no sync will confirm it as
+   * worth US$5 or more unless that price rises. Gramps knows the answer, so nothing waits for Patreon.
+   */
+  founderTierBelowMinimum: boolean;
   /** The staff-facing text for `founderBlockedReason`. */
   founderBlockedMessage: string | null;
   /** A founder without a linked Discord account cannot receive the Founder role. */

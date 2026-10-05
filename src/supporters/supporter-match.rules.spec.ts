@@ -506,7 +506,11 @@ describe("next steps on the Supporters page", () => {
     ["invalid_steam_id", "invalid_steam_id", `The SteamID (${steamId}) on their application is not valid.`],
     ["steam_shared", "steam_shared", `Another Discord account applied with this SteamID (${steamId}).`],
     ["steam_rejected_before", "steam_rejected_before", `This SteamID (${steamId}) was declined or revoked before.`],
-    ["steam_on_another_record", "steam_on_another_record", `Another supporter already has this SteamID (${steamId}).`],
+    [
+      "steam_on_another_record",
+      "steam_on_another_record",
+      `Another supporter has this SteamID (${steamId}). Link it here if they are the same person.`,
+    ],
   ] as const)("explains a missing SteamID (%s)", (reason, code, message) => {
     const record = ready({ steamId: null, steamSource: null, match: { ...ready().match, steam: steamMatch(reason) } });
     expect(supporterNextSteps(record, on)).toContainEqual({ code, area: "steam", message });
@@ -631,20 +635,24 @@ describe("next steps on the Supporters page", () => {
       "founder_ready_automatic",
     ]);
   });
-  it("leaves a founder to staff when another record holds the SteamID the Discord account applied with", () => {
-    const steps = supporterNextSteps(
-      ready({
-        steamId: null,
-        steamSource: null,
-        automaticBlockedReason: "steam_on_another_record",
-        match: { ...ready().match, steam: steamMatch("steam_on_another_record") },
-      }),
-      on,
-    );
-    expect(steps.map((step) => step.code)).toEqual(["steam_on_another_record", "founder_steam_on_another_record"]);
-    expect(steps[0].message).toBe(`Another supporter already has this SteamID (${steamId}).`);
-    // Why automation would not record it is the record's automaticBlockedMessage, so the step stays one sentence.
-    expect(steps[1].message).toBe("Another supporter has a SteamID they applied with.");
+  it("gives one line that says what to do when another record holds the SteamID the Discord account applied with", () => {
+    const held = {
+      steamId: null,
+      steamSource: null,
+      automaticBlockedReason: "steam_on_another_record",
+      match: { ...ready().match, steam: steamMatch("steam_on_another_record") },
+    } as const;
+    const line = {
+      code: "steam_on_another_record",
+      area: "steam",
+      message: `Another supporter has this SteamID (${steamId}). Link it here if they are the same person.`,
+    };
+    // The SteamID step names the SteamID and the action, so no founder step says the same thing again.
+    for (const context of [on, off]) expect(supporterNextSteps(ready(held), context)).toEqual([line]);
+    // A PayPal record shows the same one line.
+    expect(
+      supporterNextSteps(ready({ ...held, provider: "paypal", automaticBlockedReason: "not_patreon" }), on),
+    ).toEqual([line, { code: "founder_ready_staff", area: "founder", message: "Ready to be made a founder." }]);
     const linked = supporterNextSteps(ready({ automaticBlockedReason: "steam_on_another_record" }), on);
     expect(linked).toEqual([
       {
@@ -730,15 +738,8 @@ describe("next steps on the Supporters page", () => {
         message: "Another supporter has a SteamID they applied with.",
       },
     ],
-    [
-      "an earlier payment on another record",
-      "earlier_payment_other_record",
-      {
-        code: "founder_earlier_payment_other_record",
-        area: "founder",
-        message: "Another record for this person paid earlier.",
-      },
-    ],
+    // Gramps decided it, so it is a note (see below), never a founder step.
+    ["an earlier payment on another record", "earlier_payment_other_record", null],
     [
       "a staff receipt saved before the import ran",
       "no_patreon_payment",
@@ -754,6 +755,17 @@ describe("next steps on the Supporters page", () => {
       );
       expect(founderSteps).toEqual(expected ? [expected] : []);
     }
+  });
+  it("says a person's first payment on another record is a note, with nothing for staff to do", () => {
+    const note = {
+      code: "founder_earlier_payment_other_record",
+      area: "info",
+      message: "Their first payment is on another record.",
+    };
+    for (const context of [on, off])
+      expect(supporterNextSteps(ready({ automaticBlockedReason: "earlier_payment_other_record" }), context)).toEqual([
+        note,
+      ]);
   });
   it("waits for the import itself while it is not set up", () => {
     const context = { ...on, importConfigured: false };
@@ -819,6 +831,39 @@ describe("next steps on the Supporters page", () => {
       area: "info",
       message: "This CAD payment is not confirmed as US$5 or more.",
     });
+    // A tier Patreon priced under US$5 is an answer, not something to wait for, so it is a note.
+    const cheap = supporterNextSteps(
+      ready({
+        founderBlockedReason: "below_minimum",
+        founderTierBelowMinimum: true,
+        founderBlockedMessage: "Their tier costs less than US$5.",
+        latestPayment: paymentFixture({ currency: "CAD" }),
+        founderEligiblePayment: null,
+      }),
+      on,
+    );
+    expect(cheap.at(-1)).toEqual({
+      code: "founder_below_minimum",
+      area: "info",
+      message: "Their tier costs less than US$5.",
+    });
+  });
+  it("words a founder note as the record's own verdict, which names the payment it judged", () => {
+    // Patreon refunded the first charge and they paid again. The record shows the later, paid one.
+    const steps = supporterNextSteps(
+      ready({
+        founderBlockedReason: "not_verified",
+        founderBlockedMessage: "Their first payment was refunded.",
+        founderEligiblePayment: null,
+        latestPayment: paymentFixture({ paidAt: "2026-10-05T12:00:00.000Z", firstSuccessfulPaymentVerified: false }),
+      }),
+      on,
+    );
+    expect(steps.at(-1)).toEqual({
+      code: "founder_not_verified",
+      area: "payment",
+      message: "Their first payment was refunded.",
+    });
   });
   it("waits for Patreon to settle a first payment it has not settled yet, and leaves any other a note", () => {
     const waiting = supporterNextSteps(
@@ -859,6 +904,17 @@ describe("next steps on the Supporters page", () => {
       code: "founder_source_not_qualifying",
       area: "founder",
       message: "Waiting for Patreon to show a payment.",
+    });
+    // Webhooks never bring in a payment, so without the import the wait is for the import itself.
+    expect(
+      supporterNextSteps(ready({ founderBlockedReason: "source_not_qualifying" }), {
+        ...on,
+        importConfigured: false,
+      }).at(-1),
+    ).toEqual({
+      code: "founder_source_not_qualifying",
+      area: "founder",
+      message: "Waiting for the Patreon import to be set up.",
     });
   });
   it("says a linked SteamID that is not valid stops a founder", () => {

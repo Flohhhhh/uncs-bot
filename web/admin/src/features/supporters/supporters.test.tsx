@@ -794,6 +794,80 @@ it("keeps Make founder secondary when Gramps makes them a founder at the next sy
   expect(within(dialog).queryByRole("button", { name: "Add payment" })).not.toBeInTheDocument();
 });
 
+it("hides Make founder and says so as a note when the person's first payment is on another record", async () => {
+  const note = "Their first payment is on another record.";
+  request.mockResolvedValue(
+    data({
+      ...supporter,
+      discordSource: "patreon",
+      automaticBlockedReason: "earlier_payment_other_record",
+      automaticBlockedMessage: "Another supporter record for this person has an earlier payment.",
+      nextSteps: [{ code: "founder_earlier_payment_other_record", area: "info", message: note }],
+    }),
+  );
+  render(page());
+  // Gramps decided it, so the row has nothing for staff.
+  expect(await screen.findByText("All set")).toBeInTheDocument();
+  const dialog = await openRecord();
+  expect(section(dialog, "Not a founder")).toHaveTextContent(note);
+  expect(within(dialog).queryByRole("heading", { name: "Needs you" })).not.toBeInTheDocument();
+  // The staff rule compares this record alone, so Make founder would break the first-payment rule.
+  expect(within(dialog).queryByRole("button", { name: "Make founder" })).not.toBeInTheDocument();
+  expect(dialog).not.toHaveTextContent("Gramps skipped this");
+});
+
+it("asks staff once to link a SteamID another record holds, offers it, and hides Make founder until then", async () => {
+  const line = "Another supporter has this SteamID (76561198000000009). Link it here if they are the same person.";
+  for (const provider of ["patreon", "paypal"] as const) {
+    const held: Supporter = {
+      ...supporter,
+      provider,
+      patreonMemberId: provider === "paypal" ? null : supporter.patreonMemberId,
+      confirmKey: provider === "paypal" ? supporter.id : supporter.confirmKey,
+      steamId: null,
+      steamSource: null,
+      identityState: "partial",
+      match: { ...supporter.match, steam: { ...automaticSteam, reason: "steam_on_another_record" } },
+      nextSteps: [{ code: "steam_on_another_record", area: "steam", message: line }],
+    };
+    expect(applicationSteamId(held)).toBe(automaticSteam.steamId);
+    request.mockResolvedValue(data(held));
+    const view = render(page());
+    expect(await screen.findByText("Needs you", { selector: ".pill" })).toBeInTheDocument();
+    const dialog = await openRecord();
+    expect(section(dialog, "Needs you")).toHaveTextContent(line);
+    expect(within(section(dialog, "Needs you")).getAllByRole("listitem")).toHaveLength(1);
+    expect(within(dialog).queryByRole("button", { name: "Make founder" })).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Change accounts" }));
+    fireEvent.click(screen.getByRole("button", { name: `Use SteamID ${automaticSteam.steamId}` }));
+    expect(screen.getByLabelText("SteamID64")).toHaveValue(automaticSteam.steamId);
+    view.unmount();
+  }
+});
+
+it("lists a PayPal founder's SteamID alerts under Later, so the row is all set", async () => {
+  const alerts = [
+    { code: "steam_available", area: "steam", message: "Add the SteamID (76561198000000009) from their application." },
+    { code: "linked_steam_shared", area: "steam", message: "Another Discord account applied with their SteamID." },
+  ] as const;
+  request.mockResolvedValue(
+    data({
+      ...supporter,
+      provider: "paypal",
+      patreonMemberId: null,
+      confirmKey: supporter.id,
+      founder: { awardedAt: policy.startsAt!, paymentId: payment.id },
+      founderEligiblePayment: null,
+      nextSteps: [...alerts],
+    }),
+  );
+  render(page());
+  expect(await screen.findByText("All set")).toBeInTheDocument();
+  const dialog = await openRecord();
+  for (const alert of alerts) expect(section(dialog, "Later")).toHaveTextContent(alert.message);
+  expect(within(dialog).queryByRole("heading", { name: "Needs you" })).not.toBeInTheDocument();
+});
+
 it("checks linked Steam account structure rather than a decimal prefix", () => {
   const input = new FormData();
   input.set("reason", "Checked this supporter's player identity");
@@ -1384,7 +1458,6 @@ it.each([
   "application_pending",
   "steam_shared",
   "steam_rejected_before",
-  "steam_on_another_record",
   "invalid_steam_id",
 ] as const)("never offers a SteamID flagged %s, and shows why", async (reason) => {
   const flagged: Supporter = {

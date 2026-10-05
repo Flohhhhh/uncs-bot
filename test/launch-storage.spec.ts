@@ -12,6 +12,7 @@ import {
   type AutoMatchOptions,
   type AutoMatchResult,
 } from "../src/supporters/supporter-match.store";
+import { supporterNextSteps } from "../src/supporters/supporter-match.rules";
 import type {
   FounderPolicy,
   ManualMemberInput,
@@ -1870,6 +1871,11 @@ describe("launch storage on isolated PostgreSQL", () => {
     async function application(discordUserId = patron, steamId = patronSteam, serverId = "primary") {
       return (await applications.create({ ...applicationInput(discordUserId, steamId), serverId }))!;
     }
+    // The store's view has no steps: the service adds them, as the page receives them, with every switch on.
+    const stepCodes = (view: SupporterView | null) =>
+      supporterNextSteps(view!, { steamFill: true, founderAuto: true, importConfigured: true, holdHours: 0 }).map(
+        (step) => step.code,
+      );
     const kinds = async (memberId: string) =>
       (
         await client.query<{ actor_id: string; kind: string }>(
@@ -2093,13 +2099,14 @@ describe("launch storage on isolated PostgreSQL", () => {
           new Date(),
         ),
       ).toMatchObject({ discordLinked: false, conflict: "discord-differs" });
-      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
+      const differs = await supporters.get(record.id, campaign, automaticPolicy);
+      expect(differs).toMatchObject({
         discordId: "567890123456789018",
         discordSource: "staff",
         patreonDiscordId: "567890123456789014",
         automaticBlockedReason: "discord_not_from_patreon",
-        nextSteps: expect.arrayContaining([expect.objectContaining({ code: "discord_differs" })]),
       });
+      expect(stepCodes(differs)).toContain("discord_differs");
       expect(await match.autoMatch(record.id, options())).toMatchObject({
         founderRecorded: false,
         blocked: ["discord_not_from_patreon"],
@@ -2201,6 +2208,86 @@ describe("launch storage on isolated PostgreSQL", () => {
       });
     });
 
+    it("still sees the earlier payment on a record Patreon took the Discord account from", async () => {
+      const beforeWindow = (id: string) => charge(`pledge_start:${id}`, "2026-09-01T12:00:00.000Z");
+      const report = (id: string, discordId: string | null) =>
+        supporters.importApiMember(campaign, { ...apiMember(id, [beforeWindow(id)], true), discordId }, new Date());
+      // The person paid before the window on one Patreon account, then connected Discord to a second one instead
+      // and paid in the window there. Patreon moves the account to the second record.
+      const moved = "567890123456789024";
+      const first = await importPatron("paid-before-patron", moved, beforeWindow("paid-before-patron"));
+      await report("paid-before-patron", null);
+      const second = await importPatron("paid-in-window-patron", moved);
+      expect(await supporters.get(first.id, campaign, automaticPolicy)).toMatchObject({ discordId: null });
+      expect(second).toMatchObject({
+        discordId: moved,
+        discordSource: "patreon",
+        founderBlockedReason: null,
+        automaticBlockedReason: "earlier_payment_other_record",
+      });
+      // A note, not a task: Gramps decided they are not a founder. The SteamID step is for the whitelist later.
+      expect(stepCodes(second)).toEqual(["no_whitelist_application", "founder_earlier_payment_other_record"]);
+      expect(await match.autoMatch(second.id, options({ fillSteam: false }))).toMatchObject({
+        founderRecorded: false,
+        blocked: ["earlier_payment_other_record"],
+      });
+      // The same when a Patreon link followed another account and the account it gave up turns up elsewhere.
+      const released = "567890123456789025";
+      const relinked = await importPatron("relinked-patron", released, beforeWindow("relinked-patron"));
+      await report("relinked-patron", "567890123456789026");
+      expect(await supporters.get(relinked.id, campaign, automaticPolicy)).toMatchObject({
+        discordId: "567890123456789026",
+      });
+      const later = await importPatron("released-to-patron", released);
+      expect(later).toMatchObject({ discordId: released, automaticBlockedReason: "earlier_payment_other_record" });
+      expect(await match.autoMatch(later.id, options({ fillSteam: false }))).toMatchObject({ founderRecorded: false });
+      expect((await client.query("SELECT count(*)::int AS count FROM supporter_founders")).rows).toEqual([
+        { count: 0 },
+      ]);
+    });
+
+    it("knows a payment in another currency on a tier under US$5 is not worth it, so nothing waits", async () => {
+      const cheap = {
+        ...charge("pledge_start:cheap-tier-patron", "2026-10-01T12:00:00.000Z"),
+        amountCents: 400,
+        currency: "CAD",
+        tierId: "222",
+        tierAmountCents: 300,
+      };
+      const record = await importPatron("cheap-tier-patron", patron, cheap);
+      expect(record).toMatchObject({
+        founderBlockedReason: "below_minimum",
+        founderTierBelowMinimum: true,
+        founderBlockedMessage: "Their tier costs less than US$5.",
+        automaticBlockedReason: "below_minimum",
+      });
+      expect(
+        supporterNextSteps(record, { steamFill: true, founderAuto: true, importConfigured: true, holdHours: 0 }),
+      ).toEqual([{ code: "founder_below_minimum", area: "info", message: "Their tier costs less than US$5." }]);
+      // The next sync at the same price writes nothing.
+      expect(
+        await supporters.importApiMember(
+          campaign,
+          { ...apiMember("cheap-tier-patron", [cheap], true), discordId: patron },
+          new Date(),
+        ),
+      ).toMatchObject({ updated: false, tierUnconfirmed: 1 });
+      expect((await supporters.get(record.id, campaign, automaticPolicy))?.version).toBe(record.version);
+      expect(
+        (
+          await client.query(
+            "SELECT actor_id, details FROM supporter_actions WHERE member_id = $1 AND kind = 'patreon-payment-below-minimum'",
+            [record.id],
+          )
+        ).rows,
+      ).toEqual([
+        {
+          actor_id: "system:patreon-sync",
+          details: expect.objectContaining({ reference: "pledge_start:cheap-tier-patron", tierAmountCents: 300 }),
+        },
+      ]);
+    });
+
     it("records an automatic founder on a history that starts with a renewal, once the refund wait is over", async () => {
       // Patreon returned the patron's whole history, which starts with a renewal rather than the pledge start.
       const record = await importPatron(
@@ -2268,11 +2355,9 @@ describe("launch storage on isolated PostgreSQL", () => {
       });
       await application("567890123456789016", patronSteam);
       // A founder needs no SteamID. The alert matters for the whitelist promise later.
-      expect(await supporters.get(record.id, campaign, automaticPolicy)).toMatchObject({
-        match: { linkedSteamShared: true },
-        automaticBlockedReason: null,
-        nextSteps: expect.arrayContaining([expect.objectContaining({ code: "linked_steam_shared" })]),
-      });
+      const shared = await supporters.get(record.id, campaign, automaticPolicy);
+      expect(shared).toMatchObject({ match: { linkedSteamShared: true }, automaticBlockedReason: null });
+      expect(stepCodes(shared)).toContain("linked_steam_shared");
       expect(await match.autoMatch(record.id, options())).toMatchObject({ founderRecorded: true, blocked: [] });
     });
 
@@ -2655,6 +2740,8 @@ describe("launch storage on isolated PostgreSQL", () => {
       expect(record).toMatchObject({
         founderEligiblePayment: null,
         founderBlockedReason: "below_minimum",
+        // No tier price was read, so Gramps still waits for one.
+        founderTierBelowMinimum: false,
         automaticBlockedReason: "below_minimum",
         latestPayment: { amountCents: 750, currency: "CAD", minimumConfirmed: false },
       });

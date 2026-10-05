@@ -267,6 +267,10 @@ export type NextStepRecord = MatchMember & {
   founderBlockedReason: FounderBlockedReason | "no_payment" | null;
   /** Only the first-payment mark, which the import has not settled yet, keeps it from being a founder (see SupporterView). */
   founderFirstPaymentWaiting?: boolean;
+  /** Patreon priced the tier of its payment in another currency under US$5, so no sync confirms it (see SupporterView). */
+  founderTierBelowMinimum?: boolean;
+  /** The record's founder verdict in staff words. A founder step that only states the verdict uses it as it is. */
+  founderBlockedMessage?: string | null;
   founderEligiblePayment: PaymentView | null;
   latestPayment: PaymentView | null;
   /** The payment automatic matching would record a founder promise on. */
@@ -340,7 +344,8 @@ function steamStep(steam: SteamMatch, record: NextStepRecord, context: NextStepC
     invalid_steam_id: `The SteamID${id} on their application is not valid.`,
     steam_shared: `Another Discord account applied with this SteamID${id}.`,
     steam_rejected_before: `This SteamID${id} was declined or revoked before.`,
-    steam_on_another_record: `Another supporter already has this SteamID${id}.`,
+    // One line with what to do: linking it here lets the founder checks compare the two records.
+    steam_on_another_record: `Another supporter has this SteamID${id}. Link it here if they are the same person.`,
   };
   if (steam.reason) return { code: steamStepCodes[steam.reason], area: "steam", message: messages[steam.reason] };
   // Only a Patreon record with the fill switched on is ever filled in; anything else waits for staff.
@@ -424,9 +429,10 @@ export function supporterNextSteps(record: NextStepRecord, context: NextStepCont
     const code = `founder_${reason}`;
     const payment = record.founderEligiblePayment ?? record.latestPayment;
     const otherCurrency = reason === "below_minimum" && payment?.currency && payment.currency !== "USD";
-    if (otherCurrency && record.provider === "patreon")
+    if (otherCurrency && record.provider === "patreon" && !record.founderTierBelowMinimum)
       // The import counts a Patreon payment in another currency by its tier's price and checks again at every sync,
-      // so Gramps waits for a tier Patreon did not report, or could not be read.
+      // so Gramps waits for a tier Patreon did not report, or could not be read. A tier priced under US$5 is an
+      // answer, so that one is a note.
       steps.push({
         code,
         area: "founder",
@@ -436,8 +442,13 @@ export function supporterNextSteps(record: NextStepRecord, context: NextStepCont
       // Patreon's history has not settled whether this imported payment was the first. Every sync reads it again.
       steps.push({ code, area: "founder", message: "Waiting for Patreon to confirm their first payment." });
     else if (reason === "source_not_qualifying")
-      // Only a webhook status is on record. The import brings in the payment itself.
-      steps.push({ code, area: "founder", message: "Waiting for Patreon to show a payment." });
+      // Only a webhook status is on record. The import brings in the payment itself, so without it the wait is for
+      // the import.
+      steps.push({
+        code,
+        area: "founder",
+        message: context.importConfigured ? "Waiting for Patreon to show a payment." : WAITING_FOR_IMPORT,
+      });
     else if (reason === "no_identity" && !record.discordId && !record.steamId)
       // Linking an account is the Discord step's job. This says what it unlocks.
       steps.push({ code, area: "founder", message: "Can be a founder once their Discord is linked." });
@@ -450,7 +461,8 @@ export function supporterNextSteps(record: NextStepRecord, context: NextStepCont
         // Outside the window, below the minimum, or a founder elsewhere: nothing staff can do here. Staff answered
         // whether a PayPal payment in another currency is worth US$5 or more when they recorded it.
         area: FOUNDER_IMPOSSIBLE.has(reason) ? "info" : PAYMENT_REASONS.has(reason) ? "payment" : "founder",
-        message: founderBlockedMessage(reason, payment),
+        // The record's own verdict names the payment it judged, which need not be the one the record shows.
+        message: record.founderBlockedMessage ?? founderBlockedMessage(reason, payment),
       });
     return steps;
   }
@@ -475,10 +487,18 @@ export function supporterNextSteps(record: NextStepRecord, context: NextStepCont
     founder("founder_waiting_discord", waitingForDiscord);
   // The Discord step already says which account Patreon reports, and that staff check it.
   else if (automatic === "discord_differs" || automatic === "discord_reported_for_other_patron") return steps;
-  else if (automatic === "steam_on_another_record")
-    founder("founder_steam_on_another_record", "Another supporter has a SteamID they applied with.");
-  else if (automatic === "earlier_payment_other_record")
-    founder("founder_earlier_payment_other_record", "Another record for this person paid earlier.");
+  else if (automatic === "steam_on_another_record") {
+    // The SteamID step already says which SteamID and what to do, so the record shows one line.
+    if (!steps.some((step) => step.code === "steam_on_another_record"))
+      founder("founder_steam_on_another_record", "Another supporter has a SteamID they applied with.");
+  } else if (automatic === "earlier_payment_other_record")
+    // The person's first payment is on another record with the same Discord account or SteamID, so this one is not
+    // a founder. Gramps decided it, so it is a note.
+    steps.push({
+      code: "founder_earlier_payment_other_record",
+      area: "info",
+      message: "Their first payment is on another record.",
+    });
   // A staff receipt saved while the import was off, or a payment the staff rule judges differently: staff decide.
   else founder("founder_ready_staff", "Ready to be made a founder.");
   return steps;

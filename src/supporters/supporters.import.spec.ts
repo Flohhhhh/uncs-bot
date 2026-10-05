@@ -7,7 +7,13 @@ import type { Database } from "../database/database.types";
 import { supporterMembers, supporterPayments } from "../database/supporters.schema";
 import type { Staff } from "../admin/admin.types";
 import type { PatreonMemberSnapshot, PatreonPledgeEvent } from "./patreon.client";
-import { apiSnapshotHash, PATREON_SYNC_ACTOR, SupportersStore, tierMeetsMinimum } from "./supporters.store";
+import {
+  apiSnapshotHash,
+  PATREON_SYNC_ACTOR,
+  SupportersStore,
+  tierBelowMinimum,
+  tierMeetsMinimum,
+} from "./supporters.store";
 import type { FounderPolicy } from "./supporters.types";
 
 const campaign = "16880209";
@@ -110,9 +116,13 @@ function fixture() {
       version: 4,
     },
     payments: [] as Record<string, unknown>[],
+    /** The details of `patreon-payment-below-minimum` audit rows already on record. */
+    belowNotes: [] as Record<string, unknown>[],
   };
   const query = jest.fn(async (config: { text: string }, params: unknown[]) => {
     const text = config.text;
+    if (text.startsWith('select "details" from "supporter_actions"'))
+      return { rows: state.belowNotes.map((details) => [details]) };
     if (text.startsWith('insert into "supporter_members"')) return { rows: state.created ? [[memberId]] : [] };
     if (text.startsWith('select "id", "discord_source", "patreon_discord_id", "steam_source", "version" from'))
       return {
@@ -701,6 +711,17 @@ describe("a Patreon payment in another currency, counted by the price of its tie
   ])("decides %s", (_name, change, expected) => {
     expect(tierMeetsMinimum(cad(change))).toBe(expected);
   });
+  it.each<[string, Partial<PatreonPledgeEvent>, boolean]>([
+    ["a tier under US$5", { tierAmountCents: 499 }, true],
+    ["a free tier", { tierAmountCents: 0 }, true],
+    ["a US$5 tier", {}, false],
+    ["a tier Patreon gave no price for", { tierAmountCents: undefined }, false],
+    ["no tier at all", { tierId: undefined, tierAmountCents: undefined }, false],
+    ["a payment in US dollars", { currency: "USD", tierAmountCents: 300 }, false],
+    ["a refunded charge", { paymentStatus: "Refunded", tierAmountCents: 300 }, false],
+  ])("tells a tier priced under US$5 apart: %s", (_name, change, expected) => {
+    expect(tierBelowMinimum(cad(change))).toBe(expected);
+  });
   it("confirms a new CAD payment on a US$5 tier, with a system audit row", async () => {
     const { store, state, calls } = fixture();
     state.created = true;
@@ -729,7 +750,6 @@ describe("a Patreon payment in another currency, counted by the price of its tie
     });
   });
   it.each<[string, Partial<PatreonPledgeEvent>]>([
-    ["a tier under US$5", { tierAmountCents: 300 }],
     ["an unknown tier", { tierAmountCents: undefined }],
     ["no tier", { tierId: undefined, tierAmountCents: undefined }],
   ])("leaves a new CAD payment on %s unconfirmed, exactly as before", async (_name, change) => {
@@ -822,20 +842,74 @@ describe("a Patreon payment in another currency, counted by the price of its tie
     ).toMatchObject({ tierConfirmedNew: 0 });
     expect(never.calls("update")).toHaveLength(0);
   });
-  it("leaves an earlier CAD payment unconfirmed while its tier is unknown or under US$5", async () => {
-    for (const change of [{ tierAmountCents: undefined }, { tierAmountCents: 499 }]) {
-      const { store, state, calls } = fixture();
-      state.observed = false;
-      state.payments = [cadRow()];
-      expect(await store.importApiMember(campaign, snapshot({ events: [cad(change)] }), at)).toMatchObject({
-        updated: false,
-        tierConfirmed: 0,
-        tierConfirmedNew: 0,
-        tierUnconfirmed: 1,
-      });
-      expect(calls("update")).toHaveLength(0);
-      expect(calls('insert into "supporter_actions"')).toHaveLength(0);
+  it("leaves an earlier CAD payment unconfirmed while its tier is unknown", async () => {
+    const { store, state, calls } = fixture();
+    state.observed = false;
+    state.payments = [cadRow()];
+    expect(
+      await store.importApiMember(campaign, snapshot({ events: [cad({ tierAmountCents: undefined })] }), at),
+    ).toMatchObject({ updated: false, tierConfirmed: 0, tierConfirmedNew: 0, tierUnconfirmed: 1 });
+    expect(calls("update")).toHaveLength(0);
+    expect(calls('insert into "supporter_actions"')).toHaveLength(0);
+  });
+  it("records once that a new CAD payment's tier costs under US$5, so nothing waits for Patreon", async () => {
+    const { store, state, calls } = fixture();
+    state.created = true;
+    const result = await store.importApiMember(campaign, snapshot({ events: [cad({ tierAmountCents: 300 })] }), at);
+    expect(result).toMatchObject({ payments: 1, tierConfirmed: 0, tierConfirmedNew: 0, tierUnconfirmed: 1 });
+    const [insert] = calls('insert into "supporter_payments"') as Call[];
+    expect(bound(insert, "minimum_confirmed")).toBe(false);
+    expect(bound(insert, "verification_state")).toBe("verified");
+    const audits = calls('insert into "supporter_actions"') as Call[];
+    expect(audits).toHaveLength(1);
+    expect(audits[0][1]).toEqual(
+      expect.arrayContaining([PATREON_SYNC_ACTOR.id, "patreon-payment-below-minimum", memberId]),
+    );
+    expect(details(audits)[0]).toEqual({
+      paymentId: expect.any(String),
+      reference: "pledge_start:1",
+      amountCents: 750,
+      currency: "CAD",
+      tierId: "111",
+      tierAmountCents: 300,
+      minimumConfirmed: 0,
+    });
+  });
+  it("records an earlier CAD payment's tier under US$5 once per price, bumping the version only then", async () => {
+    const first = fixture();
+    first.state.observed = false;
+    first.state.payments = [cadRow()];
+    expect(
+      await first.store.importApiMember(campaign, snapshot({ events: [cad({ tierAmountCents: 499 })] }), at),
+    ).toMatchObject({ updated: false, tierConfirmed: 0, tierConfirmedNew: 0, tierUnconfirmed: 1 });
+    expect(first.calls('update "supporter_payments"')).toHaveLength(0);
+    // Only the version moves, so an open staff dialog refreshes; the review state stays.
+    const [member] = first.calls('update "supporter_members"');
+    expect(member[0].text).toBe('update "supporter_members" set "version" = $1 where "supporter_members"."id" = $2');
+    const audits = first.calls('insert into "supporter_actions"') as Call[];
+    expect(audits).toHaveLength(1);
+    expect(details(audits)[0]).toMatchObject({ paymentId: first.state.payments[0].id, tierAmountCents: 499 });
+    // The next sync at the same price writes nothing. A new price is recorded again.
+    for (const [price, written] of [
+      [499, 0],
+      [300, 1],
+    ] as const) {
+      const again = fixture();
+      again.state.observed = false;
+      again.state.payments = [cadRow({ id: first.state.payments[0].id })];
+      again.state.belowNotes = [{ paymentId: first.state.payments[0].id, tierAmountCents: 499 }];
+      await again.store.importApiMember(campaign, snapshot({ events: [cad({ tierAmountCents: price })] }), at);
+      expect(again.calls('insert into "supporter_actions"')).toHaveLength(written);
+      expect(again.calls("update")).toHaveLength(written);
     }
+  });
+  it("records nothing about a tier price once the payment counts as US$5 or more", async () => {
+    const { store, state, calls } = fixture();
+    state.observed = false;
+    state.payments = [cadRow({ minimumConfirmed: true })];
+    await store.importApiMember(campaign, snapshot({ events: [cad({ tierAmountCents: 300 })] }), at);
+    expect(calls('insert into "supporter_actions"')).toHaveLength(0);
+    expect(calls('select "details" from "supporter_actions"')).toHaveLength(0);
   });
   it("confirms a payment once when the history lists its event twice", async () => {
     const { store, state, calls } = fixture();

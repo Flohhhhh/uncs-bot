@@ -749,14 +749,103 @@ describe("supporter persistence and founder eligibility", () => {
       [usd, { otherFounder: true }],
     ] as const)
       expect(await read(stored(payment, change))).toMatchObject({ founderFirstPaymentWaiting: false });
-    // A charge first seen already reversed is the earliest payment, so the founder rule stops at it.
+    // A charge first seen already reversed is the earliest payment, so the founder rule stops at it. The verdict
+    // names that charge, since the record shows the later, paid one.
     const reversed = { ...usd, paidAt: "2026-09-01T12:00:00.000Z", verificationState: "unverified" };
+    const later = { ...usd, id: randomUUID(), paidAt: "2026-10-05T12:00:00.000Z" };
+    for (const latest of [reversed, later])
+      expect(
+        await read(
+          stored(reversed, {
+            latestPayment: latest,
+            payments: [latest, reversed],
+            founderCandidate: { payment: reversed, earlier: false, copyUnverified: false },
+          }),
+        ),
+      ).toMatchObject({
+        founderBlockedReason: "not_verified",
+        founderBlockedMessage: "Their first payment was refunded.",
+        founderFirstPaymentWaiting: false,
+      });
+    // A staff receipt whose imported copy Patreon refunded keeps the plain verdict.
+    const receipt = { ...usd, source: "manual_receipt", recordedBy: staff.id, firstSuccessfulPaymentVerified: true };
     expect(
-      await read(stored(reversed, { founderCandidate: { payment: reversed, earlier: false, copyUnverified: false } })),
+      await read(stored(receipt, { founderCandidate: { payment: receipt, earlier: false, copyUnverified: true } })),
     ).toMatchObject({
       founderBlockedReason: "not_verified",
       founderBlockedMessage: "This payment is not confirmed as paid.",
+    });
+  });
+  it("knows a payment in another currency on a tier priced under US$5, so nothing waits for Patreon", async () => {
+    // The import's audit row for that tier price is the only place it is kept.
+    const { store, query } = fixture();
+    await store.list("123", policy);
+    const [statement, values] = query.mock.calls[0];
+    expect(statement.text).toContain(
+      "'tierBelowMinimum', EXISTS (SELECT 1 FROM supporter_actions tier_note WHERE tier_note.member_id = p.member_id",
+    );
+    expect(statement.text).toContain("AND tier_note.details->>'paymentId' = p.id::text))");
+    expect(values).toContain("patreon-payment-below-minimum");
+    const cad = {
+      id: randomUUID(),
+      paidAt: "2026-09-02T00:00:00.000Z",
+      amountCents: 400,
+      currency: "CAD",
+      source: "patreon_api",
+      reference: "pledge_start:1",
+      verificationState: "verified",
+      firstSuccessfulPaymentVerified: true,
+      minimumConfirmed: false,
+      recordedBy: "system:patreon-sync",
+    };
+    const read = async (payment: Record<string, unknown>, tierBelowMinimum: boolean | undefined) => {
+      const query = jest.fn(async () => ({
+        rows: [
+          {
+            supporter: {
+              id,
+              provider: "patreon",
+              discordId: staff.id,
+              discordSource: "patreon",
+              patreonDiscordId: staff.id,
+              steamId: null,
+              latestPayment: payment,
+              payments: [payment],
+              founderEligiblePayment: null,
+              founderCandidate: { payment, earlier: false, copyUnverified: false, tierBelowMinimum },
+              otherFounder: false,
+              founder: null,
+              matchFacts: null,
+            },
+          },
+        ],
+      }));
+      return (await new SupportersStore(drizzle({ query } as unknown as Client) as Database).list("123", policy))[0];
+    };
+    expect(await read(cad, true)).toMatchObject({
+      founderBlockedReason: "below_minimum",
+      founderTierBelowMinimum: true,
+      founderBlockedMessage: "Their tier costs less than US$5.",
+    });
+    // Without a recorded tier price it is still not confirmed, and Gramps waits for one.
+    for (const below of [false, undefined])
+      expect(await read(cad, below)).toMatchObject({
+        founderTierBelowMinimum: false,
+        founderBlockedMessage: "This CAD payment is not confirmed as US$5 or more.",
+      });
+    // A first-payment mark Patreon has not settled no longer waits either: the tier settles it.
+    expect(await read({ ...cad, firstSuccessfulPaymentVerified: false }, true)).toMatchObject({
+      founderBlockedReason: "not_first_payment",
       founderFirstPaymentWaiting: false,
+      founderTierBelowMinimum: true,
+    });
+    expect(await read({ ...cad, firstSuccessfulPaymentVerified: false }, false)).toMatchObject({
+      founderFirstPaymentWaiting: true,
+    });
+    // Payments in US dollars are judged by the amount paid.
+    expect(await read({ ...cad, currency: "USD", amountCents: 300 }, true)).toMatchObject({
+      founderTierBelowMinimum: false,
+      founderBlockedMessage: "Paid less than US$5.",
     });
   });
   it("reports where each identity came from and how the record is linked", async () => {
@@ -797,6 +886,10 @@ describe("supporter persistence and founder eligibility", () => {
     );
     expect(statement.text).toContain("p.source = 'patreon_api' AND p.verification_state = 'verified'");
     expect(statement.text).toContain("other_payment.paid_at < p.paid_at");
+    // A record the import took this Discord account from still counts, so moving it hides no earlier payment.
+    expect(statement.text).toContain(
+      "WHERE held.member_id = other_record.id AND held.kind IN ('patreon-discord-moved', 'patreon-discord-link')\n              AND held.details->>'previousDiscordId' = m.discord_id)))))",
+    );
     expect(statement.text).toContain("reporter.patreon_discord_id = m.discord_id");
     // Only whether another Discord account applied with the linked SteamID, never which one.
     expect(statement.text).toContain("'linkedSteamShared', m.discord_id IS NOT NULL AND m.steam_id IS NOT NULL");
