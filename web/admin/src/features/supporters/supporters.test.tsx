@@ -133,7 +133,7 @@ function syncStatus(overrides: Partial<PatreonSyncStatus> = {}): PatreonSyncStat
     tierConfirmed: 0,
     tierConfirmedNew: 0,
     tierUnconfirmed: 0,
-    tierPrices: "not_needed",
+    tierPrices: "not_requested",
     memberListComplete: true,
     intervalMinutes: 30,
     nextAttemptAt: minutesFromNow(25),

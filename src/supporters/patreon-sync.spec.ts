@@ -8,6 +8,7 @@ import type { EnvService } from "../env/env.service";
 import {
   firstPaidEventId,
   PATREON_HISTORY_CAP,
+  PATREON_PAGE_DELAY_MS,
   PATREON_TOKEN_REJECTED,
   PatreonApiError,
   PatreonClient,
@@ -81,8 +82,6 @@ const cad = (id: string, tierId: unknown = "111"): EventInput => ({
   tier: tierId,
 });
 type Paced = { pause: () => Promise<void> };
-/** Skips the client's pacing wait and counts how often it was asked for. */
-const pacing = () => jest.spyOn(PatreonClient.prototype as unknown as Paced, "pause").mockResolvedValue(undefined);
 function user(id: string, discord: unknown = { user_id: discordId, scopes: ["identify"] }) {
   return {
     id,
@@ -147,12 +146,15 @@ function fixture(
   return { service, store, roles, match };
 }
 let fetchMock: jest.SpyInstance;
+/** The client's wait between requests, skipped here so no test waits in real time. */
+let pause: jest.SpyInstance;
 let warn: jest.SpyInstance;
 let log: jest.SpyInstance;
 const services: PatreonSyncService[] = [];
 beforeEach(() => {
   // A request no test prepared fails here instead of reaching the network.
   fetchMock = jest.spyOn(globalThis, "fetch").mockRejectedValue(new Error("No response was prepared."));
+  pause = jest.spyOn(PatreonClient.prototype as unknown as Paced, "pause").mockResolvedValue(undefined);
   warn = jest.spyOn(Logger.prototype, "warn").mockImplementation(() => undefined);
   log = jest.spyOn(Logger.prototype, "log").mockImplementation(() => undefined);
 });
@@ -206,8 +208,21 @@ describe("Patreon API client", () => {
     const [second] = fetchMock.mock.calls[1] as [URL];
     expect(second.searchParams.get("page[cursor]")).toBe("cursor-2");
     // Every payment is in US dollars, so no tier prices are requested.
-    expect(result.tierPrices).toBe("not_needed");
+    expect(result.tierPrices).toBe("not_requested");
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    // One wait, between the two pages.
+    expect(pause).toHaveBeenCalledTimes(1);
+  });
+  it("waits long enough between requests to stay under 100 a minute", async () => {
+    pause.mockRestore();
+    jest.useFakeTimers();
+    const done = jest.fn();
+    void (new PatreonClient() as unknown as Paced).pause().then(done);
+    await jest.advanceTimersByTimeAsync(PATREON_PAGE_DELAY_MS - 1);
+    expect(done).not.toHaveBeenCalled();
+    await jest.advanceTimersByTimeAsync(1);
+    expect(done).toHaveBeenCalledTimes(1);
+    expect(PATREON_PAGE_DELAY_MS).toBeGreaterThan(60_000 / 100);
   });
   it("keeps only the display name, statuses, charges and connected Discord ID", async () => {
     fetchMock.mockResolvedValueOnce(
@@ -299,16 +314,21 @@ describe("Patreon API client", () => {
     ["an invalid amount", page([member("member-1")], [event({ ...start("pledge_start:1"), amount: -5 })])],
     ["a missing data array", { included: [] }],
   ])("rejects %s before importing anything", async (_name, body) => {
-    fetchMock.mockResolvedValueOnce(json(body));
+    // The same answer to the request with the tier field and to the original request it falls back to.
+    fetchMock.mockImplementation(async () => json(body));
     await expect(new PatreonClient().members(campaign, token)).rejects.toMatchObject({ kind: "schema" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
   it("rejects oversized responses and repeated pagination cursors", async () => {
-    fetchMock.mockResolvedValueOnce(new Response("{}", { headers: { "Content-Length": String(9 * 1024 * 1024) } }));
+    const oversized = async () => new Response("{}", { headers: { "Content-Length": String(9 * 1024 * 1024) } });
+    fetchMock.mockImplementationOnce(oversized).mockImplementationOnce(oversized);
     await expect(new PatreonClient().members(campaign, token)).rejects.toMatchObject({ kind: "schema" });
-    fetchMock
-      .mockResolvedValueOnce(json(page([member("member-1")], [], "same")))
-      .mockResolvedValueOnce(json(page([member("member-2")], [], "same")));
+    for (let attempt = 0; attempt < 2; attempt++)
+      fetchMock
+        .mockResolvedValueOnce(json(page([member("member-1")], [], "same")))
+        .mockResolvedValueOnce(json(page([member("member-2")], [], "same")));
     await expect(new PatreonClient().members(campaign, token)).rejects.toMatchObject({ kind: "schema" });
+    expect(fetchMock).toHaveBeenCalledTimes(6);
   });
   it.each([401, 403])("maps %s to a token rejection with renewal instructions", async (status) => {
     fetchMock.mockResolvedValueOnce(json({ errors: [{ status: String(status), detail: token }] }, { status }));
@@ -332,7 +352,8 @@ describe("Patreon API client", () => {
   it("maps network failures and server errors to a retryable outage", async () => {
     fetchMock.mockRejectedValueOnce(new TypeError(`fetch failed for ${token}`));
     await expect(new PatreonClient().members(campaign, token)).rejects.toMatchObject({ kind: "unavailable" });
-    fetchMock.mockResolvedValueOnce(new Response("oops", { status: 502 }));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    fetchMock.mockImplementation(async () => new Response("oops", { status: 502 }));
     await expect(new PatreonClient().members(campaign, token)).rejects.toMatchObject({ kind: "unavailable" });
   });
   it("marks histories incomplete when events are missing, capped or do not start with the pledge", async () => {
@@ -372,7 +393,6 @@ describe("Patreon tier prices", () => {
   const events = async () => (await new PatreonClient().members(campaign, token)).members[0].events;
 
   it("reads each paid event's tier and the campaign's tier prices with one paced, read-only request", async () => {
-    const pause = pacing();
     fetchMock.mockResolvedValueOnce(cadPage()).mockResolvedValueOnce(json(tiers([tier("111", 500), tier("222", 300)])));
     const result = await new PatreonClient().members(campaign, token);
     expect(result).toMatchObject({ complete: true, tierPrices: "read" });
@@ -398,7 +418,6 @@ describe("Patreon tier prices", () => {
     expect(pause).toHaveBeenCalledTimes(1);
   });
   it("does not ask for tier prices when no paid event in another currency names a tier", async () => {
-    const pause = pacing();
     const usd = { ...start("pledge_start:1"), tier: "111" };
     const declined = { ...cad("subscription:2"), status: "Declined", type: "subscription" };
     const noTier = { ...cad("subscription:3"), type: "subscription" };
@@ -407,7 +426,7 @@ describe("Patreon tier prices", () => {
       json(page([member("member-1", [usd, declined, noTier])], [event(usd), event(declined), event(noTier)])),
     );
     const result = await new PatreonClient().members(campaign, token);
-    expect(result.tierPrices).toBe("not_needed");
+    expect(result.tierPrices).toBe("not_requested");
     expect(result.members[0].events.map((item) => [item.id, item.tierId, item.tierAmountCents])).toEqual([
       ["pledge_start:1", "111", undefined],
       ["subscription:2", "111", undefined],
@@ -424,14 +443,12 @@ describe("Patreon tier prices", () => {
     ["text that is not an ID", "tier 111!", undefined],
     ["an overlong ID", "1".repeat(65), undefined],
   ])("reads an event's tier leniently and never rejects the page: %s", async (_name, value, expected) => {
-    pacing();
     fetchMock.mockResolvedValueOnce(cadPage(value)).mockResolvedValueOnce(json(tiers([tier("111", 500)])));
     const [first] = await events();
     expect(first).toMatchObject({ id: "pledge_start:1", amountCents: 750, currency: "CAD" });
     expect(first.tierId).toBe(expected);
   });
   it("leaves out tiers it cannot read and events whose tier has no price", async () => {
-    pacing();
     const known = cad("pledge_start:1", "111");
     const unknown = { ...cad("subscription:2", "999"), type: "subscription" };
     fetchMock
@@ -469,7 +486,6 @@ describe("Patreon tier prices", () => {
     ["another campaign's tiers", () => json(tiers([tier("111", 500)], "999"))],
     ["an oversized body", () => new Response("{}", { headers: { "Content-Length": String(2 * 1024 * 1024) } })],
   ])("keeps the whole member list when the tier request ends in %s", async (_name, response) => {
-    pacing();
     fetchMock.mockResolvedValueOnce(cadPage()).mockImplementationOnce(async () => response());
     const result = await new PatreonClient().members(campaign, token);
     expect(result).toMatchObject({ complete: true, tierPrices: "unavailable" });
@@ -482,7 +498,6 @@ describe("Patreon tier prices", () => {
     expect(JSON.stringify(result)).not.toContain(token);
   });
   it("reports Patreon's wait when only the tier request is rate limited", async () => {
-    pacing();
     fetchMock
       .mockResolvedValueOnce(cadPage())
       .mockResolvedValueOnce(new Response("", { status: 429, headers: { "Retry-After": "90" } }));
@@ -491,7 +506,6 @@ describe("Patreon tier prices", () => {
     expect(result.members).toHaveLength(1);
   });
   it("repeats the sync with the original request when Patreon refuses the tier field", async () => {
-    const pause = pacing();
     fetchMock
       .mockResolvedValueOnce(
         json({ errors: [{ status: "400", detail: `Invalid field for ${token}` }] }, { status: 400 }),
@@ -527,17 +541,43 @@ describe("Patreon tier prices", () => {
     // Paced before the repeat and between its pages.
     expect(pause).toHaveBeenCalledTimes(2);
   });
+  it.each<[string, () => Response]>([
+    ["a server error", () => new Response("oops", { status: 500 })],
+    ["an unavailable service", () => new Response("", { status: 503 })],
+    ["an unexpected status", () => new Response("", { status: 422 })],
+    ["a body that is not JSON", () => new Response("<html>", { status: 200 })],
+    ["a member list it cannot use", () => json({ data: [{ id: "x", type: "campaign" }] })],
+    ["an oversized page", () => new Response("{}", { headers: { "Content-Length": String(9 * 1024 * 1024) } })],
+  ])("also repeats the sync with the original request after %s", async (_name, failure) => {
+    fetchMock
+      .mockImplementationOnce(async () => failure())
+      .mockResolvedValueOnce(json(page([member("member-1", [cad("pledge_start:1")])], [event(cad("pledge_start:1"))])));
+    const result = await new PatreonClient().members(campaign, token);
+    expect(result).toMatchObject({ complete: true, tierPrices: "refused" });
+    expect(result.members.map((item) => item.patreonMemberId)).toEqual(["member-1"]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [, repeated] = fetchMock.mock.calls.map(([url]) => url as URL);
+    expect(repeated.searchParams.get("fields[pledge-event]")).toBe(
+      "amount_cents,currency_code,date,payment_status,type",
+    );
+    expect(pause).toHaveBeenCalledTimes(1);
+  });
   it("fails as before when Patreon also refuses the original request", async () => {
-    pacing();
-    fetchMock.mockResolvedValue(json({ errors: [{ status: "400" }] }, { status: 400 }));
+    fetchMock.mockImplementation(async () => json({ errors: [{ status: "400" }] }, { status: 400 }));
     await expect(new PatreonClient().members(campaign, token)).rejects.toMatchObject({ kind: "unavailable" });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
-  it.each([401, 404, 429, 500])("does not repeat the member request after a %s", async (status) => {
-    pacing();
-    fetchMock.mockResolvedValueOnce(json({}, { status }));
+  it.each<[string, () => unknown]>([
+    ["a refused token (401)", () => json({}, { status: 401 })],
+    ["a refused token (403)", () => json({}, { status: 403 })],
+    ["a missing campaign", () => json({}, { status: 404 })],
+    ["a rate limit", () => json({}, { status: 429 })],
+    ["a network failure", () => Promise.reject(new TypeError("fetch failed"))],
+  ])("does not repeat the member request after %s", async (_name, failure) => {
+    fetchMock.mockImplementationOnce(async () => failure());
     await expect(new PatreonClient().members(campaign, token)).rejects.toBeInstanceOf(PatreonApiError);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(pause).not.toHaveBeenCalled();
   });
 });
 
@@ -666,7 +706,6 @@ describe("Patreon sync worker", () => {
     expect(await service.sync()).toMatchObject({ members: 1, paidMembers: 1, discordReported: 0 });
   });
   it("hands each payment's tier price to the store and reports what it counted, logging the result once", async () => {
-    pacing();
     const { service, store } = tracked();
     const cadSync = () =>
       fetchMock
@@ -708,7 +747,6 @@ describe("Patreon sync worker", () => {
     expectNoToken();
   });
   it("imports every member and logs why when tier prices could not be read", async () => {
-    pacing();
     const { service, store } = tracked();
     fetchMock
       .mockResolvedValueOnce(json(page([member("member-1", [cad("pledge_start:1")])], [event(cad("pledge_start:1"))])))
@@ -736,7 +774,6 @@ describe("Patreon sync worker", () => {
     expectNoToken();
   });
   it("imports with the original request when Patreon refuses the tier field", async () => {
-    pacing();
     const { service, store } = tracked();
     fetchMock
       .mockResolvedValueOnce(json({ errors: [{ status: "400" }] }, { status: 400 }))
@@ -747,7 +784,6 @@ describe("Patreon sync worker", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
   it("finishes the import and waits for Patreon when only the tier request is rate limited", async () => {
-    pacing();
     const { service, store } = tracked({ PATREON_SYNC_INTERVAL_MINUTES: 10 });
     fetchMock
       .mockResolvedValueOnce(json(page([member("member-1", [cad("pledge_start:1")])], [event(cad("pledge_start:1"))])))
@@ -980,7 +1016,9 @@ describe("Patreon sync worker", () => {
     const offline = await service.sync();
     expect(offline).toMatchObject({ members: 1, tokenRejected: false });
     expect(offline.lastError).toMatch(/could not be reached.*kept/);
-    fetchMock.mockResolvedValueOnce(json({ data: [{ id: "x", type: "campaign" }] }));
+    // The request with the tier field and the original request it falls back to get the same unusable answer.
+    for (let attempt = 0; attempt < 2; attempt++)
+      fetchMock.mockResolvedValueOnce(json({ data: [{ id: "x", type: "campaign" }] }));
     expect((await service.sync()).lastError).toMatch(/unexpected/);
     expect(store.importApiMember).not.toHaveBeenCalled();
     expectNoToken();

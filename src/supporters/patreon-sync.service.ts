@@ -109,7 +109,7 @@ const emptyCounts = (): Counts => ({
   tierConfirmed: 0,
   tierConfirmedNew: 0,
   tierUnconfirmed: 0,
-  tierPrices: "not_needed",
+  tierPrices: "not_requested",
   memberListComplete: true,
   conflictDetails: [],
   founderReviews: [],
@@ -243,7 +243,8 @@ export class PatreonSyncService implements OnApplicationBootstrap, OnModuleDestr
     this.lastAttemptAt = Date.now();
     try {
       const { members, complete, tierPrices, retryAfterMs } = await this.client.members(campaignId, token);
-      // Patreon rate-limited the tier request only. The members were read, so the import goes on and the next one waits.
+      // Patreon rate-limited the tier request only. The members were read, so this import goes on and the next
+      // one waits.
       if (retryAfterMs) this.blockedUntil = Date.now() + retryAfterMs;
       const counts = emptyCounts();
       counts.members = members.length;

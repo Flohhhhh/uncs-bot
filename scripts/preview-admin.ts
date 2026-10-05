@@ -1054,7 +1054,7 @@ const previewSyncStatus = (): PatreonSyncStatus => ({
   tierConfirmed: 0,
   tierConfirmedNew: 0,
   tierUnconfirmed: 0,
-  tierPrices: "not_needed",
+  tierPrices: "not_requested",
   memberListComplete: true,
   intervalMinutes: 30,
   nextAttemptAt: new Date(previewSyncedAt + 30 * 60_000).toISOString(),

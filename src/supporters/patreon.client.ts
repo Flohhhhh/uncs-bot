@@ -47,11 +47,11 @@ export type PatreonPledgeEvent = {
   tierAmountCents?: number;
 };
 /**
- * Whether one sync learned the campaign's tier prices: `read`; `not_needed` (no paid event in another currency named
- * a tier, so they were not requested); `unavailable` (the tier request failed or could not be read); or `refused`
- * (Patreon refused the member request that asks for each event's tier, so the sync ran without it).
+ * Whether one sync learned the campaign's tier prices: `read`; `not_requested` (no paid event in another currency
+ * named a tier, so there was nothing to price); `unavailable` (the tier request failed or could not be read); or
+ * `refused` (the member request that asks for each event's tier did not work, so the sync ran without it).
  */
-export type PatreonTierPrices = "read" | "not_needed" | "unavailable" | "refused";
+export type PatreonTierPrices = "read" | "not_requested" | "unavailable" | "refused";
 export type PatreonMembersResult = {
   members: PatreonMemberSnapshot[];
   complete: boolean;
@@ -211,8 +211,19 @@ const needsTierPrice = (event: PatreonPledgeEvent) =>
   event.tierId !== undefined &&
   event.currency !== null &&
   event.currency !== PATREON_TIER_CURRENCY;
-/** Patreon answered 400 to the member request that also asks for each event's tier. Never leaves the client. */
+/**
+ * Patreon answered the member request that also asks for each event's tier with an error status other than a refused
+ * token, a missing campaign or a rate limit. Never leaves the client.
+ */
 class TierFieldRefused extends Error {}
+/**
+ * Whether a failed read that asked for tiers is tried once more without them. A refused request, a failure on
+ * Patreon's side and a response the import cannot use could each come from the added field, so none of them may
+ * stop an import that works without it. A refused token, a missing campaign, a rate limit and a network failure
+ * could not, and are reported as they always were.
+ */
+const retryWithoutTiers = (error: unknown) =>
+  error instanceof TierFieldRefused || (error instanceof PatreonApiError && error.kind === "schema");
 
 async function readBounded(response: Response, limit: number) {
   const declared = Number(response.headers.get("content-length"));
@@ -307,13 +318,13 @@ export class PatreonClient {
     try {
       list = await this.memberPages(campaignId, token, now, true);
     } catch (error) {
-      if (!(error instanceof TierFieldRefused)) throw error;
-      // Patreon refused the tier field, so this sync sends the request the import has always sent.
+      if (!retryWithoutTiers(error)) throw error;
+      // This sync sends the request the import has always sent. If that fails too, its error is the one reported.
       await this.pause();
       return { ...(await this.memberPages(campaignId, token, now, false)), tierPrices: "refused" };
     }
     if (!list.members.some((member) => member.events.some(needsTierPrice)))
-      return { ...list, tierPrices: "not_needed" };
+      return { ...list, tierPrices: "not_requested" };
     await this.pause();
     const tiers = await this.tierPrices(campaignId, token, now);
     if (!tiers.prices) return { ...list, tierPrices: "unavailable", retryAfterMs: tiers.retryAfterMs };
@@ -417,8 +428,7 @@ export class PatreonClient {
     if (!response.ok) await response.body?.cancel().catch(() => undefined);
     if (response.status === 401 || response.status === 403) throw new PatreonApiError("token", PATREON_TOKEN_REJECTED);
     if (response.status === 404) throw new PatreonApiError("campaign", CAMPAIGN_NOT_FOUND);
-    if (response.status === 400 && tierField) throw new TierFieldRefused();
-    if (!response.ok) throw new PatreonApiError("unavailable", UNAVAILABLE);
+    if (!response.ok) throw tierField ? new TierFieldRefused() : new PatreonApiError("unavailable", UNAVAILABLE);
     let body: unknown;
     try {
       body = JSON.parse(await readBounded(response, PATREON_MAX_PAGE_BYTES));

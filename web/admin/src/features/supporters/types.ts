@@ -138,7 +138,7 @@ export interface PatreonSyncStatus {
   /** Completed payments in another currency that are not confirmed as US$5 or more. */
   tierUnconfirmed: number;
   /** Whether the last sync read tier prices. */
-  tierPrices: "read" | "not_needed" | "unavailable" | "refused";
+  tierPrices: "read" | "not_requested" | "unavailable" | "refused";
   memberListComplete: boolean;
   intervalMinutes: number;
   nextAttemptAt: string | null;
