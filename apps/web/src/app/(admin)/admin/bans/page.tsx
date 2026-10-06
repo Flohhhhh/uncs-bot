@@ -1,9 +1,14 @@
 import type { Metadata } from "next";
 
-import { AdminComingSoon } from "~/components/admin-coming-soon";
+import { readServerSession } from "~/lib/session/server";
+
+import { BansSurface } from "./_components/bans-surface";
 
 export const metadata: Metadata = { title: "Bans · The UNCs" };
 
-export default function BansPage() {
-  return <AdminComingSoon group="Moderation" title="Bans" />;
+export default async function BansPage() {
+  const session = await readServerSession();
+  const csrf = session.status === "authenticated" ? session.user.csrf : "";
+
+  return <BansSurface csrf={csrf} />;
 }

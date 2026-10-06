@@ -34,7 +34,7 @@ export const playersOverviewSchema = z.object({
 export type PlayersOverview = z.infer<typeof playersOverviewSchema>;
 export type Player = PlayersOverview["players"][number];
 export type Team = PlayersOverview["status"]["factionScores"][number];
-export type PlayerAction = "message" | "team" | "kick" | "ban" | "whitelist-add" | "kill";
+export type PlayerAction = "message" | "team" | "kick" | "ban" | "unban" | "whitelist-add" | "kill";
 
 export const TEAM_TONES = {
   Valkyra: { dot: "bg-red-500", badge: "border-red-500/30 bg-red-500/10 text-red-400" },
@@ -53,10 +53,11 @@ const ACTION_ROUTES: Record<Exclude<PlayerAction, "whitelist-add">, { method: st
   team: { method: "PATCH", path: "/v1/players/{id}" },
   kick: { method: "POST", path: "/v1/players/{id}/kick" },
   ban: { method: "POST", path: "/v1/bans" },
+  unban: { method: "DELETE", path: "/v1/bans/{steamId}" },
   kill: { method: "POST", path: "/v1/players/{id}/kill" },
 };
 
-const STAFF_ACTIONS: readonly PlayerAction[] = ["message", "team", "kick", "ban", "kill"];
+const STAFF_ACTIONS: readonly PlayerAction[] = ["message", "team", "kick", "ban", "unban", "kill"];
 
 export function teamFor(player: Player, teams: Team[]): Team | undefined {
   if (!player.faction) return undefined;

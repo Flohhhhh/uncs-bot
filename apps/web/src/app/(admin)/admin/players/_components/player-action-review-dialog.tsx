@@ -36,6 +36,10 @@ const actionDetails: Record<IndividualAction, { title: string; description: stri
     title: "Ban player",
     description: "Add a permanent game ban. The current game build may require the player to be connected.",
   },
+  unban: {
+    title: "Remove ban",
+    description: "Restore this player’s ability to join the game.",
+  },
   "whitelist-add": {
     title: "Add whitelist access",
     description: "Add this SteamID to the server whitelist without changing reserved capacity.",
@@ -46,8 +50,8 @@ const actionDetails: Record<IndividualAction, { title: string; description: stri
   },
 };
 
-const needsReason = (action: IndividualAction) => action === "kick" || action === "ban";
-const needsConfirmation = (action: IndividualAction) => action === "ban" || action === "kill";
+const needsReason = (action: IndividualAction) => action === "kick" || action === "ban" || action === "unban";
+const needsConfirmation = (action: IndividualAction) => action === "ban" || action === "unban" || action === "kill";
 const singleLine = (value: string, minimum = 1) =>
   value.trim().length >= minimum && value.trim().length <= 200 && [...value].every((char) => char.charCodeAt(0) >= 32);
 
@@ -209,9 +213,13 @@ export function PlayerActionReviewDialog({
               </Button>
               <Button
                 type="submit"
-                variant={action === "kick" || action === "ban" || action === "kill" ? "outline" : "default"}
+                variant={
+                  action === "kick" || action === "ban" || action === "unban" || action === "kill"
+                    ? "outline"
+                    : "default"
+                }
                 className={
-                  action === "kick" || action === "ban" || action === "kill"
+                  action === "kick" || action === "ban" || action === "unban" || action === "kill"
                     ? "border-destructive/40 text-destructive hover:bg-destructive/10"
                     : undefined
                 }
