@@ -6,10 +6,10 @@ import { existsSync } from "node:fs";
 import process from "node:process";
 import { URL } from "node:url";
 
-const webInstalled = existsSync(new URL("./apps/web/node_modules/eslint-config-next/package.json", import.meta.url));
+const webInstalled = existsSync(new URL("./node_modules/eslint-config-next/package.json", import.meta.url));
 const checkingWebFiles = process.argv.some((argument) => argument.replaceAll("\\", "/").includes("apps/web"));
 if (checkingWebFiles && !webInstalled) {
-  throw new Error("Install the standalone web dependencies with npm --prefix apps/web ci before linting web files.");
+  throw new Error("Install the standalone web dependencies with npm ci before linting web files.");
 }
 const webConfigs = webInstalled ? (await import("./apps/web/eslint.config.mjs")).default : [];
 const webPrefix = (pattern) => (pattern.startsWith("!") ? `!apps/web/${pattern.slice(1)}` : `apps/web/${pattern}`);
@@ -66,9 +66,11 @@ const backendConfigs = [
 export default [
   {
     ignores: [
-      "apps/backend/dist/**",
-      "apps/backend/node_modules/**",
-      "apps/backend/coverage/**",
+      "apps/**/dist/**",
+      "packages/**/dist/**",
+      "apps/**/node_modules/**",
+      "packages/**/node_modules/**",
+      "apps/**/coverage/**",
       "apps/web/node_modules/**",
       "apps/web/.next/**",
       ...(!webInstalled ? ["apps/web/**"] : []),
@@ -79,5 +81,9 @@ export default [
       ? config
       : { ...config, ignores: [...(config.ignores ?? []), "apps/web/**"] },
   ),
+  {
+    files: ["**/*.cjs"],
+    languageOptions: { globals: { module: "readonly", require: "readonly", __dirname: "readonly" } },
+  },
   ...scopedWebConfigs,
 ];

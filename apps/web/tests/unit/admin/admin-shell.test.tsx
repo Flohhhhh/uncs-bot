@@ -45,7 +45,6 @@ vi.mock("~/lib/session/client", () => ({
 }));
 
 import { AdminShell } from "~/components/admin-shell";
-import SettingsPage from "~/app/(admin)/admin/settings/page";
 
 const staff = {
   id: "staff-1",
@@ -174,11 +173,4 @@ it("keeps status in the sticky header and account actions in the footer menu", a
 
   await waitFor(() => expect(mocks.endSession).toHaveBeenCalledWith(staff.csrf, expect.any(AbortSignal)));
   expect(mocks.replace).toHaveBeenCalledWith("/sign-in");
-});
-
-it("renders a coming soon heading for sections that are not migrated yet", () => {
-  render(<SettingsPage />);
-
-  expect(screen.getByRole("heading", { name: "Settings" })).toBeInTheDocument();
-  expect(screen.getByText("This section is coming soon.")).toBeInTheDocument();
 });

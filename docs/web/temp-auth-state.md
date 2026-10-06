@@ -6,9 +6,9 @@ Updated October 5, 2026. This records the current implementation and the develop
 
 The standalone Next.js app lives in `apps/web`. Nest still owns Discord OAuth, session storage, permissions and CSRF validation. The web app has no separate auth database or Better Auth installation.
 
-There is a development database, and a local development backend wrapper now exists in `apps/backend`. Its credentials and database URL still need local configuration. The local preview is a simulated backend; it is not a development instance of the real authentication service.
+There is a development database, and a independent API now exists in `apps/api`. Its credentials and database URL still need local configuration. The local preview is a simulated backend; it is not a development instance of the real authentication service.
 
-The existing bot, backend and old dashboard still share the normal Nest application. A backend-only development startup is implemented separately in `apps/backend`; see [its README](../../apps/backend/README.md).
+The existing bot, backend and old dashboard still share the normal Nest application. A independent API startup is implemented separately in `apps/api`; see [its README](../../apps/api/README.md).
 
 ## What the preview is
 
@@ -78,11 +78,11 @@ Using the real auth implementation does not require using the production backend
 
 Running the normal Nest startup locally also imports the Discord bot and scheduled/background modules. Pointing it at a development database alone does not isolate Discord or game-server integrations. Using production bot credentials locally could start another instance against the live Discord community.
 
-The local `apps/backend` wrapper now reuses the existing admin module with a dedicated environment file and database connection. It excludes the gateway bot and background jobs, binds to loopback, and allows reads and logout while blocking other writes. The root bot startup remains unchanged.
+The local `apps/api` API now contains a local copy of the admin module with a dedicated environment file and database connection. It excludes the gateway bot and background jobs, binds to the configured HTTP port, and allows reads and logout while blocking other writes. The root bot startup remains unchanged.
 
-Set the development PostgreSQL URL and Discord auth settings in the ignored `apps/backend/.env`, set web `BACKEND_URL=http://127.0.0.1:4321`, then run `npm --prefix apps/backend run dev`. The development database must already have the required schema; no migrations are generated or applied by this startup. A live development database/OAuth flow still needs verification after configuration. See [backend setup](../../apps/backend/README.md).
+Set the development PostgreSQL URL and Discord auth settings in the ignored `apps/api/.env`, set web `BACKEND_URL=http://127.0.0.1:4321`, then run `npm run dev --workspace @uncs/api`. The development database must already have the required schema; no migrations are generated or applied by this startup. A live development database/OAuth flow still needs verification after configuration. See [backend setup](../../apps/api/README.md).
 
-The development backend also supports `BACKEND_GAME_MODE=sample`, which replaces only game data with the shared preview fixtures. Real Discord auth, roles and database sessions remain active, and Next.js keeps using port 4321. The web status indicator labels this as **Sample game data**, separate from demo authentication. See [backend sample-mode setup](../../apps/backend/README.md).
+The development backend also supports `BACKEND_GAME_MODE=sample`, which replaces only game data with the shared preview fixtures. Real Discord auth, roles and database sessions remain active, and Next.js keeps using port 4321. The web status indicator labels this as **Sample game data**, separate from demo authentication. See [backend sample-mode setup](../../apps/api/README.md).
 
 The standalone preview remains useful for UI work without credentials.
 
@@ -94,4 +94,4 @@ A real Discord OAuth login against a configured development backend has **not** 
 
 No production configuration, database migrations, root dependencies or deployment settings were changed for this increment. The old dashboard remains supported. Dashboard features and game actions have not been migrated into Next.js.
 
-See [the web app README](../../apps/web/README.md) for standalone app commands and future Vercel configuration.
+See [the web app README](../../apps/web/README.md) for standalone app commands and Railway configuration.

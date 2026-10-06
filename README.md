@@ -9,6 +9,12 @@ The bot currently includes:
 - Persistent guild welcome settings stored in Neon PostgreSQL through Drizzle ORM.
 - Local development support with a separate Discord application and personal Neon database branch.
 
+## Monorepo services
+
+The new stack lives in `apps/web`, `apps/api`, and `apps/bot`, with shared HTTP contracts/client packages. Install all workspaces with one root `npm ci`; use `npm run build:stack` for the new services. Root `build` and `start` continue to run the complete legacy service and Vite dashboard.
+
+New services default to passive operation and have separate Railway configurations. See the [roadmap](docs/web/monorepo-web-separation-outline.md) and [deployment/rollback runbook](docs/backend/railway-monorepo-runbook.md). Legacy remains the production owner until a deliberate cutover.
+
 ## Local development
 
 Use a development Discord bot and your own Neon database branch. Do not use the production bot token or production database locally.

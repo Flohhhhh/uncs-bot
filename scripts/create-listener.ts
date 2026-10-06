@@ -43,6 +43,7 @@ yargs(hideBin(process.argv))
           describe: "event name (kebab or simple word)",
           demandOption: true,
         })
+        .option("app", { type: "string", choices: ["legacy", "bot"], default: "legacy" })
         .positional("event", {
           type: "string",
           describe: "Discord.js event name (e.g., messageCreate, guildMemberAdd)",
@@ -50,7 +51,7 @@ yargs(hideBin(process.argv))
         });
     },
     // --- LISTENER HANDLER ---
-    async ({ name, event }) => {
+    async ({ name, event, app }) => {
       const eventEntry = Object.entries(Events).find(([key, value]) => value === event || key === event);
       if (!eventEntry) {
         console.error(`❌ Invalid event name "${event}". Please provide a valid Discord.js event name.`);
@@ -68,7 +69,7 @@ yargs(hideBin(process.argv))
       name = name.includes("/") ? name.split("/").slice(-1)[0] : name;
 
       // ---------- Paths ----------
-      const listenersRoot = path.join(ROOT, "src", "listeners");
+      const listenersRoot = path.join(ROOT, ...(app === "bot" ? ["apps", "bot"] : []), "src", "listeners");
       const listenersDir = path.join(listenersRoot, "handlers", folder);
       const listenerFilePath = path.join(listenersDir, `${name}.listener.ts`);
       const listenersModulePath = path.join(listenersRoot, "listeners.module.ts");

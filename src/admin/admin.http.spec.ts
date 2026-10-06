@@ -100,6 +100,8 @@ describe("admin HTTP boundaries", () => {
     app = module.createNestApplication(adapter);
     app.useLogger(false);
     await app.init();
+    // Keep one listener per test instead of reopening ephemeral sockets for every request.
+    await app.listen(0, "127.0.0.1");
   });
   afterEach(async () => {
     await app.close();

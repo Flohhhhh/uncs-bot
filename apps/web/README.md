@@ -1,15 +1,14 @@
 # UNCs web app
 
-Standalone Next.js 16 App Router app. Install inside this directory; it has its own package manifest and lockfile. It is intentionally not an npm workspace yet.
+Next.js 16 App Router workspace. Install all workspaces from the repository root with `npm ci`; the root lockfile is authoritative.
 
 ## Local development
 
 Use the repository's Node 22.23.3 runtime:
 
 ```bash
-cd apps/web
 npm ci
-npm run dev
+npm run dev --workspace @uncs/web
 ```
 
 Open http://127.0.0.1:3000. The index redirects to `/admin`; staff sessions gate the admin UI. Nest authorizes every API request.
@@ -27,7 +26,7 @@ npm run format:write
 npm run format -- src/path/to/file.tsx # Format selected files
 ```
 
-The root bot install, build and start commands still operate independently. Install root dependencies separately with `npm ci` from the repository root. Root lint includes the web app when its dependencies are installed. Root formatting always covers it, using basic formatting on backend-only installs and the app’s Tailwind-aware formatter when available; root touched-file typechecking routes web files to this app's TypeScript project. Backend TypeScript projects exclude `apps/`.
+Root legacy build/start remain independent. Root checks include workspace source and use each TypeScript project; production workspace imports are validated with `npm run validate:workspaces`.
 
 The preview shortcut invokes the existing root preview command; root dependencies must be installed. It defaults to session mode and port 4320; `PREVIEW_PORT` can override the port. The preview implementation stays shared with the existing dashboard.
 
@@ -58,9 +57,9 @@ npm --prefix apps/web run dev
 
 Use `http://127.0.0.1:3000` consistently. Demo login issues a random HttpOnly cookie backed by an isolated in-memory session, valid for eight hours; logout invalidates it. Restarting the preview clears all sessions. The preview's default mode remains automatic demo authentication for the existing dashboard. Both Next.js loopback origins on port 3000 are allowed for writes, with CSRF validation still required.
 
-For real development OAuth, use [the local backend wrapper](../backend/README.md) with your development database: `npm --prefix apps/backend run dev` from the repository root. Set `BACKEND_URL=http://127.0.0.1:4321` in this app. The wrapper reads its own `apps/backend/.env`, starts no gateway bot/background jobs, and allows reads plus logout. Nest's `ADMIN_ORIGIN` must be the browser-facing Next.js origin, for example `http://localhost:3000`. Register `http://localhost:3000/admin/auth/callback` as the Discord OAuth callback. Use the same hostname for the browser, Nest's origin setting and the callback: localhost and 127.0.0.1 are different cookie/origin contexts. Keep Nest's role, MFA, membership and CSRF checks; forwarding does not rewrite origins to bypass them. No production configuration is changed by this app.
+For real development OAuth, use [the API](../api/README.md) with your development database: `npm run dev --workspace @uncs/api` from the repository root. Set `BACKEND_URL=http://127.0.0.1:4321` in this app. The API reads its own `apps/api/.env`, starts no gateway bot/background jobs, and allows reads plus logout. Nest's `ADMIN_ORIGIN` must be the browser-facing Next.js origin, for example `http://localhost:3000`. Register `http://localhost:3000/admin/auth/callback` as the Discord OAuth callback. Use the same hostname for the browser, Nest's origin setting and the callback: localhost and 127.0.0.1 are different cookie/origin contexts. Keep Nest's role, MFA, membership and CSRF checks; forwarding does not rewrite origins to bypass them. No production configuration is changed by this app.
 
-The development backend can also serve sample game data on port 4321 with `BACKEND_GAME_MODE=sample`, while keeping real Discord sessions. The status indicator labels sample data separately; see [backend sample mode](../backend/README.md).
+The development API can also serve sample game data on port 4321 with `BACKEND_GAME_MODE=sample`, while keeping real Discord sessions. The status indicator labels sample data separately; see [backend sample mode](../api/README.md).
 
 Staff identity and CSRF stay in memory; the browser uses Nest's existing HttpOnly session cookies. Sessions are checked on load, every 30 seconds while authenticated and visible, and on focus, with a ten-second timeout. A 401 or 403 clears staff data and removes protected content. Malformed responses and connection failures show retry UI. Logout hides protected content immediately and sends one CSRF-protected POST; uncertain failures require manual retry. The admin status indicator uses this same session state.
 
@@ -70,8 +69,6 @@ For future backend configuration, add server-only variables (such as `BACKEND_UR
 
 The current Nest service retains Discord OAuth, sessions, permissions and database ownership. This app has no Better Auth, database client, CMS, uploads or monitoring setup.
 
-## Future Vercel deployment
+## Railway deployment
 
-Connect this repository with the Next.js framework preset and Root Directory set to `apps/web`. Use `npm ci`, `npm run build` and the default Next.js output settings. Keep Node on 22.x. Turbopack's root is explicitly this app, and Tailwind scans only its own source.
-
-Do not change Railway's current root install/build/start commands for this scaffold. Pushing this branch may still trigger Railway according to its deployment settings; the directory itself does not control deployment triggers.
+Use the three-service [Railway TypeScript declaration](../../.railway/railway.ts), with the repository root as the build directory. The web service builds with `npm run build:web` and starts `npm start --workspace @uncs/web`, with injected `PORT` and readiness checks. Turbopack's root is the repository root; Tailwind scans this app's source. Set `BACKEND_URL` independently at build and runtime. See the [runbook](../../docs/backend/railway-monorepo-runbook.md) for separate hosts, callbacks and later cutover. Legacy service/domain configuration remains unchanged.

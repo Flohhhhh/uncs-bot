@@ -179,6 +179,7 @@ describe("Link Patreon sign-in pages", () => {
   const messages = () => logged.flatMap((spy) => spy.mock.calls.map((call) => String(call[0])));
 
   async function boot(overrides: Record<string, unknown> = {}) {
+    if (app) await app.close();
     reset(overrides);
     const module = await Test.createTestingModule({
       imports: [TestDependenciesModule, PatronLinkModule],
@@ -205,6 +206,8 @@ describe("Link Patreon sign-in pages", () => {
       .compile();
     app = module.createNestApplication();
     await app.init();
+    // Keep one listener per test instead of reopening ephemeral sockets for every request.
+    await app.listen(0, "127.0.0.1");
     server = app.getHttpServer();
     state = app.get(PatronLinkState, { strict: false });
     for (const spy of logged) spy.mockClear();

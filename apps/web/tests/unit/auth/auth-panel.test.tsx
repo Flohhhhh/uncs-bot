@@ -23,6 +23,6 @@ it("shows safe expired or unavailable OAuth messages without echoing arbitrary q
 
 it("shows a manual retry when the server cannot verify the session", () => {
   render(<AuthPanel unavailableMessage="Staff access could not be verified." />);
-  expect(screen.getByRole("alert")).toHaveTextContent("Staff access could not be verified.");
+  expect(screen.getByRole("status")).toHaveTextContent("Staff access could not be verified.");
   expect(screen.getByRole("link", { name: "Try again" })).toHaveAttribute("href", "/sign-in");
 });

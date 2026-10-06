@@ -1,0 +1,29 @@
+{
+  "name": "@uncs/api-client",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
+    "test": "tsx --test tests/*.test.ts",
+    "pretypecheck": "npm run build --workspace @uncs/contracts --prefix ../..",
+    "pretest": "npm run build --workspace @uncs/contracts --prefix ../.."
+  },
+  "dependencies": {
+    "@uncs/contracts": "0.1.0",
+    "zod": "4.1.13"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "tsx": "^4.21.0",
+    "@types/node": "^24.10.1"
+  }
+}

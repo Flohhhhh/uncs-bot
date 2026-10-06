@@ -28,6 +28,20 @@ const groups: HandlerGroup[] = [
   },
 ];
 
+groups.push({
+  label: "component",
+  modulePath: path.join(ROOT, "src/components/components.module.ts"),
+  decoratorNames: ["Button", "StringSelect", "Modal", "UserSelect", "RoleSelect", "ChannelSelect"],
+  fileSuffix: ".component.ts",
+  classSuffix: "Component",
+});
+groups.push(
+  ...groups.map((group) => ({
+    ...group,
+    modulePath: group.modulePath.replace(path.join(ROOT, "src"), path.join(ROOT, "apps/bot/src")),
+  })),
+);
+
 const project = new Project({ tsConfigFilePath: path.join(ROOT, "tsconfig.json") });
 const errors: string[] = [];
 
@@ -79,9 +93,25 @@ function validateGroup(group: HandlerGroup) {
   }
 
   const commandNames = new Map<string, string>();
+  if (group.label === "command") {
+    const optionalModule = path.resolve(
+      path.dirname(group.modulePath),
+      "../patron-link/patron-link-commands.module.ts",
+    );
+    const optionalHandler = path.resolve(path.dirname(optionalModule), "patron-link.command.ts");
+    if (fs.existsSync(optionalModule) && fs.existsSync(optionalHandler)) {
+      const module = project.addSourceFileAtPath(optionalModule);
+      if (!module.getText().match(/providers:\s*\[PatronLinkCommand\]/))
+        errors.push(`${relative(optionalModule)} must register PatronLinkCommand`);
+      const source = project.addSourceFileAtPath(optionalHandler);
+      const names = source
+        .getDescendantsOfKind(SyntaxKind.CallExpression)
+        .filter((entry) => entry.getExpression().getText() === "createCommandGroupDecorator")
+        .map((entry) => entry.getText().match(/\bname\s*:\s*["']([^"']+)["']/)?.[1]);
+      for (const name of names) if (name) commandNames.set(name, relative(optionalHandler));
+    }
+  }
   for (const { className, importPath } of imports) {
-    if (!className.endsWith(group.classSuffix)) continue;
-
     const handlerPath = path.resolve(path.dirname(group.modulePath), `${importPath}.ts`);
     if (!fs.existsSync(handlerPath)) {
       errors.push(`${relative(group.modulePath)} imports missing file ${relative(handlerPath)}`);
@@ -101,8 +131,15 @@ function validateGroup(group: HandlerGroup) {
     }
 
     if (group.label === "command") {
-      for (const decorator of decorators.filter((item) => item.getName() === "SlashCommand")) {
-        const name = decorator.getText().match(/\bname\s*:\s*["']([^"']+)["']/)?.[1];
+      const expressions = [
+        ...decorators.filter((item) => item.getName() === "SlashCommand").map((item) => item.getText()),
+        ...sourceFile
+          .getDescendantsOfKind(SyntaxKind.CallExpression)
+          .filter((item) => item.getExpression().getText() === "createCommandGroupDecorator")
+          .map((item) => item.getText()),
+      ];
+      for (const expression of expressions) {
+        const name = expression.match(/\bname\s*:\s*["']([^"']+)["']/)?.[1];
         if (!name) continue;
         const previous = commandNames.get(name);
         if (previous) {

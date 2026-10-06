@@ -18,9 +18,12 @@ const backendFiles = requestedFiles.length
       "src/**/*.ts",
       "test/**/*.ts",
       "scripts/**/*.ts",
-      "apps/backend/src/**/*.ts",
-      "apps/backend/tests/**/*.ts",
-      "apps/backend/*.{mjs,json,md}",
+      ".railway/**/*.ts",
+      "apps/{api,bot}/src/**/*.ts",
+      "apps/{api,bot}/tests/**/*.ts",
+      "apps/{api,bot}/*.{mjs,json,md}",
+      "packages/*/src/**/*.ts",
+      "packages/*/*.{json,md}",
       "web/admin/**/*.{ts,tsx,mts,css,html,json}",
     ];
 const webFiles = requestedFiles.length
@@ -30,7 +33,10 @@ const prettierCli = require.resolve("prettier/bin/prettier.cjs");
 
 function run(cli: string, files: string[], cwd: string, extra: string[] = []) {
   if (!files.length) return;
-  const result = spawnSync(process.execPath, [cli, mode, ...extra, ...files], { cwd, stdio: "inherit" });
+  const result = spawnSync(process.execPath, [cli, mode, "--no-error-on-unmatched-pattern", ...extra, ...files], {
+    cwd,
+    stdio: "inherit",
+  });
   if (result.error) {
     console.error(`Unable to run Prettier: ${result.error.message}`);
     process.exit(1);
@@ -39,7 +45,7 @@ function run(cli: string, files: string[], cwd: string, extra: string[] = []) {
 }
 
 run(prettierCli, backendFiles, process.cwd());
-const webCli = path.join(webRoot, "node_modules", "prettier", "bin", "prettier.cjs");
+const webCli = require.resolve("prettier/bin/prettier.cjs", { paths: [webRoot] });
 // Backend-only installs can check basic web formatting without loading its Tailwind plugin.
 run(
   existsSync(webCli) ? webCli : prettierCli,

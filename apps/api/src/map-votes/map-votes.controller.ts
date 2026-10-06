@@ -1,0 +1,32 @@
+import { Body, Controller, Get, Param, Post, Req, UseFilters, UseGuards } from "@nestjs/common";
+import { AdminGuard, AdminServerGuard, type StaffRequest } from "../admin/admin.auth";
+import { AdminExceptionFilter } from "../admin/admin.controller";
+import { MapVotesService } from "./map-votes.service";
+
+@Controller(["admin/api/map-votes", "admin/api/servers/:serverId/map-votes"])
+@UseFilters(AdminExceptionFilter)
+@UseGuards(AdminGuard, AdminServerGuard)
+export class MapVotesController {
+  constructor(private readonly service: MapVotesService) {}
+  @Get() list(@Req() request: StaffRequest) {
+    return this.service.list(request.staff);
+  }
+  @Get("setup") setup(@Req() request: StaffRequest) {
+    return this.service.setup(request.staff);
+  }
+  @Get("controls") controls(@Req() request: StaffRequest) {
+    return this.service.controls(request.staff);
+  }
+  @Post("controls") saveControls(@Req() request: StaffRequest, @Body() body: unknown) {
+    return this.service.saveControls(request.staff, body);
+  }
+  @Post("preview") preview(@Req() request: StaffRequest, @Body() body: unknown) {
+    return this.service.preview(request.staff, body);
+  }
+  @Post() start(@Req() request: StaffRequest, @Body() body: unknown) {
+    return this.service.start(request.staff, body);
+  }
+  @Post(":id/cancel") cancel(@Req() request: StaffRequest, @Param("id") id: string, @Body() body: unknown) {
+    return this.service.cancel(request.staff, id, body);
+  }
+}

@@ -1,0 +1,96 @@
+import {
+  ArgumentsHost,
+  Body,
+  Catch,
+  Controller,
+  ExceptionFilter,
+  Get,
+  Headers,
+  HttpException,
+  Injectable,
+  Param,
+  Post,
+  Query,
+  Req,
+  UseFilters,
+  UseGuards,
+  type RawBodyRequest,
+} from "@nestjs/common";
+import type { Request, Response } from "express";
+import { AdminGuard, type StaffRequest } from "../admin/admin.auth";
+import { SupportersService } from "./supporters.service";
+
+@Catch()
+@Injectable()
+export class SupportersExceptionFilter implements ExceptionFilter {
+  catch(error: unknown, host: ArgumentsHost) {
+    const body = error instanceof HttpException ? error.getResponse() : null;
+    // A founder refusal names its rule (for example "outside_window") so the dashboard can explain it.
+    const blockedReason =
+      body && typeof body === "object" && "blockedReason" in body && typeof body.blockedReason === "string"
+        ? { blockedReason: body.blockedReason }
+        : {};
+    host
+      .switchToHttp()
+      .getResponse<Response>()
+      .status(error instanceof HttpException ? error.getStatus() : 503)
+      .json({
+        message:
+          error instanceof HttpException
+            ? error.message
+            : "Supporter records are temporarily unavailable. No access change was sent.",
+        ...blockedReason,
+      });
+  }
+}
+@Controller("supporters/webhooks")
+@UseFilters(SupportersExceptionFilter)
+export class PatreonWebhookController {
+  constructor(private readonly service: SupportersService) {}
+  @Post("patreon")
+  webhook(
+    @Req() req: RawBodyRequest<Request>,
+    @Headers("x-patreon-signature") signature: unknown,
+    @Headers("x-patreon-event") trigger: unknown,
+  ) {
+    return this.service.webhook(req.rawBody, signature, trigger);
+  }
+}
+@Controller("admin/api/supporters")
+@UseFilters(SupportersExceptionFilter)
+@UseGuards(AdminGuard)
+export class SupportersAdminController {
+  constructor(private readonly service: SupportersService) {}
+  @Get()
+  list(@Req() req: StaffRequest, @Query("search") search: unknown, @Query("provider") provider: unknown) {
+    return this.service.list(req.staff, search, provider);
+  }
+  @Post("sync")
+  sync(@Req() req: StaffRequest) {
+    return this.service.syncNow(req.staff);
+  }
+  @Post("manual-member")
+  register(@Req() req: StaffRequest, @Body() body: unknown) {
+    return this.service.register(req.staff, body);
+  }
+  @Post("paypal")
+  paypal(@Req() req: StaffRequest, @Body() body: unknown) {
+    return this.service.paypal(req.staff, body);
+  }
+  @Post(":id/link")
+  link(@Req() req: StaffRequest, @Param("id") id: string, @Body() body: unknown) {
+    return this.service.mutate(req.staff, id, "link", body);
+  }
+  @Post(":id/payment")
+  payment(@Req() req: StaffRequest, @Param("id") id: string, @Body() body: unknown) {
+    return this.service.mutate(req.staff, id, "payment", body);
+  }
+  @Post(":id/founder")
+  founder(@Req() req: StaffRequest, @Param("id") id: string, @Body() body: unknown) {
+    return this.service.mutate(req.staff, id, "founder", body);
+  }
+  @Post(":id/review")
+  review(@Req() req: StaffRequest, @Param("id") id: string, @Body() body: unknown) {
+    return this.service.mutate(req.staff, id, "review", body);
+  }
+}

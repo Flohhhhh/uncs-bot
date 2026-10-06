@@ -10,6 +10,37 @@ permissions:
   contents: read
 
 jobs:
+  workspace-services:
+    name: Independent web, API and bot
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.3
+          cache: npm
+      - name: Install all workspaces from the root lockfile
+        run: npm ci
+      - name: Validate production imports and handler registrations
+        run: |
+          npm run validate:railway
+          npm run validate:workspaces
+          npm run validate:handlers
+      - name: Build services independently
+        run: npm run build:stack
+      - name: Check workspace types and lint
+        run: |
+          npm run typecheck -- .railway/railway.ts scripts/validate-railway.ts apps/api/src/main.ts apps/bot/src/main.ts packages/contracts/src/index.ts packages/api-client/src/index.ts apps/web/src/app/health/ready/route.ts
+          npm run lint -- .railway apps/api/src apps/api/tests apps/bot/src apps/bot/tests packages scripts
+      - name: Verify HTTP contracts, security, delivery and browser workflows
+        run: |
+          npm run test:stack
+          npm run test:unit --workspace @uncs/web
+
   storage-tests:
     name: PostgreSQL storage and concurrency
     runs-on: ubuntu-24.04
@@ -41,6 +72,13 @@ jobs:
         run: npm ci
       - name: Test production stores with simultaneous database connections
         run: npm run test:storage
+        env:
+          UNCS_TEST_POSTGRES_PORT: ${{ job.services.postgres.ports[5432] }}
+      - name: Verify compiled services start passively
+        run: |
+          npm run build:api
+          npm run build:bot
+          npm run verify:passive
         env:
           UNCS_TEST_POSTGRES_PORT: ${{ job.services.postgres.ports[5432] }}
       - name: Check storage test types and lint

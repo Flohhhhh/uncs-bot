@@ -20,6 +20,7 @@ yargs(hideBin(process.argv))
           demandOption: true,
         })
         .options({
+          app: { type: "string", choices: ["legacy", "bot"], default: "legacy", describe: "Handler application" },
           description: {
             type: "string",
             describe: "command description",
@@ -27,12 +28,12 @@ yargs(hideBin(process.argv))
         });
     },
     // --- COMMAND HANDLER ---
-    async ({ name, description }) => {
+    async ({ name, description, app }) => {
       const folder = name.includes("/") ? path.join(...name.split("/").slice(0, -1)) : "";
       name = name.includes("/") ? name.split("/").slice(-1)[0] : name;
 
       // ---------- Paths ----------
-      const commandsRoot = path.join(ROOT, "src", "commands");
+      const commandsRoot = path.join(ROOT, ...(app === "bot" ? ["apps", "bot"] : []), "src", "commands");
       const cmdDir = path.join(commandsRoot, "handlers", folder);
       const cmdFilePath = path.join(cmdDir, `${name}.command.ts`);
       const commandsModulePath = path.join(commandsRoot, "commands.module.ts");
