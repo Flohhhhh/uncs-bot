@@ -1,9 +1,14 @@
 import type { Metadata } from "next";
 
-import { AdminComingSoon } from "~/components/admin-coming-soon";
+import { readServerSession } from "~/lib/session/server";
+
+import { AnnouncementsSurface } from "./_components/announcements-surface";
 
 export const metadata: Metadata = { title: "Announcements · The UNCs" };
 
-export default function AnnouncementsPage() {
-  return <AdminComingSoon group="Community" title="Announcements" />;
+export default async function AnnouncementsPage() {
+  const session = await readServerSession();
+  const csrf = session.status === "authenticated" ? session.user.csrf : "";
+
+  return <AnnouncementsSurface csrf={csrf} />;
 }
