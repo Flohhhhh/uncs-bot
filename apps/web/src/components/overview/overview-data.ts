@@ -201,6 +201,23 @@ export function serverApiPath(serverId: string, resource: string) {
     : null;
 }
 
+/** Scope SWR entries by parser when several views read the same URL with different schemas. */
+export type ApiResponseCacheScope =
+  | "overview"
+  | "players-overview"
+  | "match-overview"
+  | "announcement-overview"
+  | "whitelist-overview"
+  | "settings-summary"
+  | "match-settings"
+  | "settings-snapshot"
+  | "vote-list"
+  | "match-votes";
+
+export function apiResponseCacheKey(path: string | null, scope: ApiResponseCacheScope) {
+  return path ? ([path, `response:${scope}`] as const) : null;
+}
+
 export function formatElapsed(seconds: number | undefined) {
   if (seconds === undefined || !Number.isFinite(seconds) || seconds < 0) return "No clock";
   const total = Math.floor(seconds);

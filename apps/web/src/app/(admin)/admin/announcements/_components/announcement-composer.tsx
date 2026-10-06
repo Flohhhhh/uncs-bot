@@ -4,7 +4,7 @@ import { useState, type FormEvent } from "react";
 import useSWR from "swr";
 import { SendIcon } from "lucide-react";
 
-import { readAdminApi, serverApiPath } from "~/components/overview/overview-data";
+import { apiResponseCacheKey, readAdminApi, serverApiPath } from "~/components/overview/overview-data";
 import { Alert, AlertDescription, AlertTitle } from "~/components/ui/alert";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
@@ -33,7 +33,11 @@ export function AnnouncementComposer({
   const [draft, setDraft] = useState("");
   const [reviewMessage, setReviewMessage] = useState<string | null>(null);
   const overviewPath = serverApiPath(server.id, "overview");
-  const overview = useSWR(overviewPath, (path) => readAdminApi(path, announcementOverviewSchema), liveRefreshOptions);
+  const overview = useSWR(
+    apiResponseCacheKey(overviewPath, "announcement-overview"),
+    ([path]) => readAdminApi(path, announcementOverviewSchema),
+    liveRefreshOptions,
+  );
   const trimmed = draft.trim();
   const length = trimmed.length;
   const overLimit = length > 200;

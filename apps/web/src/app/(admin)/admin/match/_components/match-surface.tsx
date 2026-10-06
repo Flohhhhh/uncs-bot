@@ -10,6 +10,7 @@ import {
   formatElapsed,
   formatObservedTime,
   mapDisplayName,
+  apiResponseCacheKey,
   readAdminApi,
   rotationSchema,
   runningNextRound,
@@ -252,12 +253,20 @@ function ServerMatch({ server, csrf }: { server: AdminServer; csrf: string }) {
   const overviewPath = serverApiPath(server.id, "overview");
   const settingsPath = server.role === "admin" ? serverApiPath(server.id, "settings") : null;
   const rotationPath = server.role === "admin" ? null : serverApiPath(server.id, "rotation");
-  const overview = useSWR(overviewPath, (path) => readAdminApi(path, matchOverviewSchema), liveRefreshOptions);
-  const settings = useSWR(settingsPath, (path) => readAdminApi(path, matchSettingsSchema), liveRefreshOptions);
+  const overview = useSWR(
+    apiResponseCacheKey(overviewPath, "match-overview"),
+    ([path]) => readAdminApi(path, matchOverviewSchema),
+    liveRefreshOptions,
+  );
+  const settings = useSWR(
+    apiResponseCacheKey(settingsPath, "match-settings"),
+    ([path]) => readAdminApi(path, matchSettingsSchema),
+    liveRefreshOptions,
+  );
   const rotation = useSWR(rotationPath, (path) => readAdminApi(path, rotationSchema), liveRefreshOptions);
   const votes = useSWR(
-    server.role === "admin" ? serverApiPath(server.id, "map-votes") : null,
-    (path) => readAdminApi(path, matchVotesSchema),
+    apiResponseCacheKey(server.role === "admin" ? serverApiPath(server.id, "map-votes") : null, "match-votes"),
+    ([path]) => readAdminApi(path, matchVotesSchema),
     liveRefreshOptions,
   );
   const status = overview.data?.status;

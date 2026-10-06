@@ -1,6 +1,6 @@
 # Monorepo, web migration and service separation
 
-Last reviewed: October 5, 2026.
+Last reviewed: October 6, 2026.
 
 ## Objective and decisions
 
@@ -22,8 +22,8 @@ Preserve contributor workflows until their replacement is ready. Separate mechan
 | -------------------- | -------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
 | Backend/bot          | One Nest entry point importing HTTP, Discord and background modules                                                        | Existing production architecture; preserve initially                       |
 | Existing dashboard   | React/Vite in `web/admin`, built and served by Nest                                                                        | Remains available until frontend cutover                                   |
-| New web app          | Standalone npm app in `apps/web`, with its own lockfile                                                                    | Scaffold and tweakcn theme implemented                                     |
-| Routing              | `(pages)` index redirects to `/admin`; `(admin)` and `(auth)` have separate layouts                                        | Implemented                                                                |
+| New web app          | Standalone npm app in `apps/web`, with its own lockfile                                                                    | All scoped admin page UI is ported; feature/API parity and cutover remain   |
+| Routing              | `(pages)` index redirects to `/admin`; `(admin)` and `(auth)` have separate layouts                                        | Migrated routes and navigation smoke-checked October 6, 2026                |
 | Web tooling          | Root checks recognize web files; backend TypeScript excludes `apps/`                                                       | Implemented                                                                |
 | New auth integration | API rewrites, exact OAuth forwarding routes, session provider/gate, sign-in/access-denied UI and simulated session preview | Present in the working tree; review and verify before treating as complete |
 | Hosting              | Existing Railway service; Vercel/API/bot production separation not established by this work                                | Pending                                                                    |
@@ -158,9 +158,9 @@ Each phase must retain a working deployment and has an explicit exit gate. Finis
 
 **Exit gate:** browser -> Next -> simulated Nest API -> response is verified, including viewer/moderator/admin and restricted-server cases. No production UI is replaced yet.
 
-### Phase 3 — Feature-by-feature dashboard migration
+### Phase 3 — Feature-by-feature dashboard migration and parity
 
-Port one feature per reviewable slice. Track feature parity and preserve existing permissions, validation and error semantics while changing presentation.
+The scoped admin page UI port is complete. The remaining work in this phase is behavior and API parity: confirm each page's permissions, validation, data and mutation semantics against the backend, and record any intentionally unavailable capabilities. A rendered page or a successful route transition alone does not establish feature parity.
 
 | Order | Feature group                                                               | Required parity                                                                      |
 | ----- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
@@ -170,13 +170,16 @@ Port one feature per reviewable slice. Track feature parity and preserve existin
 | 4     | Match, maps, lighting, rotation and settings                                | Server revision checks, stale-snapshot rejection and unsaved-change protection       |
 | 5     | Map votes, events, seeding/community and operational tools                  | Existing settings, scheduling semantics, Discord-linked state and recovery           |
 
-- [ ] Reinventory pages immediately before each slice; features added by other developers also need a parity row.
+- [x] Port all scoped admin pages and their route-local UI into `apps/web` without importing legacy app components.
+- [x] Smoke-check navigation across the migrated routes, including Match to Settings and the `/admin/applications` redirect, using the in-memory sample session on October 6, 2026.
+- [ ] Reinventory page behavior against the current backend before declaring feature parity; features added by other developers also need a parity row.
+- [ ] Resolve or document backend capability gaps, including Discord roles that are unavailable on the current backend build.
 - [ ] Port reusable response validation/client behavior before duplicating it across pages. Adapt tests to the new routes/components rather than preserving tests that assert obsolete markup.
 - [ ] Preserve read/write timeouts, non-retried mutations, session revision handling, stale action authority and sequential bulk-action stop conditions from the existing client.
 - [ ] Preserve accessibility, destructive confirmations, unsaved form handling and backend-generated audit records.
 - [ ] Keep applicant/public website and Patreon link pages operational on their existing hosts. Their UI migration is outside the initial staff dashboard scope, but their backend URLs/callbacks must be accounted for during API extraction.
 
-**Exit gate per feature:** meaningful component/API integration tests and simulated browser flows pass; the feature parity checklist has no unexplained omissions. Existing Vite dashboard remains usable during this phase.
+**Exit gate:** meaningful component/API integration checks and simulated browser flows pass; the feature parity checklist has no unexplained omissions. The UI route port is complete, but this phase remains open until behavior/API parity is accepted. Existing Vite dashboard remains usable during this phase.
 
 ### Phase 4 — Vercel staging and web cutover
 
@@ -284,7 +287,7 @@ Before retiring the old dashboard or combined service, record the fallback deplo
 
 ## Immediate next implementation slice
 
-Review and finish the existing local backend/auth work, add independent web CI, then migrate overview as the first real admin page. Keep production configuration and backend source paths unchanged during that slice. The next substantial backend milestone is separate process composition, not a wholesale directory move.
+The scoped admin page port and route-navigation smoke check are complete. Next, close the remaining feature/API parity gaps and verify auth and mutations through a stable staging deployment. Keep production configuration and backend source paths unchanged until staging evidence is recorded; the next substantial backend milestone is separate process composition, not a wholesale directory move.
 
 ## References
 

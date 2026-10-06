@@ -8,6 +8,7 @@ import { Skeleton } from "~/components/ui/skeleton";
 import {
   factionFor,
   factionTone,
+  apiResponseCacheKey,
   overviewSchema,
   readAdminApi,
   serverApiPath,
@@ -18,7 +19,11 @@ const SCORE_MAX = 100;
 
 export function CurrentMatchCard({ serverId }: { serverId: string }) {
   const path = serverApiPath(serverId, "overview");
-  const { data, error, isLoading, mutate } = useSWR(path, (url) => readAdminApi(url, overviewSchema), refreshOptions);
+  const { data, error, isLoading, mutate } = useSWR(
+    apiResponseCacheKey(path, "overview"),
+    ([url]) => readAdminApi(url, overviewSchema),
+    refreshOptions,
+  );
   const teams = data?.status.factionScores ?? [];
 
   return (

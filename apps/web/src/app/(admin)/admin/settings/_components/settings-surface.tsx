@@ -6,7 +6,7 @@ import useSWR from "swr";
 import { RefreshCwIcon } from "lucide-react";
 
 import { useSelectedAdminServer } from "~/components/admin-server-context";
-import { serverApiPath } from "~/components/overview/overview-data";
+import { apiResponseCacheKey, serverApiPath } from "~/components/overview/overview-data";
 import { Alert, AlertDescription, AlertTitle } from "~/components/ui/alert";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
@@ -45,7 +45,11 @@ function ServerSettings({
   csrf: string;
 }) {
   const settingsPath = server.role === "admin" ? serverApiPath(server.id, "settings") : null;
-  const settings = useSWR(settingsPath, readServerSettings, settingsRefreshOptions);
+  const settings = useSWR(
+    apiResponseCacheKey(settingsPath, "settings-snapshot"),
+    ([path]) => readServerSettings(path),
+    settingsRefreshOptions,
+  );
   const [group, setGroup] = useState<SettingGroup>("Identity");
   const [draft, setDraft] = useState<Draft | null>(null);
   const [review, setReview] = useState<Review | null>(null);

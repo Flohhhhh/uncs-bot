@@ -3,9 +3,8 @@
 import { useMemo, useState } from "react";
 import useSWR from "swr";
 
-import { overviewSchema, readAdminApi, serverApiPath } from "~/components/overview/overview-data";
+import { apiResponseCacheKey, overviewSchema, readAdminApi, serverApiPath } from "~/components/overview/overview-data";
 import { Alert, AlertDescription, AlertTitle } from "~/components/ui/alert";
-import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { Skeleton } from "~/components/ui/skeleton";
@@ -23,7 +22,11 @@ export function ActionHistory({ server, initialQuery = "" }: { server: AdminServ
   const overviewPath = serverApiPath(server.id, "overview");
   const recentPath = serverApiPath(server.id, "audit");
   const receiptPath = lookupId ? serverApiPath(server.id, `audit/${encodeURIComponent(lookupId)}`) : null;
-  const overview = useSWR(overviewPath, (path) => readAdminApi(path, overviewSchema), refreshOptions);
+  const overview = useSWR(
+    apiResponseCacheKey(overviewPath, "overview"),
+    ([path]) => readAdminApi(path, overviewSchema),
+    refreshOptions,
+  );
   const recent = useSWR(lookupId ? null : recentPath, (path) => readAdminApi(path, auditListSchema), {
     ...refreshOptions,
     keepPreviousData: true,

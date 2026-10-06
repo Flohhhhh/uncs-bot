@@ -5,7 +5,7 @@ import useSWR from "swr";
 import { PlusIcon } from "lucide-react";
 
 import { useSelectedAdminServer } from "~/components/admin-server-context";
-import { readAdminApi, serverApiPath } from "~/components/overview/overview-data";
+import { apiResponseCacheKey, readAdminApi, serverApiPath } from "~/components/overview/overview-data";
 import { Alert, AlertDescription, AlertTitle } from "~/components/ui/alert";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
@@ -47,10 +47,14 @@ function ServerBans({
     ...refreshOptions,
     keepPreviousData: true,
   });
-  const overview = useSWR(overviewPath, (path) => readAdminApi(path, playersOverviewSchema), {
-    ...refreshOptions,
-    keepPreviousData: true,
-  });
+  const overview = useSWR(
+    apiResponseCacheKey(overviewPath, "players-overview"),
+    ([path]) => readAdminApi(path, playersOverviewSchema),
+    {
+      ...refreshOptions,
+      keepPreviousData: true,
+    },
+  );
   const refreshBans = bans.mutate;
   const refreshOverview = overview.mutate;
   const [query, setQuery] = useState("");

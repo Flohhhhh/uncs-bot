@@ -3,7 +3,7 @@
 import { useCallback, useMemo, useState } from "react";
 import useSWR from "swr";
 
-import { readAdminApi, serverApiPath } from "~/components/overview/overview-data";
+import { apiResponseCacheKey, readAdminApi, serverApiPath } from "~/components/overview/overview-data";
 import { Alert, AlertDescription, AlertTitle } from "~/components/ui/alert";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -45,24 +45,27 @@ export function ApplicationsSection({
   const overviewPath = serverApiPath(server.id, "overview");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [lastSuccessfulResponse, setLastSuccessfulResponse] = useState<ApplicationsResponse>();
-  const pruneSelection = useCallback((data: ApplicationsResponse) => {
-    setLastSuccessfulResponse(data);
-    const pendingIds = new Set(
-      data.applications.filter((record) => record.status === "pending").map((record) => record.id),
-    );
-    setSelectedIds((current) => {
-      const next = new Set([...current].filter((id) => pendingIds.has(id)));
-      return next.size === current.size ? current : next;
-    });
-  }, []);
+  const pruneSelection = useCallback(
+    (data: ApplicationsResponse) => {
+      setLastSuccessfulResponse(data);
+      const pendingIds = new Set(
+        data.applications.filter((record) => record.status === "pending").map((record) => record.id),
+      );
+      setSelectedIds((current) => {
+        const next = new Set([...current].filter((id) => pendingIds.has(id)));
+        return next.size === current.size ? current : next;
+      });
+    },
+    [setLastSuccessfulResponse, setSelectedIds],
+  );
   const applications = useSWR(
     server.role === "admin" ? path : null,
     (key) => readAdminApi(key, applicationsResponseSchema),
     { ...refreshOptions, keepPreviousData: true, onSuccess: pruneSelection },
   );
   const overview = useSWR(
-    server.role === "admin" ? overviewPath : null,
-    (key) => readAdminApi(key, whitelistOverviewSchema),
+    apiResponseCacheKey(server.role === "admin" ? overviewPath : null, "whitelist-overview"),
+    ([key]) => readAdminApi(key, whitelistOverviewSchema),
     refreshOptions,
   );
   const response = applications.data ?? lastSuccessfulResponse;

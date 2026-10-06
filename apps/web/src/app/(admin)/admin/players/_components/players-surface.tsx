@@ -4,7 +4,7 @@ import { useCallback, useMemo, useState } from "react";
 import useSWR from "swr";
 import type { RowSelectionState } from "@tanstack/react-table";
 
-import { readAdminApi, serverApiPath } from "~/components/overview/overview-data";
+import { apiResponseCacheKey, readAdminApi, serverApiPath } from "~/components/overview/overview-data";
 import { useSelectedAdminServer } from "~/components/admin-server-context";
 import { Alert, AlertDescription, AlertTitle } from "~/components/ui/alert";
 import { Button } from "~/components/ui/button";
@@ -68,17 +68,21 @@ function PlayersRoster({
 }) {
   const overviewPath = serverApiPath(server.id, "overview");
   const [rowSelection, setRowSelection] = useState<RowSelectionState>(initialSelection);
-  const onRosterSuccess = useCallback((fresh: PlayersOverview) => {
-    const rosterIds = new Set(fresh.players.map((player) => player.steamId));
-    setRowSelection((current) => {
-      const next = Object.fromEntries(Object.entries(current).filter(([id]) => rosterIds.has(id)));
-      return Object.keys(next).length === Object.keys(current).length ? current : next;
-    });
-  }, []);
-  const { data, error, isLoading, mutate } = useSWR(overviewPath, (path) => readAdminApi(path, playersOverviewSchema), {
-    ...refreshOptions,
-    onSuccess: onRosterSuccess,
-  });
+  const onRosterSuccess = useCallback(
+    (fresh: PlayersOverview) => {
+      const rosterIds = new Set(fresh.players.map((player) => player.steamId));
+      setRowSelection((current) => {
+        const next = Object.fromEntries(Object.entries(current).filter(([id]) => rosterIds.has(id)));
+        return Object.keys(next).length === Object.keys(current).length ? current : next;
+      });
+    },
+    [setRowSelection],
+  );
+  const { data, error, isLoading, mutate } = useSWR(
+    apiResponseCacheKey(overviewPath, "players-overview"),
+    ([path]) => readAdminApi(path, playersOverviewSchema),
+    { ...refreshOptions, onSuccess: onRosterSuccess },
+  );
 
   const [query, setQuery] = useState("");
   const [teamFilter, setTeamFilter] = useState("all");

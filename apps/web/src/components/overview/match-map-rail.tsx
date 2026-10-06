@@ -12,6 +12,7 @@ import {
   formatElapsed,
   formatObservedTime,
   mapDisplayName,
+  apiResponseCacheKey,
   overviewSchema,
   readAdminApi,
   rotationSchema,
@@ -33,10 +34,22 @@ export function MatchMapRail({ serverId }: { serverId: string }) {
   const rotationPath = selectedServer && selectedServer.role !== "admin" ? serverApiPath(serverId, "rotation") : null;
   const votesPath = selectedServer?.role === "admin" ? serverApiPath(serverId, "map-votes") : null;
 
-  const overview = useSWR(overviewPath, (path) => readAdminApi(path, overviewSchema), liveOptions);
-  const settings = useSWR(settingsPath, (path) => readAdminApi(path, settingsSchema), setupOptions);
+  const overview = useSWR(
+    apiResponseCacheKey(overviewPath, "overview"),
+    ([path]) => readAdminApi(path, overviewSchema),
+    liveOptions,
+  );
+  const settings = useSWR(
+    apiResponseCacheKey(settingsPath, "settings-summary"),
+    ([path]) => readAdminApi(path, settingsSchema),
+    setupOptions,
+  );
   const rotation = useSWR(rotationPath, (path) => readAdminApi(path, rotationSchema), setupOptions);
-  const votes = useSWR(votesPath, (path) => readAdminApi(path, voteListSchema), setupOptions);
+  const votes = useSWR(
+    apiResponseCacheKey(votesPath, "vote-list"),
+    ([path]) => readAdminApi(path, voteListSchema),
+    setupOptions,
+  );
 
   const status = overview.data?.status;
   const nextRound = status

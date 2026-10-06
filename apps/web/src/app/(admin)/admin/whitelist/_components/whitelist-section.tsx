@@ -3,7 +3,7 @@
 import { useCallback, useMemo, useState } from "react";
 import useSWR from "swr";
 
-import { readAdminApi, serverApiPath } from "~/components/overview/overview-data";
+import { apiResponseCacheKey, readAdminApi, serverApiPath } from "~/components/overview/overview-data";
 import { Alert, AlertDescription, AlertTitle } from "~/components/ui/alert";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
@@ -65,11 +65,11 @@ export function WhitelistSection({
     keepPreviousData: true,
     onSuccess: rememberWhitelist,
   });
-  const overview = useSWR(overviewPath, (key) => readAdminApi(key, whitelistOverviewSchema), {
-    ...refreshOptions,
-    keepPreviousData: true,
-    onSuccess: rememberOverview,
-  });
+  const overview = useSWR(
+    apiResponseCacheKey(overviewPath, "whitelist-overview"),
+    ([key]) => readAdminApi(key, whitelistOverviewSchema),
+    { ...refreshOptions, keepPreviousData: true, onSuccess: rememberOverview },
+  );
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<WhitelistStatusFilter>("all");
   const [action, setAction] = useState<WhitelistAction | null>(null);

@@ -7,13 +7,23 @@ import { ArrowRightIcon, UsersIcon } from "lucide-react";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "~/components/ui/card";
 import { Skeleton } from "~/components/ui/skeleton";
-import { factionFor, overviewSchema, readAdminApi, serverApiPath } from "~/components/overview/overview-data";
+import {
+  factionFor,
+  apiResponseCacheKey,
+  overviewSchema,
+  readAdminApi,
+  serverApiPath,
+} from "~/components/overview/overview-data";
 
 const refreshOptions = { refreshInterval: 15_000, revalidateOnFocus: true, revalidateOnReconnect: true };
 
 export function PlayerListSummaryCard({ serverId }: { serverId: string }) {
   const path = serverApiPath(serverId, "overview");
-  const { data, error, isLoading, mutate } = useSWR(path, (url) => readAdminApi(url, overviewSchema), refreshOptions);
+  const { data, error, isLoading, mutate } = useSWR(
+    apiResponseCacheKey(path, "overview"),
+    ([url]) => readAdminApi(url, overviewSchema),
+    refreshOptions,
+  );
   const players = [...(data?.players ?? [])]
     .sort((first, second) => (second.kills ?? -1) - (first.kills ?? -1) || first.name.localeCompare(second.name))
     .slice(0, 8);

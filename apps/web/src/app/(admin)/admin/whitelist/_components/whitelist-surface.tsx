@@ -5,7 +5,7 @@ import { useSWRConfig } from "swr";
 
 import { useSelectedAdminServer } from "~/components/admin-server-context";
 import { Button } from "~/components/ui/button";
-import { serverApiPath } from "~/components/overview/overview-data";
+import { apiResponseCacheKey, serverApiPath } from "~/components/overview/overview-data";
 
 import { ApplicationsSection } from "./applications-section";
 import { WhitelistSection } from "./whitelist-section";
@@ -28,8 +28,11 @@ function ServerWhitelist({
   const overviewPath = serverApiPath(server.id, "overview");
 
   const refreshData = useCallback(async () => {
-    const paths = [applicationPath, whitelistPath, overviewPath].filter((path): path is string => path !== null);
-    await Promise.all(paths.map((path) => mutate(path)));
+    const paths = [applicationPath, whitelistPath].filter((path): path is string => path !== null);
+    await Promise.all([
+      ...paths.map((path) => mutate(path)),
+      overviewPath ? mutate(apiResponseCacheKey(overviewPath, "whitelist-overview")) : Promise.resolve(),
+    ]);
   }, [applicationPath, mutate, overviewPath, whitelistPath]);
 
   return (
