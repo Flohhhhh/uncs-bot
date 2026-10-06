@@ -1,9 +1,14 @@
 import type { Metadata } from "next";
 
-import { AdminComingSoon } from "~/components/admin-coming-soon";
+import { readServerSession } from "~/lib/session/server";
 
-export const metadata: Metadata = { title: "Match & maps · The UNCs" };
+import { MatchSurface } from "./_components/match-surface";
 
-export default function MatchPage() {
-  return <AdminComingSoon group="Live" title="Match & maps" />;
+export const metadata: Metadata = { title: "Match & Maps · The UNCs" };
+
+export default async function MatchPage() {
+  const session = await readServerSession();
+  const csrf = session.status === "authenticated" ? session.user.csrf : "";
+
+  return <MatchSurface csrf={csrf} />;
 }

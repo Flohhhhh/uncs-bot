@@ -48,7 +48,7 @@ const navigation = [
     pages: [
       { label: "Overview", href: "/admin", icon: LayoutDashboardIcon },
       { label: "Players", href: "/admin/players", icon: UsersIcon },
-      { label: "Match & maps", href: "/admin/match", icon: MapIcon },
+      { label: "Match & Maps", href: "/admin/match", icon: MapIcon },
       { label: "Server activity", href: "/admin/activity", icon: ActivityIcon },
     ],
   },
