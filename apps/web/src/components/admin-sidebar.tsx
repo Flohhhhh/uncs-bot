@@ -6,6 +6,7 @@ import {
   BanIcon,
   CheckIcon,
   ChevronsUpDownIcon,
+  ClipboardListIcon,
   CircleDotIcon,
   LayoutDashboardIcon,
   ListChecksIcon,
@@ -55,10 +56,16 @@ const navigation = [
     label: "Community",
     pages: [
       { label: "Whitelist", href: "/admin/whitelist", icon: ListChecksIcon },
-      { label: "Bans", href: "/admin/bans", icon: BanIcon },
       { label: "Announcements", href: "/admin/announcements", icon: ArrowUpRightIcon },
       { label: "Supporters", href: "/admin/supporters", icon: SparklesIcon },
       { label: "Discord roles", href: "/admin/discord-roles", icon: CircleDotIcon },
+    ],
+  },
+  {
+    label: "Moderation",
+    pages: [
+      { label: "Bans", href: "/admin/bans", icon: BanIcon },
+      { label: "Audit Logs", href: "/admin/audit-logs", icon: ClipboardListIcon },
     ],
   },
   {
