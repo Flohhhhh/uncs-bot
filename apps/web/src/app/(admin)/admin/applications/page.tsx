@@ -1,9 +1,20 @@
-import type { Metadata } from "next";
+import { redirect } from "next/navigation";
 
-import { AdminComingSoon } from "~/components/admin-coming-soon";
+export default async function ApplicationsPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const values = await searchParams;
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(values)) {
+    if (Array.isArray(value)) {
+      for (const item of value) query.append(key, item);
+    } else if (value !== undefined) {
+      query.set(key, value);
+    }
+  }
 
-export const metadata: Metadata = { title: "Applications · The UNCs" };
-
-export default function ApplicationsPage() {
-  return <AdminComingSoon group="Community" title="Applications" />;
+  const suffix = query.toString();
+  redirect("/admin/whitelist" + (suffix ? "?" + suffix : ""));
 }

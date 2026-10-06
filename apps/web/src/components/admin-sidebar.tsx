@@ -9,7 +9,6 @@ import {
   CircleDotIcon,
   LayoutDashboardIcon,
   ListChecksIcon,
-  MailIcon,
   MapIcon,
   SettingsIcon,
   SparklesIcon,
@@ -56,7 +55,6 @@ const navigation = [
     label: "Community",
     pages: [
       { label: "Whitelist", href: "/admin/whitelist", icon: ListChecksIcon },
-      { label: "Applications", href: "/admin/applications", icon: MailIcon },
       { label: "Bans", href: "/admin/bans", icon: BanIcon },
       { label: "Announcements", href: "/admin/announcements", icon: ArrowUpRightIcon },
       { label: "Supporters", href: "/admin/supporters", icon: SparklesIcon },

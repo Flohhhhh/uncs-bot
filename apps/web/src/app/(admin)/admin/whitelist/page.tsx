@@ -1,9 +1,14 @@
 import type { Metadata } from "next";
 
-import { AdminComingSoon } from "~/components/admin-coming-soon";
+import { readServerSession } from "~/lib/session/server";
+
+import { WhitelistSurface } from "./_components/whitelist-surface";
 
 export const metadata: Metadata = { title: "Whitelist · The UNCs" };
 
-export default function WhitelistPage() {
-  return <AdminComingSoon group="Community" title="Whitelist" />;
+export default async function WhitelistPage() {
+  const session = await readServerSession();
+  const csrf = session.status === "authenticated" ? session.user.csrf : "";
+
+  return <WhitelistSurface csrf={csrf} />;
 }
