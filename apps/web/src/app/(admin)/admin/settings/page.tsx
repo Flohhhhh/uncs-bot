@@ -1,9 +1,14 @@
 import type { Metadata } from "next";
 
-import { AdminComingSoon } from "~/components/admin-coming-soon";
+import { readServerSession } from "~/lib/session/server";
+
+import { SettingsSurface } from "./_components/settings-surface";
 
 export const metadata: Metadata = { title: "Settings · The UNCs" };
 
-export default function SettingsPage() {
-  return <AdminComingSoon group="Server" title="Settings" />;
+export default async function SettingsPage() {
+  const session = await readServerSession();
+  const csrf = session.status === "authenticated" ? session.user.csrf : "";
+
+  return <SettingsSurface csrf={csrf} />;
 }
