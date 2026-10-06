@@ -137,7 +137,9 @@ export function AdminShell({ user, children }: { user: Staff; children: ReactNod
           ) : !selectedServer ? (
             <ServerSelectionPrompt serverList={serverList} invalid={invalidSelection} />
           ) : (
-            <AdminServerProvider server={selectedServer}>{children}</AdminServerProvider>
+            <AdminServerProvider server={selectedServer} gameMode={user.gameMode}>
+              {children}
+            </AdminServerProvider>
           )}
         </main>
       </SidebarInset>
